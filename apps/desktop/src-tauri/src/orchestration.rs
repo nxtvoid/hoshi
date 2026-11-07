@@ -25,7 +25,11 @@ pub fn init(app: &App) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("hoshi: failed to emit to the UI: {error}");
         }
     });
-    let engine = Engine::open(&data_dir.join("state.sqlite"), notify)?;
+    let engine = Engine::open(
+        &data_dir.join("state.sqlite"),
+        data_dir.join("worktrees"),
+        notify,
+    )?;
     let settings = crate::settings::load(&crate::settings::settings_path(app.handle())?);
     engine.set_adapter(adapter_for(&settings));
     app.manage(engine);

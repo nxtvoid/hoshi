@@ -8,9 +8,12 @@ mod thread;
 
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, decide,
-    record_output, turn_failed,
+    record_branch, record_output, turn_failed,
 };
 pub use project::Project;
 pub use provider::ProviderOutput;
 pub use settings::{AppSettings, ClaudeCodeSettings, ProviderSettings};
-pub use thread::{ItemContent, Thread, ThreadItem, ThreadStatus, TurnFailure, TurnOutcome};
+pub use thread::{
+    Effort, ItemContent, Thread, ThreadItem, ThreadStatus, ThreadWorkspace, TurnFailure,
+    TurnOutcome,
+};

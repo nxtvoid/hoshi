@@ -4,7 +4,7 @@
 //! transaction, so the projections never disagree with the event log. The
 //! thread projection must match `ReadModel::apply`; a test checks that.
 
-use hoshi_core::{Event, Project, Snapshot, Thread, ThreadItem, ThreadStatus, TurnOutcome};
+use hoshi_core::{Effort, Event, Project, Snapshot, Thread, ThreadItem, ThreadStatus, TurnOutcome};
 use rusqlite::{Connection, Row, Transaction, params, types::Type};
 use std::path::Path;
 
@@ -46,6 +46,10 @@ const MIGRATIONS: &[&str] = &[
         content_json TEXT NOT NULL,
         UNIQUE (thread_id, id)
     );
+    ",
+    r"
+    ALTER TABLE threads ADD COLUMN model TEXT;
+    ALTER TABLE threads ADD COLUMN effort TEXT;
     ",
 ];
 
@@ -127,7 +131,7 @@ impl Store {
             .conn
             .prepare(
                 "SELECT id, project_id, title, status, branch, worktree_path, session_id,
-                        active_turn_id, created_at, updated_at
+                        active_turn_id, created_at, updated_at, model, effort
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -142,6 +146,8 @@ impl Store {
                     active_turn_id: row.get(7)?,
                     created_at: row.get(8)?,
                     updated_at: row.get(9)?,
+                    model: row.get(10)?,
+                    effort: optional_json_column(row, 11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -182,6 +188,20 @@ fn json_column<T: serde::de::DeserializeOwned>(row: &Row, index: usize) -> rusql
     })
 }
 
+fn optional_json_column<T: serde::de::DeserializeOwned>(
+    row: &Row,
+    index: usize,
+) -> rusqlite::Result<Option<T>> {
+    match row.get::<_, Option<String>>(index)? {
+        Some(_) => json_column(row, index).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn effort_text(effort: Option<Effort>) -> Option<&'static str> {
+    effort.map(Effort::as_str)
+}
+
 fn status_text(status: ThreadStatus) -> Result<String, StoreError> {
     Ok(serde_json::to_value(status)?
         .as_str()
@@ -217,8 +237,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             tx.execute(
                 "INSERT INTO threads
                  (id, project_id, title, status, branch, worktree_path, session_id,
-                  active_turn_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  active_turn_id, created_at, updated_at, model, effort)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -229,7 +249,9 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     thread.session_id,
                     thread.active_turn_id,
                     thread.created_at,
-                    thread.updated_at
+                    thread.updated_at,
+                    thread.model,
+                    effort_text(thread.effort)
                 ],
             )?;
         }
@@ -241,6 +263,22 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             tx.execute(
                 "UPDATE threads SET title = ?2 WHERE id = ?1",
                 params![thread_id, title],
+            )?;
+        }
+        Event::ThreadBranchSet { thread_id, branch } => {
+            tx.execute(
+                "UPDATE threads SET branch = ?2 WHERE id = ?1",
+                params![thread_id, branch],
+            )?;
+        }
+        Event::ThreadModelSet {
+            thread_id,
+            model,
+            effort,
+        } => {
+            tx.execute(
+                "UPDATE threads SET model = ?2, effort = ?3 WHERE id = ?1",
+                params![thread_id, model, effort_text(*effort)],
             )?;
         }
         Event::TurnStarted {
@@ -341,6 +379,8 @@ mod tests {
                 branch: Some("feat/x".into()),
                 worktree_path: Some("/worktrees/x".into()),
                 session_id: None,
+                model: Some("sonnet".into()),
+                effort: Some(Effort::High),
                 active_turn_id: None,
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
@@ -409,6 +449,15 @@ mod tests {
     fn thread_projection_matches_the_read_model_through_a_turn() {
         let (mut store, mut model) = store_with_thread();
         let events = send(&model);
+        commit(&mut store, &mut model, events);
+        let model_set = Command::ThreadModelSet {
+            thread_id: "t".into(),
+            model: Some("opus".into()),
+            effort: Some(Effort::Max),
+        };
+        let events = decide(&model, model_set, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        let events = hoshi_core::record_branch(&model, "t", Some("main".into()));
         commit(&mut store, &mut model, events);
         let outputs = [
             ProviderOutput::SessionStarted {
@@ -489,5 +538,6 @@ mod tests {
         let thread = &store.snapshot().unwrap().threads[0];
         assert_eq!(thread.title, "old");
         assert_eq!(thread.session_id, None);
+        assert_eq!(thread.model, None);
     }
 }

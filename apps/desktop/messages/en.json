@@ -60,5 +60,20 @@
   "turn_failed_provider_disabled": "Claude Code is turned off. Turn it on in Settings → Providers.",
   "turn_failed_spawn": "Couldn't start Claude Code. Check that it is installed, or set its path in Settings → Providers.",
   "turn_failed_process_exited": "Claude Code stopped before finishing this turn.",
-  "turn_failed_provider_error": "Claude Code reported an error and stopped this turn."
+  "turn_failed_provider_error": "Claude Code reported an error and stopped this turn.",
+  "model_label": "Model",
+  "effort_label": "Effort",
+  "provider_default": "Default",
+  "effort_low": "Low",
+  "effort_medium": "Medium",
+  "effort_high": "High",
+  "effort_xhigh": "Extra high",
+  "effort_max": "Max",
+  "workspace_label": "Workspace",
+  "workspace_local": "Local",
+  "workspace_new_worktree": "New worktree",
+  "error_not_a_git_repository": "This project isn't a git repository, so it can't use a worktree.",
+  "error_worktree_failed": "Couldn't create the worktree.",
+  "error_thread_busy": "This thread is still working.",
+  "error_generic": "Something went wrong. Try again."
 }

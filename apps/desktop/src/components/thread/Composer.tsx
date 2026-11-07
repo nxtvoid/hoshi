@@ -5,10 +5,13 @@ import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Button } from '@hoshi/ui/components/button'
 import { Textarea } from '@hoshi/ui/components/textarea'
+import { ModelMenu, WorkspaceMenu } from './ComposerMenus'
+import type { CommandError } from '@/bindings/CommandError'
 import {
   ArrowUp02Icon,
   Folder01Icon,
   GitBranchIcon,
+  GitForkIcon,
   StopIcon
 } from '@hugeicons/core-free-icons'
 
@@ -100,11 +103,10 @@ function ComposerFooter() {
       state.projects.find((project) => project.id === state.selectedProjectId)
         ?.title
   )
-  const branch = useAppStore(
-    (state) =>
-      state.threads.find((thread) => thread.id === state.selectedThreadId)
-        ?.branch
+  const thread = useAppStore((state) =>
+    state.threads.find((candidate) => candidate.id === state.selectedThreadId)
   )
+  const error = useAppStore((state) => state.composerError)
 
   return (
     <div className='text-muted-foreground flex items-center gap-3 px-2 text-xs'>
@@ -118,19 +120,41 @@ function ComposerFooter() {
           <span className='truncate'>{projectTitle}</span>
         </span>
       ) : null}
-      <div className='ml-auto flex shrink-0 items-center gap-3'>
-        {branch ? (
-          <span className='flex items-center gap-1.5'>
-            <HugeiconsIcon
-              icon={GitBranchIcon}
-              strokeWidth={2}
-              className='size-3.5'
-            />
-            {branch}
-          </span>
-        ) : null}
-        <span className='text-foreground font-medium'>{m.claude_code()}</span>
+      {error ? (
+        <span role='alert' className='text-destructive min-w-0 truncate'>
+          {commandErrorMessage(error)}
+        </span>
+      ) : null}
+      <div className='ml-auto flex shrink-0 items-center gap-1'>
+        {thread ? (
+          thread.branch ? (
+            <span className='flex items-center gap-1.5 px-2'>
+              <HugeiconsIcon
+                icon={thread.worktreePath ? GitForkIcon : GitBranchIcon}
+                strokeWidth={2}
+                className='size-3.5'
+              />
+              {thread.branch}
+            </span>
+          ) : null
+        ) : (
+          <WorkspaceMenu />
+        )}
+        <ModelMenu />
       </div>
     </div>
   )
+}
+
+function commandErrorMessage(error: CommandError) {
+  switch (error.code) {
+    case 'notAGitRepository':
+      return m.error_not_a_git_repository()
+    case 'worktreeFailed':
+      return m.error_worktree_failed()
+    case 'threadBusy':
+      return m.error_thread_busy()
+    default:
+      return m.error_generic()
+  }
 }

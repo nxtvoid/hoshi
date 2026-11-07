@@ -27,6 +27,8 @@ const thread = (id: string, projectId: string): Thread => ({
   branch: null,
   worktreePath: null,
   sessionId: null,
+  model: null,
+  effort: null,
   activeTurnId: null,
   createdAt: NOW,
   updatedAt: NOW

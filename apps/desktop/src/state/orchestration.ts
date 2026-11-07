@@ -40,6 +40,13 @@ export function applyEvent(
       }
     case 'threadTitleSet':
       return updateThread(event.threadId, { title: event.title })
+    case 'threadBranchSet':
+      return updateThread(event.threadId, { branch: event.branch })
+    case 'threadModelSet':
+      return updateThread(event.threadId, {
+        model: event.model,
+        effort: event.effort
+      })
     case 'turnStarted':
       return updateThread(event.threadId, {
         status: 'working',

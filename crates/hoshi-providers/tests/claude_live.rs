@@ -20,6 +20,8 @@ fn a_real_turn_streams_a_reply_and_resumes_its_session() {
             cwd: cwd.clone(),
             prompt: prompt.into(),
             resume_session_id: resume,
+            model: None,
+            effort: Some(hoshi_core::Effort::Low),
         };
         let sink = Box::new(move |output| {
             let _ = sender.send(output);

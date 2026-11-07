@@ -1,6 +1,6 @@
 use crate::{
-    ItemContent, Project, ProviderOutput, Thread, ThreadItem, ThreadStatus, TurnFailure,
-    TurnOutcome,
+    Effort, ItemContent, Project, ProviderOutput, Thread, ThreadItem, ThreadStatus,
+    ThreadWorkspace, TurnFailure, TurnOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,9 +28,18 @@ pub enum Command {
         thread_id: String,
         project_id: String,
         title: String,
+        workspace: ThreadWorkspace,
+        model: Option<String>,
+        effort: Option<Effort>,
     },
     ThreadDelete {
         thread_id: String,
+    },
+    /// Applies from the next turn.
+    ThreadModelSet {
+        thread_id: String,
+        model: Option<String>,
+        effort: Option<Effort>,
     },
     MessageSend {
         thread_id: String,
@@ -65,6 +74,15 @@ pub enum Event {
     ThreadTitleSet {
         thread_id: String,
         title: String,
+    },
+    ThreadBranchSet {
+        thread_id: String,
+        branch: Option<String>,
+    },
+    ThreadModelSet {
+        thread_id: String,
+        model: Option<String>,
+        effort: Option<Effort>,
     },
     TurnStarted {
         thread_id: String,
@@ -116,6 +134,10 @@ pub enum CommandError {
     ThreadNotWorking { thread_id: String },
     #[error("message is empty")]
     EmptyMessage,
+    #[error("{path} is not a git repository")]
+    NotAGitRepository { path: String },
+    #[error("could not create the worktree: {detail}")]
+    WorktreeFailed { detail: String },
     #[error("folder {path} does not exist")]
     WorkspaceRootNotFound { path: String },
     /// Storage or other failures outside the domain; `detail` is for logs, not the UI.
@@ -186,6 +208,10 @@ impl ReadModel {
         self.threads.get(thread_id)
     }
 
+    pub fn project(&self, project_id: &str) -> Option<&Project> {
+        self.projects.get(project_id)
+    }
+
     /// Where the thread's agent runs: its worktree when it has one, never the
     /// project root in that case.
     pub fn thread_cwd(&self, thread_id: &str) -> Option<&str> {
@@ -218,6 +244,21 @@ impl ReadModel {
             Event::ThreadTitleSet { thread_id, title } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.title.clone_from(title);
+                }
+            }
+            Event::ThreadBranchSet { thread_id, branch } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.branch.clone_from(branch);
+                }
+            }
+            Event::ThreadModelSet {
+                thread_id,
+                model,
+                effort,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.model.clone_from(model);
+                    thread.effort = *effort;
                 }
             }
             Event::TurnStarted {
@@ -303,6 +344,9 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             thread_id,
             project_id,
             title,
+            workspace,
+            model: thread_model,
+            effort,
         } => {
             if model.threads.contains_key(&thread_id) {
                 return Err(CommandError::DuplicateThreadId { thread_id });
@@ -310,15 +354,26 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             if !model.projects.contains_key(&project_id) {
                 return Err(CommandError::ProjectNotFound { project_id });
             }
+            let (worktree_path, branch) = match workspace {
+                ThreadWorkspace::Local => (None, None),
+                ThreadWorkspace::Worktree { path, branch } => (Some(path), Some(branch)),
+                ThreadWorkspace::NewWorktree => {
+                    return Err(CommandError::Internal {
+                        detail: "the engine must create the worktree first".into(),
+                    });
+                }
+            };
             Ok(vec![Event::ThreadCreated {
                 thread: Thread {
                     id: thread_id,
                     project_id,
                     title,
                     status: ThreadStatus::Idle,
-                    branch: None,
-                    worktree_path: None,
+                    branch,
+                    worktree_path,
                     session_id: None,
+                    model: thread_model,
+                    effort,
                     active_turn_id: None,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
@@ -330,6 +385,20 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 return Err(CommandError::ThreadNotFound { thread_id });
             }
             Ok(vec![Event::ThreadDeleted { thread_id }])
+        }
+        Command::ThreadModelSet {
+            thread_id,
+            model: thread_model,
+            effort,
+        } => {
+            if !model.threads.contains_key(&thread_id) {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            }
+            Ok(vec![Event::ThreadModelSet {
+                thread_id,
+                model: thread_model,
+                effort,
+            }])
         }
         Command::MessageSend {
             thread_id,
@@ -457,6 +526,17 @@ pub fn record_output(
     }
 }
 
+/// Records the branch a thread's folder is on, when it changed.
+pub fn record_branch(model: &ReadModel, thread_id: &str, branch: Option<String>) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.branch != branch => vec![Event::ThreadBranchSet {
+            thread_id: thread_id.to_owned(),
+            branch,
+        }],
+        _ => Vec::new(),
+    }
+}
+
 /// The failure recorded when a turn cannot start at all.
 pub fn turn_failed(reason: TurnFailure) -> ProviderOutput {
     ProviderOutput::TurnCompleted {
@@ -518,6 +598,9 @@ mod tests {
             thread_id: id.into(),
             project_id: project_id.into(),
             title: String::new(),
+            workspace: ThreadWorkspace::Local,
+            model: None,
+            effort: None,
         }
     }
 
@@ -707,13 +790,70 @@ mod tests {
     }
 
     #[test]
-    fn a_thread_runs_in_its_worktree_when_it_has_one() {
+    fn a_worktree_thread_runs_in_its_worktree_and_a_local_one_in_the_root() {
         let mut model = model_with_thread();
+        let mut command = create_thread("w", "p");
+        if let Command::ThreadCreate { workspace, .. } = &mut command {
+            *workspace = ThreadWorkspace::Worktree {
+                path: "/worktrees/w".into(),
+                branch: "hoshi/w".into(),
+            };
+        }
+
+        run(&mut model, command).unwrap();
+
         assert_eq!(model.thread_cwd("t"), Some("/repo"));
+        assert_eq!(model.thread_cwd("w"), Some("/worktrees/w"));
+        assert_eq!(
+            model.thread("w").unwrap().branch.as_deref(),
+            Some("hoshi/w")
+        );
+    }
 
-        model.threads.get_mut("t").unwrap().worktree_path = Some("/worktrees/t".into());
+    #[test]
+    fn an_unprepared_worktree_is_never_created() {
+        let mut model = model_with_thread();
+        let mut command = create_thread("w", "p");
+        if let Command::ThreadCreate { workspace, .. } = &mut command {
+            *workspace = ThreadWorkspace::NewWorktree;
+        }
 
-        assert_eq!(model.thread_cwd("t"), Some("/worktrees/t"));
+        let error = run(&mut model, command).unwrap_err();
+
+        assert!(matches!(error, CommandError::Internal { .. }));
+        assert!(model.thread("w").is_none());
+    }
+
+    #[test]
+    fn a_branch_is_recorded_only_when_it_changes() {
+        let mut model = model_with_thread();
+
+        let first = record_branch(&model, "t", Some("main".into()));
+        first.iter().for_each(|event| model.apply(event));
+        let again = record_branch(&model, "t", Some("main".into()));
+
+        assert_eq!(first.len(), 1);
+        assert!(again.is_empty());
+        assert_eq!(model.thread("t").unwrap().branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn the_model_choice_is_kept_on_the_thread() {
+        let mut model = model_with_thread();
+
+        run(
+            &mut model,
+            Command::ThreadModelSet {
+                thread_id: "t".into(),
+                model: Some("opus".into()),
+                effort: Some(Effort::High),
+            },
+        )
+        .unwrap();
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.model.as_deref(), Some("opus"));
+        assert_eq!(thread.effort, Some(Effort::High));
     }
 
     #[cfg(windows)]

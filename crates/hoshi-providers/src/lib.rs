@@ -5,13 +5,16 @@ mod claude;
 mod process;
 
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
-use hoshi_core::{ProviderOutput, TurnFailure};
+use hoshi_core::{Effort, ProviderOutput, TurnFailure};
 
 pub struct TurnRequest {
     /// The thread's working directory: its worktree, or the project root.
     pub cwd: String,
     pub prompt: String,
     pub resume_session_id: Option<String>,
+    /// Overrides the adapter's default model.
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
 }
 
 /// Receives everything a turn reports, ending with `ProviderOutput::TurnCompleted`.

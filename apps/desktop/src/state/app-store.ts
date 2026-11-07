@@ -3,9 +3,11 @@ import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { Thread } from '@/bindings/Thread'
+import type { Effort } from '@/bindings/Effort'
 import type { Command } from '@/bindings/Command'
 import type { Project } from '@/bindings/Project'
 import type { Snapshot } from '@/bindings/Snapshot'
+import { useComposerStore } from './composer-store'
 import { ask, open } from '@tauri-apps/plugin-dialog'
 import { useTranscriptStore } from './transcript-store'
 import type { StreamDelta } from '@/bindings/StreamDelta'
@@ -33,6 +35,11 @@ type AppState = {
   /** Sends to the selected thread, creating one first when none is selected. */
   sendMessage: (text: string) => Promise<boolean>
   interruptTurn: () => Promise<void>
+  /** Sets the selected thread's model and remembers it for new threads. */
+  setModel: (model: string | null, effort: Effort | null) => Promise<void>
+  /** The last command that failed from the composer, shown under it. */
+  composerError: CommandError | null
+  clearComposerError: () => void
 }
 
 const dispatch = (command: Command) => invoke<void>('dispatch', { command })
@@ -50,6 +57,8 @@ export const useAppStore = create<AppState>()((set, get) => ({
   selectedThreadId: null,
   sidebarOpen: true,
   search: '',
+  composerError: null,
+  clearComposerError: () => set({ composerError: null }),
   selectProject: (projectId) => {
     set({ selectedProjectId: projectId, selectedThreadId: null, search: '' })
     void useTranscriptStore.getState().load(null)
@@ -105,13 +114,23 @@ export const useAppStore = create<AppState>()((set, get) => ({
     const projectId = get().selectedProjectId
     if (!projectId) return null
     const threadId = crypto.randomUUID()
+    const { model, effort, workspace } = useComposerStore.getState()
     try {
-      await dispatch({ type: 'threadCreate', threadId, projectId, title: '' })
-      set({ search: '' })
+      await dispatch({
+        type: 'threadCreate',
+        threadId,
+        projectId,
+        title: '',
+        workspace: { type: workspace },
+        model,
+        effort
+      })
+      set({ search: '', composerError: null })
       get().selectThread(threadId)
       return threadId
     } catch (error) {
       reportError(error)
+      set({ composerError: error as CommandError })
       return null
     }
   },
@@ -137,11 +156,21 @@ export const useAppStore = create<AppState>()((set, get) => ({
         messageId: crypto.randomUUID(),
         text
       })
+      set({ composerError: null })
       return true
     } catch (error) {
       reportError(error)
+      set({ composerError: error as CommandError })
       return false
     }
+  },
+  setModel: async (model, effort) => {
+    useComposerStore.getState().setModel(model, effort)
+    const threadId = get().selectedThreadId
+    if (!threadId) return
+    await dispatch({ type: 'threadModelSet', threadId, model, effort }).catch(
+      reportError
+    )
   },
   interruptTurn: async () => {
     const threadId = get().selectedThreadId

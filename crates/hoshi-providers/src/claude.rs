@@ -29,8 +29,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .args(["--output-format", "stream-json", "--verbose"])
             .arg("--include-partial-messages")
             .args(["--permission-mode", &self.permission_mode]);
-        if let Some(model) = &self.model {
+        if let Some(model) = request.model.as_ref().or(self.model.as_ref()) {
             command.args(["--model", model]);
+        }
+        if let Some(effort) = request.effort {
+            command.args(["--effort", effort.as_str()]);
         }
         if let Some(session_id) = &request.resume_session_id {
             command.args(["--resume", session_id]);

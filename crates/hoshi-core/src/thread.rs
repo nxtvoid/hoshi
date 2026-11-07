@@ -14,6 +14,9 @@ pub struct Thread {
     pub worktree_path: Option<String>,
     /// The provider's own session, resumed on the next turn.
     pub session_id: Option<String>,
+    /// Provider model alias; `None` uses the provider's default.
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
     pub active_turn_id: Option<String>,
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
@@ -28,6 +31,44 @@ pub enum ThreadStatus {
     Working,
     WaitingForInput,
     Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum Effort {
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl Effort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+/// Where a new thread works. The engine turns `NewWorktree` into `Worktree`
+/// after creating it, so a thread never exists without its worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export)]
+pub enum ThreadWorkspace {
+    Local,
+    NewWorktree,
+    Worktree { path: String, branch: String },
 }
 
 /// One entry in a thread's transcript.
