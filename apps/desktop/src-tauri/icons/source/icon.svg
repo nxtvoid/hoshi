@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Hoshi">
+  <rect width="512" height="512" rx="120" fill="#000000"/>
+  <g transform="translate(72 88.2) scale(3.68)">
+  <g fill="#FFFFFF" stroke="#FFFFFF" stroke-width="2.5" stroke-linejoin="round">
+    <polygon points="50.00,41.00 55.50,33.00 50.00,4.00 44.50,33.00"/>
+    <polygon points="58.56,47.22 67.87,49.98 93.75,35.79 64.47,39.52"/>
+    <polygon points="55.29,57.28 55.54,66.99 77.04,87.21 64.44,60.52"/>
+    <polygon points="44.71,57.28 35.56,60.52 22.96,87.21 44.46,66.99"/>
+    <polygon points="41.44,47.22 35.53,39.52 6.25,35.79 32.13,49.98"/>
+  </g>
+  <circle cx="50" cy="50" r="4.5" fill="#FFFFFF"/>
+  </g>
+</svg>

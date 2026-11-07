@@ -1,0 +1,21 @@
+{
+  "name": "@hoshi/utils",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./tests"
+  },
+  "dependencies": {
+    "cn": "^0.5.2"
+  },
+  "devDependencies": {
+    "@hoshi/ts-config": "workspace:*",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:"
+  }
+}

@@ -1,4 +1,4 @@
-import { cn } from '@/lib/utils'
+import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -29,7 +29,8 @@ export function WindowControls() {
   }, [])
 
   return (
-    <div className='flex h-full shrink-0'>
+    // Above page modals (z-50), so the window can always be minimized or closed.
+    <div className='relative z-60 flex h-full shrink-0'>
       <ControlButton
         label={m.window_minimize()}
         onClick={() => appWindow.minimize()}
@@ -77,7 +78,7 @@ function ControlButton({
       title={label}
       onClick={onClick}
       className={cn(
-        'text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:bg-accent flex h-full w-11 items-center justify-center outline-none [&_svg:not([class*="size-"])]:size-4',
+        'text-foreground hover:bg-accent focus-visible:bg-accent flex h-full w-11 items-center justify-center outline-none [&_svg:not([class*="size-"])]:size-4',
         className
       )}
     >

@@ -4,6 +4,7 @@
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
+@source "../**/*.{ts,tsx}";
 
 :root {
   --background: oklch(1 0 0);
@@ -45,6 +46,7 @@
   --status-waiting: oklch(0.72 0.16 70);
   --status-error: oklch(0.6 0.21 25);
   --window-close: oklch(0.58 0.22 27);
+  --backdrop: oklch(0.2 0 0 / 0.25);
   --window-close-foreground: oklch(1 0 0);
 }
 
@@ -53,6 +55,7 @@
   --color-status-waiting: var(--status-waiting);
   --color-status-error: var(--status-error);
   --color-window-close: var(--window-close);
+  --color-backdrop: var(--backdrop);
   --color-window-close-foreground: var(--window-close-foreground);
   --font-heading: var(--font-sans);
   --font-sans: "Geist Variable", sans-serif;
@@ -136,6 +139,7 @@
   --status-waiting: oklch(0.83 0.15 80);
   --status-error: oklch(0.7 0.18 22);
   --window-close: oklch(0.58 0.22 27);
+  --backdrop: oklch(0 0 0 / 0.5);
   --window-close-foreground: oklch(1 0 0);
 }
 

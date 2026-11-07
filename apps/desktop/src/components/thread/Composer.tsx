@@ -1,7 +1,7 @@
 import { m } from '@/paraglide/messages'
-import { Button } from '@/components/ui/button'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { Textarea } from '@/components/ui/textarea'
+import { Button } from '@hoshi/ui/components/button'
+import { Textarea } from '@hoshi/ui/components/textarea'
 import { ArrowUp02Icon } from '@hugeicons/core-free-icons'
 
 export function Composer() {

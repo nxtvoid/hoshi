@@ -6,6 +6,9 @@ use ts_rs::TS;
 #[ts(export)]
 pub struct Project {
     pub id: String,
-    pub name: String,
-    pub path: String,
+    pub title: String,
+    /// Absolute, normalized folder path.
+    pub workspace_root: String,
+    pub created_at: String,
+    pub updated_at: String,
 }

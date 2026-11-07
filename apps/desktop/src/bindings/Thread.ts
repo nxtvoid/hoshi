@@ -3,6 +3,10 @@ import type { ThreadStatus } from "./ThreadStatus";
 
 export type Thread = { id: string, projectId: string, title: string, status: ThreadStatus, branch: string | null, 
 /**
+ * When set, the agent runs here instead of the project root.
+ */
+worktreePath: string | null, createdAt: string, 
+/**
  * RFC 3339 timestamp of the last activity.
  */
 updatedAt: string, };

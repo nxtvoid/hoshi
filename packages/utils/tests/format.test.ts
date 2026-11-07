@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { relativeTimeParts } from '../../src/lib/format'
+import { relativeTimeParts } from '../src/format'
 
 const now = new Date('2026-11-07T12:00:00Z')
 const ago = (seconds: number) => new Date(now.getTime() - seconds * 1000)

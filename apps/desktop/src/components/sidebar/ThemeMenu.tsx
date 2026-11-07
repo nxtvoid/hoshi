@@ -1,6 +1,6 @@
 import { m } from '@/paraglide/messages'
-import { Button } from '@/components/ui/button'
 import { HugeiconsIcon } from '@hugeicons/react'
+import { Button } from '@hoshi/ui/components/button'
 import { type ThemePreference, useThemeStore } from '@/state/theme-store'
 import { ComputerIcon, Moon02Icon, Sun03Icon } from '@hugeicons/core-free-icons'
 import {
@@ -9,7 +9,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
+} from '@hoshi/ui/components/dropdown-menu'
 
 const OPTIONS = [
   { value: 'system', label: m.theme_system, icon: ComputerIcon },

@@ -10,6 +10,9 @@ pub struct Thread {
     pub title: String,
     pub status: ThreadStatus,
     pub branch: Option<String>,
+    /// When set, the agent runs here instead of the project root.
+    pub worktree_path: Option<String>,
+    pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,
 }

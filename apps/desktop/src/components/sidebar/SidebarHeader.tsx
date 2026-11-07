@@ -1,10 +1,11 @@
+import { SortMenu } from './SortMenu'
 import { ThemeMenu } from './ThemeMenu'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { IconButton } from '@/components/IconButton'
+import { Wordmark } from '@/components/brand/Logo'
+import { IconButton } from '@hoshi/ui/components/icon-button'
 import {
-  FilterHorizontalIcon,
   FolderAddIcon,
   PencilEdit02Icon,
   Search01Icon,
@@ -16,6 +17,7 @@ export function SidebarHeader() {
   const setSearch = useAppStore((state) => state.setSearch)
   const toggleSidebar = useAppStore((state) => state.toggleSidebar)
   const createThread = useAppStore((state) => state.createThread)
+  const addProject = useAppStore((state) => state.addProject)
   const hasProject = useAppStore((state) => state.selectedProjectId !== null)
 
   return (
@@ -26,9 +28,11 @@ export function SidebarHeader() {
         </IconButton>
         <span
           data-tauri-drag-region
-          className='text-sm font-semibold tracking-tight'
+          role='img'
+          aria-label={m.app_name()}
+          className='flex items-center px-1 select-none'
         >
-          hoshi
+          <Wordmark className='pointer-events-none h-3 w-auto' />
         </span>
         <div className='ml-auto'>
           <ThemeMenu />
@@ -50,10 +54,8 @@ export function SidebarHeader() {
             className='placeholder:text-sidebar-foreground/50 min-w-0 flex-1 bg-transparent outline-none'
           />
         </label>
-        <IconButton label={m.filter_threads()} disabled>
-          <HugeiconsIcon icon={FilterHorizontalIcon} strokeWidth={2} />
-        </IconButton>
-        <IconButton label={m.add_project()} disabled>
+        <SortMenu />
+        <IconButton label={m.add_project()} onClick={addProject}>
           <HugeiconsIcon icon={FolderAddIcon} strokeWidth={2} />
         </IconButton>
         <IconButton

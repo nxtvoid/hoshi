@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import { fileURLToPath } from 'node:url'
 import { paraglideVitePlugin } from '@inlang/paraglide-js'
+import { tanstackRouter } from '@tanstack/router-plugin/vite'
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import process from 'node:process'
@@ -11,6 +12,7 @@ const host = process.env.TAURI_DEV_HOST
 export default defineConfig({
   plugins: [
     paraglideVitePlugin({ project: './project.inlang' }),
+    tanstackRouter({ target: 'react' }),
     react(),
     tailwindcss()
   ],

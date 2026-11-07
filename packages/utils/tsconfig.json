@@ -1,0 +1,7 @@
+{
+  "extends": "@hoshi/ts-config/base.json",
+  "compilerOptions": {
+    "types": ["bun"]
+  },
+  "include": ["src", "tests"]
+}
