@@ -3,6 +3,8 @@
 ## Layout
 
 - `apps/desktop/src` - React + Tailwind v4 UI. Renders state; holds no business logic.
+  - `components/ui` - shadcn components on Base UI (style `base-nova`). Icons are Hugeicons: `<HugeiconsIcon icon={Search01Icon} strokeWidth={2} />` with icons from `@hugeicons/core-free-icons`. Add more with `bunx shadcn@latest add <name>` from `apps/desktop`.
+  - `state` - Zustand stores. Select one field per `useAppStore` call so a component only rerenders when that field changes.
 - `apps/desktop/src-tauri` - Thin Tauri shell: forwards commands to the engine and events to the UI.
 - `apps/desktop/src/bindings` - TypeScript generated from `hoshi-core` by ts-rs. Never edit by hand.
 - `apps/desktop/messages` - UI text per locale, compiled by Paraglide JS into `src/paraglide` (git-ignored).
@@ -16,13 +18,13 @@
 
 - `bun i` installs. `bun run dev` starts the app. `bun run build` bundles it.
 - `bun run check` runs Biome, rustfmt and clippy. `bun run fix` applies formatting.
-- `bun run typecheck` and `bun run test` (Rust tests).
+- `bun run typecheck`. `bun run test` runs the Rust tests and the UI unit tests.
 - `bun run bindings` regenerates the TypeScript bindings. Run it after changing a `#[ts(export)]` type.
 - `bun run --cwd apps/desktop check:i18n` checks the translations.
 
 ### Not decided yet — ask before establishing a pattern
 
-UI component library, client state management, routing, where the SQLite database lives, and the error type for library crates.
+Routing, where the SQLite database lives, and the error type for library crates.
 
 ## CodeGraph
 
@@ -64,6 +66,7 @@ import App from './App'
 
 ## Styling
 
+- **Themes:** light, dark and system are supported, and more themes will come. Every color is a CSS variable in `apps/desktop/src/globals.css`, defined for `:root` (light) and `.dark`, and exposed to Tailwind in `@theme inline`. Components use those tokens (`bg-sidebar`, `text-muted-foreground`, `bg-status-error`), never raw palette colors (`bg-red-400`, `text-white`) or literal values. A new color is a new token in both themes.
 - Use `cn` for conditional or merged classes. Never build class strings with template literals.
 - Biome sorts Tailwind classes (`useTailwindSortedClasses`), including those inside `cn()` and `cva()`. Run `bun run fix` and let it order them.
 

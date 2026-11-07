@@ -10,7 +10,7 @@
     "typecheck": "bun run --cwd apps/desktop typecheck",
     "check": "biome check . && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "fix": "biome check --write . && cargo fmt --all",
-    "test": "cargo test --workspace",
+    "test": "cargo test --workspace && bun run --cwd apps/desktop test",
     "bindings": "cargo test -p hoshi-core export_bindings"
   },
   "devDependencies": {
