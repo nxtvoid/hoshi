@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
+apps/desktop/src/bindings/** linguist-generated

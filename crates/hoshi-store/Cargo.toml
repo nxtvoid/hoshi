@@ -1,0 +1,13 @@
+[package]
+name = "hoshi-store"
+description = "SQLite persistence for events and projections."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hoshi-core.workspace = true
+
+[lints]
+workspace = true

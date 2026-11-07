@@ -1,0 +1,5 @@
+[env]
+# ts-rs writes the TypeScript bindings for hoshi-core types here.
+TS_RS_EXPORT_DIR = { value = "apps/desktop/src/bindings", relative = true }
+# IDs and counters fit in a JS number; bigint would leak into every component.
+TS_RS_LARGE_INT = "number"

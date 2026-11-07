@@ -1,0 +1,15 @@
+[package]
+name = "hoshi-engine"
+description = "Runtime that wires the orchestrator, store and providers together."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hoshi-core.workspace = true
+hoshi-providers.workspace = true
+hoshi-store.workspace = true
+
+[lints]
+workspace = true

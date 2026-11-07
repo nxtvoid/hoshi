@@ -1,0 +1,19 @@
+{
+  "name": "hoshi",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd apps/desktop tauri dev",
+    "build": "bun run --cwd apps/desktop tauri build",
+    "typecheck": "bun run --cwd apps/desktop typecheck",
+    "check": "biome check . && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
+    "fix": "biome check --write . && cargo fmt --all",
+    "test": "cargo test --workspace",
+    "bindings": "cargo test -p hoshi-core export_bindings"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "~2.6.6"
+  }
+}

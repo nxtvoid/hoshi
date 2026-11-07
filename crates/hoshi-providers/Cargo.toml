@@ -1,0 +1,13 @@
+[package]
+name = "hoshi-providers"
+description = "Provider adapters that drive agent CLIs and translate their output."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+hoshi-core.workspace = true
+
+[lints]
+workspace = true
