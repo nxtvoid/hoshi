@@ -10,6 +10,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             orchestration::get_snapshot,
             orchestration::dispatch,
+            orchestration::get_thread_items,
             settings::get_settings,
             settings::update_settings
         ])

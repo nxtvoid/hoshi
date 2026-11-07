@@ -20,6 +20,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog.workspace = true
 hoshi-engine.workspace = true
 hoshi-core.workspace = true
+hoshi-providers.workspace = true
 serde_json.workspace = true
 
 [lints]

@@ -1464,6 +1464,7 @@ version = "0.1.0"
 dependencies = [
  "hoshi-core",
  "hoshi-engine",
+ "hoshi-providers",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -1487,6 +1488,7 @@ name = "hoshi-providers"
 version = "0.1.0"
 dependencies = [
  "hoshi-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -1495,6 +1497,7 @@ version = "0.1.0"
 dependencies = [
  "hoshi-core",
  "rusqlite",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
 ]

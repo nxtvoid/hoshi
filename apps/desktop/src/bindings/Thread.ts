@@ -5,7 +5,11 @@ export type Thread = { id: string, projectId: string, title: string, status: Thr
 /**
  * When set, the agent runs here instead of the project root.
  */
-worktreePath: string | null, createdAt: string, 
+worktreePath: string | null, 
+/**
+ * The provider's own session, resumed on the next turn.
+ */
+sessionId: string | null, activeTurnId: string | null, createdAt: string, 
 /**
  * RFC 3339 timestamp of the last activity.
  */

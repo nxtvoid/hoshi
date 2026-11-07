@@ -1,13 +1,15 @@
 //! SQLite persistence for events and the projections the UI reads.
 //!
 //! Every append writes the events and updates the projection tables in one
-//! transaction, so the projections never disagree with the event log.
+//! transaction, so the projections never disagree with the event log. The
+//! thread projection must match `ReadModel::apply`; a test checks that.
 
-use hoshi_core::{Event, Project, Snapshot, Thread};
-use rusqlite::{Connection, Transaction, params, types::Type};
+use hoshi_core::{Event, Project, Snapshot, Thread, ThreadItem, ThreadStatus, TurnOutcome};
+use rusqlite::{Connection, Row, Transaction, params, types::Type};
 use std::path::Path;
 
-const MIGRATIONS: &[&str] = &[r"
+const MIGRATIONS: &[&str] = &[
+    r"
     CREATE TABLE events (
         sequence INTEGER PRIMARY KEY AUTOINCREMENT,
         event_type TEXT NOT NULL,
@@ -32,7 +34,20 @@ const MIGRATIONS: &[&str] = &[r"
         updated_at TEXT NOT NULL
     );
     CREATE INDEX threads_project_id ON threads (project_id);
-"];
+    ",
+    r"
+    ALTER TABLE threads ADD COLUMN session_id TEXT;
+    ALTER TABLE threads ADD COLUMN active_turn_id TEXT;
+    CREATE TABLE thread_items (
+        ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
+        id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        UNIQUE (thread_id, id)
+    );
+    ",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -111,22 +126,22 @@ impl Store {
         let threads = self
             .conn
             .prepare(
-                "SELECT id, project_id, title, status, branch, worktree_path, created_at, updated_at
+                "SELECT id, project_id, title, status, branch, worktree_path, session_id,
+                        active_turn_id, created_at, updated_at
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
-                let status: String = row.get(3)?;
                 Ok(Thread {
                     id: row.get(0)?,
                     project_id: row.get(1)?,
                     title: row.get(2)?,
-                    status: serde_json::from_value(status.into()).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
-                    })?,
+                    status: json_column(row, 3)?,
                     branch: row.get(4)?,
                     worktree_path: row.get(5)?,
-                    created_at: row.get(6)?,
-                    updated_at: row.get(7)?,
+                    session_id: row.get(6)?,
+                    active_turn_id: row.get(7)?,
+                    created_at: row.get(8)?,
+                    updated_at: row.get(9)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -136,6 +151,42 @@ impl Store {
             threads,
         })
     }
+
+    /// A thread's transcript, oldest first.
+    pub fn thread_items(&self, thread_id: &str) -> Result<Vec<ThreadItem>, StoreError> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT id, thread_id, created_at, content_json
+                 FROM thread_items WHERE thread_id = ?1 ORDER BY ordinal",
+            )?
+            .query_map([thread_id], |row| {
+                let content: String = row.get(3)?;
+                Ok(ThreadItem {
+                    id: row.get(0)?,
+                    thread_id: row.get(1)?,
+                    created_at: row.get(2)?,
+                    content: serde_json::from_str(&content).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(3, Type::Text, Box::new(error))
+                    })?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+}
+
+fn json_column<T: serde::de::DeserializeOwned>(row: &Row, index: usize) -> rusqlite::Result<T> {
+    let text: String = row.get(index)?;
+    serde_json::from_value(text.into()).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
+    })
+}
+
+fn status_text(status: ThreadStatus) -> Result<String, StoreError> {
+    Ok(serde_json::to_value(status)?
+        .as_str()
+        .unwrap_or_default()
+        .to_owned())
 }
 
 fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
@@ -154,29 +205,108 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             )?;
         }
         Event::ProjectRemoved { project_id } => {
+            tx.execute(
+                "DELETE FROM thread_items WHERE thread_id IN
+                 (SELECT id FROM threads WHERE project_id = ?1)",
+                [project_id],
+            )?;
             tx.execute("DELETE FROM threads WHERE project_id = ?1", [project_id])?;
             tx.execute("DELETE FROM projects WHERE id = ?1", [project_id])?;
         }
         Event::ThreadCreated { thread } => {
-            let status = serde_json::to_value(thread.status)?;
             tx.execute(
                 "INSERT INTO threads
-                 (id, project_id, title, status, branch, worktree_path, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (id, project_id, title, status, branch, worktree_path, session_id,
+                  active_turn_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     thread.id,
                     thread.project_id,
                     thread.title,
-                    status.as_str(),
+                    status_text(thread.status)?,
                     thread.branch,
                     thread.worktree_path,
+                    thread.session_id,
+                    thread.active_turn_id,
                     thread.created_at,
                     thread.updated_at
                 ],
             )?;
         }
         Event::ThreadDeleted { thread_id } => {
+            tx.execute("DELETE FROM thread_items WHERE thread_id = ?1", [thread_id])?;
             tx.execute("DELETE FROM threads WHERE id = ?1", [thread_id])?;
+        }
+        Event::ThreadTitleSet { thread_id, title } => {
+            tx.execute(
+                "UPDATE threads SET title = ?2 WHERE id = ?1",
+                params![thread_id, title],
+            )?;
+        }
+        Event::TurnStarted {
+            thread_id,
+            turn_id,
+            at,
+        } => {
+            tx.execute(
+                "UPDATE threads SET status = ?2, active_turn_id = ?3, updated_at = ?4 WHERE id = ?1",
+                params![thread_id, status_text(ThreadStatus::Working)?, turn_id, at],
+            )?;
+        }
+        Event::SessionAttached {
+            thread_id,
+            session_id,
+        } => {
+            tx.execute(
+                "UPDATE threads SET session_id = ?2 WHERE id = ?1",
+                params![thread_id, session_id],
+            )?;
+        }
+        Event::ItemAdded { item } => {
+            tx.execute(
+                "INSERT INTO thread_items (id, thread_id, created_at, content_json)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (thread_id, id) DO UPDATE SET content_json = excluded.content_json",
+                params![
+                    item.id,
+                    item.thread_id,
+                    item.created_at,
+                    serde_json::to_string(&item.content)?
+                ],
+            )?;
+            tx.execute(
+                "UPDATE threads SET updated_at = ?2 WHERE id = ?1",
+                params![item.thread_id, item.created_at],
+            )?;
+        }
+        Event::ToolCallCompleted {
+            thread_id,
+            item_id,
+            output,
+            is_error,
+        } => {
+            tx.execute(
+                "UPDATE thread_items
+                 SET content_json = json_set(content_json, '$.output', ?3, '$.isError', json(?4))
+                 WHERE thread_id = ?1 AND id = ?2",
+                params![thread_id, item_id, output, is_error.to_string()],
+            )?;
+        }
+        Event::TurnCompleted {
+            thread_id,
+            outcome,
+            at,
+            ..
+        } => {
+            let status = match outcome {
+                TurnOutcome::Failed { .. } => ThreadStatus::Error,
+                TurnOutcome::Completed | TurnOutcome::Interrupted => ThreadStatus::Idle,
+            };
+            tx.execute(
+                "UPDATE threads SET status = ?2, active_turn_id = NULL, updated_at = ?3
+                 WHERE id = ?1",
+                params![thread_id, status_text(status)?, at],
+            )?;
         }
     }
     Ok(())
@@ -185,7 +315,7 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hoshi_core::ThreadStatus;
+    use hoshi_core::{Command, ItemContent, ProviderOutput, ReadModel, decide, record_output};
 
     const NOW: &str = "2026-11-07T12:00:00.000Z";
 
@@ -210,6 +340,8 @@ mod tests {
                 status: ThreadStatus::WaitingForInput,
                 branch: Some("feat/x".into()),
                 worktree_path: Some("/worktrees/x".into()),
+                session_id: None,
+                active_turn_id: None,
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
             },
@@ -234,35 +366,94 @@ mod tests {
         assert_eq!(snapshot.threads, [thread]);
     }
 
-    #[test]
-    fn removing_a_project_deletes_its_threads() {
+    fn commit(store: &mut Store, model: &mut ReadModel, events: Vec<Event>) {
+        events.iter().for_each(|event| model.apply(event));
+        store.append(&events, NOW).unwrap();
+    }
+
+    fn store_with_thread() -> (Store, ReadModel) {
         let mut store = Store::open_in_memory().unwrap();
         store
-            .append(
-                &[
-                    project_created("p"),
-                    project_created("q"),
-                    thread_created("t1", "p"),
-                    thread_created("t2", "q"),
-                ],
-                NOW,
-            )
+            .append(&[project_created("p"), thread_created("t", "p")], NOW)
             .unwrap();
+        let model = ReadModel::from_snapshot(&store.snapshot().unwrap());
+        (store, model)
+    }
 
-        store
-            .append(
-                &[Event::ProjectRemoved {
-                    project_id: "p".into(),
-                }],
-                NOW,
-            )
-            .unwrap();
+    fn send(model: &ReadModel) -> Vec<Event> {
+        let command = Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: "m1".into(),
+            text: "Read the file".into(),
+        };
+        decide(model, command, NOW).unwrap()
+    }
 
-        let snapshot = store.snapshot().unwrap();
-        assert_eq!(snapshot.sequence, 5);
-        assert_eq!(snapshot.projects[0].id, "q");
-        assert_eq!(snapshot.threads.len(), 1);
-        assert_eq!(snapshot.threads[0].id, "t2");
+    #[test]
+    fn removing_a_project_deletes_its_threads_and_items() {
+        let (mut store, mut model) = store_with_thread();
+        let events = send(&model);
+        commit(&mut store, &mut model, events);
+
+        let remove = Command::ProjectRemove {
+            project_id: "p".into(),
+        };
+        let events = decide(&model, remove, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+
+        assert!(store.snapshot().unwrap().threads.is_empty());
+        assert!(store.thread_items("t").unwrap().is_empty());
+    }
+
+    #[test]
+    fn thread_projection_matches_the_read_model_through_a_turn() {
+        let (mut store, mut model) = store_with_thread();
+        let events = send(&model);
+        commit(&mut store, &mut model, events);
+        let outputs = [
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+            ProviderOutput::ToolCallStarted {
+                item_id: "tool".into(),
+                name: "Read".into(),
+                input: "{}".into(),
+            },
+            ProviderOutput::ToolCallCompleted {
+                item_id: "tool".into(),
+                output: "hello".into(),
+                is_error: false,
+            },
+            ProviderOutput::AssistantMessage {
+                item_id: "a".into(),
+                text: "It says hello".into(),
+            },
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        ];
+
+        for output in outputs {
+            let events = record_output(&model, "t", "m1", output, NOW);
+            commit(&mut store, &mut model, events);
+            let expected: Vec<_> = model.threads().cloned().collect();
+            assert_eq!(store.snapshot().unwrap().threads, expected);
+        }
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.status, ThreadStatus::Idle);
+        assert_eq!(thread.session_id.as_deref(), Some("s1"));
+        let items = store.thread_items("t").unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(
+            items[1].content,
+            ItemContent::ToolCall {
+                name: "Read".into(),
+                input: "{}".into(),
+                output: Some("hello".into()),
+                is_error: false,
+            }
+        );
     }
 
     #[test]
@@ -280,5 +471,23 @@ mod tests {
 
         assert_eq!(snapshot.projects.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn upgrades_a_version_one_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute(
+            "INSERT INTO threads VALUES ('t', 'p', 'old', 'idle', NULL, NULL, ?1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+
+        let store = Store::init(conn).unwrap();
+
+        let thread = &store.snapshot().unwrap().threads[0];
+        assert_eq!(thread.title, "old");
+        assert_eq!(thread.session_id, None);
     }
 }

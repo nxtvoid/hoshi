@@ -1,16 +1,24 @@
 import type { Event } from '@/bindings/Event'
 import type { Thread } from '@/bindings/Thread'
 import type { Project } from '@/bindings/Project'
+import type { ThreadItem } from '@/bindings/ThreadItem'
 
 export type OrchestrationState = {
   projects: Project[]
   threads: Thread[]
 }
 
+/** Mirrors `ReadModel::apply` in hoshi-core for the sidebar's state. */
 export function applyEvent(
   state: OrchestrationState,
   event: Event
 ): OrchestrationState {
+  const updateThread = (threadId: string, update: Partial<Thread>) => ({
+    ...state,
+    threads: state.threads.map((thread) =>
+      thread.id === threadId ? { ...thread, ...update } : thread
+    )
+  })
   switch (event.type) {
     case 'projectCreated':
       return { ...state, projects: [...state.projects, event.project] }
@@ -30,7 +38,59 @@ export function applyEvent(
         ...state,
         threads: state.threads.filter((thread) => thread.id !== event.threadId)
       }
+    case 'threadTitleSet':
+      return updateThread(event.threadId, { title: event.title })
+    case 'turnStarted':
+      return updateThread(event.threadId, {
+        status: 'working',
+        activeTurnId: event.turnId,
+        updatedAt: event.at
+      })
+    case 'sessionAttached':
+      return updateThread(event.threadId, { sessionId: event.sessionId })
+    case 'itemAdded':
+      return updateThread(event.item.threadId, {
+        updatedAt: event.item.createdAt
+      })
+    case 'toolCallCompleted':
+      return state
+    case 'turnCompleted':
+      return updateThread(event.threadId, {
+        status: event.outcome.type === 'failed' ? 'error' : 'idle',
+        activeTurnId: null,
+        updatedAt: event.at
+      })
   }
+}
+
+/** Applies an event to one thread's transcript. Repeated items are replaced. */
+export function applyItemEvent(
+  threadId: string,
+  items: ThreadItem[],
+  event: Event
+): ThreadItem[] {
+  if (event.type === 'itemAdded' && event.item.threadId === threadId) {
+    const index = items.findIndex((item) => item.id === event.item.id)
+    if (index === -1) return [...items, event.item]
+    return items.map((item, position) =>
+      position === index ? event.item : item
+    )
+  }
+  if (event.type === 'toolCallCompleted' && event.threadId === threadId) {
+    return items.map((item) =>
+      item.id === event.itemId && item.content.kind === 'toolCall'
+        ? {
+            ...item,
+            content: {
+              ...item.content,
+              output: event.output,
+              isError: event.isError
+            }
+          }
+        : item
+    )
+  }
+  return items
 }
 
 /** A quick client-side duplicate check; the engine canonicalizes and decides. */

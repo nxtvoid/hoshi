@@ -7,6 +7,8 @@ import type { Command } from '@/bindings/Command'
 import type { Project } from '@/bindings/Project'
 import type { Snapshot } from '@/bindings/Snapshot'
 import { ask, open } from '@tauri-apps/plugin-dialog'
+import { useTranscriptStore } from './transcript-store'
+import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { CommandError } from '@/bindings/CommandError'
 import type { EventEnvelope } from '@/bindings/EventEnvelope'
 import { applyEvent, folderName, samePath } from './orchestration'
@@ -26,8 +28,11 @@ type AppState = {
   setSearch: (search: string) => void
   addProject: () => Promise<void>
   removeProject: (projectId: string) => Promise<void>
-  createThread: () => Promise<void>
+  createThread: () => Promise<string | null>
   deleteThread: (threadId: string) => Promise<void>
+  /** Sends to the selected thread, creating one first when none is selected. */
+  sendMessage: (text: string) => Promise<boolean>
+  interruptTurn: () => Promise<void>
 }
 
 const dispatch = (command: Command) => invoke<void>('dispatch', { command })
@@ -45,9 +50,15 @@ export const useAppStore = create<AppState>()((set, get) => ({
   selectedThreadId: null,
   sidebarOpen: true,
   search: '',
-  selectProject: (projectId) =>
-    set({ selectedProjectId: projectId, selectedThreadId: null, search: '' }),
-  selectThread: (threadId) => set({ selectedThreadId: threadId }),
+  selectProject: (projectId) => {
+    set({ selectedProjectId: projectId, selectedThreadId: null, search: '' })
+    void useTranscriptStore.getState().load(null)
+  },
+  selectThread: (threadId) => {
+    if (get().selectedThreadId === threadId) return
+    set({ selectedThreadId: threadId })
+    void useTranscriptStore.getState().load(threadId)
+  },
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
   setSearch: (search) => set({ search }),
   addProject: async () => {
@@ -92,13 +103,16 @@ export const useAppStore = create<AppState>()((set, get) => ({
   },
   createThread: async () => {
     const projectId = get().selectedProjectId
-    if (!projectId) return
+    if (!projectId) return null
     const threadId = crypto.randomUUID()
     try {
       await dispatch({ type: 'threadCreate', threadId, projectId, title: '' })
-      set({ selectedThreadId: threadId, search: '' })
+      set({ search: '' })
+      get().selectThread(threadId)
+      return threadId
     } catch (error) {
       reportError(error)
+      return null
     }
   },
   deleteThread: async (threadId) => {
@@ -112,12 +126,34 @@ export const useAppStore = create<AppState>()((set, get) => ({
     )
     if (!confirmed) return
     await dispatch({ type: 'threadDelete', threadId }).catch(reportError)
+  },
+  sendMessage: async (text) => {
+    const threadId = get().selectedThreadId ?? (await get().createThread())
+    if (!threadId) return false
+    try {
+      await dispatch({
+        type: 'messageSend',
+        threadId,
+        messageId: crypto.randomUUID(),
+        text
+      })
+      return true
+    } catch (error) {
+      reportError(error)
+      return false
+    }
+  },
+  interruptTurn: async () => {
+    const threadId = get().selectedThreadId
+    if (!threadId) return
+    await dispatch({ type: 'turnInterrupt', threadId }).catch(reportError)
   }
 }))
 
 function receive({ sequence, event }: EventEnvelope) {
+  if (sequence <= useAppStore.getState().sequence) return
+  useTranscriptStore.getState().applyEvent(event)
   useAppStore.setState((state) => {
-    if (sequence <= state.sequence) return state
     const next = applyEvent(state, event)
     const selectedProjectId = next.projects.some(
       (project) => project.id === state.selectedProjectId
@@ -131,6 +167,10 @@ function receive({ sequence, event }: EventEnvelope) {
       : null
     return { ...next, sequence, selectedProjectId, selectedThreadId }
   })
+  const { selectedThreadId } = useAppStore.getState()
+  if (selectedThreadId !== useTranscriptStore.getState().threadId) {
+    void useTranscriptStore.getState().load(selectedThreadId)
+  }
 }
 
 async function startSync() {
@@ -139,7 +179,14 @@ async function startSync() {
     if (buffered) buffered.push(message.payload)
     else receive(message.payload)
   })
-  import.meta.hot?.dispose(unlisten)
+  const unlistenStream = await listen<StreamDelta>(
+    'hoshi://stream',
+    (message) => useTranscriptStore.getState().applyDelta(message.payload)
+  )
+  import.meta.hot?.dispose(() => {
+    unlisten()
+    unlistenStream()
+  })
   const snapshot = await invoke<Snapshot>('get_snapshot')
   useAppStore.setState({
     ready: true,

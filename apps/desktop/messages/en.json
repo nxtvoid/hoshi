@@ -20,7 +20,6 @@
   "status_working": "Working",
   "status_waiting_for_input": "Needs input",
   "status_error": "Error",
-  "no_messages": "No messages yet",
   "composer_placeholder": "Ask anything…",
   "send_message": "Send",
   "theme": "Theme",
@@ -32,7 +31,7 @@
   "window_restore": "Restore",
   "window_close": "Close",
   "usage": "Usage",
-  "new_thread_prompt": "What should we build?",
+  "new_thread_prompt": "What should we build in {project}?",
   "settings": "Settings",
   "pull_requests": "Pull requests",
   "settings_appearance": "Appearance",
@@ -53,5 +52,13 @@
   "search_settings": "Search settings",
   "no_matching_settings": "No settings match your search",
   "close_settings": "Close (Esc)",
-  "app_version_label": "Version"
+  "app_version_label": "Version",
+  "working": "Working…",
+  "stop_turn": "Stop",
+  "tool_running": "Running",
+  "tool_failed": "Failed",
+  "turn_failed_provider_disabled": "Claude Code is turned off. Turn it on in Settings → Providers.",
+  "turn_failed_spawn": "Couldn't start Claude Code. Check that it is installed, or set its path in Settings → Providers.",
+  "turn_failed_process_exited": "Claude Code stopped before finishing this turn.",
+  "turn_failed_provider_error": "Claude Code reported an error and stopped this turn."
 }

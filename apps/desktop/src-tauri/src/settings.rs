@@ -15,10 +15,11 @@ pub fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
 #[tauri::command]
 pub fn update_settings(app: AppHandle, settings: AppSettings) -> Result<AppSettings, String> {
     save(&settings_path(&app)?, &settings).map_err(|error| error.to_string())?;
+    crate::orchestration::engine(&app).set_adapter(crate::orchestration::adapter_for(&settings));
     Ok(settings)
 }
 
-fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_config_dir()
         .map(|dir| dir.join(FILE_NAME))

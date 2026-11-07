@@ -3,6 +3,6 @@ import type { Project } from "./Project";
 import type { Thread } from "./Thread";
 
 /**
- * What the UI reads: every project and thread, plus the last applied event.
+ * What the UI reads at startup: every project and thread, without transcripts.
  */
 export type Snapshot = { sequence: number, projects: Array<Project>, threads: Array<Thread>, };

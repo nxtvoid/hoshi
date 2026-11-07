@@ -1,7 +1,12 @@
-use crate::{Project, Thread, ThreadStatus};
+use crate::{
+    ItemContent, Project, ProviderOutput, Thread, ThreadItem, ThreadStatus, TurnFailure,
+    TurnOutcome,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use ts_rs::TS;
+
+const TITLE_MAX_CHARS: usize = 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
@@ -27,6 +32,14 @@ pub enum Command {
     ThreadDelete {
         thread_id: String,
     },
+    MessageSend {
+        thread_id: String,
+        message_id: String,
+        text: String,
+    },
+    TurnInterrupt {
+        thread_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -37,10 +50,46 @@ pub enum Command {
 )]
 #[ts(export)]
 pub enum Event {
-    ProjectCreated { project: Project },
-    ProjectRemoved { project_id: String },
-    ThreadCreated { thread: Thread },
-    ThreadDeleted { thread_id: String },
+    ProjectCreated {
+        project: Project,
+    },
+    ProjectRemoved {
+        project_id: String,
+    },
+    ThreadCreated {
+        thread: Thread,
+    },
+    ThreadDeleted {
+        thread_id: String,
+    },
+    ThreadTitleSet {
+        thread_id: String,
+        title: String,
+    },
+    TurnStarted {
+        thread_id: String,
+        turn_id: String,
+        at: String,
+    },
+    SessionAttached {
+        thread_id: String,
+        session_id: String,
+    },
+    ItemAdded {
+        item: ThreadItem,
+    },
+    ToolCallCompleted {
+        thread_id: String,
+        item_id: String,
+        output: String,
+        is_error: bool,
+    },
+    TurnCompleted {
+        thread_id: String,
+        turn_id: String,
+        outcome: TurnOutcome,
+        at: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, thiserror::Error)]
@@ -61,6 +110,12 @@ pub enum CommandError {
     DuplicateThreadId { thread_id: String },
     #[error("thread {thread_id} not found")]
     ThreadNotFound { thread_id: String },
+    #[error("thread {thread_id} is already running a turn")]
+    ThreadBusy { thread_id: String },
+    #[error("thread {thread_id} is not running a turn")]
+    ThreadNotWorking { thread_id: String },
+    #[error("message is empty")]
+    EmptyMessage,
     #[error("folder {path} does not exist")]
     WorkspaceRootNotFound { path: String },
     /// Storage or other failures outside the domain; `detail` is for logs, not the UI.
@@ -68,7 +123,7 @@ pub enum CommandError {
     Internal { detail: String },
 }
 
-/// What the UI reads: every project and thread, plus the last applied event.
+/// What the UI reads at startup: every project and thread, without transcripts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -85,6 +140,16 @@ pub struct Snapshot {
 pub struct EventEnvelope {
     pub sequence: u64,
     pub event: Event,
+}
+
+/// Text an assistant is still writing. Sent to the UI as it streams, never stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct StreamDelta {
+    pub thread_id: String,
+    pub item_id: String,
+    pub delta: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -117,6 +182,23 @@ impl ReadModel {
         self.threads.values()
     }
 
+    pub fn thread(&self, thread_id: &str) -> Option<&Thread> {
+        self.threads.get(thread_id)
+    }
+
+    /// Where the thread's agent runs: its worktree when it has one, never the
+    /// project root in that case.
+    pub fn thread_cwd(&self, thread_id: &str) -> Option<&str> {
+        let thread = self.threads.get(thread_id)?;
+        match &thread.worktree_path {
+            Some(path) => Some(path),
+            None => self
+                .projects
+                .get(&thread.project_id)
+                .map(|project| project.workspace_root.as_str()),
+        }
+    }
+
     pub fn apply(&mut self, event: &Event) {
         match event {
             Event::ProjectCreated { project } => {
@@ -132,6 +214,51 @@ impl ReadModel {
             }
             Event::ThreadDeleted { thread_id } => {
                 self.threads.remove(thread_id);
+            }
+            Event::ThreadTitleSet { thread_id, title } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.title.clone_from(title);
+                }
+            }
+            Event::TurnStarted {
+                thread_id,
+                turn_id,
+                at,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.status = ThreadStatus::Working;
+                    thread.active_turn_id = Some(turn_id.clone());
+                    thread.updated_at.clone_from(at);
+                }
+            }
+            Event::SessionAttached {
+                thread_id,
+                session_id,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.session_id = Some(session_id.clone());
+                }
+            }
+            Event::ItemAdded { item } => {
+                if let Some(thread) = self.threads.get_mut(&item.thread_id) {
+                    thread.updated_at.clone_from(&item.created_at);
+                }
+            }
+            Event::ToolCallCompleted { .. } => {}
+            Event::TurnCompleted {
+                thread_id,
+                outcome,
+                at,
+                ..
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.active_turn_id = None;
+                    thread.status = match outcome {
+                        TurnOutcome::Failed { .. } => ThreadStatus::Error,
+                        TurnOutcome::Completed | TurnOutcome::Interrupted => ThreadStatus::Idle,
+                    };
+                    thread.updated_at.clone_from(at);
+                }
             }
         }
     }
@@ -191,6 +318,8 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     status: ThreadStatus::Idle,
                     branch: None,
                     worktree_path: None,
+                    session_id: None,
+                    active_turn_id: None,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
                 },
@@ -202,7 +331,142 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             Ok(vec![Event::ThreadDeleted { thread_id }])
         }
+        Command::MessageSend {
+            thread_id,
+            message_id,
+            text,
+        } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            if thread.active_turn_id.is_some() {
+                return Err(CommandError::ThreadBusy { thread_id });
+            }
+            let text = text.trim().to_owned();
+            if text.is_empty() {
+                return Err(CommandError::EmptyMessage);
+            }
+            let mut events = Vec::with_capacity(3);
+            if thread.title.is_empty() {
+                events.push(Event::ThreadTitleSet {
+                    thread_id: thread_id.clone(),
+                    title: title_from(&text),
+                });
+            }
+            events.push(Event::ItemAdded {
+                item: ThreadItem {
+                    id: message_id.clone(),
+                    thread_id: thread_id.clone(),
+                    created_at: now.to_owned(),
+                    content: ItemContent::UserMessage { text },
+                },
+            });
+            events.push(Event::TurnStarted {
+                thread_id,
+                turn_id: message_id,
+                at: now.to_owned(),
+            });
+            Ok(events)
+        }
+        Command::TurnInterrupt { thread_id } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            if thread.active_turn_id.is_none() {
+                return Err(CommandError::ThreadNotWorking { thread_id });
+            }
+            Ok(Vec::new())
+        }
     }
+}
+
+/// Turns provider output into events. Output from a turn that is no longer
+/// active (interrupted, or the thread was deleted) is dropped.
+pub fn record_output(
+    model: &ReadModel,
+    thread_id: &str,
+    turn_id: &str,
+    output: ProviderOutput,
+    now: &str,
+) -> Vec<Event> {
+    let active = model
+        .threads
+        .get(thread_id)
+        .is_some_and(|thread| thread.active_turn_id.as_deref() == Some(turn_id));
+    if !active {
+        return Vec::new();
+    }
+    let item = |id: String, content: ItemContent| Event::ItemAdded {
+        item: ThreadItem {
+            id,
+            thread_id: thread_id.to_owned(),
+            created_at: now.to_owned(),
+            content,
+        },
+    };
+    match output {
+        ProviderOutput::SessionStarted { session_id } => vec![Event::SessionAttached {
+            thread_id: thread_id.to_owned(),
+            session_id,
+        }],
+        ProviderOutput::TextDelta { .. } => Vec::new(),
+        ProviderOutput::AssistantMessage { item_id, text } => {
+            vec![item(item_id, ItemContent::AssistantMessage { text })]
+        }
+        ProviderOutput::ToolCallStarted {
+            item_id,
+            name,
+            input,
+        } => vec![item(
+            item_id,
+            ItemContent::ToolCall {
+                name,
+                input,
+                output: None,
+                is_error: false,
+            },
+        )],
+        ProviderOutput::ToolCallCompleted {
+            item_id,
+            output,
+            is_error,
+        } => vec![Event::ToolCallCompleted {
+            thread_id: thread_id.to_owned(),
+            item_id,
+            output,
+            is_error,
+        }],
+        ProviderOutput::TurnCompleted { outcome } => {
+            let mut events = Vec::with_capacity(2);
+            if let TurnOutcome::Failed { reason } = &outcome {
+                events.push(item(
+                    format!("{turn_id}:failed"),
+                    ItemContent::TurnFailed {
+                        reason: reason.clone(),
+                    },
+                ));
+            }
+            events.push(Event::TurnCompleted {
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+                outcome,
+                at: now.to_owned(),
+            });
+            events
+        }
+    }
+}
+
+/// The failure recorded when a turn cannot start at all.
+pub fn turn_failed(reason: TurnFailure) -> ProviderOutput {
+    ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Failed { reason },
+    }
+}
+
+fn title_from(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default().trim();
+    line.chars().take(TITLE_MAX_CHARS).collect()
 }
 
 /// Windows paths are case-insensitive and accept either separator.
@@ -233,6 +497,14 @@ mod tests {
         Ok(events)
     }
 
+    fn record(model: &mut ReadModel, turn_id: &str, output: ProviderOutput) -> Vec<Event> {
+        let events = record_output(model, "t", turn_id, output, NOW);
+        for event in &events {
+            model.apply(event);
+        }
+        events
+    }
+
     fn create_project(id: &str, root: &str) -> Command {
         Command::ProjectCreate {
             project_id: id.into(),
@@ -247,6 +519,21 @@ mod tests {
             project_id: project_id.into(),
             title: String::new(),
         }
+    }
+
+    fn send(message_id: &str, text: &str) -> Command {
+        Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: message_id.into(),
+            text: text.into(),
+        }
+    }
+
+    fn model_with_thread() -> ReadModel {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+        run(&mut model, create_thread("t", "p")).unwrap();
+        model
     }
 
     #[test]
@@ -279,19 +566,6 @@ mod tests {
     }
 
     #[test]
-    fn new_threads_start_idle_on_the_project_root() {
-        let mut model = ReadModel::default();
-        run(&mut model, create_project("p", "/repo")).unwrap();
-
-        run(&mut model, create_thread("t", "p")).unwrap();
-
-        let thread = model.threads().next().unwrap();
-        assert_eq!(thread.status, ThreadStatus::Idle);
-        assert_eq!(thread.worktree_path, None);
-        assert_eq!(thread.created_at, NOW);
-    }
-
-    #[test]
     fn removing_a_project_removes_its_threads_and_frees_the_folder() {
         let mut model = ReadModel::default();
         run(&mut model, create_project("p", "/repo")).unwrap();
@@ -313,12 +587,49 @@ mod tests {
     }
 
     #[test]
-    fn deleting_an_unknown_thread_fails() {
-        let mut model = ReadModel::default();
+    fn first_message_titles_the_thread_and_starts_a_turn() {
+        let mut model = model_with_thread();
+
+        run(&mut model, send("m1", "  Fix the login bug\nwith details")).unwrap();
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.title, "Fix the login bug");
+        assert_eq!(thread.status, ThreadStatus::Working);
+        assert_eq!(thread.active_turn_id.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn a_busy_thread_rejects_another_message() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "first")).unwrap();
+
+        let error = run(&mut model, send("m2", "second")).unwrap_err();
+
+        assert_eq!(
+            error,
+            CommandError::ThreadBusy {
+                thread_id: "t".into()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_an_empty_message() {
+        let mut model = model_with_thread();
+
+        assert_eq!(
+            run(&mut model, send("m1", "   ")).unwrap_err(),
+            CommandError::EmptyMessage
+        );
+    }
+
+    #[test]
+    fn interrupting_an_idle_thread_fails() {
+        let mut model = model_with_thread();
 
         let error = run(
             &mut model,
-            Command::ThreadDelete {
+            Command::TurnInterrupt {
                 thread_id: "t".into(),
             },
         )
@@ -326,10 +637,83 @@ mod tests {
 
         assert_eq!(
             error,
-            CommandError::ThreadNotFound {
+            CommandError::ThreadNotWorking {
                 thread_id: "t".into()
             }
         );
+    }
+
+    #[test]
+    fn output_from_a_finished_turn_is_dropped() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "hi")).unwrap();
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+            },
+        );
+
+        let late = record(
+            &mut model,
+            "m1",
+            ProviderOutput::AssistantMessage {
+                item_id: "a".into(),
+                text: "too late".into(),
+            },
+        );
+
+        assert!(late.is_empty());
+        assert_eq!(model.thread("t").unwrap().status, ThreadStatus::Idle);
+    }
+
+    #[test]
+    fn a_failed_turn_records_the_reason_and_marks_the_thread() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "hi")).unwrap();
+
+        let events = record(
+            &mut model,
+            "m1",
+            turn_failed(TurnFailure::SpawnFailed {
+                detail: "not found".into(),
+            }),
+        );
+
+        assert!(matches!(
+            &events[0],
+            Event::ItemAdded { item } if matches!(item.content, ItemContent::TurnFailed { .. })
+        ));
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.status, ThreadStatus::Error);
+        assert_eq!(thread.active_turn_id, None);
+    }
+
+    #[test]
+    fn the_session_is_kept_for_the_next_turn() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "hi")).unwrap();
+
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+        );
+
+        assert_eq!(model.thread("t").unwrap().session_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn a_thread_runs_in_its_worktree_when_it_has_one() {
+        let mut model = model_with_thread();
+        assert_eq!(model.thread_cwd("t"), Some("/repo"));
+
+        model.threads.get_mut("t").unwrap().worktree_path = Some("/worktrees/t".into());
+
+        assert_eq!(model.thread_cwd("t"), Some("/worktrees/t"));
     }
 
     #[cfg(windows)]

@@ -2,10 +2,15 @@
 
 mod orchestration;
 mod project;
+mod provider;
 mod settings;
 mod thread;
 
-pub use orchestration::{Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, decide};
+pub use orchestration::{
+    Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, decide,
+    record_output, turn_failed,
+};
 pub use project::Project;
+pub use provider::ProviderOutput;
 pub use settings::{AppSettings, ClaudeCodeSettings, ProviderSettings};
-pub use thread::{Thread, ThreadStatus};
+pub use thread::{ItemContent, Thread, ThreadItem, ThreadStatus, TurnFailure, TurnOutcome};
