@@ -36,7 +36,22 @@ pub struct TurnRequest {
     pub ultracode: bool,
     pub access_mode: AccessMode,
     pub plan_mode: bool,
+    /// hoshi's own MCP server for the agent, whose tools it may call without asking.
+    pub mcp: Option<McpServer>,
+    /// Added to the agent's system prompt.
+    pub instructions: Option<String>,
 }
+
+/// An MCP server reached over HTTP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    pub url: String,
+    /// The `Authorization` header that says which thread calls.
+    pub authorization: String,
+}
+
+/// The name agents know hoshi's MCP server by; its tools are `mcp__hoshi__<tool>`.
+pub const MCP_SERVER_NAME: &str = "hoshi";
 
 /// Something the message carries besides its text.
 #[derive(Debug, Clone, PartialEq, Eq)]

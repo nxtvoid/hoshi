@@ -26,6 +26,8 @@ ignore = "0.4"
 portable-pty = "0.9"
 notify = "8"
 ureq = "3"
+tiny_http = "0.12"
+getrandom = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 tauri-plugin-dialog = "2"

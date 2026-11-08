@@ -26,6 +26,8 @@ fn a_real_turn_streams_a_reply_and_resumes_its_session() {
             ultracode: false,
             access_mode: hoshi_core::AccessMode::AcceptEdits,
             plan_mode: false,
+            mcp: None,
+            instructions: None,
         };
         let sink = Box::new(move |output| {
             let _ = sender.send(output);
@@ -134,6 +136,8 @@ fn a_real_turn_sees_an_attached_image() {
         ultracode: false,
         access_mode: hoshi_core::AccessMode::AcceptEdits,
         plan_mode: false,
+        mcp: None,
+        instructions: None,
     };
     let _turn = adapter
         .start_turn(
@@ -193,6 +197,8 @@ fn run_answering(
         ultracode: false,
         access_mode,
         plan_mode: false,
+        mcp: None,
+        instructions: None,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
@@ -419,6 +425,8 @@ fn a_stopped_subagent_ends_and_the_turn_goes_on() {
         ultracode: false,
         access_mode: AccessMode::FullAccess,
         plan_mode: false,
+        mcp: None,
+        instructions: None,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
@@ -528,6 +536,8 @@ fn run_acting(
         ultracode: false,
         access_mode: AccessMode::FullAccess,
         plan_mode: false,
+        mcp: None,
+        instructions: None,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
@@ -630,6 +640,8 @@ fn a_message_is_answered_at_once_while_a_subagent_keeps_working() {
         ultracode: false,
         access_mode: AccessMode::FullAccess,
         plan_mode: false,
+        mcp: None,
+        instructions: None,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);

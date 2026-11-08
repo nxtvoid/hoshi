@@ -3,10 +3,14 @@
 //! (provider turns, git). Provider output comes back through the same path.
 
 mod attachments;
+mod delegation;
 mod diff;
 mod editors;
 mod folders;
 mod git;
+mod mcp;
+use delegation::Delegation;
+use mcp::{McpServer, ToolHandler};
 mod paths;
 mod project_icon;
 mod pull_request_cache;
@@ -146,6 +150,10 @@ struct State {
     /// Messages sent while a thread's turn was ending, too late to join it, oldest first.
     /// Each starts a turn of its own once the running one ends.
     queued: HashMap<String, VecDeque<QueuedMessage>>,
+    /// The server agents call to delegate tasks; `None` when it couldn't start.
+    mcp: Option<McpServer>,
+    /// Tasks delegated to child threads, by child thread id, until their answer goes back.
+    delegations: HashMap<String, Delegation>,
 }
 
 /// A message waiting for the thread's running turn to end.
@@ -239,6 +247,8 @@ impl Engine {
             provider_version: None,
             session_moves: HashMap::new(),
             queued: HashMap::new(),
+            mcp: None,
+            delegations: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -265,6 +275,15 @@ impl Engine {
             Mutex::new(state)
         });
         refresh_branches(Arc::downgrade(&shared), thread_ids);
+        let weak = Arc::downgrade(&shared);
+        let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
+            let shared = weak.upgrade().ok_or("hoshi is closing")?;
+            lock(&shared).call_tool(caller, tool, arguments)
+        });
+        match McpServer::start(tools) {
+            Ok(server) => lock(&shared).mcp = Some(server),
+            Err(error) => eprintln!("hoshi: MCP server unavailable: {error}"),
+        }
         let weak = Arc::downgrade(&shared);
         match GitWatcher::new(move |project_ids| refresh_projects(&weak, &project_ids)) {
             Ok(watcher) => lock(&shared).watcher = Some(watcher),
@@ -1454,7 +1473,11 @@ impl State {
         {
             workspace.record_tool_input(input);
         }
-        let completed = matches!(output, ProviderOutput::TurnCompleted { .. });
+        let ended = match &output {
+            ProviderOutput::TurnCompleted { outcome } => Some(outcome.clone()),
+            _ => None,
+        };
+        let completed = ended.is_some();
         let now = now();
         let events = record_output(&self.model, thread_id, turn_id, output, &now);
         if let Err(error) = self.commit(&events, &now) {
@@ -1473,6 +1496,9 @@ impl State {
             // The agent may have created a worktree or switched branches.
             let check = workspace.map(|workspace| self.worktree_check(thread_id, workspace));
             refresh_after_turn(self.this.clone(), thread_id.to_owned(), check);
+            if let Some(outcome) = &ended {
+                self.deliver_task_result(thread_id, outcome);
+            }
             self.start_next_queued(thread_id);
         }
     }
@@ -1480,6 +1506,11 @@ impl State {
     /// Carries out a command: decides its events, records them, and starts what they call for.
     fn run_command(&mut self, command: Command) -> Result<(), CommandError> {
         let command = self.prepare(command)?;
+        self.run_prepared(command)
+    }
+
+    /// Carries out a command `prepare` already went through, or one the engine itself made.
+    fn run_prepared(&mut self, command: Command) -> Result<(), CommandError> {
         let interrupt = match &command {
             Command::TurnInterrupt { thread_id } => Some(thread_id.clone()),
             _ => None,
@@ -1504,7 +1535,53 @@ impl State {
         let now = now();
         let events = decide(&self.model, command, &now)?;
         self.commit(&events, &now)?;
+        self.react(&events);
+        if let Some(thread_id) = interrupt
+            && let Some(turn) = self.turns.get(&thread_id)
+        {
+            turn.running.interrupt();
+        }
+        if let Some((thread_id, request_id, response)) = answer
+            && let Some(turn) = self.turns.get(&thread_id)
+        {
+            turn.running.respond(&request_id, &response);
+        }
+        if let Some((thread_id, tool_use_id)) = stop
+            && let Some(turn) = self.turns.get(&thread_id)
+        {
+            turn.running.stop_subagent(&tool_use_id);
+        }
+        // A deleted thread (or a removed project's threads) must not keep an agent running.
+        let orphaned: Vec<_> = self
+            .turns
+            .keys()
+            .filter(|thread_id| self.model.thread(thread_id).is_none())
+            .cloned()
+            .collect();
+        for thread_id in orphaned {
+            if let Some(turn) = self.turns.remove(&thread_id) {
+                turn.running.interrupt();
+            }
+        }
+        let State {
+            model,
+            context_usages,
+            ..
+        } = self;
+        context_usages.retain(|thread_id, _| model.thread(thread_id).is_some());
+        for (repository, path) in freed_worktrees {
+            if let Err(error) = git::remove_worktree(&repository, &path) {
+                eprintln!("hoshi: kept worktree {path}: {error}");
+            }
+        }
+        for image in &freed_images {
+            self.attachments.remove(image);
+        }
+        Ok(())
+    }
 
+    /// Starts what recorded events call for: turns, titles, watches, cleanups.
+    fn react(&mut self, events: &[Event]) {
         let mut message: Option<QueuedMessage> = None;
         let mut joining: Option<String> = None;
         let titled: Vec<_> = events
@@ -1516,7 +1593,7 @@ impl State {
                 _ => None,
             })
             .collect();
-        for event in &events {
+        for event in events {
             match event {
                 Event::ItemAdded {
                     item:
@@ -1570,6 +1647,10 @@ impl State {
                     self.repositories.remove(project_id);
                 }
                 Event::ThreadDeleted { thread_id } => {
+                    if let Some(mcp) = &self.mcp {
+                        mcp.forget(thread_id);
+                    }
+                    self.delegations.remove(thread_id);
                     self.pull_requests.forget(thread_id);
                     self.pull_request_cache.forget(thread_id);
                     if let Some(folder) = self.chat_folder(thread_id) {
@@ -1582,48 +1663,6 @@ impl State {
         if let (Some(message), Some(thread_id)) = (message, joining) {
             self.join_turn(&thread_id, message);
         }
-        if let Some(thread_id) = interrupt
-            && let Some(turn) = self.turns.get(&thread_id)
-        {
-            turn.running.interrupt();
-        }
-        if let Some((thread_id, request_id, response)) = answer
-            && let Some(turn) = self.turns.get(&thread_id)
-        {
-            turn.running.respond(&request_id, &response);
-        }
-        if let Some((thread_id, tool_use_id)) = stop
-            && let Some(turn) = self.turns.get(&thread_id)
-        {
-            turn.running.stop_subagent(&tool_use_id);
-        }
-        // A deleted thread (or a removed project's threads) must not keep an agent running.
-        let orphaned: Vec<_> = self
-            .turns
-            .keys()
-            .filter(|thread_id| self.model.thread(thread_id).is_none())
-            .cloned()
-            .collect();
-        for thread_id in orphaned {
-            if let Some(turn) = self.turns.remove(&thread_id) {
-                turn.running.interrupt();
-            }
-        }
-        let State {
-            model,
-            context_usages,
-            ..
-        } = self;
-        context_usages.retain(|thread_id, _| model.thread(thread_id).is_some());
-        for (repository, path) in freed_worktrees {
-            if let Err(error) = git::remove_worktree(&repository, &path) {
-                eprintln!("hoshi: kept worktree {path}: {error}");
-            }
-        }
-        for image in &freed_images {
-            self.attachments.remove(image);
-        }
-        Ok(())
     }
 
     /// Passes a message sent to a busy thread on to its running turn, or keeps it for a turn
@@ -2277,6 +2316,18 @@ fn start_turn(
         })
     });
     let attachments = state.turn_attachments(attachments);
+    // A project thread's agent can delegate; a delegated task's does its own work.
+    let mcp = state
+        .mcp
+        .as_ref()
+        .filter(|_| thread.project_id.is_some() && thread.parent_thread_id.is_none())
+        .and_then(|server| {
+            Some(hoshi_providers::McpServer {
+                url: server.url.clone(),
+                authorization: format!("Bearer {}", server.token_for(thread_id)?),
+            })
+        });
+    let instructions = mcp.as_ref().map(|_| delegation::INSTRUCTIONS.to_owned());
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
@@ -2288,6 +2339,8 @@ fn start_turn(
         ultracode: thread.ultracode,
         access_mode: thread.access_mode,
         plan_mode: thread.plan_mode,
+        mcp,
+        instructions,
     };
     let weak: Weak<Mutex<State>> = state.this.clone();
     let (sink_thread, sink_turn) = (thread_id.to_owned(), turn_id.to_owned());
@@ -3232,6 +3285,99 @@ mod tests {
 
         assert_eq!(harness.thread("t").active_turn_id.as_deref(), Some("m2"));
         assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+    }
+
+    fn delegate(harness: &Harness, arguments: serde_json::Value) -> serde_json::Value {
+        lock(&harness.engine.state)
+            .call_tool("t", "delegate_task", &arguments)
+            .unwrap()
+    }
+
+    fn child_turn_ends(harness: &Harness, adapter: &FakeAdapter, turn: usize) {
+        finish(adapter, turn, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        // Waits for the engine to finish reacting.
+        harness.thread("t");
+    }
+
+    #[test]
+    fn a_delegated_task_runs_in_a_child_and_answers_into_the_running_turn() {
+        let harness = Harness::in_memory("delegate", Vec::new());
+        let steers = Arc::<Mutex<Vec<String>>>::default();
+        let adapter = adapter(Some(steers.clone()));
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+
+        let task = delegate(
+            &harness,
+            serde_json::json!({ "task": "count the files", "title": "Count" }),
+        );
+
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        let thread = harness.thread(&child);
+        assert_eq!(thread.parent_thread_id.as_deref(), Some("t"));
+        assert_eq!(thread.title, "Count");
+        assert_eq!(
+            adapter.requests.lock().unwrap()[1].prompt,
+            "count the files"
+        );
+        assert!(task["next"].is_string());
+
+        child_turn_ends(&harness, &adapter, 1);
+
+        assert_eq!(steers.lock().unwrap().len(), 1);
+        let items = harness.engine.transcript("t", None).unwrap().items;
+        assert!(items.iter().any(|item| matches!(
+            &item.content,
+            ItemContent::UserMessage { task_result: Some(from), text, .. }
+                if *from == child && text.contains("[completed]")
+        )));
+    }
+
+    #[test]
+    fn a_delegated_task_wakes_its_parent_once_the_parent_rested() {
+        let harness = Harness::in_memory("delegate-wake", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        delegate(&harness, serde_json::json!({ "task": "count the files" }));
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+
+        child_turn_ends(&harness, &adapter, 1);
+
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].prompt.starts_with("Delegated task"));
+        assert!(harness.thread("t").active_turn_id.is_some());
+    }
+
+    #[test]
+    fn a_cancelled_task_never_answers_and_only_its_parent_reaches_it() {
+        let harness = Harness::in_memory("delegate-cancel", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "count the files" }));
+        let task_id = serde_json::json!({ "taskId": task["taskId"] });
+
+        let stranger = lock(&harness.engine.state).call_tool("p", "task_status", &task_id);
+        assert!(stranger.is_err());
+        let running = lock(&harness.engine.state)
+            .call_tool("t", "task_status", &task_id)
+            .unwrap();
+        assert_eq!(running["status"], "running");
+
+        let cancelled = lock(&harness.engine.state)
+            .call_tool("t", "task_cancel", &task_id)
+            .unwrap();
+        assert_eq!(cancelled["status"], "cancel_requested");
+        harness.wait_for_turn_end();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+
+        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+        assert_eq!(harness.thread("t").active_turn_id, None);
     }
 
     #[test]

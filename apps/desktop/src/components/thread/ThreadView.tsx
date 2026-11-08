@@ -13,6 +13,7 @@ import {
 } from './ThreadDetails'
 import { m } from '@/paraglide/messages'
 import { Transcript } from './Transcript'
+import { DelegatedBanner } from './DelegationRows'
 import { ThreadGitChip } from './ThreadGitChip'
 import { useAppStore } from '@/state/app-store'
 import { useSidebarStore } from '@/state/sidebar-store'
@@ -192,6 +193,11 @@ export function ThreadView() {
             </div>
           ) : (
             <>
+              {thread?.parentThreadId ? (
+                <div className={cn(CHAT_LANE, 'w-full px-4 pt-3')}>
+                  <DelegatedBanner parentThreadId={thread.parentThreadId} />
+                </div>
+              ) : null}
               <Transcript
                 working={working}
                 cwd={thread?.worktreePath ?? workspaceRoot ?? null}

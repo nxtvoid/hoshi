@@ -1,7 +1,7 @@
 //! Requests Claude Code makes mid-turn over its control protocol, started by
 //! `--permission-prompt-tool stdio`: tool approvals, `AskUserQuestion` and `ExitPlanMode`.
 
-use crate::truncate;
+use crate::{MCP_SERVER_NAME, truncate};
 use hoshi_core::{
     AccessMode, ApprovalDecision, ItemContent, ProviderOutput, Question, QuestionOption,
     RequestResponse, RequestStatus,
@@ -28,10 +28,15 @@ impl Access {
     }
 
     /// Auto mode leaves the call to Claude's classifier; asking on top would ask twice.
+    /// hoshi's own tools never need the user's approval.
     fn approves_on_its_own(self, tool_name: &str) -> bool {
-        self.mode == AccessMode::Auto
+        let own = tool_name
+            .strip_prefix("mcp__")
+            .and_then(|rest| rest.strip_prefix(MCP_SERVER_NAME))
+            .is_some_and(|rest| rest.starts_with("__"));
+        own || (self.mode == AccessMode::Auto
             && !self.plan_mode
-            && !matches!(tool_name, "AskUserQuestion" | "ExitPlanMode")
+            && !matches!(tool_name, "AskUserQuestion" | "ExitPlanMode"))
     }
 }
 
@@ -475,6 +480,25 @@ mod tests {
             }]
         );
         assert!(requests.take("r1").is_some());
+    }
+
+    #[test]
+    fn hoshis_own_tools_need_no_approval() {
+        let requests = Requests::default();
+        let (outputs, line) = receive(
+            &can_use_tool("mcp__hoshi__delegate_task", json!({ "task": "x" })),
+            ASK,
+            &requests,
+        );
+        assert!(outputs.is_empty());
+        assert_eq!(response(&line.unwrap())["behavior"], "allow");
+
+        let (outputs, _) = receive(
+            &can_use_tool("mcp__hoshi_fake__delegate_task", json!({})),
+            ASK,
+            &requests,
+        );
+        assert_eq!(outputs.len(), 1, "another server's tool still asks");
     }
 
     #[test]

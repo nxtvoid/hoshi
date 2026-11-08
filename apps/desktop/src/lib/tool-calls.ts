@@ -71,6 +71,34 @@ export function toolName(name: string): {
 /** Tools that start a subagent, shown as its own card rather than among the work. */
 const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
 
+/** The tool an agent delegates a task to a child thread with. */
+const DELEGATE_TOOL = 'mcp__hoshi__delegate_task'
+
+export function isDelegation(item: TranscriptItem): item is ToolCallItem {
+  return item.content.kind === 'toolCall' && item.content.name === DELEGATE_TOOL
+}
+
+/** What a delegation names: its title, the child thread once started, or why it failed. */
+export function delegationOf(call: ToolCallContent): {
+  title: string
+  taskId: string | null
+  error: string | null
+} {
+  const input = parseInput(call.input)
+  const output = call.output && !call.isError ? parseInput(call.output) : null
+  const text = (value: Record<string, unknown> | null, key: string) =>
+    typeof value?.[key] === 'string' ? (value[key] as string) : null
+  return {
+    title:
+      text(output, 'title') ??
+      text(input, 'title') ??
+      text(input, 'task') ??
+      '',
+    taskId: text(output, 'taskId'),
+    error: call.isError ? call.output : null
+  }
+}
+
 export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
   return (
     item.content.kind === 'toolCall' && SUBAGENT_TOOLS.has(item.content.name)
@@ -97,7 +125,8 @@ export function subagentInput(input: string) {
 function isWork(item: TranscriptItem): item is WorkItem {
   return (
     (item.content.kind === 'toolCall' || item.content.kind === 'reasoning') &&
-    !isSubagentCall(item)
+    !isSubagentCall(item) &&
+    !isDelegation(item)
   )
 }
 

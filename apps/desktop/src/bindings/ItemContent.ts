@@ -11,7 +11,12 @@ export type ItemContent = { "kind": "userMessage", text: string, attachments: Ar
 /**
  * Sent while the agent worked, to steer the running turn.
  */
-steer: boolean, } | { "kind": "assistantMessage", text: string, } | { "kind": "reasoning", text: string, } | { "kind": "toolCall", name: string, 
+steer: boolean, 
+/**
+ * The answer of a task this thread delegated, from that child thread; sent by hoshi,
+ * not the user.
+ */
+taskResult: string | null, } | { "kind": "assistantMessage", text: string, } | { "kind": "reasoning", text: string, } | { "kind": "toolCall", name: string, 
 /**
  * The tool input as JSON, truncated for display.
  */

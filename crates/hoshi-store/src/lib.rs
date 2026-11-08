@@ -157,6 +157,9 @@ const MIGRATIONS: &[&str] = &[
                OR substr(thread_items.thread_id, 1, length(threads.id) + 1) = threads.id || ':')
       );
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN parent_thread_id TEXT;
+    ",
 ];
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
@@ -249,7 +252,7 @@ impl Store {
                 "SELECT id, project_id, title, status, branch, worktree_path, session_id,
                         active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                         fast_mode, ultracode, access_mode, plan_mode, worktree_released,
-                        worktree_adopted
+                        worktree_adopted, parent_thread_id
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -274,6 +277,7 @@ impl Store {
                     plan_mode: row.get(17)?,
                     worktree_released: row.get(18)?,
                     worktree_adopted: row.get(19)?,
+                    parent_thread_id: row.get(20)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -487,6 +491,21 @@ impl Store {
         Ok((items, has_older))
     }
 
+    /// The thread's latest answer, which is what a delegated task reports back.
+    pub fn last_answer(&self, thread_id: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT json_extract(content_json, '$.text') FROM thread_items
+                 WHERE thread_id = ?1
+                   AND json_extract(content_json, '$.kind') = 'assistantMessage'
+                 ORDER BY ordinal DESC LIMIT 1",
+            )?
+            .query_map([thread_id], |row| row.get(0))?
+            .next()
+            .transpose()?)
+    }
+
     /// A thread's transcript, oldest first.
     pub fn thread_items(&self, thread_id: &str) -> Result<Vec<ThreadItem>, StoreError> {
         self.items(
@@ -605,9 +624,9 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                  (id, project_id, title, status, branch, worktree_path, session_id,
                   active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                   fast_mode, ultracode, access_mode, plan_mode, worktree_released,
-                  worktree_adopted)
+                  worktree_adopted, parent_thread_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18, ?19, ?20)",
+                         ?17, ?18, ?19, ?20, ?21)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -628,7 +647,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     enum_text(thread.access_mode)?,
                     thread.plan_mode,
                     thread.worktree_released,
-                    thread.worktree_adopted
+                    thread.worktree_adopted,
+                    thread.parent_thread_id
                 ],
             )?;
         }
@@ -821,6 +841,17 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 params![thread_id, item_id],
             )?;
         }
+        Event::ThreadDelegated {
+            thread_id,
+            parent_thread_id,
+            shares_worktree,
+        } => {
+            tx.execute(
+                "UPDATE threads SET parent_thread_id = ?2,
+                 worktree_adopted = worktree_adopted OR ?3 WHERE id = ?1",
+                params![thread_id, parent_thread_id, shares_worktree],
+            )?;
+        }
         Event::ThreadStatusSet { thread_id, status } => {
             tx.execute(
                 "UPDATE threads SET status = ?2 WHERE id = ?1",
@@ -875,6 +906,7 @@ mod tests {
                 pinned: true,
                 worktree_released: false,
                 worktree_adopted: false,
+                parent_thread_id: None,
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
             },

@@ -49,7 +49,11 @@ worktreeReleased: boolean,
  * Its worktree existed before the thread moved into it, as one the user made; hoshi
  * never removes it.
  */
-worktreeAdopted: boolean, createdAt: string, 
+worktreeAdopted: boolean, 
+/**
+ * The thread whose agent delegated this one's task to it; `None` for one the user started.
+ */
+parentThreadId: string | null, createdAt: string, 
 /**
  * RFC 3339 timestamp of the last activity.
  */

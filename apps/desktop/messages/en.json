@@ -589,5 +589,11 @@
   "working_for": "Working for {duration}",
   "stopping_for": "Stopping {duration}",
   "turn_interrupted": "Turn interrupted",
-  "message_steer": "Steer"
+  "message_steer": "Steer",
+  "delegation_task": "Delegated task",
+  "delegation_open": "Open",
+  "delegation_done": "Done",
+  "delegation_back": "Back to it",
+  "delegated_by": "Delegated by {thread}",
+  "task_result_from": "Answer from {task}"
 }

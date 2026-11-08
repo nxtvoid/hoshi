@@ -9,6 +9,7 @@ import { RequestRow } from './RequestRow'
 import { ApprovalBadge, ApprovalsContext } from './ApprovalBadge'
 import { approvalsByCall } from '@/lib/requests'
 import { SubagentRow } from './SubagentRow'
+import { DelegationRow, TaskResultRow } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
 import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
@@ -45,6 +46,7 @@ import {
   activeEntry,
   foldTurns,
   groupTranscript,
+  isDelegation,
   isSubagentCall,
   isToolCall,
   reasoningPreview,
@@ -305,7 +307,9 @@ const Item = memo(function Item({
   const { content } = item
   switch (content.kind) {
     case 'userMessage':
-      return (
+      return content.taskResult ? (
+        <TaskResultRow text={content.text} childThreadId={content.taskResult} />
+      ) : (
         <UserMessage
           text={content.text}
           attachments={content.attachments}
@@ -319,6 +323,7 @@ const Item = memo(function Item({
         <ReasoningRow text={content.text} streaming={item.streaming === true} />
       )
     case 'toolCall':
+      if (isDelegation(item)) return <DelegationRow item={item} />
       return isSubagentCall(item) ? (
         <SubagentRow
           item={item}

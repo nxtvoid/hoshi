@@ -8,7 +8,8 @@ import {
   inactiveAfterMs,
   inboxCount,
   inboxSections,
-  sidebarSections
+  sidebarSections,
+  withDelegatedWork
 } from '@/state/thread-sections'
 
 /** The sections the sidebar lists right now, for its view, search, filter and sort. */
@@ -64,7 +65,7 @@ function useInboxSections() {
   const unseen = useUnseenStore((state) => state.unseen)
 
   return useMemo(() => {
-    const sorted = [...threads].sort((a, b) =>
+    const sorted = withDelegatedWork(threads).sort((a, b) =>
       b.updatedAt.localeCompare(a.updatedAt)
     )
     return inboxSections(sorted, pullRequests, Date.now(), unseen)

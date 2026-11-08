@@ -12,7 +12,8 @@ import {
   sectionOf,
   sidebarSections,
   stepThread,
-  visibleOrder
+  visibleOrder,
+  withDelegatedWork
 } from '../../src/state/thread-sections'
 
 const NOW = Date.parse('2026-11-07T12:00:00.000Z')
@@ -36,6 +37,7 @@ const thread = (id: string, changes: Partial<Thread> = {}): Thread => ({
   pinned: false,
   worktreeReleased: false,
   worktreeAdopted: false,
+  parentThreadId: null,
   createdAt: new Date(NOW).toISOString(),
   updatedAt: new Date(NOW).toISOString(),
   ...changes
@@ -321,5 +323,40 @@ describe('inbox completed turns', () => {
       ['review', ['reviewed']]
     ])
     expect(inboxCount(sections)).toBe(2)
+  })
+})
+
+describe('withDelegatedWork', () => {
+  test('lists only the threads the user started, with their tasks’ work on them', () => {
+    const threads = [
+      thread('parent'),
+      thread('task', { parentThreadId: 'parent', status: 'waitingForInput' }),
+      thread('other', { status: 'working' }),
+      thread('done', { parentThreadId: 'other', status: 'idle' })
+    ]
+
+    const listed = withDelegatedWork(threads)
+
+    expect(listed.map((each) => [each.id, each.status])).toEqual([
+      ['parent', 'waitingForInput'],
+      ['other', 'working']
+    ])
+  })
+
+  test('a task whose thread is gone is listed on its own', () => {
+    const listed = withDelegatedWork([
+      thread('task', { parentThreadId: 'deleted', status: 'working' })
+    ])
+
+    expect(listed.map((each) => each.id)).toEqual(['task'])
+  })
+
+  test('a failed thread keeps showing its own failure', () => {
+    const listed = withDelegatedWork([
+      thread('parent', { status: 'error' }),
+      thread('task', { parentThreadId: 'parent', status: 'working' })
+    ])
+
+    expect(listed.map((each) => each.status)).toEqual(['error'])
   })
 })

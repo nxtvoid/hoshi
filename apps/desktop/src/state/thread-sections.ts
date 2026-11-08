@@ -147,6 +147,44 @@ function inView(thread: Thread, query: SidebarQuery) {
   }
 }
 
+const ESCALATION: Partial<Record<Thread['status'], number>> = {
+  working: 1,
+  waitingForInput: 2
+}
+
+/**
+ * The threads the user started. Tasks their agents delegated aren't listed: a task that
+ * works, or waits for the user, shows on the thread that delegated it.
+ */
+export function withDelegatedWork(threads: Thread[]): Thread[] {
+  if (!threads.some((thread) => thread.parentThreadId !== null)) return threads
+  const ids = new Set(threads.map((thread) => thread.id))
+  // A task whose thread is gone is the user's to see.
+  const delegated = (thread: Thread) =>
+    thread.parentThreadId !== null && ids.has(thread.parentThreadId)
+  const busiest = new Map<string, Thread['status']>()
+  for (const thread of threads) {
+    const { parentThreadId, status } = thread
+    const rank = ESCALATION[status]
+    if (parentThreadId === null || !delegated(thread) || rank === undefined)
+      continue
+    const current = busiest.get(parentThreadId)
+    if (!current || rank > (ESCALATION[current] ?? 0)) {
+      busiest.set(parentThreadId, status)
+    }
+  }
+  return threads
+    .filter((thread) => !delegated(thread))
+    .map((thread) => {
+      const delegated = busiest.get(thread.id)
+      const own =
+        ESCALATION[thread.status] ?? (thread.status === 'error' ? 3 : 0)
+      return delegated && (ESCALATION[delegated] ?? 0) > own
+        ? { ...thread, status: delegated }
+        : thread
+    })
+}
+
 /** The sections the sidebar shows for a view, search and filter. */
 export function sidebarSections(
   threads: Thread[],
@@ -156,7 +194,7 @@ export function sidebarSections(
   unseen: Record<string, true> = {}
 ): ThreadSection[] {
   const key = query.sort === 'created' ? 'createdAt' : 'updatedAt'
-  const visible = threads
+  const visible = withDelegatedWork(threads)
     .filter(
       (thread) =>
         inView(thread, query) &&

@@ -107,6 +107,11 @@ export function applyEvent(
       })
     case 'threadStatusSet':
       return updateThread(event.threadId, { status: event.status })
+    case 'threadDelegated':
+      return updateThread(event.threadId, {
+        parentThreadId: event.parentThreadId,
+        ...(event.sharesWorktree ? { worktreeAdopted: true } : {})
+      })
   }
 }
 

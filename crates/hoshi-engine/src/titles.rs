@@ -105,6 +105,7 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
             steer: false,
+            task_result: None,
         })
     }
 
@@ -117,6 +118,7 @@ mod tests {
         let items = [
             item(ItemContent::UserMessage {
                 steer: false,
+                task_result: None,
                 text: "why is this red?".into(),
                 attachments: vec![MessageAttachment::Image {
                     id: "1".into(),

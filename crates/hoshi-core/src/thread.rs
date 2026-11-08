@@ -39,6 +39,9 @@ pub struct Thread {
     /// never removes it.
     #[serde(default)]
     pub worktree_adopted: bool,
+    /// The thread whose agent delegated this one's task to it; `None` for one the user started.
+    #[serde(default)]
+    pub parent_thread_id: Option<String>,
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,
@@ -164,6 +167,10 @@ pub enum ItemContent {
         /// Sent while the agent worked, to steer the running turn.
         #[serde(default)]
         steer: bool,
+        /// The answer of a task this thread delegated, from that child thread; sent by hoshi,
+        /// not the user.
+        #[serde(default)]
+        task_result: Option<String>,
     },
     AssistantMessage {
         text: String,

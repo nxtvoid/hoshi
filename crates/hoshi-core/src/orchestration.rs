@@ -204,6 +204,13 @@ pub enum Event {
         thread_id: String,
         item_id: String,
     },
+    /// The thread works on a task another thread's agent delegated to it.
+    ThreadDelegated {
+        thread_id: String,
+        parent_thread_id: String,
+        /// It works in the parent's worktree, which stays the parent's to remove.
+        shares_worktree: bool,
+    },
     /// Mid-turn: the agent waits for the user, or works again.
     ThreadStatusSet {
         thread_id: String,
@@ -623,6 +630,16 @@ impl ReadModel {
                     thread.status = *status;
                 }
             }
+            Event::ThreadDelegated {
+                thread_id,
+                parent_thread_id,
+                shares_worktree,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.parent_thread_id = Some(parent_thread_id.clone());
+                    thread.worktree_adopted |= *shares_worktree;
+                }
+            }
         }
     }
 }
@@ -717,6 +734,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     pinned: false,
                     worktree_released: false,
                     worktree_adopted: false,
+                    parent_thread_id: None,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
                 },
@@ -850,58 +868,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             message_id,
             text,
             attachments,
-        } => {
-            let Some(thread) = model.threads.get(&thread_id) else {
-                return Err(CommandError::ThreadNotFound { thread_id });
-            };
-            let text = text.trim().to_owned();
-            let images = attachments
-                .iter()
-                .filter(|attachment| matches!(attachment, MessageAttachment::Image { .. }));
-            if text.is_empty() && images.count() == 0 {
-                return Err(CommandError::EmptyMessage);
-            }
-            let mut events = Vec::with_capacity(5);
-            if thread.worktree_released {
-                // The engine recreated the folder before this command reached here.
-                events.push(Event::ThreadWorktreeRestored {
-                    thread_id: thread_id.clone(),
-                });
-            }
-            if thread.archived {
-                events.push(Event::ThreadArchivedSet {
-                    thread_id: thread_id.clone(),
-                    archived: false,
-                });
-            }
-            if thread.title.is_empty() {
-                events.push(Event::ThreadTitleSet {
-                    thread_id: thread_id.clone(),
-                    title: title_from(&text, &attachments),
-                });
-            }
-            events.push(Event::ItemAdded {
-                item: ThreadItem {
-                    id: message_id.clone(),
-                    thread_id: thread_id.clone(),
-                    created_at: now.to_owned(),
-                    content: ItemContent::UserMessage {
-                        text,
-                        attachments,
-                        steer: thread.active_turn_id.is_some(),
-                    },
-                },
-            });
-            // A running turn takes the message in; the engine passes it on.
-            if thread.active_turn_id.is_none() {
-                events.push(Event::TurnStarted {
-                    thread_id,
-                    turn_id: message_id,
-                    at: now.to_owned(),
-                });
-            }
-            Ok(events)
-        }
+        } => message_events(model, thread_id, message_id, text, attachments, None, now),
         Command::TurnInterrupt { thread_id } => {
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
@@ -1046,6 +1013,105 @@ fn working_again(model: &ReadModel, thread: &Thread, closed: &str) -> Option<Eve
         thread_id: thread.id.clone(),
         status: ThreadStatus::Working,
     })
+}
+
+/// A message to the thread: it starts a turn, or joins the running one.
+fn message_events(
+    model: &ReadModel,
+    thread_id: String,
+    message_id: String,
+    text: String,
+    attachments: Vec<MessageAttachment>,
+    task_result: Option<String>,
+    now: &str,
+) -> Result<Vec<Event>, CommandError> {
+    let Some(thread) = model.threads.get(&thread_id) else {
+        return Err(CommandError::ThreadNotFound { thread_id });
+    };
+    let text = text.trim().to_owned();
+    let images = attachments
+        .iter()
+        .filter(|attachment| matches!(attachment, MessageAttachment::Image { .. }));
+    if text.is_empty() && images.count() == 0 {
+        return Err(CommandError::EmptyMessage);
+    }
+    let mut events = Vec::with_capacity(5);
+    if thread.worktree_released {
+        // The engine recreated the folder before this command reached here.
+        events.push(Event::ThreadWorktreeRestored {
+            thread_id: thread_id.clone(),
+        });
+    }
+    if thread.archived {
+        events.push(Event::ThreadArchivedSet {
+            thread_id: thread_id.clone(),
+            archived: false,
+        });
+    }
+    if thread.title.is_empty() {
+        events.push(Event::ThreadTitleSet {
+            thread_id: thread_id.clone(),
+            title: title_from(&text, &attachments),
+        });
+    }
+    events.push(Event::ItemAdded {
+        item: ThreadItem {
+            id: message_id.clone(),
+            thread_id: thread_id.clone(),
+            created_at: now.to_owned(),
+            content: ItemContent::UserMessage {
+                text,
+                attachments,
+                steer: thread.active_turn_id.is_some(),
+                task_result,
+            },
+        },
+    });
+    // A running turn takes the message in; the engine passes it on.
+    if thread.active_turn_id.is_none() {
+        events.push(Event::TurnStarted {
+            thread_id,
+            turn_id: message_id,
+            at: now.to_owned(),
+        });
+    }
+    Ok(events)
+}
+
+/// Hands the answer of a task this thread delegated back to it, as a message from hoshi.
+pub fn send_task_result(
+    model: &ReadModel,
+    thread_id: &str,
+    child_thread_id: &str,
+    message_id: &str,
+    text: &str,
+    now: &str,
+) -> Result<Vec<Event>, CommandError> {
+    message_events(
+        model,
+        thread_id.to_owned(),
+        message_id.to_owned(),
+        text.to_owned(),
+        Vec::new(),
+        Some(child_thread_id.to_owned()),
+        now,
+    )
+}
+
+/// Links a thread to the one whose agent delegated its task to it.
+pub fn record_delegation(model: &ReadModel, thread_id: &str, parent_thread_id: &str) -> Vec<Event> {
+    let (Some(thread), Some(parent)) = (
+        model.threads.get(thread_id),
+        model.threads.get(parent_thread_id),
+    ) else {
+        return Vec::new();
+    };
+    vec![Event::ThreadDelegated {
+        thread_id: thread_id.to_owned(),
+        parent_thread_id: parent_thread_id.to_owned(),
+        shares_worktree: thread.worktree_path.is_some()
+            && thread.worktree_path == parent.worktree_path,
+    }]
 }
 
 /// Turns provider output into events. Output from a turn that is no longer
@@ -1688,6 +1754,7 @@ const a = 1
                 text: String::new(),
                 attachments: vec![image("screenshot.png")],
                 steer: false,
+                task_result: None,
             }
         )));
     }
@@ -2389,6 +2456,35 @@ const a = 1
             .collect();
         assert_eq!(interrupted, ["t/long", "t:toolu_agent/inner"]);
         assert_eq!(model.open_tool_calls().count(), 0);
+    }
+
+    #[test]
+    fn a_delegated_thread_knows_its_parent_and_gets_its_answer_back_as_hoshi() {
+        let mut model = model_with_thread();
+        run(&mut model, create_thread("c", "p")).unwrap();
+        for event in record_delegation(&model, "c", "t") {
+            model.apply(&event);
+        }
+        assert_eq!(
+            model.thread("c").unwrap().parent_thread_id.as_deref(),
+            Some("t")
+        );
+        assert!(record_delegation(&model, "c", "missing").is_empty());
+
+        let events = send_task_result(&model, "t", "c", "r1", "done", NOW).unwrap();
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ItemAdded { item } if matches!(
+                &item.content,
+                ItemContent::UserMessage { task_result: Some(child), .. } if child == "c"
+            )
+        )));
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::TurnStarted { turn_id, .. } if turn_id == "r1")
+            )
+        );
     }
 
     #[cfg(windows)]

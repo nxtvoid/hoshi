@@ -9,8 +9,8 @@ use crate::claude_tools;
 use crate::claude_usage;
 use crate::process::{ProcessTurn, hide_console, spawn_turn};
 use crate::{
-    GeneratedTitle, Installation, OutputSink, ProviderAdapter, RunningTurn, TitleRequest,
-    TurnAttachment, TurnRequest, truncate,
+    GeneratedTitle, Installation, MCP_SERVER_NAME, McpServer, OutputSink, ProviderAdapter,
+    RunningTurn, TitleRequest, TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
     AccessMode, ContextUsage, ProviderModels, ProviderOutput, RequestResponse, SlashCommand,
@@ -145,6 +145,9 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         if let Some(settings) = session_settings(&turn_model) {
             command.args(["--settings", &settings.to_string()]);
         }
+        if let Some(instructions) = &request.instructions {
+            command.args(["--append-system-prompt", instructions]);
+        }
         if let Some(session_id) = &request.resume_session_id {
             command.args(["--resume", session_id]);
             let (rules, directories) = self.grants.arguments(session_id);
@@ -155,13 +158,19 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 command.args(["--add-dir", &directory]);
             }
         }
-        let input = json!({
+        let message = json!({
             "type": "user",
             "message": {
                 "role": "user",
                 "content": claude_prompt::message_content(&request.prompt, &request.attachments),
             },
         });
+        // Over stdin rather than argv, which keeps the token out of the process list. The CLI
+        // connects before it reads the message, so the first turn has the tools.
+        let input = match &request.mcp {
+            Some(server) => format!("{}\n{message}", mcp_servers(server)),
+            None => message.to_string(),
+        };
         let requests = Requests::default();
         let live_output = LiveOutput::default();
         let queue = Queue::default();
@@ -310,6 +319,23 @@ impl RunningTurn for ClaudeTurn {
         });
         self.process.stdin().write_line(&request.to_string());
     }
+}
+
+fn mcp_servers(server: &McpServer) -> Value {
+    json!({
+        "type": "control_request",
+        "request_id": "hoshi-mcp",
+        "request": {
+            "subtype": "mcp_set_servers",
+            "servers": {
+                MCP_SERVER_NAME: {
+                    "type": "http",
+                    "url": server.url,
+                    "headers": { "Authorization": server.authorization },
+                },
+            },
+        },
+    })
 }
 
 /// Ultracode runs through the `Workflow` tool, which `-p` would refuse
