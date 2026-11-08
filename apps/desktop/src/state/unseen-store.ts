@@ -44,6 +44,11 @@ export const useUnseenStore = create<UnseenState>()(
   )
 )
 
+/** The open thread shows: the window has focus and no overlay, such as settings, covers it. */
+function onScreen() {
+  return document.hasFocus() && window.location.pathname === '/'
+}
+
 /**
  * Marks a turn that ends while its thread isn't on screen, and unmarks a thread once the
  * user opens it, or comes back to the window with it open.
@@ -53,11 +58,11 @@ export function useUnseenTracking() {
     const { mark, see } = useUnseenStore.getState()
     const seeSelected = () => {
       const { selectedThreadId } = useAppStore.getState()
-      if (selectedThreadId && document.hasFocus()) see(selectedThreadId)
+      if (selectedThreadId && onScreen()) see(selectedThreadId)
     }
     const unsubscribe = useAppStore.subscribe((state, previous) => {
       if (state.threads !== previous.threads) {
-        const watched = document.hasFocus() ? state.selectedThreadId : null
+        const watched = onScreen() ? state.selectedThreadId : null
         const finished = finishedTurns(previous.threads, state.threads).filter(
           (id) => id !== watched
         )
