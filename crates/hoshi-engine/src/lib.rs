@@ -957,6 +957,11 @@ impl Engine {
         lock(&self.state).hand_back(thread_id, &TurnOutcome::Completed);
     }
 
+    /// Cancels a delegated task: it stops if it runs, and its answer never goes back.
+    pub fn cancel_task(&self, thread_id: &str) {
+        lock(&self.state).cancel_task(thread_id);
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let state = lock(&self.state);
         Snapshot {
@@ -3397,6 +3402,25 @@ mod tests {
 
         assert_eq!(adapter.requests.lock().unwrap().len(), 2);
         assert_eq!(harness.thread("t").active_turn_id, None);
+        let child = task["taskId"].as_str().unwrap();
+        assert!(harness.thread(child).task_cancelled);
+        assert!(lock(&harness.engine.state).pending_delegations().is_empty());
+    }
+
+    #[test]
+    fn the_user_cancels_a_task_waiting_on_its_plan_and_it_never_answers() {
+        let harness = Harness::in_memory("delegate-plan-cancel", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        let child = planning_task(&harness, &adapter);
+
+        harness.engine.cancel_task(&child);
+        harness.send(&child, "m5", "one more thing");
+        child_turn_ends(&harness, &adapter, 2);
+
+        assert!(harness.thread(&child).task_cancelled);
+        assert!(harness.engine.snapshot().pending_tasks.is_empty());
+        assert_eq!(adapter.requests.lock().unwrap().len(), 3);
     }
 
     #[test]

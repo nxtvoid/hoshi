@@ -36,6 +36,7 @@ function taskState(
   pendingTasks: Record<string, true>
 ): AgentState {
   if (isPlanningWithUser(thread, pendingTasks)) return 'waiting'
+  if (thread.taskCancelled && thread.status !== 'working') return 'stopped'
   switch (thread.status) {
     case 'working':
       return 'running'

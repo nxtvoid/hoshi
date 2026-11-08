@@ -69,4 +69,7 @@ test('keeps the tasks that still owe their thread an answer', () => {
   })
 
   expect(useRequestStore.getState().pendingTasks).toEqual({ task: true })
+
+  store.applyEvent({ type: 'taskCancelled', threadId: 'task' })
+  expect(useRequestStore.getState().pendingTasks).toEqual({})
 })

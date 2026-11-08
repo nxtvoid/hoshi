@@ -605,6 +605,8 @@
   "delegation_waiting_changes": "Waiting for your changes to the plan",
   "delegation_send_plan": "Send plan as is",
   "delegation_change_plan": "Change plan",
+  "delegation_cancel": "Cancel task",
+  "delegation_cancelled": "Cancelled",
   "planning_task_note": "{task} waits for your changes to its plan",
   "planning_tasks_more": "+{count}",
   "delegated_request_from": "{task} needs your input",

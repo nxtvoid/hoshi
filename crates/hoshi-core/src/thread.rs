@@ -42,6 +42,9 @@ pub struct Thread {
     /// The thread whose agent delegated this one's task to it; `None` for one the user started.
     #[serde(default)]
     pub parent_thread_id: Option<String>,
+    /// As a delegated task, it was cancelled: its answer never goes back.
+    #[serde(default)]
+    pub task_cancelled: bool,
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,

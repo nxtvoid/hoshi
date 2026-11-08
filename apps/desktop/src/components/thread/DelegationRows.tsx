@@ -6,6 +6,7 @@ import { useAppStore } from '@/state/app-store'
 import { isPlanningWithUser } from '@/lib/agents'
 import { useRequestStore } from '@/state/request-store'
 import { Button } from '@hoshi/ui/components/button'
+import { IconButton } from '@hoshi/ui/components/icon-button'
 import { useWholeToolCall } from './use-whole-tool-call'
 import type { Thread } from '@/bindings/Thread'
 import { Markdown } from '@/components/markdown/Markdown'
@@ -17,9 +18,12 @@ import {
 import {
   Alert02Icon,
   ArrowRight01Icon,
+  CancelCircleIcon,
   CheckmarkCircle02Icon,
   GitForkIcon,
   Loading03Icon,
+  PencilEdit01Icon,
+  SentIcon,
   UserQuestion01Icon
 } from '@hugeicons/core-free-icons'
 
@@ -49,25 +53,27 @@ function OpenButton({ threadId }: { threadId: string }) {
 function TaskStatus({ child }: { child: Thread | undefined }) {
   if (!child) return null
   const { icon, label, tone } =
-    child.status === 'working'
-      ? { icon: Loading03Icon, label: m.tool_running(), tone: 'animate-spin' }
-      : child.status === 'waitingForInput'
-        ? {
-            icon: UserQuestion01Icon,
-            label: m.status_waiting_for_input(),
-            tone: 'text-status-waiting'
-          }
-        : child.status === 'error'
+    child.taskCancelled && child.status !== 'working'
+      ? { icon: CancelCircleIcon, label: m.delegation_cancelled(), tone: '' }
+      : child.status === 'working'
+        ? { icon: Loading03Icon, label: m.tool_running(), tone: 'animate-spin' }
+        : child.status === 'waitingForInput'
           ? {
-              icon: Alert02Icon,
-              label: m.tool_failed(),
-              tone: 'text-destructive'
+              icon: UserQuestion01Icon,
+              label: m.status_waiting_for_input(),
+              tone: 'text-status-waiting'
             }
-          : {
-              icon: CheckmarkCircle02Icon,
-              label: m.delegation_done(),
-              tone: ''
-            }
+          : child.status === 'error'
+            ? {
+                icon: Alert02Icon,
+                label: m.tool_failed(),
+                tone: 'text-destructive'
+              }
+            : {
+                icon: CheckmarkCircle02Icon,
+                label: m.delegation_done(),
+                tone: ''
+              }
   return (
     <span className='text-muted-foreground flex shrink-0 items-center gap-1 text-xs'>
       <HugeiconsIcon
@@ -127,6 +133,7 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
 function PlanningTray({ threadId }: { threadId: string }) {
   const selectThread = useAppStore((state) => state.selectThread)
   const sendTaskAnswer = useRequestStore((state) => state.sendTaskAnswer)
+  const cancelTask = useRequestStore((state) => state.cancelTask)
   const setOnScreen = useRequestStore((state) => state.setTaskOnScreen)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -146,31 +153,38 @@ function PlanningTray({ threadId }: { threadId: string }) {
   return (
     <div
       ref={ref}
-      className='border-status-waiting/40 bg-status-waiting/10 mx-3.5 -mt-2 flex items-center gap-2 rounded-b-lg border border-t-0 px-3 pt-3.5 pb-1.5 text-xs'
+      className='border-status-waiting/20 bg-status-waiting/5 mx-3.5 -mt-2 flex items-center gap-1 rounded-b-lg border border-t-0 pt-3 pr-1.5 pb-1 pl-3 text-xs'
     >
       <HugeiconsIcon
         icon={UserQuestion01Icon}
         strokeWidth={2}
         className='text-status-waiting size-3.5 shrink-0'
       />
-      <span className='text-status-waiting min-w-0 flex-1 truncate'>
+      <span className='text-status-waiting/90 ms-1 min-w-0 flex-1 truncate'>
         {m.delegation_waiting_changes()}
       </span>
-      <Button
-        size='xs'
-        variant='ghost'
-        className='text-muted-foreground shrink-0'
+      <IconButton
+        label={m.delegation_cancel()}
+        side='top'
+        onClick={() => void cancelTask(threadId)}
+      >
+        <HugeiconsIcon icon={CancelCircleIcon} strokeWidth={2} />
+      </IconButton>
+      <IconButton
+        label={m.delegation_send_plan()}
+        side='top'
         onClick={() => void sendTaskAnswer(threadId)}
       >
-        {m.delegation_send_plan()}
-      </Button>
-      <Button
-        size='xs'
-        className='shrink-0'
+        <HugeiconsIcon icon={SentIcon} strokeWidth={2} />
+      </IconButton>
+      <IconButton
+        label={m.delegation_change_plan()}
+        side='top'
+        className='bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground'
         onClick={() => selectThread(threadId)}
       >
-        {m.delegation_change_plan()}
-      </Button>
+        <HugeiconsIcon icon={PencilEdit01Icon} strokeWidth={2} />
+      </IconButton>
     </div>
   )
 }

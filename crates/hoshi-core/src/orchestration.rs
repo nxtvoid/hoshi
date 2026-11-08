@@ -211,6 +211,10 @@ pub enum Event {
         /// It works in the parent's worktree, which stays the parent's to remove.
         shares_worktree: bool,
     },
+    /// The user, or the agent that delegated it, cancelled the thread's task.
+    TaskCancelled {
+        thread_id: String,
+    },
     /// Mid-turn: the agent waits for the user, or works again.
     ThreadStatusSet {
         thread_id: String,
@@ -642,6 +646,11 @@ impl ReadModel {
                     thread.worktree_adopted |= *shares_worktree;
                 }
             }
+            Event::TaskCancelled { thread_id } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.task_cancelled = true;
+                }
+            }
         }
     }
 }
@@ -737,6 +746,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     worktree_released: false,
                     worktree_adopted: false,
                     parent_thread_id: None,
+                    task_cancelled: false,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
                 },
@@ -1101,6 +1111,18 @@ pub fn send_task_result(
 }
 
 /// Links a thread to the one whose agent delegated its task to it.
+/// Cancels the delegated task thread `thread_id` works on, once.
+pub fn cancel_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.parent_thread_id.is_some() && !thread.task_cancelled => {
+            vec![Event::TaskCancelled {
+                thread_id: thread_id.to_owned(),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub fn record_delegation(model: &ReadModel, thread_id: &str, parent_thread_id: &str) -> Vec<Event> {
     let (Some(thread), Some(parent)) = (
         model.threads.get(thread_id),

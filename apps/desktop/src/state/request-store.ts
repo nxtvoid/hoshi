@@ -20,6 +20,8 @@ type RequestState = {
   applyEvent: (event: Event) => void
   /** Hands a task's answer back to its thread now, as it stands. */
   sendTaskAnswer: (threadId: string) => Promise<void>
+  /** Cancels a task: it stops if it runs, and its answer never goes back. */
+  cancelTask: (threadId: string) => Promise<void>
   /** Tasks whose card, waiting on the user, is on screen. */
   onScreenTasks: Record<string, true>
   setTaskOnScreen: (threadId: string, onScreen: boolean) => void
@@ -45,6 +47,10 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
       pending: items.filter(isRequest),
       pendingTasks: Object.fromEntries(pendingTasks.map((id) => [id, true]))
     }),
+  cancelTask: (threadId) =>
+    invoke<void>('cancel_task', { threadId }).catch((error) =>
+      console.error('hoshi: failed to cancel a task', error)
+    ),
   sendTaskAnswer: (threadId) =>
     invoke<void>('send_task_answer', { threadId }).catch((error) =>
       console.error('hoshi: failed to send a task answer', error)
@@ -56,12 +62,15 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
       }))
       return
     }
-    if (
-      event.type === 'itemAdded' &&
-      event.item.content.kind === 'userMessage' &&
-      event.item.content.taskResult
-    ) {
-      const { [event.item.content.taskResult]: _, ...rest } = get().pendingTasks
+    const answered =
+      event.type === 'taskCancelled'
+        ? event.threadId
+        : event.type === 'itemAdded' &&
+            event.item.content.kind === 'userMessage'
+          ? event.item.content.taskResult
+          : null
+    if (answered) {
+      const { [answered]: _, ...rest } = get().pendingTasks
       set({ pendingTasks: rest })
       return
     }

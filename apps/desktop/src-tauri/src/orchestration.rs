@@ -103,6 +103,12 @@ pub fn send_task_answer(engine: State<'_, Engine>, thread_id: String) {
     engine.send_task_answer(&thread_id);
 }
 
+/// Cancels a delegated task: it stops if it runs, and its answer never goes back.
+#[tauri::command(async)]
+pub fn cancel_task(engine: State<'_, Engine>, thread_id: String) {
+    engine.cancel_task(&thread_id);
+}
+
 /// `None` when the project has no icon among its files.
 #[tauri::command(async)]
 pub fn get_project_icon(engine: State<'_, Engine>, project_id: String) -> Option<String> {

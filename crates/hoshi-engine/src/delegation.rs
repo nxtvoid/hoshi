@@ -119,7 +119,7 @@ impl State {
             .collect();
         self.model
             .threads()
-            .filter(|thread| !answered.contains(&thread.id))
+            .filter(|thread| !answered.contains(&thread.id) && !thread.task_cancelled)
             .filter_map(|thread| {
                 let parent = thread.parent_thread_id.clone()?;
                 self.model.thread(&parent)?;
@@ -287,17 +287,28 @@ impl State {
 
     fn task_cancel(&mut self, caller: &str, arguments: &Value) -> Result<Value, String> {
         let child = self.task(caller, arguments)?;
-        self.delegations.remove(&child.id);
-        let running = self.turns.get(&child.id);
-        if let Some(turn) = running {
-            turn.running.interrupt();
-        }
-        let status = if running.is_some() {
+        let status = if self.cancel_task(&child.id) {
             "cancel_requested"
         } else {
             "already_ended"
         };
         Ok(json!({ "taskId": child.id, "status": status }))
+    }
+
+    /// Cancels a delegated task: it stops if it runs, and its answer never goes back.
+    /// `true` when it was running.
+    pub(crate) fn cancel_task(&mut self, child: &str) -> bool {
+        self.delegations.remove(child);
+        let now = now();
+        let events = hoshi_core::cancel_task(&self.model, child);
+        if let Err(error) = self.commit(&events, &now) {
+            eprintln!("hoshi: failed to record a cancelled task: {error}");
+        }
+        let running = self.turns.get(child);
+        if let Some(turn) = running {
+            turn.running.interrupt();
+        }
+        running.is_some()
     }
 
     fn answer_of(&self, thread_id: &str) -> String {

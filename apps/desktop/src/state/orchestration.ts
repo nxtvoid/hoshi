@@ -112,6 +112,8 @@ export function applyEvent(
         parentThreadId: event.parentThreadId,
         ...(event.sharesWorktree ? { worktreeAdopted: true } : {})
       })
+    case 'taskCancelled':
+      return updateThread(event.threadId, { taskCancelled: true })
   }
 }
 

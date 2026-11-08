@@ -77,3 +77,13 @@ test('a task waiting for changes to its plan counts as waiting', () => {
   )
   expect(threadAgents('t', [planning], [])[0]?.state).toBe('done')
 })
+
+test('a cancelled task counts as stopped', () => {
+  const cancelled = thread('gone', {
+    parentThreadId: 't',
+    taskCancelled: true,
+    status: 'idle'
+  })
+
+  expect(threadAgents('t', [cancelled], [])[0]?.state).toBe('stopped')
+})

@@ -160,6 +160,9 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE threads ADD COLUMN parent_thread_id TEXT;
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN task_cancelled INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
@@ -252,7 +255,7 @@ impl Store {
                 "SELECT id, project_id, title, status, branch, worktree_path, session_id,
                         active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                         fast_mode, ultracode, access_mode, plan_mode, worktree_released,
-                        worktree_adopted, parent_thread_id
+                        worktree_adopted, parent_thread_id, task_cancelled
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -278,6 +281,7 @@ impl Store {
                     worktree_released: row.get(18)?,
                     worktree_adopted: row.get(19)?,
                     parent_thread_id: row.get(20)?,
+                    task_cancelled: row.get(21)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -670,9 +674,9 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                  (id, project_id, title, status, branch, worktree_path, session_id,
                   active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                   fast_mode, ultracode, access_mode, plan_mode, worktree_released,
-                  worktree_adopted, parent_thread_id)
+                  worktree_adopted, parent_thread_id, task_cancelled)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18, ?19, ?20, ?21)",
+                         ?17, ?18, ?19, ?20, ?21, ?22)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -694,7 +698,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     thread.plan_mode,
                     thread.worktree_released,
                     thread.worktree_adopted,
-                    thread.parent_thread_id
+                    thread.parent_thread_id,
+                    thread.task_cancelled
                 ],
             )?;
         }
@@ -898,6 +903,12 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 params![thread_id, parent_thread_id, shares_worktree],
             )?;
         }
+        Event::TaskCancelled { thread_id } => {
+            tx.execute(
+                "UPDATE threads SET task_cancelled = 1 WHERE id = ?1",
+                [thread_id],
+            )?;
+        }
         Event::ThreadStatusSet { thread_id, status } => {
             tx.execute(
                 "UPDATE threads SET status = ?2 WHERE id = ?1",
@@ -953,6 +964,7 @@ mod tests {
                 worktree_released: false,
                 worktree_adopted: false,
                 parent_thread_id: None,
+                task_cancelled: false,
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
             },

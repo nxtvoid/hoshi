@@ -24,6 +24,7 @@ pub fn run() {
             orchestration::get_thread_items,
             orchestration::get_thread_item,
             orchestration::send_task_answer,
+            orchestration::cancel_task,
             orchestration::get_forge_accounts,
             orchestration::list_folders,
             orchestration::create_folder,

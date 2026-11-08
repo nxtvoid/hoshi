@@ -53,7 +53,11 @@ worktreeAdopted: boolean,
 /**
  * The thread whose agent delegated this one's task to it; `None` for one the user started.
  */
-parentThreadId: string | null, createdAt: string, 
+parentThreadId: string | null, 
+/**
+ * As a delegated task, it was cancelled: its answer never goes back.
+ */
+taskCancelled: boolean, createdAt: string, 
 /**
  * RFC 3339 timestamp of the last activity.
  */
