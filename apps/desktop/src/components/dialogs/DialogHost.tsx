@@ -72,7 +72,7 @@ export function DialogHost() {
               )}
             >
               <HugeiconsIcon
-                icon={tone.icon}
+                icon={current.icon ?? tone.icon}
                 strokeWidth={2}
                 className='size-5'
               />

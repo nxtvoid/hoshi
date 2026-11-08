@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { IconSvgElement } from '@hugeicons/react'
 
 /**
  * `destructive` for what can't be undone, `warning` to tell about a refusal, `success` for
@@ -14,6 +15,8 @@ export type DialogRequest = {
   /** `false` leaves only the confirm button, for a notice. */
   cancelLabel?: string | false
   tone?: DialogTone
+  /** Says what going ahead does, in place of the tone's own icon. */
+  icon?: IconSvgElement
 }
 
 type Pending = DialogRequest & { resolve: (confirmed: boolean) => void }

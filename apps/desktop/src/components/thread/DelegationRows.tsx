@@ -144,7 +144,8 @@ function PlanningTray({ threadId }: { threadId: string }) {
       description: m.delegation_cancel_description(),
       confirmLabel: m.delegation_cancel(),
       cancelLabel: m.delegation_cancel_keep(),
-      tone: 'destructive'
+      tone: 'destructive',
+      icon: CancelCircleIcon
     })
     if (confirmed) await cancelTask(threadId)
   }
