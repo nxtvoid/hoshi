@@ -33,7 +33,6 @@ import {
   ArrowDown01Icon,
   ArrowRight01Icon,
   Cancel01Icon,
-  Clock01Icon,
   CommandLineIcon,
   File01Icon,
   FileEditIcon,
@@ -340,18 +339,13 @@ function TurnFold({
   const duration =
     durationMs === null ? null : formatDuration(durationMs, getLocale())
   return (
-    <div>
+    <div className='border-border/60 border-b pb-2'>
       <button
         type='button'
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className='group/fold text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-6 items-center gap-2 rounded-md text-sm outline-none focus-visible:ring-2'
+        className='text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-6 items-center gap-1 rounded-md text-sm tabular-nums outline-none focus-visible:ring-2'
       >
-        <HugeiconsIcon
-          icon={Clock01Icon}
-          strokeWidth={2}
-          className='size-4 shrink-0'
-        />
         {ending === 'stopped'
           ? duration === null
             ? m.stopped_response()
@@ -367,13 +361,13 @@ function TurnFold({
           icon={ArrowRight01Icon}
           strokeWidth={2}
           className={cn(
-            'size-3.5 shrink-0 opacity-0 transition-transform group-hover/fold:opacity-100',
-            open && 'rotate-90 opacity-100'
+            'size-3.5 shrink-0 transition-transform',
+            open && 'rotate-90'
           )}
         />
       </button>
       {open ? (
-        <ol className='border-border/60 ms-2 mt-2 flex flex-col gap-4 border-s ps-4'>
+        <ol className='border-border/60 ms-2 mt-2 mb-2 flex flex-col gap-4 border-s ps-4'>
           <Rows {...rows} />
         </ol>
       ) : null}
