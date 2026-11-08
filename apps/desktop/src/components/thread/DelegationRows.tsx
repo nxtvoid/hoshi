@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -6,7 +7,11 @@ import { Button } from '@hoshi/ui/components/button'
 import { useWholeToolCall } from './use-whole-tool-call'
 import type { Thread } from '@/bindings/Thread'
 import { Markdown } from '@/components/markdown/Markdown'
-import { delegationOf, type ToolCallItem } from '@/lib/tool-calls'
+import {
+  delegationOf,
+  reasoningPreview,
+  type ToolCallItem
+} from '@/lib/tool-calls'
 import {
   Alert02Icon,
   ArrowRight01Icon,
@@ -99,7 +104,10 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
   )
 }
 
-/** A delegated task's answer, which hoshi handed back to the thread. */
+/**
+ * A delegated task's answer, which hoshi handed back to the thread. It starts folded: the
+ * agent's reply that follows usually tells the same.
+ */
 export function TaskResultRow({
   text,
   childThreadId
@@ -108,21 +116,45 @@ export function TaskResultRow({
   childThreadId: string
 }) {
   const child = useThread(childThreadId)
+  const [open, setOpen] = useState(false)
   const answer = text.slice(text.indexOf('\n') + 1).trim()
   return (
     <div className='border-border/70 flex flex-col gap-2 rounded-xl border px-3 py-2'>
       <div className='flex items-center gap-2.5 text-sm'>
-        <HugeiconsIcon
-          icon={GitForkIcon}
-          strokeWidth={2}
-          className='text-muted-foreground size-4 shrink-0'
-        />
-        <span className='text-foreground min-w-0 flex-1 truncate font-medium'>
-          {m.task_result_from({ task: child?.title ?? '' })}
-        </span>
+        <button
+          type='button'
+          aria-expanded={open}
+          disabled={!answer}
+          onClick={() => setOpen((value) => !value)}
+          className='focus-visible:ring-ring flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md text-left outline-none focus-visible:ring-2'
+        >
+          <HugeiconsIcon
+            icon={GitForkIcon}
+            strokeWidth={2}
+            className='text-muted-foreground size-4 shrink-0'
+          />
+          <span className='text-foreground shrink-0 font-medium'>
+            {m.task_result_from({ task: child?.title ?? '' })}
+          </span>
+          {open ? null : (
+            <span className='text-muted-foreground min-w-0 flex-1 truncate'>
+              {reasoningPreview(answer, false)}
+            </span>
+          )}
+          {answer ? (
+            <HugeiconsIcon
+              icon={ArrowRight01Icon}
+              strokeWidth={2}
+              className={cn(
+                'text-muted-foreground ms-auto size-3.5 shrink-0 transition-transform',
+                open && 'rotate-90'
+              )}
+            />
+          ) : null}
+        </button>
         {child ? <OpenButton threadId={child.id} /> : null}
       </div>
-      {answer ? (
+      {open && answer ? (
         <div className='bg-muted/40 max-h-60 overflow-auto rounded-md px-3 py-2'>
           <Markdown text={answer} className='text-sm' />
         </div>
