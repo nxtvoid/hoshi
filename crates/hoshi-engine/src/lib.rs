@@ -926,6 +926,7 @@ impl Engine {
             projects: state.model.projects().cloned().collect(),
             threads: state.model.threads().cloned().collect(),
             pending_requests: state.model.all_pending_requests(),
+            open_tool_calls: state.model.open_tool_calls().cloned().collect(),
             pull_requests: state
                 .pull_requests
                 .known()

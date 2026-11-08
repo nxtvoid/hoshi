@@ -172,7 +172,8 @@ describe('applyItemEvent', () => {
       output: null,
       isError: false,
       detail: null,
-      outputOmitted: false
+      outputOmitted: false,
+      interrupted: false
     }
   }
 
@@ -194,6 +195,16 @@ describe('applyItemEvent', () => {
     })
 
     expect(items[0]?.content).toMatchObject({ output: 'hello', detail })
+  })
+
+  test('stops a tool call whose turn ended first', () => {
+    const items = applyItemEvent('t', [tool], {
+      type: 'toolCallInterrupted',
+      threadId: 't',
+      itemId: 'tool'
+    })
+
+    expect(items[0]?.content).toMatchObject({ output: null, interrupted: true })
   })
 
   test('replaces an item that arrives twice and ignores other threads', () => {

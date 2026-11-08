@@ -13,6 +13,7 @@ import {
   BotIcon,
   Cancel01Icon,
   Loading03Icon,
+  StopCircleIcon,
   StopIcon
 } from '@hugeicons/core-free-icons'
 import {
@@ -33,8 +34,8 @@ export function SubagentRow({
   renderRows: (rows: TranscriptRow[]) => React.ReactNode
 }) {
   const [open, setOpen] = useState(false)
-  const { output, isError, input } = item.content
-  const running = output === null
+  const { output, isError, input, interrupted } = item.content
+  const running = output === null && !interrupted
   const { description, kind, prompt } = subagentInput(input)
   const progress = useTranscriptStore((state) =>
     running ? state.streaming[item.id]?.text : undefined
@@ -44,7 +45,7 @@ export function SubagentRow({
 
   return (
     <div className='border-border/70 rounded-xl border'>
-      <div className='flex items-center gap-1 pe-1.5'>
+      <div className={cn('flex items-center gap-1', running && 'pe-1.5')}>
         <button
           type='button'
           aria-expanded={open}
@@ -52,7 +53,15 @@ export function SubagentRow({
           className='group/agent hover:bg-muted/40 focus-visible:ring-ring flex min-w-0 flex-1 items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm outline-none focus-visible:ring-2'
         >
           <HugeiconsIcon
-            icon={running ? Loading03Icon : isError ? Cancel01Icon : BotIcon}
+            icon={
+              running
+                ? Loading03Icon
+                : interrupted
+                  ? StopCircleIcon
+                  : isError
+                    ? Cancel01Icon
+                    : BotIcon
+            }
             strokeWidth={2}
             aria-label={
               running ? m.tool_running() : isError ? m.tool_failed() : undefined

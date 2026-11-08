@@ -583,5 +583,6 @@
   "subagent": "Subagent",
   "subagent_prompt": "What it was asked",
   "subagent_no_activity": "No activity yet",
-  "subagent_stop": "Stop this subagent"
+  "subagent_stop": "Stop this subagent",
+  "tool_stopped": "Stopped"
 }

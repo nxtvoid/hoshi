@@ -209,7 +209,11 @@ export function activeEntry(entries: WorkItem[]) {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index] as WorkItem
     if (entry.streaming) return entry
-    if (entry.content.kind === 'toolCall' && entry.content.output === null) {
+    if (
+      entry.content.kind === 'toolCall' &&
+      entry.content.output === null &&
+      !entry.content.interrupted
+    ) {
       return entry
     }
   }

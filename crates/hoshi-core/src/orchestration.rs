@@ -1,10 +1,10 @@
 use crate::{
-    AccessMode, ApprovalDecision, Effort, ItemContent, MessageAttachment, Project, ProviderOutput,
-    RequestResponse, RequestStatus, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest,
-    ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
+    AccessMode, ApprovalDecision, Effort, ItemContent, MessageAttachment, OpenToolCall, Project,
+    ProviderOutput, RequestResponse, RequestStatus, Thread, ThreadContextUsage, ThreadItem,
+    ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use ts_rs::TS;
 
 const TITLE_MAX_CHARS: usize = 60;
@@ -198,6 +198,11 @@ pub enum Event {
         outcome: TurnOutcome,
         at: String,
     },
+    /// The turn ended before the call did.
+    ToolCallInterrupted {
+        thread_id: String,
+        item_id: String,
+    },
     /// Mid-turn: the agent waits for the user, or works again.
     ThreadStatusSet {
         thread_id: String,
@@ -309,6 +314,8 @@ pub struct Snapshot {
     pub context_usages: Vec<ThreadContextUsage>,
     /// What agents asked and still wait for, oldest first.
     pub pending_requests: Vec<ThreadItem>,
+    /// Tool calls of running turns still waiting for their output.
+    pub open_tool_calls: Vec<OpenToolCall>,
 }
 
 /// An event as delivered to the UI, with its position in the event log.
@@ -348,6 +355,8 @@ pub struct ReadModel {
     threads: BTreeMap<String, Thread>,
     /// Requests waiting for an answer, by id.
     requests: BTreeMap<String, ThreadItem>,
+    /// Tool calls without output yet, of threads and their subagents.
+    open_calls: BTreeSet<OpenToolCall>,
 }
 
 impl ReadModel {
@@ -368,7 +377,12 @@ impl ReadModel {
                 .iter()
                 .map(|item| (item.id.clone(), item.clone()))
                 .collect(),
+            open_calls: snapshot.open_tool_calls.iter().cloned().collect(),
         }
+    }
+
+    pub fn open_tool_calls(&self) -> impl Iterator<Item = &OpenToolCall> {
+        self.open_calls.iter()
     }
 
     /// Every request waiting for an answer, oldest first.
@@ -430,6 +444,8 @@ impl ReadModel {
                 let threads = &self.threads;
                 self.requests
                     .retain(|_, item| threads.contains_key(&item.thread_id));
+                self.open_calls
+                    .retain(|call| threads.contains_key(root_thread(&call.thread_id)));
             }
             Event::ThreadCreated { thread } => {
                 self.threads.insert(thread.id.clone(), thread.clone());
@@ -437,6 +453,8 @@ impl ReadModel {
             Event::ThreadDeleted { thread_id } => {
                 self.threads.remove(thread_id);
                 self.requests.retain(|_, item| &item.thread_id != thread_id);
+                self.open_calls
+                    .retain(|call| root_thread(&call.thread_id) != thread_id);
             }
             Event::ThreadTitleSet { thread_id, title } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
@@ -548,6 +566,23 @@ impl ReadModel {
                 if let Some(thread) = self.threads.get_mut(&item.thread_id) {
                     thread.updated_at.clone_from(&item.created_at);
                 }
+                let call = OpenToolCall {
+                    thread_id: item.thread_id.clone(),
+                    item_id: item.id.clone(),
+                };
+                match &item.content {
+                    ItemContent::ToolCall {
+                        output: None,
+                        interrupted: false,
+                        ..
+                    } => {
+                        self.open_calls.insert(call);
+                    }
+                    ItemContent::ToolCall { .. } => {
+                        self.open_calls.remove(&call);
+                    }
+                    _ => {}
+                }
                 match item.content.request_status() {
                     Some(RequestStatus::Pending) => {
                         self.requests.insert(item.id.clone(), item.clone());
@@ -558,7 +593,15 @@ impl ReadModel {
                     None => {}
                 }
             }
-            Event::ToolCallCompleted { .. } => {}
+            Event::ToolCallCompleted {
+                thread_id, item_id, ..
+            }
+            | Event::ToolCallInterrupted { thread_id, item_id } => {
+                self.open_calls.remove(&OpenToolCall {
+                    thread_id: thread_id.clone(),
+                    item_id: item_id.clone(),
+                });
+            }
             Event::TurnCompleted {
                 thread_id,
                 outcome,
@@ -1094,6 +1137,7 @@ pub fn record_output(
                 is_error: false,
                 detail: None,
                 output_omitted: false,
+                interrupted: false,
             },
         )],
         ProviderOutput::ToolCallCompleted {
@@ -1114,6 +1158,16 @@ pub fn record_output(
                 .into_iter()
                 .map(|pending| item(pending.id.clone(), cancelled(&pending.content)))
                 .collect();
+            events.extend(
+                model
+                    .open_calls
+                    .iter()
+                    .filter(|call| root_thread(&call.thread_id) == thread_id)
+                    .map(|call| Event::ToolCallInterrupted {
+                        thread_id: call.thread_id.clone(),
+                        item_id: call.item_id.clone(),
+                    }),
+            );
             if let TurnOutcome::Failed { reason } = &outcome {
                 events.push(item(
                     format!("{turn_id}:failed"),
@@ -1136,8 +1190,12 @@ pub fn record_output(
 /// Where a subagent's own transcript is kept: beside its thread's, under the id of the
 /// call that started it. Subagents of subagents sit beside it too.
 pub fn subagent_thread_id(thread_id: &str, tool_use_id: &str) -> String {
-    let root = thread_id.split(':').next().unwrap_or(thread_id);
-    format!("{root}:{tool_use_id}")
+    format!("{}:{tool_use_id}", root_thread(thread_id))
+}
+
+/// The thread a transcript belongs to: itself, or the thread of a subagent's.
+fn root_thread(transcript: &str) -> &str {
+    transcript.split(':').next().unwrap_or(transcript)
 }
 
 /// A subagent's messages, reasoning and tool calls, in its own transcript. It has no turn
@@ -1171,6 +1229,7 @@ fn record_subagent(transcript: &str, output: ProviderOutput, now: &str) -> Vec<E
                 is_error: false,
                 detail: None,
                 output_omitted: false,
+                interrupted: false,
             },
         )],
         ProviderOutput::ToolCallCompleted {
@@ -2166,6 +2225,7 @@ const a = 1
             is_error: false,
             detail: None,
             output_omitted: false,
+            interrupted: false,
         };
         let long = "x".repeat(1_000);
 
@@ -2225,6 +2285,57 @@ const a = 1
             "t:toolu_inner"
         );
         assert_eq!(model.thread("t").unwrap().status, ThreadStatus::Working);
+    }
+
+    #[test]
+    fn calls_left_running_stop_with_their_turn_subagents_included() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "run it")).unwrap();
+        let start = |item_id: &str| ProviderOutput::ToolCallStarted {
+            item_id: item_id.into(),
+            name: "Bash".into(),
+            input: "{}".into(),
+        };
+        record(&mut model, "m1", start("done"));
+        record(&mut model, "m1", start("long"));
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::Subagent {
+                tool_use_id: "toolu_agent".into(),
+                output: Box::new(start("inner")),
+            },
+        );
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::ToolCallCompleted {
+                item_id: "done".into(),
+                output: "ok".into(),
+                is_error: false,
+                detail: None,
+            },
+        );
+
+        let events = record(
+            &mut model,
+            "m1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+            },
+        );
+
+        let interrupted: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ToolCallInterrupted { thread_id, item_id } => {
+                    Some(format!("{thread_id}/{item_id}"))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(interrupted, ["t/long", "t:toolu_agent/inner"]);
+        assert_eq!(model.open_tool_calls().count(), 0);
     }
 
     #[cfg(windows)]

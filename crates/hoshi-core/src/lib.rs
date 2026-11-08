@@ -39,8 +39,8 @@ pub use settings::{
 };
 pub use terminal::{TerminalAttach, TerminalEvent, TerminalExit};
 pub use thread::{
-    AccessMode, Effort, ItemContent, Task, TaskStatus, Thread, ThreadItem, ThreadStatus,
-    ThreadWorkspace, ToolDetail, TranscriptPage, TurnFailure, TurnOutcome,
+    AccessMode, Effort, ItemContent, OpenToolCall, Task, TaskStatus, Thread, ThreadItem,
+    ThreadStatus, ThreadWorkspace, ToolDetail, TranscriptPage, TurnFailure, TurnOutcome,
 };
 pub use usage::{ContextUsage, ThreadContextUsage, UsageLimits, UsageWindow, UsageWindowKind};
 pub use workspace::{ChangesSummary, Editor};

@@ -5,8 +5,8 @@
 //! thread projection must match `ReadModel::apply`; a test checks that.
 
 use hoshi_core::{
-    ContextUsage, Effort, Event, Project, PullRequestDetail, Snapshot, Thread, ThreadContextUsage,
-    ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits,
+    ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, Snapshot, Thread,
+    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits,
 };
 use rusqlite::{Connection, Row, Transaction, params, types::Type};
 use std::path::Path;
@@ -143,6 +143,19 @@ const MIGRATIONS: &[&str] = &[
     ",
     r"
     ALTER TABLE threads ADD COLUMN worktree_adopted INTEGER NOT NULL DEFAULT 0;
+    ",
+    // Tool calls left without output by turns that ended before calls were marked interrupted.
+    r"
+    UPDATE thread_items
+    SET content_json = json_set(content_json, '$.interrupted', json('true'))
+    WHERE json_extract(content_json, '$.kind') = 'toolCall'
+      AND json_extract(content_json, '$.output') IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM threads
+        WHERE threads.active_turn_id IS NOT NULL
+          AND (threads.id = thread_items.thread_id
+               OR substr(thread_items.thread_id, 1, length(threads.id) + 1) = threads.id || ':')
+      );
     ",
 ];
 
@@ -294,6 +307,22 @@ impl Store {
              ORDER BY ordinal",
             [],
         )?;
+        let open_tool_calls = self
+            .conn
+            .prepare(
+                "SELECT thread_id, id FROM thread_items
+                 WHERE json_extract(content_json, '$.kind') = 'toolCall'
+                   AND json_extract(content_json, '$.output') IS NULL
+                   AND coalesce(json_extract(content_json, '$.interrupted'), 0) = 0
+                 ORDER BY ordinal",
+            )?
+            .query_map([], |row| {
+                Ok(OpenToolCall {
+                    thread_id: row.get(0)?,
+                    item_id: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Snapshot {
             sequence: sequence as u64,
             projects,
@@ -301,6 +330,7 @@ impl Store {
             pull_requests,
             context_usages,
             pending_requests,
+            open_tool_calls,
         })
     }
 
@@ -783,6 +813,14 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 params![thread_id, enum_text(status)?, at],
             )?;
         }
+        Event::ToolCallInterrupted { thread_id, item_id } => {
+            tx.execute(
+                "UPDATE thread_items
+                 SET content_json = json_set(content_json, '$.interrupted', json('true'))
+                 WHERE thread_id = ?1 AND id = ?2",
+                params![thread_id, item_id],
+            )?;
+        }
         Event::ThreadStatusSet { thread_id, status } => {
             tx.execute(
                 "UPDATE threads SET status = ?2 WHERE id = ?1",
@@ -1191,6 +1229,7 @@ mod tests {
                 is_error: false,
                 detail: Some(change()),
                 output_omitted: false,
+                interrupted: false,
             }
         );
     }

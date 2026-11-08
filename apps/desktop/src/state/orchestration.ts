@@ -97,6 +97,7 @@ export function applyEvent(
         updatedAt: event.item.createdAt
       })
     case 'toolCallCompleted':
+    case 'toolCallInterrupted':
       return state
     case 'turnCompleted':
       return updateThread(event.threadId, {
@@ -134,6 +135,13 @@ export function applyItemEvent(
               detail: event.detail
             }
           }
+        : item
+    )
+  }
+  if (event.type === 'toolCallInterrupted' && event.threadId === threadId) {
+    return items.map((item) =>
+      item.id === event.itemId && item.content.kind === 'toolCall'
+        ? { ...item, content: { ...item.content, interrupted: true } }
         : item
     )
   }

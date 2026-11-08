@@ -34,6 +34,7 @@ import {
   Globe02Icon,
   Loading03Icon,
   Search01Icon,
+  StopCircleIcon,
   Wrench01Icon
 } from '@hugeicons/core-free-icons'
 import {
@@ -506,11 +507,11 @@ function ToolCallRow({
   item: ToolCallItem
   cwd: string | null
 }) {
-  const { name, input, output, isError, detail } = item.content
+  const { name, input, output, isError, detail, interrupted } = item.content
   const [open, setOpen] = useState(false)
   const whole = useWholeToolCall(item, open)
   const diff = whole.detail?.kind === 'fileChange' ? whole.detail.diff : null
-  const running = output === null
+  const running = output === null && !interrupted
   const live = useTranscriptStore((state) =>
     running && open ? state.streaming[item.id]?.text : undefined
   )
@@ -528,13 +529,21 @@ function ToolCallRow({
           icon={
             running
               ? Loading03Icon
-              : isError
-                ? Cancel01Icon
-                : ACTION_ICONS[toolAction(name)]
+              : interrupted
+                ? StopCircleIcon
+                : isError
+                  ? Cancel01Icon
+                  : ACTION_ICONS[toolAction(name)]
           }
           strokeWidth={2}
           aria-label={
-            running ? m.tool_running() : isError ? m.tool_failed() : undefined
+            running
+              ? m.tool_running()
+              : interrupted
+                ? m.tool_stopped()
+                : isError
+                  ? m.tool_failed()
+                  : undefined
           }
           className={cn(
             'size-4 shrink-0',

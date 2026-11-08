@@ -26,7 +26,8 @@ function tool(id: string, name: string, input: object = {}): ToolCallItem {
       output: '',
       isError: false,
       detail: null,
-      outputOmitted: false
+      outputOmitted: false,
+      interrupted: false
     }
   }
 }

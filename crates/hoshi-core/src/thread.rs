@@ -128,6 +128,16 @@ pub struct TranscriptPage {
     pub has_older: bool,
 }
 
+/// A tool call still waiting for its output.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OpenToolCall {
+    /// The thread's transcript, or one of its subagents'.
+    pub thread_id: String,
+    pub item_id: String,
+}
+
 /// One entry in a thread's transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -170,6 +180,9 @@ pub enum ItemContent {
         /// `output` is only its start: a page of the transcript leaves the rest out.
         #[serde(default)]
         output_omitted: bool,
+        /// Its turn ended before it did, so it has no output.
+        #[serde(default)]
+        interrupted: bool,
     },
     TurnFailed {
         reason: TurnFailure,
@@ -222,6 +235,7 @@ impl ItemContent {
                 is_error,
                 detail,
                 output_omitted,
+                interrupted,
             } => {
                 let long = output
                     .as_ref()
@@ -238,6 +252,7 @@ impl ItemContent {
                     is_error,
                     detail: detail.as_ref().map(ToolDetail::summary),
                     output_omitted: output_omitted || long,
+                    interrupted,
                 }
             }
             other => other,
