@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>dev.hoshi.app</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>hoshi</name>
+  <summary>A desktop home for coding agents</summary>
+  <description>
+    <p>
+      hoshi runs coding agents such as Claude Code in threads, one per task,
+      each in its own folder or git worktree. Follow their work side by side,
+      review their changes and pull requests, and pick up where you left off.
+    </p>
+  </description>
+  <launchable type="desktop-id">hoshi-desktop.desktop</launchable>
+  <icon type="stock">hoshi-desktop</icon>
+  <url type="homepage">https://github.com/nxtvoid/hoshi</url>
+  <developer id="dev.hoshi">
+    <name>nxtvoid</name>
+  </developer>
+  <categories>
+    <category>Development</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+</component>
