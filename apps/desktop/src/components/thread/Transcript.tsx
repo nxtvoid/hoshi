@@ -47,6 +47,7 @@ import {
   foldTurns,
   groupTranscript,
   isDelegation,
+  isLiveAgent,
   isSubagentCall,
   isToolCall,
   reasoningPreview,
@@ -81,10 +82,25 @@ export function Transcript({
 }) {
   const items = useTranscriptStore((state) => state.items)
   const streaming = useTranscriptStore((state) => state.streaming)
-  const rows = useMemo(
-    () => foldTurns(groupTranscript(withStreaming(items, streaming)), working),
-    [items, streaming, working]
+  const threadId = useTranscriptStore((state) => state.threadId)
+  const busyTasks = useAppStore((state) =>
+    state.threads
+      .filter(
+        (thread) =>
+          thread.parentThreadId === threadId &&
+          (thread.status === 'working' || thread.status === 'waitingForInput')
+      )
+      .map((thread) => thread.id)
+      .join(' ')
   )
+  const rows = useMemo(() => {
+    const busy = new Set(busyTasks.split(' '))
+    return foldTurns(
+      groupTranscript(withStreaming(items, streaming)),
+      working,
+      (row) => isLiveAgent(row, busy)
+    )
+  }, [items, streaming, working, busyTasks])
   const approvals = useMemo(() => approvalsByCall(items), [items])
   const liveTasks = working
     ? items.filter((item) => item.content.kind === 'taskList').at(-1)?.id

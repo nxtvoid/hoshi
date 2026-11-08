@@ -10,7 +10,7 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { ModelPicker } from './ModelPicker'
 import { stepHistory } from '@/lib/prompt-history'
 import { ContextMeter } from './ContextMeter'
-import { RequestPanel } from './RequestPanel'
+import { DelegatedRequestPanel, RequestPanel } from './RequestPanel'
 import { ComposerImages } from './ComposerImages'
 import { Button } from '@hoshi/ui/components/button'
 import { useComposerImages } from './use-composer-images'
@@ -107,6 +107,7 @@ export function Composer({
   const interruptTurn = useAppStore((state) => state.interruptTurn)
   const openModelPicker = useModelPickerStore((state) => state.setOpen)
   const [, updateAccess] = useAccess()
+  const threadId = useAppStore((state) => state.selectedThreadId)
   const request = usePendingRequest()
   const requestActions = useRequestActions(request)
   const { text } = snapshot
@@ -400,7 +401,11 @@ export function Composer({
             onPick={pick}
           />
         ) : null}
-        {request ? <RequestPanel request={request} cwd={cwd} /> : null}
+        {request ? (
+          <RequestPanel request={request} cwd={cwd} />
+        ) : threadId ? (
+          <DelegatedRequestPanel threadId={threadId} cwd={cwd} />
+        ) : null}
         <form
           className={cn(
             'border-border bg-card focus-within:border-ring/60 relative flex flex-col rounded-2xl border shadow-xs transition-colors',

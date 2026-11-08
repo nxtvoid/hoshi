@@ -8,15 +8,13 @@ import { useTranscriptStore } from '@/state/transcript-store'
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import { type AgentState, type ThreadAgent, threadAgents } from '@/lib/agents'
 import {
-  ArrowDown01Icon,
+  ArrowRight01Icon,
   BotIcon,
   GitForkIcon
 } from '@hugeicons/core-free-icons'
 
 const ROW =
   'flex h-8 w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] font-medium text-foreground/80 outline-none transition-colors hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset'
-/** How many agents show before the rest fold behind "Show more". */
-const SHOWN = 5
 const NO_ITEMS: ThreadItem[] = []
 
 const DOT: Record<AgentState, string> = {
@@ -25,6 +23,10 @@ const DOT: Record<AgentState, string> = {
   done: 'bg-status-done',
   stopped: 'bg-muted-foreground/50',
   failed: 'bg-status-error'
+}
+
+function isActive(state: AgentState) {
+  return state === 'running' || state === 'waiting'
 }
 
 /** The agents that worked for a thread: what it delegated, and its subagents. */
@@ -40,7 +42,7 @@ export function ThreadAgents({
   const items = useTranscriptStore((state) =>
     state.threadId === threadId ? state.items : NO_ITEMS
   )
-  const [all, setAll] = useState(false)
+  const [previousOpen, setPreviousOpen] = useState(false)
   const agents = useMemo(
     () => threadAgents(threadId, threads, items),
     [threadId, threads, items]
@@ -61,7 +63,35 @@ export function ThreadAgents({
       .querySelector(`[data-item-id="${CSS.escape(agent.id)}"]`)
       ?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   }
-  const shown = all ? agents : agents.slice(0, SHOWN)
+  const active = agents.filter((agent) => isActive(agent.state))
+  const previous = agents.filter((agent) => !isActive(agent.state))
+  const row = (agent: ThreadAgent) => (
+    <button
+      key={agent.id}
+      type='button'
+      className={ROW}
+      onClick={() => open(agent)}
+    >
+      <span className='relative flex shrink-0'>
+        <HugeiconsIcon
+          icon={agent.kind === 'task' ? GitForkIcon : BotIcon}
+          strokeWidth={2}
+          className='text-muted-foreground size-4'
+        />
+        <span
+          className={cn(
+            'ring-popover absolute -right-0.5 -bottom-0.5 size-1.5 rounded-full ring-2',
+            DOT[agent.state],
+            agent.state === 'running' && 'animate-pulse'
+          )}
+        />
+      </span>
+      <span className='min-w-0 flex-1 truncate'>{agent.title}</span>
+      <span className='text-muted-foreground shrink-0 text-xs font-normal tabular-nums'>
+        {formatRelativeTime(agent.at, new Date(), getLocale())}
+      </span>
+    </button>
+  )
 
   return (
     <>
@@ -88,46 +118,34 @@ export function ThreadAgents({
           </span>
         </button>
       ) : null}
-      {shown.map((agent) => (
-        <button
-          key={agent.id}
-          type='button'
-          className={ROW}
-          onClick={() => open(agent)}
-        >
-          <span className='relative flex shrink-0'>
+      {active.length > 0 ? (
+        <div className='max-h-60 overflow-y-auto'>{active.map(row)}</div>
+      ) : null}
+      {previous.length > 0 ? (
+        <>
+          <button
+            type='button'
+            aria-expanded={previousOpen}
+            className={cn(ROW, 'text-muted-foreground font-normal')}
+            onClick={() => setPreviousOpen((value) => !value)}
+          >
+            <span className='min-w-0 flex-1 truncate'>
+              {m.agents_previous()}
+            </span>
+            <span className='text-xs tabular-nums'>{previous.length}</span>
             <HugeiconsIcon
-              icon={agent.kind === 'task' ? GitForkIcon : BotIcon}
+              icon={ArrowRight01Icon}
               strokeWidth={2}
-              className='text-muted-foreground size-4'
-            />
-            <span
               className={cn(
-                'ring-popover absolute -right-0.5 -bottom-0.5 size-1.5 rounded-full ring-2',
-                DOT[agent.state],
-                agent.state === 'running' && 'animate-pulse'
+                'size-3.5 shrink-0 transition-transform',
+                previousOpen && 'rotate-90'
               )}
             />
-          </span>
-          <span className='min-w-0 flex-1 truncate'>{agent.title}</span>
-          <span className='text-muted-foreground shrink-0 text-xs font-normal tabular-nums'>
-            {formatRelativeTime(agent.at, new Date(), getLocale())}
-          </span>
-        </button>
-      ))}
-      {agents.length > SHOWN && !all ? (
-        <button
-          type='button'
-          className={cn(ROW, 'text-muted-foreground font-normal')}
-          onClick={() => setAll(true)}
-        >
-          <HugeiconsIcon
-            icon={ArrowDown01Icon}
-            strokeWidth={2}
-            className='size-4 shrink-0'
-          />
-          {m.agents_show_more({ count: agents.length - SHOWN })}
-        </button>
+          </button>
+          {previousOpen ? (
+            <div className='max-h-48 overflow-y-auto'>{previous.map(row)}</div>
+          ) : null}
+        </>
       ) : null}
     </>
   )

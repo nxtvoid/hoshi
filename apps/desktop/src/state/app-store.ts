@@ -23,6 +23,7 @@ import { useSubagentStore } from './subagent-store'
 import { useStoppingStore } from './stopping-store'
 import { usePullRequestStore } from './pull-request-store'
 import { useDraftStore } from './draft-store'
+import { useRequestStore } from './request-store'
 import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
@@ -93,8 +94,9 @@ type AppState = {
   interruptTurn: () => Promise<void>
   /** Stops one subagent of the selected thread's turn; `toolUseId` is the call that started it. */
   stopSubagent: (toolUseId: string) => Promise<void>
-  /** Answers what the selected thread's agent asked; `false` when it was refused. */
+  /** Answers what a thread's agent asked; `false` when it was refused. */
   respondToRequest: (
+    threadId: string,
     requestId: string,
     response: RequestResponse
   ) => Promise<boolean>
@@ -331,9 +333,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
       reportError
     )
   },
-  respondToRequest: async (requestId, response) => {
-    const threadId = get().selectedThreadId
-    if (!threadId) return false
+  respondToRequest: async (threadId, requestId, response) => {
     try {
       await dispatch({ type: 'requestRespond', threadId, requestId, response })
       set({ composerError: null })
@@ -350,6 +350,7 @@ function receive({ sequence, event }: EventEnvelope) {
   if (sequence <= useAppStore.getState().sequence) return
   useTranscriptStore.getState().applyEvent(event)
   useSubagentStore.getState().applyEvent(event)
+  useRequestStore.getState().applyEvent(event)
   if (event.type === 'turnCompleted' || event.type === 'threadDeleted') {
     useStoppingStore.getState().end(event.threadId)
   }
@@ -449,6 +450,7 @@ async function startSync() {
     snapshot.threads
   )
   useSidebarStore.getState().setView(start.sidebarView)
+  useRequestStore.getState().seed(snapshot.pendingRequests)
   useAppStore.setState({
     ready: true,
     sequence: snapshot.sequence,

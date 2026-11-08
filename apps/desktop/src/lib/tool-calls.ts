@@ -105,6 +105,20 @@ export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
   )
 }
 
+/**
+ * Whether a row is an agent still at work: a subagent without its answer, or a delegated
+ * task whose thread, among `busyTasks`, is still working or waiting.
+ */
+export function isLiveAgent(row: TranscriptRow, busyTasks: Set<string>) {
+  if (row.kind !== 'item' || row.item.content.kind !== 'toolCall') return false
+  const call = row.item.content
+  if (isDelegation(row.item)) {
+    const { taskId } = delegationOf(call)
+    return taskId !== null && busyTasks.has(taskId)
+  }
+  return isSubagentCall(row.item) && call.output === null && !call.interrupted
+}
+
 /** Where a subagent's transcript is kept; mirrors `subagent_thread_id` in hoshi-core. */
 export function subagentTranscriptId(threadId: string, toolUseId: string) {
   return `${threadId.split(':')[0]}:${toolUseId}`
@@ -187,11 +201,13 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
 
 /**
  * A finished turn's work, between the user's message and the agent's final answer, folds
- * into one row. The running turn, and a turn that ended any other way, stay open.
+ * into one row. The running turn, and a turn that ended any other way, stay open. Rows
+ * still `live` stay out of the fold, after it.
  */
 export function foldTurns(
   rows: TranscriptRow[],
-  working: boolean
+  working: boolean,
+  live: (row: TranscriptRow) => boolean = () => false
 ): TranscriptRow[] {
   const folded: TranscriptRow[] = []
   let asked: TranscriptItem | null = null
@@ -212,9 +228,10 @@ export function foldTurns(
         {
           kind: 'fold',
           id: `fold:${asked.id}`,
-          rows: work,
+          rows: work.filter((row) => !live(row)),
           durationMs: Number.isFinite(duration) ? duration : null
         },
+        ...work.filter(live),
         answer
       )
     } else {

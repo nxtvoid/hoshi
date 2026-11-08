@@ -6,9 +6,12 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { Kbd } from '@hoshi/ui/components/kbd'
 import { Button } from '@hoshi/ui/components/button'
 import { Markdown } from '@/components/markdown/Markdown'
-import { useRequestActions } from './use-request-actions'
+import { useAppStore } from '@/state/app-store'
+import { useDelegatedRequest, useRequestActions } from './use-request-actions'
 import type { QuestionsContent, RequestItem } from '@/lib/requests'
 import {
+  ArrowRight01Icon,
+  GitForkIcon,
   ShieldUserIcon,
   TaskDone01Icon,
   UserQuestion01Icon
@@ -16,6 +19,46 @@ import {
 
 const PANEL =
   'border-border bg-card mb-2 flex flex-col gap-2.5 rounded-2xl border p-3 shadow-xs'
+
+/**
+ * What a delegated task waits on, answered from the thread that delegated it, with the
+ * way to the task's own thread.
+ */
+export function DelegatedRequestPanel({
+  threadId,
+  cwd
+}: {
+  threadId: string
+  cwd: string | null
+}) {
+  const delegated = useDelegatedRequest(threadId)
+  const selectThread = useAppStore((state) => state.selectThread)
+  if (!delegated) return null
+  const { request, child } = delegated
+  return (
+    <div className='flex flex-col'>
+      <div className='text-muted-foreground flex items-center gap-2 px-1 pb-1 text-xs'>
+        <HugeiconsIcon
+          icon={GitForkIcon}
+          strokeWidth={2}
+          className='size-3.5 shrink-0'
+        />
+        <span className='min-w-0 flex-1 truncate'>
+          {m.delegated_request_from({ task: child.title })}
+        </span>
+        <Button
+          size='xs'
+          variant='ghost'
+          onClick={() => selectThread(child.id)}
+        >
+          {m.delegation_open()}
+          <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2} />
+        </Button>
+      </div>
+      <RequestPanel request={request} cwd={child.worktreePath ?? cwd} />
+    </div>
+  )
+}
 
 /** What the agent waits on, above the composer, which takes typed answers and feedback. */
 export function RequestPanel({

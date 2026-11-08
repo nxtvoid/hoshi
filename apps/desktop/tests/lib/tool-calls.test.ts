@@ -257,4 +257,26 @@ describe('foldTurns', () => {
     ])
     expect(foldTurns(rows, true).at(-2)?.kind).toBe('work')
   })
+
+  test('keeps live rows out of the fold, after it', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      tool('agent', 'Agent'),
+      tool('e', 'Edit'),
+      answer('a1', '2026-11-08T10:01:00Z')
+    ])
+
+    const folded = foldTurns(
+      rows,
+      false,
+      (row) => row.kind === 'item' && row.item.id === 'agent'
+    )
+
+    expect(
+      folded.map((row) => (row.kind === 'item' ? row.item.id : row.kind))
+    ).toEqual(['u1', 'fold', 'agent', 'a1'])
+    const fold = folded[1]
+    expect(fold?.kind === 'fold' && fold.rows.length).toBe(2)
+  })
 })

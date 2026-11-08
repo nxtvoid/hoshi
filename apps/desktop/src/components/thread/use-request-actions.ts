@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { useAppStore } from '@/state/app-store'
 import { useTranscriptStore } from '@/state/transcript-store'
 import { useRequestStore } from '@/state/request-store'
@@ -18,6 +19,23 @@ export function usePendingRequest() {
   return useTranscriptStore((state) => pendingRequest(state.items))
 }
 
+/**
+ * The oldest request of a task the thread delegated, which the user can answer from the
+ * thread, with the task's thread.
+ */
+export function useDelegatedRequest(threadId: string | null) {
+  const threads = useAppStore((state) => state.threads)
+  const pending = useRequestStore((state) => state.pending)
+  return useMemo(() => {
+    if (!threadId) return null
+    for (const request of pending) {
+      const child = threads.find((thread) => thread.id === request.threadId)
+      if (child?.parentThreadId === threadId) return { request, child }
+    }
+    return null
+  }, [threadId, threads, pending])
+}
+
 /** Answers `request`; shared by its panel and the composer, which takes typed answers. */
 export function useRequestActions(request: RequestItem | null) {
   const respond = useAppStore((state) => state.respondToRequest)
@@ -32,7 +50,11 @@ export function useRequestActions(request: RequestItem | null) {
     feedback: string | null = null
   ) =>
     request
-      ? respond(request.id, { type: 'decision', decision, feedback })
+      ? respond(request.threadId, request.id, {
+          type: 'decision',
+          decision,
+          feedback
+        })
       : Promise.resolve(false)
 
   /** Answers the current question and moves on; `false` when there was nothing to answer. */
@@ -45,7 +67,10 @@ export function useRequestActions(request: RequestItem | null) {
       answer
     )
     if (result.answers) {
-      void respond(request.id, { type: 'answers', answers: result.answers })
+      void respond(request.threadId, request.id, {
+        type: 'answers',
+        answers: result.answers
+      })
       return true
     }
     setProgress(request.id, result.progress)

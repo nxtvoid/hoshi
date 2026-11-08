@@ -8,7 +8,9 @@ use hoshi_core::{
 use serde_json::{Value, json};
 
 /// What the agent reads with every running task: its answer comes on its own.
-const NEXT: &str = "The answer arrives as a message in this thread once the task ends, so end your turn now. Don't wait on it or poll it.";
+/// Kept short: a page of the transcript keeps only the start of a tool's output, which must
+/// still hold the task id.
+const NEXT: &str = "End your turn now; the answer arrives here as a message.";
 /// An answer longer than this is cut; `task_status` still has it all.
 const ANSWER_MAX_CHARS: usize = 16_000;
 const TITLE_MAX_CHARS: usize = 60;
@@ -132,7 +134,7 @@ impl State {
             attachments: Vec::new(),
         })
         .map_err(|error| error.to_string())?;
-        Ok(json!({ "taskId": child, "title": title, "status": "running", "next": NEXT }))
+        Ok(json!({ "taskId": child, "status": "running", "next": NEXT }))
     }
 
     /// The child `taskId` names, when the caller delegated it.

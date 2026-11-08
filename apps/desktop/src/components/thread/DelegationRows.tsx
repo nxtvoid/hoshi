@@ -3,6 +3,7 @@ import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
 import { Button } from '@hoshi/ui/components/button'
+import { useWholeToolCall } from './use-whole-tool-call'
 import type { Thread } from '@/bindings/Thread'
 import { Markdown } from '@/components/markdown/Markdown'
 import { delegationOf, type ToolCallItem } from '@/lib/tool-calls'
@@ -74,7 +75,8 @@ function TaskStatus({ child }: { child: Thread | undefined }) {
 
 /** A task the agent delegated to a child thread, with how the child is doing. */
 export function DelegationRow({ item }: { item: ToolCallItem }) {
-  const { title, taskId, error } = delegationOf(item.content)
+  const whole = useWholeToolCall(item, true)
+  const { title, taskId, error } = delegationOf(whole)
   const child = useThread(taskId)
   return (
     <div className='border-border/70 flex items-center gap-2.5 rounded-xl border px-3 py-2 text-sm'>

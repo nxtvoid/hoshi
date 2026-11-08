@@ -592,10 +592,11 @@
   "message_steer": "Steer",
   "delegation_task": "Delegated task",
   "delegation_open": "Open",
+  "delegated_request_from": "{task} needs your input",
   "delegation_done": "Done",
   "delegation_back": "Back to it",
   "delegated_by": "Delegated by {thread}",
   "task_result_from": "Answer from {task}",
   "agents": "Agents",
-  "agents_show_more": "Show {count} more"
+  "agents_previous": "Previous agents"
 }
