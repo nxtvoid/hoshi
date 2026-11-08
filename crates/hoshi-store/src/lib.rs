@@ -335,6 +335,8 @@ impl Store {
             context_usages,
             pending_requests,
             open_tool_calls,
+            // The engine knows which tasks still owe an answer.
+            pending_tasks: Vec::new(),
         })
     }
 

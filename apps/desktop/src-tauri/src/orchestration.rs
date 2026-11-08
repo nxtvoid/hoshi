@@ -97,6 +97,12 @@ pub fn dispatch(engine: State<'_, Engine>, command: Command) -> Result<(), Comma
     })
 }
 
+/// Hands a delegated task's answer back now, as it stands.
+#[tauri::command(async)]
+pub fn send_task_answer(engine: State<'_, Engine>, thread_id: String) {
+    engine.send_task_answer(&thread_id);
+}
+
 /// `None` when the project has no icon among its files.
 #[tauri::command(async)]
 pub fn get_project_icon(engine: State<'_, Engine>, project_id: String) -> Option<String> {

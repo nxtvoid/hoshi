@@ -13,6 +13,9 @@ use std::collections::{HashMap, HashSet};
 /// Kept short: a page of the transcript keeps only the start of a tool's output, which must
 /// still hold the task id.
 const NEXT: &str = "End your turn now; the answer arrives here as a message.";
+/// What the agent reads of a task whose plan the user is still changing.
+const PLANNING: &str =
+    "The user is changing its plan in the task's thread; the answer arrives here as a message.";
 /// An answer longer than this is cut; `task_status` still has it all.
 const ANSWER_MAX_CHARS: usize = 16_000;
 const TITLE_MAX_CHARS: usize = 60;
@@ -268,8 +271,12 @@ impl State {
                 ThreadStatus::Error => "failed",
             },
         });
+        let planning = child.plan_mode && self.delegations.contains_key(&child.id);
         if child.active_turn_id.is_some() {
             status["next"] = json!(NEXT);
+        } else if planning {
+            status["status"] = json!("waiting_for_user");
+            status["next"] = json!(PLANNING);
         } else {
             // Read here, the answer needn't come again as a message.
             self.delegations.remove(&child.id);
@@ -326,6 +333,12 @@ impl State {
         {
             return;
         }
+        self.hand_back(child, outcome);
+    }
+
+    /// Gives a delegated task's answer to its parent: into the turn it runs, or as the start
+    /// of a new one.
+    pub(crate) fn hand_back(&mut self, child: &str, outcome: &TurnOutcome) {
         let Some(delegation) = self.delegations.remove(child) else {
             return;
         };

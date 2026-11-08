@@ -951,6 +951,12 @@ impl Engine {
         check_usage_limits(&self.state, &self.usage_probe, force)
     }
 
+    /// Hands a delegated task's answer back to its thread now, as it stands, with its plan
+    /// when it still plans.
+    pub fn send_task_answer(&self, thread_id: &str) {
+        lock(&self.state).hand_back(thread_id, &TurnOutcome::Completed);
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let state = lock(&self.state);
         Snapshot {
@@ -958,6 +964,7 @@ impl Engine {
             projects: state.model.projects().cloned().collect(),
             threads: state.model.threads().cloned().collect(),
             pending_requests: state.model.all_pending_requests(),
+            pending_tasks: state.delegations.keys().cloned().collect(),
             open_tool_calls: state.model.open_tool_calls().cloned().collect(),
             pull_requests: state
                 .pull_requests
@@ -3439,6 +3446,58 @@ mod tests {
         assert!(told(0).is_some_and(|told| !told.contains(delegation::TASK_INSTRUCTIONS)));
         assert!(told(1).is_some_and(|told| told.contains(delegation::TASK_INSTRUCTIONS)));
         assert_eq!(told(2), None);
+    }
+
+    /// A task whose plan the user sent back to planning, its turn over, and its parent at rest.
+    fn planning_task(harness: &Harness, adapter: &FakeAdapter) -> String {
+        harness.send("t", "m1", "split the work");
+        let task = delegate(
+            harness,
+            serde_json::json!({ "task": "plan the README", "plan": true }),
+        );
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        let declined = Event::ItemAdded {
+            item: ThreadItem {
+                id: "plan1".into(),
+                thread_id: child.clone(),
+                created_at: "2026-11-08T10:00:00Z".into(),
+                content: ItemContent::ProposedPlan {
+                    plan: "1. Sort the sections".into(),
+                    status: RequestStatus::Resolved,
+                    decision: Some(ApprovalDecision::Decline),
+                    feedback: None,
+                },
+            },
+        };
+        lock(&harness.engine.state)
+            .commit(&[declined], "2026-11-08T10:00:00Z")
+            .unwrap();
+        child_turn_ends(harness, adapter, 1);
+        child
+    }
+
+    #[test]
+    fn a_task_still_planning_tells_its_status_and_answers_as_is_when_the_user_says() {
+        let harness = Harness::in_memory("delegate-plan-as-is", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        let child = planning_task(&harness, &adapter);
+
+        let status = lock(&harness.engine.state)
+            .call_tool("t", "task_status", &serde_json::json!({ "taskId": child }))
+            .unwrap();
+        assert_eq!(status["status"], "waiting_for_user");
+        assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+
+        harness.engine.send_task_answer(&child);
+        harness.thread("t");
+
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].prompt.contains("1. Sort the sections"));
+        assert!(harness.engine.snapshot().pending_tasks.is_empty());
     }
 
     #[test]

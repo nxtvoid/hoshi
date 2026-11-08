@@ -15,7 +15,27 @@ export type ThreadAgent = {
   at: string
 }
 
-function taskState(thread: Thread): AgentState {
+/**
+ * A task that waits for the user's changes to its plan: still planning, at rest, its
+ * answer not given back.
+ */
+export function isPlanningWithUser(
+  thread: Thread,
+  pendingTasks: Record<string, true>
+) {
+  return (
+    thread.parentThreadId !== null &&
+    thread.planMode &&
+    thread.status === 'idle' &&
+    pendingTasks[thread.id] === true
+  )
+}
+
+function taskState(
+  thread: Thread,
+  pendingTasks: Record<string, true>
+): AgentState {
+  if (isPlanningWithUser(thread, pendingTasks)) return 'waiting'
   switch (thread.status) {
     case 'working':
       return 'running'
@@ -35,7 +55,8 @@ function taskState(thread: Thread): AgentState {
 export function threadAgents(
   threadId: string,
   threads: Thread[],
-  items: ThreadItem[]
+  items: ThreadItem[],
+  pendingTasks: Record<string, true> = {}
 ): ThreadAgent[] {
   const tasks = threads
     .filter((thread) => thread.parentThreadId === threadId)
@@ -44,7 +65,7 @@ export function threadAgents(
         kind: 'task',
         id: thread.id,
         title: thread.title,
-        state: taskState(thread),
+        state: taskState(thread, pendingTasks),
         at: thread.createdAt
       })
     )

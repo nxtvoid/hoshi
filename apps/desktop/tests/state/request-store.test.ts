@@ -26,7 +26,7 @@ const approval = (
 
 test('keeps what every thread still waits for', () => {
   const store = useRequestStore.getState()
-  store.seed([approval('a', 'child', 'pending')])
+  store.seed([approval('a', 'child', 'pending')], [])
   store.applyEvent({
     type: 'itemAdded',
     item: approval('b', 'other', 'pending')
@@ -42,4 +42,31 @@ test('keeps what every thread still waits for', () => {
 
   store.applyEvent({ type: 'threadDeleted', threadId: 'other' })
   expect(useRequestStore.getState().pending).toEqual([])
+})
+
+test('keeps the tasks that still owe their thread an answer', () => {
+  const store = useRequestStore.getState()
+  store.seed([], ['old'])
+  store.applyEvent({
+    type: 'threadDelegated',
+    threadId: 'task',
+    parentThreadId: 't'
+  })
+  store.applyEvent({
+    type: 'itemAdded',
+    item: {
+      id: 'r',
+      threadId: 't',
+      createdAt: '2026-11-08T10:00:00Z',
+      content: {
+        kind: 'userMessage',
+        text: 'Delegated task old',
+        attachments: [],
+        steer: false,
+        taskResult: 'old'
+      }
+    }
+  })
+
+  expect(useRequestStore.getState().pendingTasks).toEqual({ task: true })
 })

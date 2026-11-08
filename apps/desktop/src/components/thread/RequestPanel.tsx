@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { toolTarget } from '@/lib/tool-calls'
@@ -7,6 +7,8 @@ import { Kbd } from '@hoshi/ui/components/kbd'
 import { Button } from '@hoshi/ui/components/button'
 import { Markdown } from '@/components/markdown/Markdown'
 import { useAppStore } from '@/state/app-store'
+import { isPlanningWithUser } from '@/lib/agents'
+import { useRequestStore } from '@/state/request-store'
 import { useDelegatedRequest, useRequestActions } from './use-request-actions'
 import type { QuestionsContent, RequestItem } from '@/lib/requests'
 import {
@@ -60,6 +62,57 @@ export function DelegatedRequestPanel({
         cwd={child.worktreePath ?? cwd}
         onKeepPlanning={() => selectThread(child.id)}
       />
+    </div>
+  )
+}
+
+/**
+ * The tasks the thread delegated that wait for the user's changes to their plan, in one
+ * line above the composer: the oldest, and how many more.
+ */
+export function PlanningTasksNote({ threadId }: { threadId: string }) {
+  const threads = useAppStore((state) => state.threads)
+  const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const selectThread = useAppStore((state) => state.selectThread)
+  const sendTaskAnswer = useRequestStore((state) => state.sendTaskAnswer)
+  const planning = useMemo(
+    () =>
+      threads
+        .filter(
+          (thread) =>
+            thread.parentThreadId === threadId &&
+            isPlanningWithUser(thread, pendingTasks)
+        )
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    [threads, pendingTasks, threadId]
+  )
+  const [task] = planning
+  if (!task) return null
+  return (
+    <div className='text-muted-foreground flex items-center gap-2 px-1 pb-1 text-xs'>
+      <HugeiconsIcon
+        icon={GitForkIcon}
+        strokeWidth={2}
+        className='size-3.5 shrink-0'
+      />
+      <span className='min-w-0 flex-1 truncate'>
+        {m.planning_task_note({ task: task.title })}
+        {planning.length > 1
+          ? ` ${m.planning_tasks_more({ count: planning.length - 1 })}`
+          : null}
+      </span>
+      <Button
+        size='xs'
+        variant='ghost'
+        className='text-muted-foreground'
+        onClick={() => void sendTaskAnswer(task.id)}
+      >
+        {m.delegation_send_plan()}
+      </Button>
+      <Button size='xs' variant='ghost' onClick={() => selectThread(task.id)}>
+        {m.delegation_open()}
+        <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2} />
+      </Button>
     </div>
   )
 }

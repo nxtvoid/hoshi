@@ -10,7 +10,11 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { ModelPicker } from './ModelPicker'
 import { stepHistory } from '@/lib/prompt-history'
 import { ContextMeter } from './ContextMeter'
-import { DelegatedRequestPanel, RequestPanel } from './RequestPanel'
+import {
+  DelegatedRequestPanel,
+  PlanningTasksNote,
+  RequestPanel
+} from './RequestPanel'
 import { ComposerImages } from './ComposerImages'
 import { Button } from '@hoshi/ui/components/button'
 import { useComposerImages } from './use-composer-images'
@@ -404,7 +408,10 @@ export function Composer({
         {request ? (
           <RequestPanel request={request} cwd={cwd} />
         ) : threadId ? (
-          <DelegatedRequestPanel threadId={threadId} cwd={cwd} />
+          <>
+            <DelegatedRequestPanel threadId={threadId} cwd={cwd} />
+            <PlanningTasksNote threadId={threadId} />
+          </>
         ) : null}
         <form
           className={cn(

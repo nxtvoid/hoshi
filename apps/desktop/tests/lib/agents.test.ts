@@ -64,3 +64,16 @@ test('lists the tasks a thread delegated and its subagents, newest first', () =>
     ['subagent', 'a1', 'look a1', 'done']
   ])
 })
+
+test('a task waiting for changes to its plan counts as waiting', () => {
+  const planning = thread('plan', {
+    parentThreadId: 't',
+    planMode: true,
+    status: 'idle'
+  })
+
+  expect(threadAgents('t', [planning], [], { plan: true })[0]?.state).toBe(
+    'waiting'
+  )
+  expect(threadAgents('t', [planning], [])[0]?.state).toBe('done')
+})

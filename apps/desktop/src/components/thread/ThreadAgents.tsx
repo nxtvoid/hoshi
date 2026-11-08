@@ -4,6 +4,7 @@ import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
+import { useRequestStore } from '@/state/request-store'
 import { useTranscriptStore } from '@/state/transcript-store'
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import { type AgentState, type ThreadAgent, threadAgents } from '@/lib/agents'
@@ -43,9 +44,10 @@ export function ThreadAgents({
     state.threadId === threadId ? state.items : NO_ITEMS
   )
   const [previousOpen, setPreviousOpen] = useState(false)
+  const pendingTasks = useRequestStore((state) => state.pendingTasks)
   const agents = useMemo(
-    () => threadAgents(threadId, threads, items),
-    [threadId, threads, items]
+    () => threadAgents(threadId, threads, items, pendingTasks),
+    [threadId, threads, items, pendingTasks]
   )
   const parent = useMemo(() => {
     const own = threads.find((thread) => thread.id === threadId)

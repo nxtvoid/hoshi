@@ -25,4 +25,8 @@ pendingRequests: Array<ThreadItem>,
 /**
  * Tool calls of running turns still waiting for their output.
  */
-openToolCalls: Array<OpenToolCall>, };
+openToolCalls: Array<OpenToolCall>, 
+/**
+ * Delegated tasks whose answer hasn't gone back yet, by thread id.
+ */
+pendingTasks: Array<string>, };

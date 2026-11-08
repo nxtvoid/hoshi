@@ -450,7 +450,9 @@ async function startSync() {
     snapshot.threads
   )
   useSidebarStore.getState().setView(start.sidebarView)
-  useRequestStore.getState().seed(snapshot.pendingRequests)
+  useRequestStore
+    .getState()
+    .seed(snapshot.pendingRequests, snapshot.pendingTasks)
   useAppStore.setState({
     ready: true,
     sequence: snapshot.sequence,

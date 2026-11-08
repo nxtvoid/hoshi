@@ -19,6 +19,8 @@ import { TranscriptMinimap } from './TranscriptMinimap'
 import { useTranscriptStore } from '@/state/transcript-store'
 import { useAppStore } from '@/state/app-store'
 import { useStoppingStore } from '@/state/stopping-store'
+import { useRequestStore } from '@/state/request-store'
+import { isPlanningWithUser } from '@/lib/agents'
 import {
   memo,
   useEffect,
@@ -84,12 +86,15 @@ export function Transcript({
   const items = useTranscriptStore((state) => state.items)
   const streaming = useTranscriptStore((state) => state.streaming)
   const threadId = useTranscriptStore((state) => state.threadId)
+  const pendingTasks = useRequestStore((state) => state.pendingTasks)
   const busyTasks = useAppStore((state) =>
     state.threads
       .filter(
         (thread) =>
           thread.parentThreadId === threadId &&
-          (thread.status === 'working' || thread.status === 'waitingForInput')
+          (thread.status === 'working' ||
+            thread.status === 'waitingForInput' ||
+            isPlanningWithUser(thread, pendingTasks))
       )
       .map((thread) => thread.id)
       .join(' ')

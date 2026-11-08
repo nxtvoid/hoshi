@@ -3,6 +3,8 @@ import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
+import { isPlanningWithUser } from '@/lib/agents'
+import { useRequestStore } from '@/state/request-store'
 import { Button } from '@hoshi/ui/components/button'
 import { useWholeToolCall } from './use-whole-tool-call'
 import type { Thread } from '@/bindings/Thread'
@@ -44,10 +46,21 @@ function OpenButton({ threadId }: { threadId: string }) {
   )
 }
 
-function TaskStatus({ child }: { child: Thread | undefined }) {
+function TaskStatus({
+  child,
+  planning
+}: {
+  child: Thread | undefined
+  planning: boolean
+}) {
   if (!child) return null
-  const { icon, label, tone } =
-    child.status === 'working'
+  const { icon, label, tone } = planning
+    ? {
+        icon: UserQuestion01Icon,
+        label: m.delegation_waiting_changes(),
+        tone: 'text-status-waiting'
+      }
+    : child.status === 'working'
       ? { icon: Loading03Icon, label: m.tool_running(), tone: 'animate-spin' }
       : child.status === 'waitingForInput'
         ? {
@@ -83,6 +96,9 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
   const whole = useWholeToolCall(item, true)
   const { title, taskId, error } = delegationOf(whole)
   const child = useThread(taskId)
+  const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const sendTaskAnswer = useRequestStore((state) => state.sendTaskAnswer)
+  const planning = child ? isPlanningWithUser(child, pendingTasks) : false
   return (
     <div className='border-border/70 flex items-center gap-2.5 rounded-xl border px-3 py-2 text-sm'>
       <HugeiconsIcon
@@ -98,7 +114,17 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
           {error ?? m.delegation_task()}
         </span>
       </span>
-      <TaskStatus child={child} />
+      <TaskStatus child={child} planning={planning} />
+      {child && planning ? (
+        <Button
+          size='xs'
+          variant='ghost'
+          className='text-muted-foreground shrink-0'
+          onClick={() => void sendTaskAnswer(child.id)}
+        >
+          {m.delegation_send_plan()}
+        </Button>
+      ) : null}
       {child ? <OpenButton threadId={child.id} /> : null}
     </div>
   )

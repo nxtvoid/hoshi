@@ -324,6 +324,8 @@ pub struct Snapshot {
     pub pending_requests: Vec<ThreadItem>,
     /// Tool calls of running turns still waiting for their output.
     pub open_tool_calls: Vec<OpenToolCall>,
+    /// Delegated tasks whose answer hasn't gone back yet, by thread id.
+    pub pending_tasks: Vec<String>,
 }
 
 /// An event as delivered to the UI, with its position in the event log.
