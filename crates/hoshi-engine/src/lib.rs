@@ -4097,6 +4097,8 @@ mod tests {
         wait_until(|| lock(&harness.engine.state).session_moves.is_empty());
 
         let thread = harness.thread("t");
+        // The root's branch is read in the background once the turn ends.
+        wait_until(|| harness.thread("t").branch.is_some());
         assert_eq!(thread.worktree_path, None);
         assert_eq!(thread.branch.as_deref(), Some("main"));
         assert!(!thread.worktree_adopted);
