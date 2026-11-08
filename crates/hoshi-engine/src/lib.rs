@@ -3442,6 +3442,48 @@ mod tests {
     }
 
     #[test]
+    fn a_task_whose_plan_the_user_sent_back_answers_only_once_it_ends_otherwise() {
+        let harness = Harness::in_memory("delegate-plan", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(
+            &harness,
+            serde_json::json!({ "task": "plan the README", "plan": true }),
+        );
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        let declined = Event::ItemAdded {
+            item: ThreadItem {
+                id: "plan1".into(),
+                thread_id: child.clone(),
+                created_at: "2026-11-08T10:00:00Z".into(),
+                content: ItemContent::ProposedPlan {
+                    plan: "1. Sort the sections".into(),
+                    status: RequestStatus::Resolved,
+                    decision: Some(ApprovalDecision::Decline),
+                    feedback: None,
+                },
+            },
+        };
+        lock(&harness.engine.state)
+            .commit(&[declined], "2026-11-08T10:00:00Z")
+            .unwrap();
+
+        child_turn_ends(&harness, &adapter, 1);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+
+        harness.send(&child, "m5", "keep it as it is");
+        child_turn_ends(&harness, &adapter, 2);
+
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].prompt.starts_with("Delegated task"));
+        assert!(requests[3].prompt.contains("1. Sort the sections"));
+    }
+
+    #[test]
     fn a_task_a_restart_cut_short_answers_once_the_user_has_it_finish() {
         let store_dir = scratch_dir("delegate-restart-store");
         let database = store_dir.join("state.sqlite");

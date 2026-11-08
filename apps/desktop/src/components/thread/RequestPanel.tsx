@@ -55,7 +55,11 @@ export function DelegatedRequestPanel({
           <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2} />
         </Button>
       </div>
-      <RequestPanel request={request} cwd={child.worktreePath ?? cwd} />
+      <RequestPanel
+        request={request}
+        cwd={child.worktreePath ?? cwd}
+        onKeepPlanning={() => selectThread(child.id)}
+      />
     </div>
   )
 }
@@ -63,17 +67,26 @@ export function DelegatedRequestPanel({
 /** What the agent waits on, above the composer, which takes typed answers and feedback. */
 export function RequestPanel({
   request,
-  cwd
+  cwd,
+  onKeepPlanning
 }: {
   request: RequestItem
   cwd: string | null
+  /** Instead of sending the plan back at once, as where the user can say what to change. */
+  onKeepPlanning?: () => void
 }) {
   const { content } = request
   switch (content.kind) {
     case 'approval':
       return <ApprovalPanel request={request} cwd={cwd} />
     case 'proposedPlan':
-      return <PlanPanel request={request} plan={content.plan} />
+      return (
+        <PlanPanel
+          request={request}
+          plan={content.plan}
+          onKeepPlanning={onKeepPlanning}
+        />
+      )
     case 'questions':
       return <QuestionsPanel request={request} content={content} />
   }
@@ -151,7 +164,15 @@ function ApprovalPanel({
   )
 }
 
-function PlanPanel({ request, plan }: { request: RequestItem; plan: string }) {
+function PlanPanel({
+  request,
+  plan,
+  onKeepPlanning
+}: {
+  request: RequestItem
+  plan: string
+  onKeepPlanning?: () => void
+}) {
   const { decide } = useRequestActions(request)
   return (
     <div className={PANEL} role='alertdialog' aria-label={m.request_waiting()}>
@@ -163,7 +184,10 @@ function PlanPanel({ request, plan }: { request: RequestItem; plan: string }) {
         <Button
           size='sm'
           variant='ghost'
-          onClick={() => void decide('decline')}
+          onClick={() => {
+            if (onKeepPlanning) onKeepPlanning()
+            else void decide('decline')
+          }}
         >
           {m.request_plan_keep_planning()}
         </Button>

@@ -506,6 +506,37 @@ impl Store {
             .transpose()?)
     }
 
+    /// The thread's latest proposed plan, in markdown.
+    pub fn last_plan(&self, thread_id: &str) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT json_extract(content_json, '$.plan') FROM thread_items
+                 WHERE thread_id = ?1
+                   AND json_extract(content_json, '$.kind') = 'proposedPlan'
+                 ORDER BY ordinal DESC LIMIT 1",
+            )?
+            .query_map([thread_id], |row| row.get(0))?
+            .next()
+            .transpose()?)
+    }
+
+    /// Whether the user sent the thread's plan back to planning since their last message.
+    pub fn plan_declined_last(&self, thread_id: &str) -> Result<bool, StoreError> {
+        let decision: Option<Option<String>> = self
+            .conn
+            .prepare(
+                "SELECT json_extract(content_json, '$.decision') FROM thread_items
+                 WHERE thread_id = ?1
+                   AND json_extract(content_json, '$.kind') IN ('userMessage', 'proposedPlan')
+                 ORDER BY ordinal DESC LIMIT 1",
+            )?
+            .query_map([thread_id], |row| row.get(0))?
+            .next()
+            .transpose()?;
+        Ok(decision.flatten().as_deref() == Some("decline"))
+    }
+
     /// The delegated tasks whose answer already went back to the thread that delegated them.
     pub fn answered_tasks(&self) -> Result<Vec<String>, StoreError> {
         Ok(self

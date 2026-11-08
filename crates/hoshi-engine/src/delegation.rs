@@ -294,12 +294,23 @@ impl State {
     }
 
     fn answer_of(&self, thread_id: &str) -> String {
-        let answer = self
+        let said = self
             .store
             .last_answer(thread_id)
             .ok()
             .flatten()
             .unwrap_or_default();
+        let planning = self
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| thread.plan_mode);
+        let plan = planning
+            .then(|| self.store.last_plan(thread_id).ok().flatten())
+            .flatten();
+        let answer = match plan {
+            Some(plan) => format!("{said}\n\nThe plan, not approved yet:\n{plan}"),
+            None => said,
+        };
         match answer.char_indices().nth(ANSWER_MAX_CHARS) {
             Some((cut, _)) => format!("{}…", &answer[..cut]),
             None => answer,
@@ -309,6 +320,12 @@ impl State {
     /// Once a delegated task's turn ends, its answer goes to the parent: into the turn it
     /// runs, or as the start of a new one.
     pub(crate) fn deliver_task_result(&mut self, child: &str, outcome: &TurnOutcome) {
+        // The user sent the task's plan back: it answers once they approve one or stop it.
+        if *outcome == TurnOutcome::Completed
+            && self.store.plan_declined_last(child).unwrap_or(false)
+        {
+            return;
+        }
         let Some(delegation) = self.delegations.remove(child) else {
             return;
         };
