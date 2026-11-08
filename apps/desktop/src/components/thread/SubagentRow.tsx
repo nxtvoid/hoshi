@@ -122,24 +122,23 @@ export function SubagentRow({
           ) : null}
           <SubagentActivity
             transcriptId={subagentTranscriptId(item.threadId, item.id)}
+            result={interrupted ? null : whole.output}
             renderRows={renderRows}
           />
-          {whole.output && !interrupted ? (
-            <div className='border-border/70 border-t pt-3'>
-              <Markdown text={whole.output} className='text-sm' />
-            </div>
-          ) : null}
         </div>
       ) : null}
     </div>
   )
 }
 
+/** What the subagent did, then what it reported, unless its last message already says it. */
 function SubagentActivity({
   transcriptId,
+  result,
   renderRows
 }: {
   transcriptId: string
+  result: string | null
   renderRows: (rows: TranscriptRow[]) => React.ReactNode
 }) {
   const items = useSubagentStore((state) => state.transcripts[transcriptId])
@@ -152,16 +151,28 @@ function SubagentActivity({
   }, [transcriptId, open, close])
 
   if (!items) return null
-  if (items.length === 0) {
-    return (
-      <p className='text-muted-foreground text-xs'>
-        {m.subagent_no_activity()}
-      </p>
-    )
-  }
+  const said = items
+    .filter((entry) => entry.content.kind === 'assistantMessage')
+    .at(-1)
+  const repeated =
+    said?.content.kind === 'assistantMessage' &&
+    said.content.text.trim() === result?.trim()
   return (
-    <ol className='flex flex-col gap-2'>
-      {renderRows(groupTranscript(items))}
-    </ol>
+    <>
+      {items.length === 0 ? (
+        <p className='text-muted-foreground text-xs'>
+          {m.subagent_no_activity()}
+        </p>
+      ) : (
+        <ol className='flex flex-col gap-2'>
+          {renderRows(groupTranscript(items))}
+        </ol>
+      )}
+      {result && !repeated ? (
+        <div className='border-border/70 border-t pt-3'>
+          <Markdown text={result} className='text-sm' />
+        </div>
+      ) : null}
+    </>
   )
 }
