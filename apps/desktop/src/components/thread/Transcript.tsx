@@ -8,7 +8,7 @@ import { Markdown } from '@/components/markdown/Markdown'
 import { RequestRow } from './RequestRow'
 import { ApprovalBadge, ApprovalsContext } from './ApprovalBadge'
 import { approvalsByCall } from '@/lib/requests'
-import { SubagentRow } from './SubagentRow'
+import { SubagentGroup, SubagentRow } from './SubagentRow'
 import { DelegationRow, TaskResultRow } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
@@ -238,40 +238,91 @@ type RowsProps = {
   liveTasks: string | undefined
 }
 
+/** Subagents started one after another, from `index` on. */
+function subagentsFrom(rows: TranscriptRow[], index: number) {
+  const agents: ToolCallItem[] = []
+  for (const row of rows.slice(index)) {
+    if (row.kind !== 'item' || !isSubagentCall(row.item)) break
+    agents.push(row.item)
+  }
+  return agents
+}
+
 function Rows({ rows, cwd, liveTasks }: RowsProps) {
-  return rows.map((row) => {
-    switch (row.kind) {
-      case 'item':
-        return (
-          <li
-            key={row.item.id}
-            data-item-id={row.item.id}
-            className={cn(ROW, 'scroll-mt-6')}
-          >
-            <Item item={row.item} cwd={cwd} live={row.item.id === liveTasks} />
-          </li>
-        )
-      case 'work':
-        return (
-          <li key={row.id} className={ROW}>
-            <WorkGroup entries={row.entries} cwd={cwd} />
-          </li>
-        )
-      default:
-        return (
-          <li key={row.id} className={ROW}>
-            <TurnFold
-              rows={row.rows}
-              durationMs={row.durationMs}
-              ending={row.ending}
-              after={row.after}
-              cwd={cwd}
-              liveTasks={liveTasks}
-            />
-          </li>
-        )
+  const shown: React.ReactNode[] = []
+  for (let index = 0; index < rows.length; index += 1) {
+    const agents = subagentsFrom(rows, index)
+    const [first] = agents
+    if (first && agents.length > 1) {
+      shown.push(
+        <li
+          key={`agents:${first.id}`}
+          data-item-id={first.id}
+          className={cn(ROW, 'scroll-mt-6')}
+        >
+          <SubagentGroup
+            items={agents}
+            renderRows={(inner) => (
+              <Rows rows={inner} cwd={cwd} liveTasks={undefined} />
+            )}
+          />
+        </li>
+      )
+      index += agents.length - 1
+      continue
     }
-  })
+    shown.push(
+      <Row
+        key={rowKey(rows[index] as TranscriptRow)}
+        row={rows[index] as TranscriptRow}
+        cwd={cwd}
+        liveTasks={liveTasks}
+      />
+    )
+  }
+  return shown
+}
+
+function rowKey(row: TranscriptRow) {
+  return row.kind === 'item' ? row.item.id : row.id
+}
+
+function Row({
+  row,
+  cwd,
+  liveTasks
+}: Omit<RowsProps, 'rows'> & { row: TranscriptRow }) {
+  switch (row.kind) {
+    case 'item':
+      return (
+        <li
+          key={row.item.id}
+          data-item-id={row.item.id}
+          className={cn(ROW, 'scroll-mt-6')}
+        >
+          <Item item={row.item} cwd={cwd} live={row.item.id === liveTasks} />
+        </li>
+      )
+    case 'work':
+      return (
+        <li key={row.id} className={ROW}>
+          <WorkGroup entries={row.entries} cwd={cwd} />
+        </li>
+      )
+    default:
+      return (
+        <li key={row.id} className={ROW}>
+          <TurnFold
+            rows={row.rows}
+            durationMs={row.durationMs}
+            ending={row.ending}
+            after={row.after}
+            cwd={cwd}
+            liveTasks={liveTasks}
+          />
+        </li>
+      )
+  }
 }
 
 /** A finished turn's work, folded behind one line until opened. */

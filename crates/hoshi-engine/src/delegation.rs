@@ -16,7 +16,7 @@ const ANSWER_MAX_CHARS: usize = 16_000;
 const TITLE_MAX_CHARS: usize = 60;
 
 /// Added to the system prompt of agents that can delegate.
-pub(crate) const INSTRUCTIONS: &str = "hoshi can run work in child threads the user can open, through the hoshi MCP server's tools (load them with ToolSearch, \"select:mcp__hoshi__delegate_task\").\n- Use your own Agent tool for quick help within this turn. Use delegate_task for work that should run as a thread of its own, or in its own checkout and branch (isolation: \"worktree\").\n- The child gets only `task`: include everything it needs.\n- delegate_task returns at once. The child's answer arrives later as a message in this thread, so end your turn after delegating; don't wait, sleep or poll with task_status.\n- Stop a task with task_cancel.";
+pub(crate) const INSTRUCTIONS: &str = "hoshi can run work in child threads the user can open, through the hoshi MCP server's tools (load them with ToolSearch, \"select:mcp__hoshi__delegate_task\").\n- Subagents: use your own Agent tool with run_in_background: false and wait for them; start several in one message to run them in parallel, then answer once with all they found. Never start a background Agent: use delegate_task for work that should go on in the background, run as a thread of its own, or in its own checkout and branch (isolation: \"worktree\").\n- The child gets only `task`: include everything it needs.\n- delegate_task returns at once. The child's answer arrives later as a message in this thread, so end your turn after delegating; don't wait, sleep or poll with task_status.\n- Stop a task with task_cancel.";
 
 /// A task a thread delegated, until its answer goes back.
 pub(crate) struct Delegation {
