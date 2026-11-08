@@ -4,6 +4,7 @@ import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { Editor } from '@/bindings/Editor'
 import { usePanelStore } from '@/state/panel-store'
+import { ThreadAgents } from './ThreadAgents'
 import { useEditorStore } from '@/state/editor-store'
 import { useDetailsStore } from '@/state/details-store'
 import { EditorIcon, isMac, isWindows } from '@/components/brand/EditorIcon'
@@ -341,6 +342,7 @@ function DetailsContent({
           </span>
         </button>
       ) : null}
+      <ThreadAgents threadId={threadId} onNavigate={onNavigate} />
       {error ? (
         <p role='alert' className='text-destructive px-2.5 pt-1 pb-1 text-xs'>
           {error}

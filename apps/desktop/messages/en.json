@@ -595,5 +595,7 @@
   "delegation_done": "Done",
   "delegation_back": "Back to it",
   "delegated_by": "Delegated by {thread}",
-  "task_result_from": "Answer from {task}"
+  "task_result_from": "Answer from {task}",
+  "agents": "Agents",
+  "agents_show_more": "Show {count} more"
 }
