@@ -985,6 +985,13 @@ impl Engine {
             Command::TurnInterrupt { thread_id } => Some(thread_id.clone()),
             _ => None,
         };
+        let stop = match &command {
+            Command::SubagentStop {
+                thread_id,
+                tool_use_id,
+            } => Some((thread_id.clone(), tool_use_id.clone())),
+            _ => None,
+        };
         let answer = match &command {
             Command::RequestRespond {
                 thread_id,
@@ -1075,6 +1082,11 @@ impl Engine {
             && let Some(turn) = state.turns.get(&thread_id)
         {
             turn.running.respond(&request_id, &response);
+        }
+        if let Some((thread_id, tool_use_id)) = stop
+            && let Some(turn) = state.turns.get(&thread_id)
+        {
+            turn.running.stop_subagent(&tool_use_id);
         }
         // A deleted thread (or a removed project's threads) must not keep an agent running.
         let orphaned: Vec<_> = state

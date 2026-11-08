@@ -132,14 +132,41 @@ fn an_error_result_fails_the_turn() {
 }
 
 #[test]
-fn subagent_traffic_is_ignored() {
+fn subagent_traffic_goes_to_its_own_transcript() {
     let mut parser = ClaudeParser::default();
 
-    let outputs = parser.parse_line(
+    let message = parser.parse_line(
         r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"m","content":[{"type":"text","text":"inner"}]}}"#,
     );
+    let prompt = parser.parse_line(
+        r#"{"type":"user","parent_tool_use_id":"toolu_1","message":{"role":"user","content":[{"type":"text","text":"count the files"}]}}"#,
+    );
+    let streamed = parser.parse_line(
+        r#"{"type":"stream_event","parent_tool_use_id":"toolu_1","api_message_id":"m","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"in"}}}"#,
+    );
+    let progress = parser.parse_line(
+        r#"{"type":"system","subtype":"task_progress","task_id":"a1","tool_use_id":"toolu_1","description":"Running ls"}"#,
+    );
 
-    assert!(outputs.is_empty());
+    assert_eq!(
+        message,
+        vec![ProviderOutput::Subagent {
+            tool_use_id: "toolu_1".into(),
+            output: Box::new(ProviderOutput::AssistantMessage {
+                item_id: "m:0".into(),
+                text: "inner".into(),
+            }),
+        }]
+    );
+    assert!(prompt.is_empty());
+    assert!(streamed.is_empty());
+    assert_eq!(
+        progress,
+        vec![ProviderOutput::ToolOutput {
+            item_id: "toolu_1".into(),
+            output: "Running ls".into(),
+        }]
+    );
 }
 
 const USAGE_TURN: &str = concat!(

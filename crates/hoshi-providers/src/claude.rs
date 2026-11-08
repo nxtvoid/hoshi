@@ -179,6 +179,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             requests,
             grants: self.grants.clone(),
             access,
+            live_output,
         }))
     }
 }
@@ -188,6 +189,7 @@ struct ClaudeTurn {
     requests: Requests,
     grants: Grants,
     access: Access,
+    live_output: LiveOutput,
 }
 
 impl RunningTurn for ClaudeTurn {
@@ -205,6 +207,18 @@ impl RunningTurn for ClaudeTurn {
             .map(|session_id| (session_id, &self.grants));
         let line = claude_requests::reply(request_id, &pending, response, self.access, session);
         self.process.stdin().write_line(&line);
+    }
+
+    fn stop_subagent(&self, tool_use_id: &str) {
+        let Some(task_id) = self.live_output.agent_task(tool_use_id) else {
+            return;
+        };
+        let request = json!({
+            "type": "control_request",
+            "request_id": format!("hoshi-stop:{task_id}"),
+            "request": { "subtype": "stop_task", "task_id": task_id },
+        });
+        self.process.stdin().write_line(&request.to_string());
     }
 }
 
@@ -288,13 +302,15 @@ impl ClaudeParser {
             Some("system") => match value["subtype"].as_str() {
                 Some("task_started") => self.live_output.started(&value),
                 Some("task_notification") => self.live_output.ended(&value),
+                Some("task_progress") => {
+                    return self.subagent_progress(&value).into_iter().collect();
+                }
                 _ => {}
             },
             _ => {}
         }
-        // Subagent traffic belongs to its parent tool call; the transcript shows only the top level.
-        if !value["parent_tool_use_id"].is_null() {
-            return Vec::new();
+        if let Some(parent) = value["parent_tool_use_id"].as_str() {
+            return self.parse_subagent(parent, &value);
         }
         match value["type"].as_str() {
             Some("system") if value["subtype"] == "init" => {
@@ -445,6 +461,44 @@ impl ClaudeParser {
 }
 
 impl ClaudeParser {
+    /// A subagent's own messages and tool calls, which go to its transcript. Its prompt, sent
+    /// as a user message, is already the input of the call that started it.
+    fn parse_subagent(&mut self, parent: &str, value: &Value) -> Vec<ProviderOutput> {
+        let outputs = match value["type"].as_str() {
+            Some("assistant") => self.parse_assistant(&value["message"]),
+            Some("user") => parse_tool_results(&value["message"], &value["tool_use_result"]),
+            _ => Vec::new(),
+        };
+        outputs
+            .into_iter()
+            .filter(|output| {
+                matches!(
+                    output,
+                    ProviderOutput::AssistantMessage { .. }
+                        | ProviderOutput::Reasoning { .. }
+                        | ProviderOutput::ToolCallStarted { .. }
+                        | ProviderOutput::ToolCallCompleted { .. }
+                )
+            })
+            .map(|output| ProviderOutput::Subagent {
+                tool_use_id: parent.to_owned(),
+                output: Box::new(output),
+            })
+            .collect()
+    }
+
+    /// What a running subagent is doing, as a line that replaces the previous one.
+    fn subagent_progress(&self, value: &Value) -> Option<ProviderOutput> {
+        let task_id = value["task_id"].as_str()?;
+        if self.live_output.follows(task_id) {
+            return None;
+        }
+        Some(ProviderOutput::ToolOutput {
+            item_id: value["tool_use_id"].as_str()?.to_owned(),
+            output: value["description"].as_str()?.to_owned(),
+        })
+    }
+
     /// The task list as Claude Code saved it, once a call that changes it succeeded.
     fn changed_task_list(&mut self, message: &Value) -> Option<ProviderOutput> {
         let blocks = message["content"].as_array()?;

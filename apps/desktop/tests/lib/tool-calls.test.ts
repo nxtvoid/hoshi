@@ -7,6 +7,7 @@ import {
   reasoningPreview,
   relativePath,
   summarizeToolCalls,
+  subagentTranscriptId,
   toolName,
   toolTarget,
   withStreaming,
@@ -71,6 +72,18 @@ test('an MCP tool shows its own name and its server', () => {
     source: 'Google Drive'
   })
   expect(toolName('Bash')).toEqual({ label: 'Bash', source: null })
+})
+
+test('a subagent stands apart from the work, its transcript beside the thread', () => {
+  const rows = groupTranscript([
+    tool('a', 'Read'),
+    tool('b', 'Agent', { description: 'Count files' }),
+    tool('c', 'Grep')
+  ])
+
+  expect(rows.map((row) => row.kind)).toEqual(['work', 'item', 'work'])
+  expect(subagentTranscriptId('t', 'toolu_1')).toBe('t:toolu_1')
+  expect(subagentTranscriptId('t:toolu_1', 'toolu_2')).toBe('t:toolu_2')
 })
 
 describe('groupTranscript', () => {

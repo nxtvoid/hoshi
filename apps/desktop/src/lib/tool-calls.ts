@@ -68,8 +68,37 @@ export function toolName(name: string): {
   return { label: words(mcp[2] ?? ''), source: words(mcp[1] ?? '') }
 }
 
+/** Tools that start a subagent, shown as its own card rather than among the work. */
+const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
+
+export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
+  return (
+    item.content.kind === 'toolCall' && SUBAGENT_TOOLS.has(item.content.name)
+  )
+}
+
+/** Where a subagent's transcript is kept; mirrors `subagent_thread_id` in hoshi-core. */
+export function subagentTranscriptId(threadId: string, toolUseId: string) {
+  return `${threadId.split(':')[0]}:${toolUseId}`
+}
+
+/** What the agent asked a subagent, read from the call that started it. */
+export function subagentInput(input: string) {
+  const value = parseInput(input)
+  const text = (key: string) =>
+    typeof value?.[key] === 'string' ? (value[key] as string) : ''
+  return {
+    description: text('description'),
+    kind: text('subagent_type'),
+    prompt: text('prompt')
+  }
+}
+
 function isWork(item: TranscriptItem): item is WorkItem {
-  return item.content.kind === 'toolCall' || item.content.kind === 'reasoning'
+  return (
+    (item.content.kind === 'toolCall' || item.content.kind === 'reasoning') &&
+    !isSubagentCall(item)
+  )
 }
 
 export function isToolCall(item: TranscriptItem): item is ToolCallItem {

@@ -546,6 +546,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
         Event::ProjectRemoved { project_id } => {
             tx.execute(
                 "DELETE FROM thread_items WHERE thread_id IN
+                 (SELECT id FROM threads WHERE project_id = ?1)
+                 OR substr(thread_id, 1, instr(thread_id, ':') - 1) IN
                  (SELECT id FROM threads WHERE project_id = ?1)",
                 [project_id],
             )?;
@@ -601,7 +603,11 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             )?;
         }
         Event::ThreadDeleted { thread_id } => {
-            tx.execute("DELETE FROM thread_items WHERE thread_id = ?1", [thread_id])?;
+            tx.execute(
+                "DELETE FROM thread_items
+                 WHERE thread_id = ?1 OR substr(thread_id, 1, length(?1) + 1) = ?1 || ':'",
+                [thread_id],
+            )?;
             tx.execute(
                 "DELETE FROM pull_requests WHERE thread_id = ?1",
                 [thread_id],
@@ -1187,6 +1193,35 @@ mod tests {
                 output_omitted: false,
             }
         );
+    }
+
+    #[test]
+    fn deleting_a_thread_deletes_its_subagent_transcripts() {
+        let (mut store, mut model) = store_with_thread();
+        let events = decide(&model, send_text("m1"), NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        let inside = ProviderOutput::Subagent {
+            tool_use_id: "toolu_agent".into(),
+            output: Box::new(ProviderOutput::AssistantMessage {
+                item_id: "a".into(),
+                text: "3 files".into(),
+            }),
+        };
+        let events = record_output(&model, "t", "m1", inside, NOW);
+        commit(&mut store, &mut model, events);
+        assert_eq!(store.thread_items("t:toolu_agent").unwrap().len(), 1);
+
+        let events = decide(
+            &model,
+            Command::ThreadDelete {
+                thread_id: "t".into(),
+            },
+            NOW,
+        )
+        .unwrap();
+        commit(&mut store, &mut model, events);
+
+        assert!(store.thread_items("t:toolu_agent").unwrap().is_empty());
     }
 
     #[test]

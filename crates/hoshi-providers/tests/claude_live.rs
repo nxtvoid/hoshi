@@ -372,3 +372,93 @@ fn a_running_command_shows_its_output_before_it_ends() {
     });
     assert!(partial, "{outputs:#?}");
 }
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_subagent_reports_its_own_work() {
+    let cwd = scratch("subagent");
+    let outputs = run_answering(
+        &cwd,
+        "Use the Agent tool to launch one general-purpose subagent in the foreground that lists the files in the current directory with a shell command. Then reply with its answer.",
+        AccessMode::FullAccess,
+        |_| RequestResponse::Decision {
+            decision: ApprovalDecision::Accept,
+            feedback: None,
+        },
+    );
+
+    let agent = outputs.iter().find_map(|output| match output {
+        ProviderOutput::ToolCallStarted { item_id, name, .. } if name == "Agent" => {
+            Some(item_id.clone())
+        }
+        _ => None,
+    });
+    let agent = agent.unwrap_or_else(|| panic!("no subagent started: {outputs:#?}"));
+    let inner = outputs.iter().any(|output| {
+        matches!(output, ProviderOutput::Subagent { tool_use_id, output }
+            if *tool_use_id == agent
+                && matches!(**output, ProviderOutput::ToolCallStarted { .. }))
+    });
+    assert!(inner, "{outputs:#?}");
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_stopped_subagent_ends_and_the_turn_goes_on() {
+    let cwd = scratch("stop-subagent");
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let (sender, receiver) = mpsc::channel();
+    let request = TurnRequest {
+        cwd: cwd.to_string_lossy().into_owned(),
+        prompt: "Use the Agent tool to launch one general-purpose subagent in the foreground whose only job is to run this exact shell command in the foreground: `1..40 | % { Start-Sleep 1; \"tick $_\" }` (or `for i in $(seq 40); do sleep 1; echo tick $i; done`) and then report done. When it returns, reply with one word.".into(),
+        attachments: Vec::new(),
+        resume_session_id: None,
+        model: None,
+        effort: Some(hoshi_core::Effort::Low),
+        fast_mode: false,
+        ultracode: false,
+        access_mode: AccessMode::FullAccess,
+        plan_mode: false,
+    };
+    let sink = Box::new(move |output| {
+        let _ = sender.send(output);
+    });
+    let turn = adapter.start_turn(request, sink).unwrap();
+    let started = std::time::Instant::now();
+    let mut agent: Option<String> = None;
+    let mut stopped = false;
+    let mut outputs = Vec::new();
+    loop {
+        let Ok(output) = receiver.recv_timeout(std::time::Duration::from_millis(200)) else {
+            if let (Some(agent), false) = (&agent, stopped)
+                && started.elapsed() > std::time::Duration::from_secs(12)
+            {
+                turn.stop_subagent(agent);
+                stopped = true;
+            }
+            continue;
+        };
+        if let ProviderOutput::ToolCallStarted { item_id, name, .. } = &output
+            && name == "Agent"
+        {
+            agent = Some(item_id.clone());
+        }
+        let done = matches!(output, ProviderOutput::TurnCompleted { .. });
+        outputs.push(output);
+        if done {
+            break;
+        }
+    }
+
+    assert!(stopped, "the subagent never started: {outputs:#?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(40),
+        "the turn waited for the subagent: {outputs:#?}"
+    );
+    assert!(matches!(
+        outputs.last(),
+        Some(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed
+        })
+    ));
+}

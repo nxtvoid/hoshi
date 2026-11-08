@@ -84,6 +84,12 @@ pub enum Command {
     TurnInterrupt {
         thread_id: String,
     },
+    /// Stops one subagent of the running turn, which goes on without it. `tool_use_id` is
+    /// the call that started the subagent.
+    SubagentStop {
+        thread_id: String,
+        tool_use_id: String,
+    },
     /// Answers what the agent asked mid-turn; the engine passes it on to the agent.
     RequestRespond {
         thread_id: String,
@@ -857,6 +863,15 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             Ok(Vec::new())
         }
+        Command::SubagentStop { thread_id, .. } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            if thread.active_turn_id.is_none() {
+                return Err(CommandError::ThreadNotWorking { thread_id });
+            }
+            Ok(Vec::new())
+        }
         Command::RequestRespond {
             thread_id,
             request_id,
@@ -1050,6 +1065,10 @@ pub fn record_output(
         | ProviderOutput::ContextUsage(_)
         | ProviderOutput::UsageLimits(_)
         | ProviderOutput::WorkingDirectory { .. } => Vec::new(),
+        ProviderOutput::Subagent {
+            tool_use_id,
+            output,
+        } => record_subagent(&subagent_thread_id(thread_id, &tool_use_id), *output, now),
         ProviderOutput::TaskList { tasks } => {
             vec![item(
                 format!("{turn_id}:tasks"),
@@ -1111,6 +1130,62 @@ pub fn record_output(
             });
             events
         }
+    }
+}
+
+/// Where a subagent's own transcript is kept: beside its thread's, under the id of the
+/// call that started it. Subagents of subagents sit beside it too.
+pub fn subagent_thread_id(thread_id: &str, tool_use_id: &str) -> String {
+    let root = thread_id.split(':').next().unwrap_or(thread_id);
+    format!("{root}:{tool_use_id}")
+}
+
+/// A subagent's messages, reasoning and tool calls, in its own transcript. It has no turn
+/// or status of its own: the call that started it stands for it in the thread.
+fn record_subagent(transcript: &str, output: ProviderOutput, now: &str) -> Vec<Event> {
+    let item = |id: String, content: ItemContent| Event::ItemAdded {
+        item: ThreadItem {
+            id,
+            thread_id: transcript.to_owned(),
+            created_at: now.to_owned(),
+            content,
+        },
+    };
+    match output {
+        ProviderOutput::AssistantMessage { item_id, text } => {
+            vec![item(item_id, ItemContent::AssistantMessage { text })]
+        }
+        ProviderOutput::Reasoning { item_id, text } => {
+            vec![item(item_id, ItemContent::Reasoning { text })]
+        }
+        ProviderOutput::ToolCallStarted {
+            item_id,
+            name,
+            input,
+        } => vec![item(
+            item_id,
+            ItemContent::ToolCall {
+                name,
+                input,
+                output: None,
+                is_error: false,
+                detail: None,
+                output_omitted: false,
+            },
+        )],
+        ProviderOutput::ToolCallCompleted {
+            item_id,
+            output,
+            is_error,
+            detail,
+        } => vec![Event::ToolCallCompleted {
+            thread_id: transcript.to_owned(),
+            item_id,
+            output,
+            is_error,
+            detail,
+        }],
+        _ => Vec::new(),
     }
 }
 
@@ -2105,6 +2180,51 @@ const a = 1
         assert_eq!(output.map(|text| text.len()), Some(200));
         assert!(output_omitted);
         assert_eq!(call("short").summary(), call("short"));
+    }
+
+    #[test]
+    fn a_subagent_writes_its_own_transcript_beside_the_thread() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "count the files")).unwrap();
+        let nested = |tool_use_id: &str, output| ProviderOutput::Subagent {
+            tool_use_id: tool_use_id.into(),
+            output: Box::new(output),
+        };
+
+        let started = record(
+            &mut model,
+            "m1",
+            nested(
+                "toolu_agent",
+                ProviderOutput::ToolCallStarted {
+                    item_id: "toolu_ls".into(),
+                    name: "Bash".into(),
+                    input: "{}".into(),
+                },
+            ),
+        );
+        let ignored = record(
+            &mut model,
+            "m1",
+            nested(
+                "toolu_agent",
+                ProviderOutput::TextDelta {
+                    item_id: "x".into(),
+                    delta: "hi".into(),
+                },
+            ),
+        );
+
+        assert!(matches!(
+            started.as_slice(),
+            [Event::ItemAdded { item }] if item.thread_id == "t:toolu_agent" && item.id == "toolu_ls"
+        ));
+        assert!(ignored.is_empty());
+        assert_eq!(
+            subagent_thread_id("t:toolu_agent", "toolu_inner"),
+            "t:toolu_inner"
+        );
+        assert_eq!(model.thread("t").unwrap().status, ThreadStatus::Working);
     }
 
     #[cfg(windows)]

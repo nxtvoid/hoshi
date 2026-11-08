@@ -21,7 +21,7 @@ pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
     decide, record_branch, record_output, record_title, record_worktree, record_worktree_left,
-    turn_failed,
+    subagent_thread_id, turn_failed,
 };
 pub use project::{FolderListing, Project, RemoteRepository};
 pub use provider::ProviderOutput;

@@ -579,5 +579,9 @@
   "error_request_not_pending": "That request no longer waits for an answer.",
   "task_list_progress": "Tasks {done} of {total}",
   "worked_for": "Worked for {duration}",
-  "worked": "Worked"
+  "worked": "Worked",
+  "subagent": "Subagent",
+  "subagent_prompt": "What it was asked",
+  "subagent_no_activity": "No activity yet",
+  "subagent_stop": "Stop this subagent"
 }

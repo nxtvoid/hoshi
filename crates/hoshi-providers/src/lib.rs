@@ -139,6 +139,10 @@ pub trait RunningTurn: Send {
     /// Answers a request the turn reported with `ProviderOutput::RequestOpened`. Ignored
     /// once the agent no longer waits for it.
     fn respond(&self, request_id: &str, response: &RequestResponse);
+
+    /// Stops the subagent that call `tool_use_id` started; the turn goes on. Ignored when it
+    /// already ended or the provider can't stop one alone.
+    fn stop_subagent(&self, _tool_use_id: &str) {}
 }
 
 /// Truncates long tool inputs and outputs so a transcript stays light.

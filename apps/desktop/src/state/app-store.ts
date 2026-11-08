@@ -19,6 +19,7 @@ import { useSidebarStore } from './sidebar-store'
 import { loadedSettings } from './settings-store'
 import { useLastSelectionStore } from './last-selection-store'
 import { useTranscriptStore } from './transcript-store'
+import { useSubagentStore } from './subagent-store'
 import { usePullRequestStore } from './pull-request-store'
 import { useDraftStore } from './draft-store'
 import { useUsageStore } from './usage-store'
@@ -89,6 +90,8 @@ type AppState = {
     attachments?: MessageAttachment[]
   ) => Promise<boolean>
   interruptTurn: () => Promise<void>
+  /** Stops one subagent of the selected thread's turn; `toolUseId` is the call that started it. */
+  stopSubagent: (toolUseId: string) => Promise<void>
   /** Answers what the selected thread's agent asked; `false` when it was refused. */
   respondToRequest: (
     requestId: string,
@@ -316,6 +319,13 @@ export const useAppStore = create<AppState>()((set, get) => ({
     if (!threadId) return
     await dispatch({ type: 'turnInterrupt', threadId }).catch(reportError)
   },
+  stopSubagent: async (toolUseId) => {
+    const threadId = get().selectedThreadId
+    if (!threadId) return
+    await dispatch({ type: 'subagentStop', threadId, toolUseId }).catch(
+      reportError
+    )
+  },
   respondToRequest: async (requestId, response) => {
     const threadId = get().selectedThreadId
     if (!threadId) return false
@@ -334,6 +344,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
 function receive({ sequence, event }: EventEnvelope) {
   if (sequence <= useAppStore.getState().sequence) return
   useTranscriptStore.getState().applyEvent(event)
+  useSubagentStore.getState().applyEvent(event)
   if (event.type === 'threadDeleted') {
     useDraftStore.getState().save(event.threadId, null)
   }

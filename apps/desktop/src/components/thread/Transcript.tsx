@@ -6,6 +6,7 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import type { TurnFailure } from '@/bindings/TurnFailure'
 import { Markdown } from '@/components/markdown/Markdown'
 import { RequestRow } from './RequestRow'
+import { SubagentRow } from './SubagentRow'
 import { TaskListRow } from './TaskListRow'
 import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
@@ -39,6 +40,7 @@ import {
   activeEntry,
   foldTurns,
   groupTranscript,
+  isSubagentCall,
   isToolCall,
   reasoningPreview,
   summarizeToolCalls,
@@ -303,7 +305,16 @@ const Item = memo(function Item({
         <ReasoningRow text={content.text} streaming={item.streaming === true} />
       )
     case 'toolCall':
-      return <ToolCallRow item={{ ...item, content }} cwd={cwd} />
+      return isSubagentCall(item) ? (
+        <SubagentRow
+          item={item}
+          renderRows={(rows) => (
+            <Rows rows={rows} cwd={cwd} liveTasks={undefined} />
+          )}
+        />
+      ) : (
+        <ToolCallRow item={{ ...item, content }} cwd={cwd} />
+      )
     case 'turnFailed':
       return (
         <p className='text-destructive text-sm'>

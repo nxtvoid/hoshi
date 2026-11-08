@@ -47,6 +47,12 @@ pub enum ProviderOutput {
         is_error: bool,
         detail: Option<ToolDetail>,
     },
+    /// What a subagent did, which the agent's `tool_use_id` call started. Only its messages,
+    /// reasoning and tool calls are kept.
+    Subagent {
+        tool_use_id: String,
+        output: Box<ProviderOutput>,
+    },
     /// The agent's whole task list, after it changed.
     TaskList {
         tasks: Vec<Task>,
