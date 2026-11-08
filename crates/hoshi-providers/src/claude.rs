@@ -428,7 +428,9 @@ impl ClaudeParser {
             Some("stream_event") => self.parse_stream_event(&value),
             Some("assistant") => self.parse_assistant(&value["message"]),
             Some("user") => {
-                let mut outputs = self.hold_async_agents(&value, parse_tool_results(&value));
+                let interrupted = self.queue.state().interrupted;
+                let results = parse_tool_results(&value, interrupted);
+                let mut outputs = self.hold_async_agents(&value, results);
                 outputs.extend(self.worktree_move(&value));
                 outputs.extend(self.changed_task_list(&value["message"]));
                 outputs
@@ -627,7 +629,7 @@ impl ClaudeParser {
     fn parse_subagent(&mut self, parent: &str, value: &Value) -> Vec<ProviderOutput> {
         let outputs = match value["type"].as_str() {
             Some("assistant") => self.parse_assistant(&value["message"]),
-            Some("user") => parse_tool_results(value),
+            Some("user") => parse_tool_results(value, self.queue.state().interrupted),
             _ => Vec::new(),
         };
         outputs
@@ -750,8 +752,9 @@ impl ClaudeParser {
 const STOPPED_MARKER: &str = "[Request interrupted by user";
 
 /// The results a `user` frame carries. A frame with a single result also carries the CLI's
-/// own reading of it, in `tool_use_result`.
-fn parse_tool_results(frame: &Value) -> Vec<ProviderOutput> {
+/// own reading of it, in `tool_use_result`. Once the user asked the turn to stop, a call that
+/// fails was stopped.
+fn parse_tool_results(frame: &Value, interrupted: bool) -> Vec<ProviderOutput> {
     let structured = &frame["tool_use_result"];
     let Some(blocks) = frame["message"]["content"].as_array() else {
         return Vec::new();
@@ -790,7 +793,7 @@ fn parse_tool_results(frame: &Value) -> Vec<ProviderOutput> {
             };
             let is_error = block["is_error"].as_bool().unwrap_or(false);
             let stopped = cancelled(&item_id)
-                || (is_error && output.trim_start().starts_with(STOPPED_MARKER));
+                || (is_error && (interrupted || output.trim_start().starts_with(STOPPED_MARKER)));
             let mut outputs = vec![ProviderOutput::ToolCallCompleted {
                 item_id: item_id.clone(),
                 output: truncate(&output, TOOL_OUTPUT_MAX_CHARS),
@@ -862,6 +865,20 @@ mod tests {
                 ProviderOutput::ToolCallCompleted { is_error: true, .. },
                 ProviderOutput::ToolCallStopped { item_id }
             ] if item_id == "toolu_1"
+        ));
+    }
+
+    #[test]
+    fn a_call_that_fails_once_the_turn_was_asked_to_stop_was_stopped() {
+        let mut parser = ClaudeParser::new(None);
+        parser.queue.state().interrupted = true;
+        let frame = json!({ "type": "user", "parent_tool_use_id": null, "message": { "role": "user",
+            "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "is_error": true,
+                          "content": "The user doesn't want to proceed with this tool use." }] } });
+
+        assert!(matches!(
+            parser.parse_line(&frame.to_string()).last(),
+            Some(ProviderOutput::ToolCallStopped { .. })
         ));
     }
 

@@ -1173,13 +1173,18 @@ pub fn record_output(
                         item_id: call.item_id.clone(),
                     }),
             );
-            if let TurnOutcome::Failed { reason } = &outcome {
-                events.push(item(
+            match &outcome {
+                TurnOutcome::Failed { reason } => events.push(item(
                     format!("{turn_id}:failed"),
                     ItemContent::TurnFailed {
                         reason: reason.clone(),
                     },
-                ));
+                )),
+                TurnOutcome::Interrupted => events.push(item(
+                    format!("{turn_id}:interrupted"),
+                    ItemContent::TurnInterrupted,
+                )),
+                TurnOutcome::Completed => {}
             }
             events.push(Event::TurnCompleted {
                 thread_id: thread_id.to_owned(),

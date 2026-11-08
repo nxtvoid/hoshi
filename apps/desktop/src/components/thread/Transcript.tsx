@@ -13,6 +13,8 @@ import { useWholeToolCall } from './use-whole-tool-call'
 import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
 import { useTranscriptStore } from '@/state/transcript-store'
+import { useAppStore } from '@/state/app-store'
+import { useStoppingStore } from '@/state/stopping-store'
 import {
   memo,
   useEffect,
@@ -172,7 +174,9 @@ export function Transcript({
           {hasOlder ? <li ref={olderRef} aria-hidden className='h-px' /> : null}
           <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
           {working ? (
-            <li className='text-muted-foreground text-sm'>{m.working()}</li>
+            <li>
+              <TurnStatus />
+            </li>
           ) : null}
         </ol>
       </div>
@@ -321,6 +325,21 @@ const Item = memo(function Item({
         <p className='text-destructive text-sm'>
           {failureMessage(content.reason)}
         </p>
+      )
+    case 'turnInterrupted':
+      return (
+        <div className='text-muted-foreground flex items-center gap-3 text-xs'>
+          <span className='bg-border h-px flex-1' />
+          <span className='flex items-center gap-1.5'>
+            <HugeiconsIcon
+              icon={StopCircleIcon}
+              strokeWidth={2}
+              className='size-3.5'
+            />
+            {m.turn_interrupted()}
+          </span>
+          <span className='bg-border h-px flex-1' />
+        </div>
       )
     case 'approval':
     case 'questions':
@@ -627,6 +646,49 @@ function LiveOutput({ text, framed }: { text: string; framed: boolean }) {
     >
       {text}
     </pre>
+  )
+}
+
+/** How long the running turn has worked, or how long it has been stopping. */
+function TurnStatus() {
+  const turnId = useAppStore(
+    (state) =>
+      state.threads.find((thread) => thread.id === state.selectedThreadId)
+        ?.activeTurnId
+  )
+  const threadId = useAppStore((state) => state.selectedThreadId)
+  const stoppingSince = useStoppingStore((state) =>
+    threadId ? state.since[threadId] : undefined
+  )
+  const startedAt = useTranscriptStore((state) => {
+    const asked = state.items.find((item) => item.id === turnId)
+    return asked ? Date.parse(asked.createdAt) : undefined
+  })
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const since = stoppingSince ?? startedAt
+  const duration =
+    since === undefined || Number.isNaN(since)
+      ? null
+      : formatDuration(now - since, getLocale())
+  const stopping = stoppingSince !== undefined
+  return (
+    <span className='text-muted-foreground flex items-center gap-2 text-sm'>
+      <HugeiconsIcon
+        icon={stopping ? StopCircleIcon : Loading03Icon}
+        strokeWidth={2}
+        className={cn('size-4 shrink-0', !stopping && 'animate-spin')}
+      />
+      {stopping
+        ? m.stopping_for({ duration: duration ?? '' })
+        : duration === null
+          ? m.working()
+          : m.working_for({ duration })}
+    </span>
   )
 }
 

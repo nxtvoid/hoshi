@@ -23,7 +23,7 @@ outputOmitted: boolean,
 /**
  * Its turn ended before it did, so it has no output.
  */
-interrupted: boolean, } | { "kind": "turnFailed", reason: TurnFailure, } | { "kind": "approval", 
+interrupted: boolean, } | { "kind": "turnFailed", reason: TurnFailure, } | { "kind": "turnInterrupted" } | { "kind": "approval", 
 /**
  * The call in the transcript; `None` when a subagent made it.
  */

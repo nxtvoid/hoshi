@@ -187,6 +187,8 @@ pub enum ItemContent {
     TurnFailed {
         reason: TurnFailure,
     },
+    /// The turn stopped before it finished, as the user asked or as the app closed.
+    TurnInterrupted,
     /// A tool call held back until the user approves it.
     Approval {
         /// The call in the transcript; `None` when a subagent made it.

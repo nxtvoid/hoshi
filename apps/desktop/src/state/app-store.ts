@@ -20,6 +20,7 @@ import { loadedSettings } from './settings-store'
 import { useLastSelectionStore } from './last-selection-store'
 import { useTranscriptStore } from './transcript-store'
 import { useSubagentStore } from './subagent-store'
+import { useStoppingStore } from './stopping-store'
 import { usePullRequestStore } from './pull-request-store'
 import { useDraftStore } from './draft-store'
 import { useUsageStore } from './usage-store'
@@ -317,7 +318,11 @@ export const useAppStore = create<AppState>()((set, get) => ({
   interruptTurn: async () => {
     const threadId = get().selectedThreadId
     if (!threadId) return
-    await dispatch({ type: 'turnInterrupt', threadId }).catch(reportError)
+    useStoppingStore.getState().start(threadId)
+    await dispatch({ type: 'turnInterrupt', threadId }).catch((error) => {
+      useStoppingStore.getState().end(threadId)
+      reportError(error)
+    })
   },
   stopSubagent: async (toolUseId) => {
     const threadId = get().selectedThreadId
@@ -345,6 +350,9 @@ function receive({ sequence, event }: EventEnvelope) {
   if (sequence <= useAppStore.getState().sequence) return
   useTranscriptStore.getState().applyEvent(event)
   useSubagentStore.getState().applyEvent(event)
+  if (event.type === 'turnCompleted' || event.type === 'threadDeleted') {
+    useStoppingStore.getState().end(event.threadId)
+  }
   if (event.type === 'threadDeleted') {
     useDraftStore.getState().save(event.threadId, null)
   }

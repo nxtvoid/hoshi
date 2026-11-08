@@ -596,4 +596,19 @@ fn an_interrupted_turn_winds_down_on_its_own() {
         since_interrupt < std::time::Duration::from_secs(4),
         "it took {since_interrupt:?}, so it was killed"
     );
+    let stopped: Vec<_> = outputs
+        .iter()
+        .filter_map(|output| match output {
+            ProviderOutput::ToolCallStopped { item_id } => Some(item_id),
+            _ => None,
+        })
+        .collect();
+    let failed_unstopped = outputs.iter().any(|output| {
+        matches!(output, ProviderOutput::ToolCallCompleted { item_id, is_error: true, .. }
+            if !stopped.contains(&item_id))
+    });
+    assert!(
+        !failed_unstopped,
+        "a call cut by the stop shows as failed: {outputs:#?}"
+    );
 }

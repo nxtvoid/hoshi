@@ -1594,12 +1594,6 @@ impl State {
             workspace.record_tool_input(input);
         }
         let completed = matches!(output, ProviderOutput::TurnCompleted { .. });
-        let stopped = matches!(
-            output,
-            ProviderOutput::TurnCompleted {
-                outcome: TurnOutcome::Interrupted
-            }
-        );
         let now = now();
         let events = record_output(&self.model, thread_id, turn_id, output, &now);
         if let Err(error) = self.commit(&events, &now) {
@@ -1618,7 +1612,7 @@ impl State {
             // The agent may have created a worktree or switched branches.
             let check = workspace.map(|workspace| self.worktree_check(thread_id, workspace));
             refresh_after_turn(self.this.clone(), thread_id.to_owned(), check);
-            self.start_next_queued(thread_id, stopped);
+            self.start_next_queued(thread_id);
         }
     }
 
@@ -1639,17 +1633,13 @@ impl State {
             .push_back(message);
         // The turn may have ended between the message's events and this call.
         if !self.turns.contains_key(thread_id) {
-            self.start_next_queued(thread_id, false);
+            self.start_next_queued(thread_id);
         }
     }
 
-    /// Starts the oldest message waiting for its own turn. A turn the user stopped drops them:
-    /// they were sent to the turn just stopped.
-    fn start_next_queued(&mut self, thread_id: &str, stopped: bool) {
-        if stopped {
-            self.queued.remove(thread_id);
-            return;
-        }
+    /// Starts the oldest message waiting for its own turn, such as one sent while the user
+    /// stopped the running turn.
+    fn start_next_queued(&mut self, thread_id: &str) {
         let Some(message) = self.queued.get_mut(thread_id).and_then(VecDeque::pop_front) else {
             return;
         };
@@ -3212,7 +3202,7 @@ mod tests {
     }
 
     #[test]
-    fn stopping_a_turn_drops_the_messages_waiting_for_it() {
+    fn a_message_sent_while_a_turn_stops_starts_the_next_one() {
         let harness = Harness::in_memory("stopped-queue", Vec::new());
         let adapter = adapter(None);
         harness.engine.set_adapter(Some(adapter.clone()));
@@ -3225,10 +3215,13 @@ mod tests {
                 thread_id: "t".into(),
             })
             .unwrap();
-        harness.wait_for_turn_end();
+        harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } if turn_id == "m2" => Some(()),
+            _ => None,
+        });
 
-        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
-        assert_eq!(harness.thread("t").active_turn_id, None);
+        assert_eq!(harness.thread("t").active_turn_id.as_deref(), Some("m2"));
+        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
     }
 
     #[test]
