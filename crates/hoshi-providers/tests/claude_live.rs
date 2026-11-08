@@ -469,3 +469,40 @@ fn a_stopped_subagent_ends_and_the_turn_goes_on() {
         })
     ));
 }
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_turn_waits_for_a_background_subagent() {
+    let cwd = scratch("background-agent");
+    let outputs = run_answering(
+        &cwd,
+        "Launch one general-purpose subagent with the Agent tool IN THE BACKGROUND (run_in_background: true) whose job is to run the shell command `1..5 | % { Start-Sleep 1; \"tick $_\" }` (or `for i in 1 2 3 4 5; do sleep 1; echo tick $i; done`) and report the last line. Then reply 'launched' and end your turn.",
+        AccessMode::FullAccess,
+        |_| RequestResponse::Decision {
+            decision: ApprovalDecision::Accept,
+            feedback: None,
+        },
+    );
+
+    let agent = outputs.iter().find_map(|output| match output {
+        ProviderOutput::ToolCallStarted { item_id, name, .. } if name == "Agent" => {
+            Some(item_id.clone())
+        }
+        _ => None,
+    });
+    let agent = agent.unwrap_or_else(|| panic!("no subagent: {outputs:#?}"));
+    let closed = outputs.iter().position(|output| {
+        matches!(output, ProviderOutput::ToolCallCompleted { item_id, output, .. }
+            if *item_id == agent && !output.contains("Async agent launched"))
+    });
+    let closed = closed.unwrap_or_else(|| panic!("the subagent's call never closed: {outputs:#?}"));
+    let completions = outputs
+        .iter()
+        .filter(|output| matches!(output, ProviderOutput::TurnCompleted { .. }))
+        .count();
+    assert_eq!(completions, 1, "{outputs:#?}");
+    let answered_after = outputs[closed..]
+        .iter()
+        .any(|output| matches!(output, ProviderOutput::AssistantMessage { .. }));
+    assert!(answered_after, "{outputs:#?}");
+}

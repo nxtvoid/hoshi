@@ -260,6 +260,12 @@ pub struct ClaudeParser {
     /// Calls that change the task list Claude Code keeps on disk, by id.
     task_calls: HashSet<String>,
     live_output: LiveOutput,
+    /// Subagents running in the background, by task id. A turn that ends while they run
+    /// is not over: Claude Code goes on once they finish, in a turn of its own.
+    background_agents: HashSet<String>,
+    /// Calls that started a subagent in the background, whose result comes with the
+    /// subagent's end rather than at once.
+    async_agents: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -301,7 +307,20 @@ impl ClaudeParser {
             }
             Some("system") => match value["subtype"].as_str() {
                 Some("task_started") => self.live_output.started(&value),
-                Some("task_notification") => self.live_output.ended(&value),
+                Some("task_notification") => {
+                    self.live_output.ended(&value);
+                    return self.background_agent_ended(&value);
+                }
+                Some("background_tasks_changed") => {
+                    self.background_agents = value["tasks"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|task| task["task_type"] == "local_agent")
+                        .filter_map(|task| task["task_id"].as_str().map(str::to_owned))
+                        .collect();
+                    return Vec::new();
+                }
                 Some("task_progress") => {
                     return self.subagent_progress(&value).into_iter().collect();
                 }
@@ -335,7 +354,7 @@ impl ClaudeParser {
             Some("stream_event") => self.parse_stream_event(&value),
             Some("assistant") => self.parse_assistant(&value["message"]),
             Some("user") => {
-                let mut outputs = parse_tool_results(&value);
+                let mut outputs = self.hold_async_agents(&value, parse_tool_results(&value));
                 outputs.extend(self.worktree_move(&value));
                 outputs.extend(self.changed_task_list(&value["message"]));
                 outputs
@@ -346,9 +365,11 @@ impl ClaudeParser {
                 .collect(),
             Some("result") => {
                 let mut outputs: Vec<_> = self.reported_window(&value).into_iter().collect();
-                outputs.push(ProviderOutput::TurnCompleted {
-                    outcome: parse_result(&value),
-                });
+                if self.background_agents.is_empty() {
+                    outputs.push(ProviderOutput::TurnCompleted {
+                        outcome: parse_result(&value),
+                    });
+                }
                 outputs
             }
             _ => Vec::new(),
@@ -461,6 +482,55 @@ impl ClaudeParser {
 }
 
 impl ClaudeParser {
+    /// A call that started a subagent in the background answers only that it started; the
+    /// call stays open until the subagent ends.
+    fn hold_async_agents(
+        &mut self,
+        frame: &Value,
+        outputs: Vec<ProviderOutput>,
+    ) -> Vec<ProviderOutput> {
+        let result = &frame["tool_use_result"];
+        if result["isAsync"] != true && result["status"] != "async_launched" {
+            return outputs;
+        }
+        outputs
+            .into_iter()
+            .filter(|output| match output {
+                ProviderOutput::ToolCallCompleted { item_id, .. } => {
+                    self.async_agents.insert(item_id.clone());
+                    false
+                }
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// The end of a subagent started in the background closes the call that started it.
+    fn background_agent_ended(&mut self, value: &Value) -> Vec<ProviderOutput> {
+        let Some(item_id) = value["tool_use_id"].as_str() else {
+            return Vec::new();
+        };
+        if !self.async_agents.remove(item_id) {
+            return Vec::new();
+        }
+        let status = value["status"].as_str().unwrap_or_default();
+        let mut outputs = vec![ProviderOutput::ToolCallCompleted {
+            item_id: item_id.to_owned(),
+            output: truncate(
+                value["summary"].as_str().unwrap_or_default(),
+                TOOL_OUTPUT_MAX_CHARS,
+            ),
+            is_error: status == "failed",
+            detail: None,
+        }];
+        if status == "stopped" {
+            outputs.push(ProviderOutput::ToolCallStopped {
+                item_id: item_id.to_owned(),
+            });
+        }
+        outputs
+    }
+
     /// A subagent's own messages and tool calls, which go to its transcript. Its prompt, sent
     /// as a user message, is already the input of the call that started it.
     fn parse_subagent(&mut self, parent: &str, value: &Value) -> Vec<ProviderOutput> {
@@ -718,6 +788,54 @@ mod tests {
             outputs.last(),
             Some(ProviderOutput::Subagent { output, .. })
                 if matches!(**output, ProviderOutput::ToolCallStopped { .. })
+        ));
+    }
+
+    #[test]
+    fn a_turn_waits_for_its_background_subagents() {
+        let mut parser = ClaudeParser::new(None);
+        let lines = [
+            json!({ "type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{ "task_id": "a1", "task_type": "local_agent" }] }),
+            json!({ "type": "user", "parent_tool_use_id": null,
+                "tool_use_result": { "isAsync": true, "status": "async_launched" },
+                "message": { "role": "user", "content": [{ "type": "tool_result",
+                    "tool_use_id": "toolu_agent", "content": "Async agent launched successfully." }] } }),
+            json!({ "type": "result", "subtype": "success", "is_error": false, "result": "launched" }),
+        ];
+        let early: Vec<_> = lines
+            .iter()
+            .flat_map(|line| parser.parse_line(&line.to_string()))
+            .collect();
+        assert!(early.is_empty(), "{early:?}");
+
+        let ended = parser.parse_line(
+            &json!({ "type": "system", "subtype": "task_notification", "task_id": "a1",
+                "tool_use_id": "toolu_agent", "status": "completed", "summary": "tick 6" })
+            .to_string(),
+        );
+        assert_eq!(
+            ended,
+            vec![ProviderOutput::ToolCallCompleted {
+                item_id: "toolu_agent".into(),
+                output: "tick 6".into(),
+                is_error: false,
+                detail: None,
+            }]
+        );
+        parser.parse_line(
+            &json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] })
+                .to_string(),
+        );
+        let continued = parser.parse_line(
+            &json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done" })
+                .to_string(),
+        );
+        assert!(matches!(
+            continued.as_slice(),
+            [ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed
+            }]
         ));
     }
 
