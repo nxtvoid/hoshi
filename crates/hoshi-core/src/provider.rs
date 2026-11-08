@@ -67,6 +67,11 @@ pub enum ProviderOutput {
     RequestWithdrawn {
         request_id: String,
     },
+    /// The user stopped the call before it finished, as a subagent stopped on its own.
+    /// Follows its `ToolCallCompleted`.
+    ToolCallStopped {
+        item_id: String,
+    },
     /// After each model call of the thread's own agent, not its subagents.
     ContextUsage(ContextUsage),
     /// Plan limits the provider reported mid-turn; may cover only some windows.

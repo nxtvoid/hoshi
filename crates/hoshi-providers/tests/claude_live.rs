@@ -451,6 +451,13 @@ fn a_stopped_subagent_ends_and_the_turn_goes_on() {
     }
 
     assert!(stopped, "the subagent never started: {outputs:#?}");
+    let agent = agent.unwrap_or_default();
+    assert!(
+        outputs.iter().any(
+            |output| matches!(output, ProviderOutput::ToolCallStopped { item_id } if *item_id == agent)
+        ),
+        "the subagent's call was not marked stopped: {outputs:#?}"
+    );
     assert!(
         started.elapsed() < std::time::Duration::from_secs(40),
         "the turn waited for the subagent: {outputs:#?}"

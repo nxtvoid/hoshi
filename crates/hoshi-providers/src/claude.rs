@@ -335,7 +335,7 @@ impl ClaudeParser {
             Some("stream_event") => self.parse_stream_event(&value),
             Some("assistant") => self.parse_assistant(&value["message"]),
             Some("user") => {
-                let mut outputs = parse_tool_results(&value["message"], &value["tool_use_result"]);
+                let mut outputs = parse_tool_results(&value);
                 outputs.extend(self.worktree_move(&value));
                 outputs.extend(self.changed_task_list(&value["message"]));
                 outputs
@@ -466,7 +466,7 @@ impl ClaudeParser {
     fn parse_subagent(&mut self, parent: &str, value: &Value) -> Vec<ProviderOutput> {
         let outputs = match value["type"].as_str() {
             Some("assistant") => self.parse_assistant(&value["message"]),
-            Some("user") => parse_tool_results(&value["message"], &value["tool_use_result"]),
+            Some("user") => parse_tool_results(value),
             _ => Vec::new(),
         };
         outputs
@@ -478,6 +478,7 @@ impl ClaudeParser {
                         | ProviderOutput::Reasoning { .. }
                         | ProviderOutput::ToolCallStarted { .. }
                         | ProviderOutput::ToolCallCompleted { .. }
+                        | ProviderOutput::ToolCallStopped { .. }
                 )
             })
             .map(|output| ProviderOutput::Subagent {
@@ -584,9 +585,22 @@ impl ClaudeParser {
 
 /// `structured` is the CLI's own reading of the result, sent along when the message holds a
 /// single one.
-fn parse_tool_results(message: &Value, structured: &Value) -> Vec<ProviderOutput> {
-    let Some(blocks) = message["content"].as_array() else {
+/// What Claude Code answers in place of a call the user stopped.
+const STOPPED_MARKER: &str = "[Request interrupted by user";
+
+/// The results a `user` frame carries. A frame with a single result also carries the CLI's
+/// own reading of it, in `tool_use_result`.
+fn parse_tool_results(frame: &Value) -> Vec<ProviderOutput> {
+    let structured = &frame["tool_use_result"];
+    let Some(blocks) = frame["message"]["content"].as_array() else {
         return Vec::new();
+    };
+    let cancelled = |id: &str| {
+        frame["tool_result_meta"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|meta| meta["id"] == id && meta["non_execution_kind"] == "cancelled")
     };
     let results = blocks
         .iter()
@@ -600,8 +614,10 @@ fn parse_tool_results(message: &Value, structured: &Value) -> Vec<ProviderOutput
     blocks
         .iter()
         .filter(|block| block["type"] == "tool_result")
-        .filter_map(|block| {
-            let item_id = block["tool_use_id"].as_str()?.to_owned();
+        .flat_map(|block| {
+            let Some(item_id) = block["tool_use_id"].as_str().map(str::to_owned) else {
+                return Vec::new();
+            };
             let output = match &block["content"] {
                 Value::String(text) => text.clone(),
                 Value::Array(parts) => parts
@@ -612,12 +628,18 @@ fn parse_tool_results(message: &Value, structured: &Value) -> Vec<ProviderOutput
                 _ => String::new(),
             };
             let is_error = block["is_error"].as_bool().unwrap_or(false);
-            Some(ProviderOutput::ToolCallCompleted {
-                item_id,
+            let stopped = cancelled(&item_id)
+                || (is_error && output.trim_start().starts_with(STOPPED_MARKER));
+            let mut outputs = vec![ProviderOutput::ToolCallCompleted {
+                item_id: item_id.clone(),
                 output: truncate(&output, TOOL_OUTPUT_MAX_CHARS),
                 is_error,
                 detail: detail.clone().filter(|_| !is_error),
-            })
+            }];
+            if stopped {
+                outputs.push(ProviderOutput::ToolCallStopped { item_id });
+            }
+            outputs
         })
         .collect()
 }
@@ -662,6 +684,41 @@ mod tests {
         assert_eq!(access.permission_mode(), "bypassPermissions");
         access.plan_mode = true;
         assert_eq!(access.permission_mode(), "plan");
+    }
+
+    #[test]
+    fn a_stopped_call_completes_and_then_stops() {
+        let mut parser = ClaudeParser::new(None);
+        let frame = json!({ "type": "user", "parent_tool_use_id": null, "message": { "role": "user",
+            "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "is_error": true,
+                          "content": "[Request interrupted by user for tool use]" }] } });
+
+        let outputs = parser.parse_line(&frame.to_string());
+
+        assert!(matches!(
+            outputs.as_slice(),
+            [
+                ProviderOutput::ToolCallCompleted { is_error: true, .. },
+                ProviderOutput::ToolCallStopped { item_id }
+            ] if item_id == "toolu_1"
+        ));
+    }
+
+    #[test]
+    fn a_call_the_cli_cancelled_stops_too() {
+        let mut parser = ClaudeParser::new(None);
+        let frame = json!({ "type": "user", "parent_tool_use_id": "toolu_agent",
+            "tool_result_meta": [{ "id": "toolu_1", "non_execution_kind": "cancelled" }],
+            "message": { "role": "user",
+            "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "" }] } });
+
+        let outputs = parser.parse_line(&frame.to_string());
+
+        assert!(matches!(
+            outputs.last(),
+            Some(ProviderOutput::Subagent { output, .. })
+                if matches!(**output, ProviderOutput::ToolCallStopped { .. })
+        ));
     }
 
     #[test]

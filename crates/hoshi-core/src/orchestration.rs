@@ -1152,6 +1152,10 @@ pub fn record_output(
             is_error,
             detail,
         }],
+        ProviderOutput::ToolCallStopped { item_id } => vec![Event::ToolCallInterrupted {
+            thread_id: thread_id.to_owned(),
+            item_id,
+        }],
         ProviderOutput::TurnCompleted { outcome } => {
             let mut events: Vec<_> = model
                 .pending_requests(thread_id)
@@ -1243,6 +1247,10 @@ fn record_subagent(transcript: &str, output: ProviderOutput, now: &str) -> Vec<E
             output,
             is_error,
             detail,
+        }],
+        ProviderOutput::ToolCallStopped { item_id } => vec![Event::ToolCallInterrupted {
+            thread_id: transcript.to_owned(),
+            item_id,
         }],
         _ => Vec::new(),
     }

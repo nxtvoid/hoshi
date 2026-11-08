@@ -124,7 +124,7 @@ export function SubagentRow({
             transcriptId={subagentTranscriptId(item.threadId, item.id)}
             renderRows={renderRows}
           />
-          {whole.output ? (
+          {whole.output && !interrupted ? (
             <div className='border-border/70 border-t pt-3'>
               <Markdown text={whole.output} className='text-sm' />
             </div>

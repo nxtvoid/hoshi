@@ -354,7 +354,8 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
 
   const calls = entries.filter(isToolCall)
   const active = activeEntry(entries)
-  const failed = !active && (calls.at(-1)?.content.isError ?? false)
+  const last = calls.at(-1)?.content
+  const failed = !active && last?.isError === true && !last.interrupted
   const actions = new Set(calls.map((call) => toolAction(call.content.name)))
   const [onlyAction] = actions
   const icon =
