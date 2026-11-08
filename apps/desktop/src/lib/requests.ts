@@ -10,24 +10,15 @@ export type QuestionsContent = Extract<ItemContent, { kind: 'questions' }>
 export type ApprovalContent = Extract<ItemContent, { kind: 'approval' }>
 
 /**
- * Approvals by the tool call they held back, for calls the transcript shows: those show on
- * the call's own row rather than as rows of their own.
+ * Approvals by the tool call they held back, which shows them on its own row: in the
+ * thread's transcript, or a subagent's.
  */
 export function approvalsByCall(
   items: ThreadItem[]
 ): Map<string, ApprovalContent> {
-  const calls = new Set(
-    items
-      .filter((item) => item.content.kind === 'toolCall')
-      .map((item) => item.id)
-  )
   const approvals = new Map<string, ApprovalContent>()
   for (const { content } of items) {
-    if (
-      content.kind === 'approval' &&
-      content.toolCallId !== null &&
-      calls.has(content.toolCallId)
-    ) {
+    if (content.kind === 'approval' && content.toolCallId !== null) {
       approvals.set(content.toolCallId, content)
     }
   }

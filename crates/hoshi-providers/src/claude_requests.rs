@@ -183,10 +183,7 @@ pub(crate) fn receive(
             feedback: None,
         },
         _ => ItemContent::Approval {
-            // A subagent's calls are not in the transcript.
-            tool_call_id: tool_use_id
-                .clone()
-                .filter(|_| request["agent_id"].is_null()),
+            tool_call_id: tool_use_id.clone(),
             tool_name: tool_name.clone(),
             input: truncate(&input.to_string(), TOOL_INPUT_MAX_CHARS),
             reason: request["decision_reason"]

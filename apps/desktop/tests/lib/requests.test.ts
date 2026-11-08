@@ -58,36 +58,25 @@ const questions: QuestionsContent = {
 }
 
 describe('approvalsByCall', () => {
-  test('pairs an approval with the call it held back, when the call is shown', () => {
-    const call: ThreadItem = {
-      id: 'toolu_1',
-      threadId: 't',
-      createdAt: '',
-      content: {
-        kind: 'toolCall',
-        name: 'Bash',
-        input: '{}',
-        output: null,
-        isError: false,
-        detail: null,
-        outputOmitted: false,
-        interrupted: false
-      }
-    }
+  test('pairs each approval with the call it held back, a subagent’s too', () => {
     const held = approval('a', 'resolved')
     const onCall = {
       ...held,
       content: { ...held.content, toolCallId: 'toolu_1' }
     } as ThreadItem
-    const elsewhere = {
+    const inSubagent = {
       ...held,
       id: 'b',
       content: { ...held.content, toolCallId: 'toolu_9' }
     } as ThreadItem
 
-    const approvals = approvalsByCall([call, onCall, elsewhere])
+    const approvals = approvalsByCall([
+      onCall,
+      inSubagent,
+      approval('c', 'resolved')
+    ])
 
-    expect([...approvals.keys()]).toEqual(['toolu_1'])
+    expect([...approvals.keys()]).toEqual(['toolu_1', 'toolu_9'])
   })
 })
 

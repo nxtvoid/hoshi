@@ -191,7 +191,8 @@ pub enum ItemContent {
     TurnInterrupted,
     /// A tool call held back until the user approves it.
     Approval {
-        /// The call in the transcript; `None` when a subagent made it.
+        /// The call it held back, in the thread's transcript or a subagent's; `None` in
+        /// approvals recorded before calls were kept.
         tool_call_id: Option<String>,
         tool_name: String,
         /// The tool input as JSON, truncated for display.

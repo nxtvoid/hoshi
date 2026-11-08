@@ -50,7 +50,7 @@ export function ApprovalBadge({ callId }: { callId: string }) {
           className={cn('size-3.5', tone)}
         />
       </TooltipTrigger>
-      <TooltipContent>
+      <TooltipContent sideOffset={10}>
         {label}
         {approval.feedback ? (
           <span className='block opacity-80'>{approval.feedback}</span>

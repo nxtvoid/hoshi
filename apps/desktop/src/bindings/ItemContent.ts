@@ -25,7 +25,8 @@ outputOmitted: boolean,
  */
 interrupted: boolean, } | { "kind": "turnFailed", reason: TurnFailure, } | { "kind": "turnInterrupted" } | { "kind": "approval", 
 /**
- * The call in the transcript; `None` when a subagent made it.
+ * The call it held back, in the thread's transcript or a subagent's; `None` in
+ * approvals recorded before calls were kept.
  */
 toolCallId: string | null, toolName: string, 
 /**
