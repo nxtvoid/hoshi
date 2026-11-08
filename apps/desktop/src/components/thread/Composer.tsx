@@ -406,7 +406,11 @@ export function Composer({
           />
         ) : null}
         {request ? (
-          <RequestPanel request={request} cwd={cwd} />
+          <RequestPanel
+            request={request}
+            cwd={cwd}
+            onKeepPlanning={() => editorRef.current?.focus()}
+          />
         ) : threadId ? (
           <>
             <DelegatedRequestPanel threadId={threadId} cwd={cwd} />

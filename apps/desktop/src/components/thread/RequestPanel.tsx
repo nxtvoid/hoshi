@@ -127,7 +127,7 @@ export function RequestPanel({
 }: {
   request: RequestItem
   cwd: string | null
-  /** Instead of sending the plan back at once, as where the user can say what to change. */
+  /** Instead of sending the plan back at once: takes the user where they say what to change. */
   onKeepPlanning?: () => void
 }) {
   const { content } = request
