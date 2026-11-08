@@ -2,14 +2,20 @@ import { m } from '@/paraglide/messages'
 import { Input } from '@hoshi/ui/components/input'
 import { Switch } from '@hoshi/ui/components/switch'
 import { useSettingsStore } from '@/state/settings-store'
+import { ThreadTitlesSection } from './ThreadTitlesSection'
+import { ProviderVersionRow } from './ProviderVersionRow'
 import { SettingsPage, SettingsRow, SettingsSection } from './SettingsLayout'
 
 export function ProvidersSection() {
   const claudeCode = useSettingsStore(
     (state) => state.settings?.providers.claudeCode
   )
+  const planModeEnabled = useSettingsStore(
+    (state) => state.settings?.planModeEnabled ?? false
+  )
   const error = useSettingsStore((state) => state.error)
   const updateClaudeCode = useSettingsStore((state) => state.updateClaudeCode)
+  const updateSettings = useSettingsStore((state) => state.updateSettings)
 
   if (!claudeCode) {
     return (
@@ -61,7 +67,25 @@ export function ProvidersSection() {
             />
           }
         />
+        {claudeCode.enabled ? <ProviderVersionRow /> : null}
       </SettingsSection>
+      <SettingsSection title={m.settings_composer()}>
+        <SettingsRow
+          title={m.plan_mode_setting()}
+          description={m.plan_mode_setting_description()}
+          htmlFor='plan-mode-enabled'
+          control={
+            <Switch
+              id='plan-mode-enabled'
+              checked={planModeEnabled}
+              onCheckedChange={(enabled) =>
+                updateSettings({ planModeEnabled: enabled })
+              }
+            />
+          }
+        />
+      </SettingsSection>
+      <ThreadTitlesSection />
       {error === 'save' ? (
         <p className='text-destructive px-4 text-xs'>
           {m.settings_save_failed()}

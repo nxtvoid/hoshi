@@ -1,7 +1,8 @@
-use hoshi_core::{ProviderOutput, TurnOutcome};
+use hoshi_core::{ContextUsage, ProviderOutput, TurnOutcome, UsageWindowKind};
 use hoshi_providers::ClaudeParser;
 
 const READ_TURN: &str = include_str!("fixtures/claude-read-turn.jsonl");
+const THINKING_TURN: &str = include_str!("fixtures/claude-thinking-turn.jsonl");
 
 fn parse(fixture: &str) -> Vec<ProviderOutput> {
     let mut parser = ClaudeParser::default();
@@ -15,7 +16,15 @@ fn parse(fixture: &str) -> Vec<ProviderOutput> {
 fn a_turn_with_a_tool_call_becomes_session_tool_and_reply() {
     let outputs: Vec<_> = parse(READ_TURN)
         .into_iter()
-        .filter(|output| !matches!(output, ProviderOutput::TextDelta { .. }))
+        .filter(|output| {
+            !matches!(
+                output,
+                ProviderOutput::TextDelta { .. }
+                    | ProviderOutput::ReasoningDelta { .. }
+                    | ProviderOutput::ContextUsage(_)
+                    | ProviderOutput::UsageLimits(_)
+            )
+        })
         .collect();
 
     let [
@@ -70,6 +79,40 @@ fn streamed_deltas_add_up_to_the_final_message_with_the_same_id() {
 }
 
 #[test]
+fn reasoning_streams_and_then_arrives_whole_before_the_reply() {
+    let outputs = parse(THINKING_TURN);
+    let Some((reasoning_id, reasoning)) = outputs.iter().find_map(|output| match output {
+        ProviderOutput::Reasoning { item_id, text } => Some((item_id, text)),
+        _ => None,
+    }) else {
+        panic!("no reasoning: {outputs:#?}");
+    };
+
+    let streamed: String = outputs
+        .iter()
+        .filter_map(|output| match output {
+            ProviderOutput::ReasoningDelta { item_id, delta } if item_id == reasoning_id => {
+                Some(delta.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let reasoning_at = outputs
+        .iter()
+        .position(|output| matches!(output, ProviderOutput::Reasoning { .. }));
+    let reply_at = outputs
+        .iter()
+        .position(|output| matches!(output, ProviderOutput::AssistantMessage { .. }));
+
+    assert_eq!(&streamed, reasoning);
+    assert!(reasoning_at < reply_at, "{outputs:#?}");
+    assert!(!outputs.iter().any(|output| matches!(
+        output,
+        ProviderOutput::TextDelta { item_id, .. } if item_id == reasoning_id
+    )));
+}
+
+#[test]
 fn an_error_result_fails_the_turn() {
     let mut parser = ClaudeParser::default();
 
@@ -94,4 +137,79 @@ fn subagent_traffic_is_ignored() {
     );
 
     assert!(outputs.is_empty());
+}
+
+const USAGE_TURN: &str = concat!(
+    r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-haiku-5-5","id":"msg_1","usage":{"input_tokens":2,"cache_creation_input_tokens":5096,"cache_read_input_tokens":3969,"output_tokens":4}}},"parent_tool_use_id":null,"api_message_id":"msg_1"}"#,
+    "
+",
+    r#"{"type":"stream_event","event":{"type":"message_start","message":{"model":"claude-sonnet-5-5","id":"msg_sub","usage":{"input_tokens":90000,"output_tokens":1}}},"parent_tool_use_id":"toolu_1","api_message_id":"msg_sub"}"#,
+    "
+",
+    r#"{"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":2,"cache_creation_input_tokens":5096,"cache_read_input_tokens":3969,"output_tokens":40}},"parent_tool_use_id":null,"api_message_id":"msg_1"}"#,
+    "
+",
+    r#"{"type":"result","subtype":"success","is_error":false,"modelUsage":{"claude-haiku-5-5":{"contextWindow":1000000},"claude-sonnet-5-5":{"contextWindow":200000}}}"#,
+);
+
+fn context_usages(parser: &mut ClaudeParser, fixture: &str) -> Vec<ContextUsage> {
+    fixture
+        .lines()
+        .flat_map(|line| parser.parse_line(line))
+        .filter_map(|output| match output {
+            ProviderOutput::ContextUsage(usage) => Some(usage),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn context_usage_counts_cached_input_and_output_of_the_agent_only() {
+    let usages = context_usages(&mut ClaudeParser::new(None), USAGE_TURN);
+
+    assert_eq!(
+        usages,
+        [
+            ContextUsage {
+                used_tokens: 9_071,
+                max_tokens: None
+            },
+            ContextUsage {
+                used_tokens: 9_107,
+                max_tokens: None
+            },
+            ContextUsage {
+                used_tokens: 9_107,
+                max_tokens: Some(1_000_000)
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_window_known_up_front_is_not_reported_again() {
+    let usages = context_usages(&mut ClaudeParser::new(Some(1_000_000)), USAGE_TURN);
+
+    assert_eq!(usages.len(), 2);
+    assert!(
+        usages
+            .iter()
+            .all(|usage| usage.max_tokens == Some(1_000_000))
+    );
+}
+
+#[test]
+fn a_rate_limit_event_reports_the_plan_limits() {
+    let mut parser = ClaudeParser::default();
+
+    let outputs = parser.parse_line(
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","unifiedWindows":{"five_hour":{"utilization":0.34,"resetsAt":1794099000},"seven_day":{"utilization":0.16,"resetsAt":1794492000}}}}"#,
+    );
+
+    let [ProviderOutput::UsageLimits(limits)] = outputs.as_slice() else {
+        panic!("unexpected outputs: {outputs:#?}");
+    };
+    assert_eq!(limits.windows[0].kind, UsageWindowKind::Session);
+    assert_eq!(limits.windows[0].used_percent, 34);
+    assert_eq!(limits.windows[1].kind, UsageWindowKind::Weekly);
 }

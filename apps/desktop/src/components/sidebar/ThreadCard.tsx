@@ -1,94 +1,85 @@
-import { memo } from 'react'
-import { m } from '@/paraglide/messages'
-import { getLocale } from '@/paraglide/runtime'
-import type { Thread } from '@/bindings/Thread'
+import type { ReactElement, ReactNode } from 'react'
+import { ThreadSummary } from './ThreadSummary'
 import { useAppStore } from '@/state/app-store'
-import { HugeiconsIcon } from '@hugeicons/react'
-import { cn, formatRelativeTime } from '@hoshi/utils'
-import { GitBranchIcon } from '@hugeicons/core-free-icons'
-import type { ThreadStatus } from '@/bindings/ThreadStatus'
 import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger
-} from '@hoshi/ui/components/context-menu'
+  createHoverCardHandle,
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger
+} from '@hoshi/ui/components/hover-card'
 
-const STATUS: Record<
-  Exclude<ThreadStatus, 'idle'>,
-  { label: () => string; dot: string }
-> = {
-  working: { label: m.status_working, dot: 'bg-status-working' },
-  waitingForInput: {
-    label: m.status_waiting_for_input,
-    dot: 'bg-status-waiting'
+/** Resting this long on a row shows its thread's summary. */
+const OPEN_DELAY_MS = 400
+
+/**
+ * One card for every thread row: once open, moving to another row moves the card there and
+ * shows that thread at once.
+ */
+const threadCard = createHoverCardHandle<string>()
+
+/** A pull request pill has its own card; the thread's stays closed while the pointer is on one. */
+let overPullRequest = false
+
+export const pullRequestPillHover = {
+  onPointerEnter: () => {
+    overPullRequest = true
+    threadCard.close()
   },
-  error: { label: m.status_error, dot: 'bg-status-error' }
+  onPointerLeave: () => {
+    overPullRequest = false
+  }
 }
 
-type ThreadCardProps = {
-  thread: Thread
-  selected: boolean
-  onSelect: (threadId: string) => void
-}
-
-export const ThreadCard = memo(function ThreadCard({
-  thread,
-  selected,
-  onSelect
-}: ThreadCardProps) {
-  const deleteThread = useAppStore((state) => state.deleteThread)
-  const status = thread.status === 'idle' ? null : STATUS[thread.status]
-
+/** The card itself, rendered once next to the rows that open it. */
+export function ThreadCardHost() {
   return (
-    <ContextMenu>
-      <ContextMenuTrigger
-        render={
-          <button
-            type='button'
-            aria-current={selected || undefined}
-            onClick={() => onSelect(thread.id)}
-            className={cn(
-              'border-sidebar-border hover:bg-sidebar-accent/60 focus-visible:ring-sidebar-ring flex w-full flex-col gap-1 rounded-lg border px-2.5 py-2 text-left outline-none focus-visible:ring-2',
-              selected && 'border-sidebar-foreground/40 bg-sidebar-accent'
-            )}
-          />
-        }
-      >
-        <span className='truncate text-sm font-medium'>
-          {thread.title || m.untitled_thread()}
-        </span>
-        <span className='text-muted-foreground flex min-w-0 items-center gap-2 text-xs'>
-          {status ? (
-            <span className='text-sidebar-foreground flex shrink-0 items-center gap-1.5'>
-              <span className={cn('size-1.5 rounded-full', status.dot)} />
-              {status.label()}
-            </span>
-          ) : (
-            <span className='shrink-0 tabular-nums'>
-              {formatRelativeTime(thread.updatedAt, new Date(), getLocale())}
-            </span>
-          )}
-          {thread.branch ? (
-            <span className='flex min-w-0 items-center gap-1'>
-              <HugeiconsIcon
-                icon={GitBranchIcon}
-                strokeWidth={2}
-                className='size-3 shrink-0'
-              />
-              <span className='truncate'>{thread.branch}</span>
-            </span>
-          ) : null}
-        </span>
-      </ContextMenuTrigger>
-      <ContextMenuContent>
-        <ContextMenuItem
-          variant='destructive'
-          onClick={() => deleteThread(thread.id)}
+    <HoverCard
+      handle={threadCard}
+      onOpenChange={(open, details) => {
+        if (open && overPullRequest) details.cancel()
+      }}
+    >
+      {({ payload }) => (
+        <HoverCardContent
+          side='right'
+          align='start'
+          sideOffset={12}
+          className='w-64 p-3'
+          positionerClassName='transition-[top,left,transform] duration-150 ease-out data-instant:transition-none'
         >
-          {m.delete_thread()}
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
+          {payload ? <ThreadCardBody threadId={payload} /> : null}
+        </HoverCardContent>
+      )}
+    </HoverCard>
   )
-})
+}
+
+function ThreadCardBody({ threadId }: { threadId: string }) {
+  const thread = useAppStore((state) =>
+    state.threads.find((candidate) => candidate.id === threadId)
+  )
+  return thread ? <ThreadSummary thread={thread} /> : null
+}
+
+/** Makes `render` open the shared card for `threadId`. */
+export function ThreadCardTrigger({
+  threadId,
+  render,
+  children
+}: {
+  threadId: string
+  render: ReactElement
+  children: ReactNode
+}) {
+  return (
+    <HoverCardTrigger
+      handle={threadCard}
+      payload={threadId}
+      delay={OPEN_DELAY_MS}
+      closeDelay={100}
+      render={render}
+    >
+      {children}
+    </HoverCardTrigger>
+  )
+}

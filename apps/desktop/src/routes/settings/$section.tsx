@@ -7,7 +7,7 @@ export const Route = createFileRoute('/settings/$section')({
     if (!isSettingsSection(params.section)) {
       throw redirect({
         to: '/settings/$section',
-        params: { section: 'appearance' },
+        params: { section: 'general' },
         replace: true
       })
     }

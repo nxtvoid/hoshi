@@ -14,8 +14,14 @@ pub fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
 
 #[tauri::command]
 pub fn update_settings(app: AppHandle, settings: AppSettings) -> Result<AppSettings, String> {
-    save(&settings_path(&app)?, &settings).map_err(|error| error.to_string())?;
-    crate::orchestration::engine(&app).set_adapter(crate::orchestration::adapter_for(&settings));
+    let path = settings_path(&app)?;
+    let previous = load(&path);
+    save(&path, &settings).map_err(|error| error.to_string())?;
+    let engine = crate::orchestration::engine(&app);
+    if previous.providers != settings.providers {
+        engine.set_adapter(crate::orchestration::adapter_for(&settings));
+    }
+    engine.set_thread_titles(settings.thread_titles.clone());
     Ok(settings)
 }
 
@@ -65,7 +71,10 @@ pub fn save(path: &Path, settings: &AppSettings) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hoshi_core::{ClaudeCodeSettings, ProviderSettings};
+    use hoshi_core::{
+        ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
+        ThreadTitleSettings,
+    };
 
     fn settings_file(name: &str) -> PathBuf {
         let dir =
@@ -126,6 +135,22 @@ mod tests {
                     enabled: false,
                     binary_path: Some("C:\\tools\\claude.exe".into()),
                 },
+            },
+            plan_mode_enabled: true,
+            favorite_models: vec![FavoriteModel {
+                provider: "claudeCode".into(),
+                model: "claude-opus-5-5".into(),
+            }],
+            thread_titles: ThreadTitleSettings {
+                generate: false,
+                model: Some("haiku".into()),
+                instructions: "Use Spanish.".into(),
+            },
+            general: GeneralSettings {
+                startup_view: StartupView::LastProject,
+                inactive_after_days: 7,
+                notifications: false,
+                projects_folder: Some("D:\\code".into()),
             },
         };
 

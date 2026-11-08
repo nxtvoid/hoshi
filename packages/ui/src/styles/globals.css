@@ -22,6 +22,7 @@
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
   --ring: oklch(0.708 0 0);
@@ -39,24 +40,74 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
-  --header: oklch(0.975 0.008 85);
-  --header-glow: oklch(0.85 0.12 80 / 0.35);
-  --header-star: oklch(0.6 0.08 75 / 0.55);
+  --header: oklch(0.975 0 0);
+  --header-glow: oklch(0.85 0 0 / 0.35);
+  --header-star: oklch(0.55 0 0 / 0.55);
   --status-working: oklch(0.62 0.16 240);
   --status-waiting: oklch(0.72 0.16 70);
+  --draft: oklch(0.62 0.14 75);
+  --draft-surface: oklch(0.8 0.12 85 / 0.14);
   --status-error: oklch(0.6 0.21 25);
+  --status-done: oklch(0.6 0.15 155);
+  --provider-claude: oklch(0.64 0.14 40);
+  --forge-bitbucket: oklch(0.63 0.19 259);
+  --forge-bitbucket-deep: oklch(0.46 0.19 260);
+  --favorite: oklch(0.78 0.15 80);
+  --link: oklch(0.55 0.17 252);
+  --pr-open: oklch(0.55 0.15 150);
+  --pr-merged: oklch(0.55 0.2 300);
+  --diff-added: oklch(0.94 0.06 150);
+  --diff-removed: oklch(0.94 0.05 25);
   --window-close: oklch(0.58 0.22 27);
   --backdrop: oklch(0.2 0 0 / 0.25);
+  --terminal-selection: oklch(0.708 0 0 / 0.35);
   --window-close-foreground: oklch(1 0 0);
+  --file-blue: #1a85d4;
+  --file-cyan: #1ca1c7;
+  --file-teal: #17a5af;
+  --file-green: #199f43;
+  --file-yellow: #d5a910;
+  --file-orange: #d47628;
+  --file-red: #d52c36;
+  --file-pink: #d32a61;
+  --file-purple: #693acf;
+  --file-magenta: #a631be;
+  --file-gray: #84848a;
+  --scrollbar: oklch(0.145 0 0 / 0.18);
+  --scrollbar-hover: oklch(0.145 0 0 / 0.34);
 }
 
 @theme inline {
   --color-status-working: var(--status-working);
   --color-status-waiting: var(--status-waiting);
+  --color-draft: var(--draft);
+  --color-draft-surface: var(--draft-surface);
   --color-status-error: var(--status-error);
+  --color-status-done: var(--status-done);
+  --animate-signal: signal 2.4s ease-out infinite;
+  --color-provider-claude: var(--provider-claude);
+  --color-favorite: var(--favorite);
+  --color-link: var(--link);
+  --color-pr-open: var(--pr-open);
+  --color-pr-merged: var(--pr-merged);
+  --color-diff-added: var(--diff-added);
+  --color-diff-removed: var(--diff-removed);
   --color-window-close: var(--window-close);
   --color-backdrop: var(--backdrop);
   --color-window-close-foreground: var(--window-close-foreground);
+  --color-file-blue: var(--file-blue);
+  --color-file-cyan: var(--file-cyan);
+  --color-file-teal: var(--file-teal);
+  --color-file-green: var(--file-green);
+  --color-file-yellow: var(--file-yellow);
+  --color-file-orange: var(--file-orange);
+  --color-file-red: var(--file-red);
+  --color-file-pink: var(--file-pink);
+  --color-file-purple: var(--file-purple);
+  --color-file-magenta: var(--file-magenta);
+  --color-file-gray: var(--file-gray);
+  --color-scrollbar: var(--scrollbar);
+  --color-scrollbar-hover: var(--scrollbar-hover);
   --font-heading: var(--font-sans);
   --font-sans: "Geist Variable", sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
@@ -76,6 +127,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -116,6 +168,7 @@
   --accent: oklch(0.269 0 0);
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
@@ -132,15 +185,41 @@
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.556 0 0);
-  --header: oklch(0.19 0.006 80);
-  --header-glow: oklch(0.78 0.14 75 / 0.16);
-  --header-star: oklch(0.92 0.07 85 / 0.8);
+  --header: oklch(0.19 0 0);
+  --header-glow: oklch(0.85 0 0 / 0.08);
+  --header-star: oklch(0.95 0 0 / 0.8);
   --status-working: oklch(0.75 0.13 235);
   --status-waiting: oklch(0.83 0.15 80);
+  --draft: oklch(0.82 0.14 85);
+  --draft-surface: oklch(0.75 0.12 80 / 0.1);
   --status-error: oklch(0.7 0.18 22);
+  --status-done: oklch(0.76 0.15 155);
+  --provider-claude: oklch(0.72 0.13 42);
+  --forge-bitbucket: oklch(0.63 0.19 259);
+  --forge-bitbucket-deep: oklch(0.46 0.19 260);
+  --favorite: oklch(0.83 0.15 85);
+  --link: oklch(0.74 0.13 245);
+  --pr-open: oklch(0.74 0.15 150);
+  --pr-merged: oklch(0.72 0.16 300);
+  --diff-added: oklch(0.35 0.08 150 / 0.45);
+  --diff-removed: oklch(0.35 0.09 25 / 0.45);
   --window-close: oklch(0.58 0.22 27);
   --backdrop: oklch(0 0 0 / 0.5);
+  --terminal-selection: oklch(0.556 0 0 / 0.45);
   --window-close-foreground: oklch(1 0 0);
+  --file-blue: #69b1ff;
+  --file-cyan: #68cdf2;
+  --file-teal: #64d1db;
+  --file-green: #5ecc71;
+  --file-yellow: #ffd452;
+  --file-orange: #ffa359;
+  --file-red: #ff6762;
+  --file-pink: #ff678d;
+  --file-purple: #9d6afb;
+  --file-magenta: #d568ea;
+  --file-gray: #adadb1;
+  --scrollbar: oklch(0.985 0 0 / 0.16);
+  --scrollbar-hover: oklch(0.985 0 0 / 0.3);
 }
 
 @layer base {
@@ -153,6 +232,32 @@
   html {
     @apply font-sans;
   }
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+  /* A thin pill on a clear track, in every scrolling area of the app. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-button {
+    display: none;
+  }
+  ::-webkit-scrollbar-thumb {
+    min-height: 24px;
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-color: var(--scrollbar);
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-hover);
+  }
 }
 @utility bg-starfield {
   background-color: var(--header);
@@ -164,4 +269,15 @@
     radial-gradient(1px 1px at 22% 52%, var(--header-star), transparent),
     radial-gradient(1.5px 1.5px at 79% 38%, var(--header-star), transparent),
     radial-gradient(90% 160% at 100% 0%, var(--header-glow), transparent 70%);
+}
+
+/* A ring in `--signal` that grows from an element and fades, for things that call for attention. */
+@keyframes signal {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--signal) 60%, transparent);
+  }
+  70%,
+  100% {
+    box-shadow: 0 0 0 5px color-mix(in oklab, var(--signal) 0%, transparent);
+  }
 }

@@ -7,11 +7,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+base64.workspace = true
 chrono.workspace = true
 dunce.workspace = true
 hoshi-core.workspace = true
+hoshi-forge.workspace = true
 hoshi-providers.workspace = true
 hoshi-store.workspace = true
+ignore.workspace = true
+keyring.workspace = true
+notify.workspace = true
+portable-pty.workspace = true
 
 [lints]
 workspace = true

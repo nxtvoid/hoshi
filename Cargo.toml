@@ -11,6 +11,7 @@ publish = false
 [workspace.dependencies]
 hoshi-core = { path = "crates/hoshi-core" }
 hoshi-engine = { path = "crates/hoshi-engine" }
+hoshi-forge = { path = "crates/hoshi-forge" }
 hoshi-providers = { path = "crates/hoshi-providers" }
 hoshi-store = { path = "crates/hoshi-store" }
 
@@ -18,8 +19,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ts-rs = "12"
 thiserror = "2"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 dunce = "1"
+ignore = "0.4"
+portable-pty = "0.9"
+notify = "8"
+ureq = "3"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 tauri-plugin-dialog = "2"
 

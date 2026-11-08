@@ -1,19 +1,29 @@
+import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
-import type { Effort } from '@/bindings/Effort'
+import { useSettingsStore } from '@/state/settings-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Button } from '@hoshi/ui/components/button'
+import type { AccessMode } from '@/bindings/AccessMode'
 import {
-  ArrowDown01Icon,
-  ComputerIcon,
-  GitForkIcon
-} from '@hugeicons/core-free-icons'
-import {
-  CLAUDE_MODELS,
+  type AccessChoice,
   type DraftWorkspace,
-  EFFORTS,
   useComposerStore
 } from '@/state/composer-store'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from '@hoshi/ui/components/tooltip'
+import {
+  AiMagicIcon,
+  ArrowDown01Icon,
+  ComputerIcon,
+  GitForkIcon,
+  PencilEdit02Icon,
+  SquareUnlock02Icon,
+  TaskEdit01Icon
+} from '@hugeicons/core-free-icons'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,86 +31,8 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@hoshi/ui/components/dropdown-menu'
-
-/** Radio values can't be null, so "use the provider default" is this. */
-const DEFAULT = 'default'
-
-const EFFORT_LABELS: Record<Effort, () => string> = {
-  low: m.effort_low,
-  medium: m.effort_medium,
-  high: m.effort_high,
-  xhigh: m.effort_xhigh,
-  max: m.effort_max
-}
-
-export function ModelMenu() {
-  const thread = useAppStore((state) =>
-    state.threads.find((candidate) => candidate.id === state.selectedThreadId)
-  )
-  const draftModel = useComposerStore((state) => state.model)
-  const draftEffort = useComposerStore((state) => state.effort)
-  const setModel = useAppStore((state) => state.setModel)
-  const model = thread ? thread.model : draftModel
-  const effort = thread ? thread.effort : draftEffort
-  const modelLabel = CLAUDE_MODELS.find(
-    (option) => option.value === model
-  )?.label
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        render={<Button variant='ghost' size='xs' className='-mr-1.5' />}
-      >
-        <span className='text-foreground font-medium'>{m.claude_code()}</span>
-        {modelLabel ? <span>{modelLabel}</span> : null}
-        {effort ? <span>{EFFORT_LABELS[effort]()}</span> : null}
-        <HugeiconsIcon icon={ArrowDown01Icon} strokeWidth={2} />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align='end' side='top' className='w-44'>
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>{m.model_label()}</DropdownMenuLabel>
-          <DropdownMenuRadioGroup
-            value={model ?? DEFAULT}
-            onValueChange={(value: string) =>
-              void setModel(value === DEFAULT ? null : value, effort)
-            }
-          >
-            <DropdownMenuRadioItem value={DEFAULT}>
-              {m.provider_default()}
-            </DropdownMenuRadioItem>
-            {CLAUDE_MODELS.map(({ value, label }) => (
-              <DropdownMenuRadioItem key={value} value={value}>
-                {label}
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuGroup>
-          <DropdownMenuLabel>{m.effort_label()}</DropdownMenuLabel>
-          <DropdownMenuRadioGroup
-            value={effort ?? DEFAULT}
-            onValueChange={(value: string) =>
-              void setModel(model, value === DEFAULT ? null : (value as Effort))
-            }
-          >
-            <DropdownMenuRadioItem value={DEFAULT}>
-              {m.provider_default()}
-            </DropdownMenuRadioItem>
-            {EFFORTS.map((value) => (
-              <DropdownMenuRadioItem key={value} value={value}>
-                {EFFORT_LABELS[value]()}
-              </DropdownMenuRadioItem>
-            ))}
-          </DropdownMenuRadioGroup>
-        </DropdownMenuGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
 
 const WORKSPACES = [
   { value: 'local', label: m.workspace_local, icon: ComputerIcon },
@@ -138,5 +70,114 @@ export function WorkspaceMenu() {
         </DropdownMenuGroup>
       </DropdownMenuContent>
     </DropdownMenu>
+  )
+}
+
+const ACCESS_MODES = [
+  {
+    value: 'acceptEdits',
+    label: m.access_accept_edits,
+    description: m.access_accept_edits_description,
+    icon: PencilEdit02Icon
+  },
+  {
+    value: 'auto',
+    label: m.access_auto,
+    description: m.access_auto_description,
+    icon: AiMagicIcon
+  },
+  {
+    value: 'fullAccess',
+    label: m.access_full,
+    description: m.access_full_description,
+    icon: SquareUnlock02Icon
+  }
+] as const
+
+export function useAccess(): [
+  AccessChoice,
+  (change: Partial<AccessChoice>) => void
+] {
+  const thread = useAppStore((state) =>
+    state.threads.find((candidate) => candidate.id === state.selectedThreadId)
+  )
+  const draftAccessMode = useComposerStore((state) => state.accessMode)
+  const draftPlanMode = useComposerStore((state) => state.planMode)
+  const setAccess = useAppStore((state) => state.setAccess)
+  const choice: AccessChoice = thread
+    ? { accessMode: thread.accessMode, planMode: thread.planMode }
+    : { accessMode: draftAccessMode, planMode: draftPlanMode }
+  return [choice, (change) => void setAccess({ ...choice, ...change })]
+}
+
+/** What the agent may do without asking, from the next turn on. */
+export function AccessMenu() {
+  const [choice, update] = useAccess()
+  const current =
+    ACCESS_MODES.find((option) => option.value === choice.accessMode) ??
+    ACCESS_MODES[0]
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger render={<Button variant='ghost' size='xs' />}>
+        <HugeiconsIcon icon={current.icon} strokeWidth={2} />
+        {current.label()}
+        <HugeiconsIcon icon={ArrowDown01Icon} strokeWidth={2} />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align='end' side='top' className='w-72'>
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>{m.access_label()}</DropdownMenuLabel>
+          <DropdownMenuRadioGroup
+            value={choice.accessMode}
+            onValueChange={(accessMode: AccessMode) => update({ accessMode })}
+          >
+            {ACCESS_MODES.map(({ value, label, description, icon }) => (
+              <DropdownMenuRadioItem
+                key={value}
+                value={value}
+                className='items-start py-1.5'
+              >
+                <HugeiconsIcon icon={icon} strokeWidth={2} className='mt-0.5' />
+                <span className='flex min-w-0 flex-col'>
+                  {label()}
+                  <span className='text-muted-foreground text-xs'>
+                    {description()}
+                  </span>
+                </span>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+        </DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/** Hidden unless turned on in settings, but kept while a thread is still planning. */
+export function PlanToggle() {
+  const [choice, update] = useAccess()
+  const enabled = useSettingsStore(
+    (state) => state.settings?.planModeEnabled ?? false
+  )
+  if (!enabled && !choice.planMode) return null
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant='ghost'
+            size='xs'
+            aria-pressed={choice.planMode}
+            onClick={() => update({ planMode: !choice.planMode })}
+            className={cn(choice.planMode && 'bg-accent text-foreground')}
+          />
+        }
+      >
+        <HugeiconsIcon icon={TaskEdit01Icon} strokeWidth={2} />
+        {m.plan_mode()}
+      </TooltipTrigger>
+      <TooltipContent>{m.plan_mode_description()}</TooltipContent>
+    </Tooltip>
   )
 }

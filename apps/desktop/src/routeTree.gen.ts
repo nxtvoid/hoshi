@@ -10,11 +10,17 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as UsageRouteImport } from './routes/usage'
 import { Route as SettingsSectionRouteImport } from './routes/settings/$section'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const UsageRoute = UsageRouteImport.update({
+  id: '/usage',
+  path: '/usage',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SettingsSectionRoute = SettingsSectionRouteImport.update({
@@ -25,27 +31,31 @@ const SettingsSectionRoute = SettingsSectionRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/usage': typeof UsageRoute
   '/settings/$section': typeof SettingsSectionRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/usage': typeof UsageRoute
   '/settings/$section': typeof SettingsSectionRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/usage': typeof UsageRoute
   '/settings/$section': typeof SettingsSectionRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/settings/$section'
+  fullPaths: '/' | '/usage' | '/settings/$section'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/settings/$section'
-  id: '__root__' | '/' | '/settings/$section'
+  to: '/' | '/usage' | '/settings/$section'
+  id: '__root__' | '/' | '/usage' | '/settings/$section'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  UsageRoute: typeof UsageRoute
   SettingsSectionRoute: typeof SettingsSectionRoute
 }
 
@@ -56,6 +66,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/usage': {
+      id: '/usage'
+      path: '/usage'
+      fullPath: '/usage'
+      preLoaderRoute: typeof UsageRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/settings/$section': {
@@ -70,6 +87,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  UsageRoute: UsageRoute,
   SettingsSectionRoute: SettingsSectionRoute,
 }
 export const routeTree = rootRouteImport

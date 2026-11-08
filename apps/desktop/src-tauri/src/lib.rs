@@ -1,16 +1,70 @@
 mod orchestration;
 mod settings;
 
+use tauri::Manager;
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| orchestration::init(app))
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                orchestration::engine(window.app_handle()).refresh_pull_requests();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             orchestration::get_snapshot,
             orchestration::dispatch,
             orchestration::get_thread_items,
+            orchestration::get_forge_accounts,
+            orchestration::list_folders,
+            orchestration::create_folder,
+            orchestration::clone_repository,
+            orchestration::find_repository,
+            orchestration::connect_bitbucket,
+            orchestration::disconnect_forge,
+            orchestration::release_worktree,
+            orchestration::clean_up_thread,
+            orchestration::get_pull_request_detail,
+            orchestration::get_pull_request_files,
+            orchestration::prefetch_pull_request,
+            orchestration::get_linked_pull_request,
+            orchestration::get_editors,
+            orchestration::get_thread_branches,
+            orchestration::get_thread_changes,
+            orchestration::open_in_editor,
+            orchestration::get_thread_folder,
+            orchestration::switch_branch,
+            orchestration::open_terminal,
+            orchestration::write_terminal,
+            orchestration::resize_terminal,
+            orchestration::detach_terminal,
+            orchestration::close_terminal,
+            orchestration::run_pull_request_action,
+            orchestration::get_reviewer_candidates,
+            orchestration::get_repository_labels,
+            orchestration::get_pull_request_file_diff,
+            orchestration::get_thread_diff_files,
+            orchestration::get_thread_file_diff,
+            orchestration::get_models,
+            orchestration::get_known_usage_limits,
+            orchestration::get_usage_limits,
+            orchestration::get_provider_version,
+            orchestration::check_provider_version,
+            orchestration::update_provider,
+            orchestration::get_project_icon,
+            orchestration::search_paths,
+            orchestration::get_slash_commands,
+            orchestration::save_image,
+            orchestration::discard_image,
+            orchestration::get_image,
+            orchestration::search_pull_requests,
+            orchestration::regenerate_thread_title,
             settings::get_settings,
             settings::update_settings
         ])

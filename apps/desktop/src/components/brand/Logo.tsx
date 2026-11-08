@@ -4,20 +4,13 @@ type LogoProps = SVGProps<SVGSVGElement>
 
 export function LogoMark(props: LogoProps) {
   return (
-    <svg viewBox='2 -2.4 96 96' aria-hidden='true' {...props}>
-      <g
+    <svg viewBox='0 -0.5 19 19' aria-hidden='true' {...props}>
+      <path
         fill='currentColor'
-        stroke='currentColor'
-        strokeWidth={2.5}
-        strokeLinejoin='round'
-      >
-        <polygon points='50,41 55.5,33 50,4 44.5,33' />
-        <polygon points='58.56,47.22 67.87,49.98 93.75,35.79 64.47,39.52' />
-        <polygon points='55.29,57.28 55.54,66.99 77.04,87.21 64.44,60.52' />
-        <polygon points='44.71,57.28 35.56,60.52 22.96,87.21 44.46,66.99' />
-        <polygon points='41.44,47.22 35.53,39.52 6.25,35.79 32.13,49.98' />
-      </g>
-      <circle cx={50} cy={50} r={4.5} fill='currentColor' />
+        fillRule='evenodd'
+        shapeRendering='crispEdges'
+        d='M9 0h1v1h-1zM8 1h3v1h-3zM8 2h3v1h-3zM7 3h5v1h-5zM7 4h5v1h-5zM0 5h19v1h-19zM1 6h17v1h-17zM2 7h15v1h-15zM3 8h13v1h-13zM4 9h11v1h-11zM4 10h11v1h-11zM4 11h11v1h-11zM4 12h11v1h-11zM3 13h13v1h-13zM3 14h6v1h-6zM10 14h6v1h-6zM2 15h5v1h-5zM12 15h5v1h-5zM2 16h4v1h-4zM13 16h4v1h-4zM1 17h3v1h-3zM15 17h3v1h-3zM4 7h11v1h-11zM5 8h4v1h-4zM10 8h4v1h-4zM6 11h1v1h-1zM12 11h1v1h-1zM7 12h5v1h-5z'
+      />
     </svg>
   )
 }

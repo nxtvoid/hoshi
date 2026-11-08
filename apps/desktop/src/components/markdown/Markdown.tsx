@@ -1,0 +1,191 @@
+import { memo } from 'react'
+import { cn } from '@hoshi/utils'
+import { CodeBlock } from './CodeBlock'
+import { MarkdownLink } from './MarkdownLink'
+import { rehypeMentions } from './rehype-mentions'
+import type { KnownMentions } from '@/lib/prompt-segments'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
+import ReactMarkdown, {
+  type Components,
+  type ExtraProps,
+  type Options
+} from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeRaw from 'rehype-raw'
+import remarkBreaks from 'remark-breaks'
+
+type HastElement = NonNullable<ExtraProps['node']>
+const TRAILING_NEWLINE = /\r?\n$/
+
+const COMPONENTS: Components = {
+  h1: ({ node: _, ...props }) => (
+    <h1 className='mt-5 mb-2 text-xl leading-snug font-semibold' {...props} />
+  ),
+  h2: ({ node: _, ...props }) => (
+    <h2 className='mt-5 mb-2 text-lg leading-snug font-semibold' {...props} />
+  ),
+  h3: ({ node: _, ...props }) => (
+    <h3 className='mt-5 mb-2 text-base leading-snug font-semibold' {...props} />
+  ),
+  h4: ({ node: _, ...props }) => (
+    <h4 className='mt-4 mb-1.5 text-sm font-semibold' {...props} />
+  ),
+  p: ({ node: _, ...props }) => <p className='my-2.5' {...props} />,
+  strong: ({ node: _, ...props }) => (
+    <strong className='font-semibold' {...props} />
+  ),
+  ul: ({ node: _, ...props }) => (
+    <ul
+      className='my-2.5 list-disc ps-5 [&_ul]:my-1 [&_ul]:list-[circle] [&_ul_ul]:list-[square]'
+      {...props}
+    />
+  ),
+  ol: ({ node: _, ...props }) => (
+    <ol
+      className='my-2.5 list-decimal ps-5 marker:tabular-nums [&_ol]:my-1 [&_ol]:list-[lower-alpha]'
+      {...props}
+    />
+  ),
+  li: ({ node: _, className, ...props }) => (
+    <li
+      className={cn('[&+li]:mt-1 [&.task-list-item]:list-none', className)}
+      {...props}
+    />
+  ),
+  blockquote: ({ node: _, ...props }) => (
+    <blockquote
+      className='border-foreground/25 text-muted-foreground my-2.5 border-s-2 ps-3'
+      {...props}
+    />
+  ),
+  hr: () => <hr className='border-border my-4' />,
+  a: ({ href, children }) => (
+    <MarkdownLink href={href}>{children}</MarkdownLink>
+  ),
+  code: ({ node: _, className, ...props }) => (
+    <code
+      className={cn(
+        'bg-foreground/10 rounded [box-decoration-break:clone] px-[0.35em] py-[0.1em] font-mono text-[0.85em]',
+        className
+      )}
+      {...props}
+    />
+  ),
+  pre: ({ node, ...props }) => {
+    const block = codeBlockOf(node)
+    if (block) return <CodeBlock {...block} />
+    return (
+      <pre
+        className='bg-muted my-2.5 overflow-x-auto rounded-lg p-3 font-mono text-xs'
+        {...props}
+      />
+    )
+  },
+  table: ({ node: _, ...props }) => (
+    <div className='my-2.5 overflow-x-auto'>
+      <table className='w-full border-collapse text-xs' {...props} />
+    </div>
+  ),
+  th: ({ node: _, ...props }) => (
+    <th
+      className='border-border border-b px-2 py-1.5 text-left font-semibold'
+      {...props}
+    />
+  ),
+  td: ({ node: _, ...props }) => (
+    <td
+      className='border-border/60 border-b px-2 py-1.5 align-top'
+      {...props}
+    />
+  ),
+  img: ({ node: _, alt, ...props }) => (
+    <img alt={alt} className='inline max-w-full align-middle' {...props} />
+  ),
+  input: ({ node: _, ...props }) => (
+    <input className='me-1.5 align-middle' disabled {...props} />
+  )
+}
+
+/** The code and language of a fenced block; `null` for a `pre` written as raw HTML. */
+function codeBlockOf(pre: HastElement | undefined) {
+  const code = pre?.children.find(
+    (child): child is HastElement =>
+      child.type === 'element' && child.tagName === 'code'
+  )
+  if (!code) return null
+  const classes = code.properties.className
+  const language = Array.isArray(classes)
+    ? classes
+        .map(String)
+        .find((name) => name.startsWith('language-'))
+        ?.slice('language-'.length)
+        .toLowerCase()
+    : undefined
+  return {
+    code: textOf(code).replace(TRAILING_NEWLINE, ''),
+    language: language ?? null
+  }
+}
+
+function textOf(node: HastElement['children'][number]): string {
+  if (node.type === 'text') return node.value
+  if (node.type === 'element') return node.children.map(textOf).join('')
+  return ''
+}
+
+/** GitHub's own rules for HTML inside markdown, plus the sizing bots use on images. */
+type PluggableList = NonNullable<Options['rehypePlugins']>
+
+const SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    img: [...(defaultSchema.attributes?.img ?? []), 'align', 'width', 'height']
+  }
+}
+
+/** Raw HTML is allowed, as on GitHub, and then cleaned of scripts and handlers. */
+const REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, SCHEMA]]
+
+const REMARK_PLUGINS: Record<MarkdownSource, PluggableList> = {
+  agent: [remarkGfm],
+  // Comments on a forge keep their single line breaks, as the forge shows them.
+  forge: [remarkGfm, remarkBreaks]
+}
+
+type MarkdownSource = 'agent' | 'forge'
+
+/** GitHub-flavoured markdown from agents and forges, styled with the theme. */
+export const Markdown = memo(function Markdown({
+  text,
+  source = 'agent',
+  mentions,
+  className
+}: {
+  text: string
+  source?: MarkdownSource
+  /** Shows these and any `@file` as chips, as the composer did. */
+  mentions?: KnownMentions
+  className?: string
+}) {
+  return (
+    <div
+      className={cn(
+        'text-sm leading-relaxed wrap-break-word *:first:mt-0 *:last:mb-0',
+        className
+      )}
+    >
+      <ReactMarkdown
+        remarkPlugins={REMARK_PLUGINS[source]}
+        rehypePlugins={
+          mentions
+            ? [...REHYPE_PLUGINS, [rehypeMentions, mentions]]
+            : REHYPE_PLUGINS
+        }
+        components={COMPONENTS}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  )
+})

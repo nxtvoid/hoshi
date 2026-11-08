@@ -1,0 +1,131 @@
+# Builds hoshi for Windows and Linux when a version tag is pushed, then signs the
+# installers for the updater and drafts a GitHub release with them and `latest.json`.
+# Publishing the draft is what makes installed apps see the update.
+#
+# Building runs every dependency's code, so it gets no secrets and a read-only token.
+# Only the release job, which runs no build, sees the signing key and may write.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches the app version
+        shell: bash
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in apps/desktop/package.json"
+            exit 1
+          fi
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev pkg-config
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+          no-cache: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Unsigned here; the release job signs. `--locked` refuses a Cargo.lock that drifted.
+      - name: Build
+        shell: bash
+        run: bun run --cwd apps/desktop tauri build --ci --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
+
+      - name: Collect the installers
+        shell: bash
+        run: |
+          shopt -s nullglob
+          mkdir installers
+          cp target/release/bundle/nsis/*-setup.exe target/release/bundle/msi/*.msi \
+            target/release/bundle/appimage/*.AppImage target/release/bundle/deb/*.deb \
+            target/release/bundle/rpm/*.rpm installers/
+          ls -l installers
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installers-${{ matrix.platform }}
+          path: installers/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Sign and draft the release
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: release
+    permissions:
+      contents: write # creates the draft release and uploads its assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.4
+          no-cache: true
+
+      # Only for the Tauri CLI; no install scripts run, and nothing gets built.
+      - name: Install the Tauri CLI
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: installers-*
+          path: installers
+          merge-multiple: true
+
+      # The signature carries the version, which the updater requires (`requireSignedVersion`).
+      - name: Sign the installers
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for file in "$GITHUB_WORKSPACE"/installers/*; do
+            bun run --cwd apps/desktop tauri signer sign --app-version "$version" "$file"
+          done
+
+      - name: Write latest.json
+        run: bun scripts/updater-manifest.ts installers "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY" > latest.json
+
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s extglob
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "hoshi $GITHUB_REF_NAME" \
+            --notes "Download the installer for your system from the assets below." \
+            installers/!(*.sig) latest.json

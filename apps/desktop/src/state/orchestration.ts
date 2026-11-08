@@ -42,10 +42,38 @@ export function applyEvent(
       return updateThread(event.threadId, { title: event.title })
     case 'threadBranchSet':
       return updateThread(event.threadId, { branch: event.branch })
+    case 'threadWorktreeAttached':
+      return updateThread(event.threadId, {
+        worktreePath: event.worktreePath,
+        branch: event.branch,
+        worktreeReleased: false
+      })
+    case 'threadWorktreeReleased':
+      return updateThread(event.threadId, { worktreeReleased: true })
+    case 'threadWorktreeRestored':
+      return updateThread(event.threadId, { worktreeReleased: false })
+    case 'threadCleanedUp':
+      return updateThread(event.threadId, {
+        worktreePath: null,
+        branch: null,
+        worktreeReleased: false,
+        sessionId: null
+      })
+    case 'threadArchivedSet':
+      return updateThread(event.threadId, { archived: event.archived })
+    case 'threadPinnedSet':
+      return updateThread(event.threadId, { pinned: event.pinned })
     case 'threadModelSet':
       return updateThread(event.threadId, {
         model: event.model,
-        effort: event.effort
+        effort: event.effort,
+        fastMode: event.fastMode,
+        ultracode: event.ultracode
+      })
+    case 'threadAccessSet':
+      return updateThread(event.threadId, {
+        accessMode: event.accessMode,
+        planMode: event.planMode
       })
     case 'turnStarted':
       return updateThread(event.threadId, {

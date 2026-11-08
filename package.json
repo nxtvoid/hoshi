@@ -23,7 +23,8 @@
     "check": "biome check . && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "fix": "biome check --write . && cargo fmt --all",
     "test": "cargo test --workspace && bun run --filter './apps/*' --filter './packages/*' test",
-    "bindings": "cargo test -p hoshi-core export_bindings"
+    "bindings": "cargo test -p hoshi-core export_bindings",
+    "bump": "bun scripts/bump.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "~2.6.6"

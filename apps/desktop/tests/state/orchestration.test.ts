@@ -29,7 +29,14 @@ const thread = (id: string, projectId: string): Thread => ({
   sessionId: null,
   model: null,
   effort: null,
+  fastMode: false,
+  ultracode: false,
+  accessMode: 'acceptEdits',
+  planMode: false,
   activeTurnId: null,
+  archived: false,
+  pinned: false,
+  worktreeReleased: false,
   createdAt: NOW,
   updatedAt: NOW
 })
@@ -80,6 +87,46 @@ describe('applyEvent', () => {
     expect(failed.threads[0]).toMatchObject({
       status: 'error',
       activeTurnId: null
+    })
+  })
+
+  test('a released worktree comes back, and a cleaned up thread loses it', () => {
+    const state = {
+      projects: [project('p')],
+      threads: [
+        {
+          ...thread('t', 'p'),
+          worktreePath: '/w/t',
+          branch: 'feat/x',
+          sessionId: 's1'
+        }
+      ]
+    }
+
+    const released = applyEvent(state, {
+      type: 'threadWorktreeReleased',
+      threadId: 't'
+    })
+    const restored = applyEvent(released, {
+      type: 'threadWorktreeRestored',
+      threadId: 't'
+    })
+    const cleaned = applyEvent(released, {
+      type: 'threadCleanedUp',
+      threadId: 't'
+    })
+
+    expect(released.threads[0]).toMatchObject({
+      worktreeReleased: true,
+      worktreePath: '/w/t',
+      branch: 'feat/x'
+    })
+    expect(restored.threads[0]?.worktreeReleased).toBe(false)
+    expect(cleaned.threads[0]).toMatchObject({
+      worktreePath: null,
+      branch: null,
+      worktreeReleased: false,
+      sessionId: null
     })
   })
 })

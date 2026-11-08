@@ -3,6 +3,7 @@ import { StrictMode } from 'react'
 import { routeTree } from './routeTree.gen'
 import { createRoot } from 'react-dom/client'
 import { startThemeSync } from './state/theme-store'
+import { useModelsStore } from './state/models-store'
 import { useSettingsStore } from './state/settings-store'
 import { createRouter, RouterProvider } from '@tanstack/react-router'
 
@@ -16,6 +17,7 @@ declare module '@tanstack/react-router' {
 
 startThemeSync()
 useSettingsStore.getState().load()
+useModelsStore.getState().load()
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing #root element')

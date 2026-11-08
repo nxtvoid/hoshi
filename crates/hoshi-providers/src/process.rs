@@ -99,18 +99,18 @@ pub fn spawn_turn(
 }
 
 #[cfg(windows)]
-fn hide_console(command: &mut Command) {
+pub(crate) fn hide_console(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn hide_console(_command: &mut Command) {}
+pub(crate) fn hide_console(_command: &mut Command) {}
 
 /// Agents start their own tools (shells, servers), so stopping a turn kills the whole tree.
 #[cfg(windows)]
-fn kill_tree(pid: u32, child: &Mutex<Child>) {
+pub(crate) fn kill_tree(pid: u32, child: &Mutex<Child>) {
     let mut taskkill = Command::new("taskkill");
     taskkill
         .args(["/PID", &pid.to_string(), "/T", "/F"])
@@ -123,7 +123,7 @@ fn kill_tree(pid: u32, child: &Mutex<Child>) {
 }
 
 #[cfg(not(windows))]
-fn kill_tree(_pid: u32, child: &Mutex<Child>) {
+pub(crate) fn kill_tree(_pid: u32, child: &Mutex<Child>) {
     kill_child(child);
 }
 

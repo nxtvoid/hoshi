@@ -4,6 +4,7 @@ import type { Event } from '@/bindings/Event'
 import { applyItemEvent } from './orchestration'
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamDelta } from '@/bindings/StreamDelta'
+import type { StreamingText } from '@/lib/tool-calls'
 
 type TranscriptState = {
   /** The thread whose transcript is loaded; only one is kept in memory. */
@@ -11,7 +12,7 @@ type TranscriptState = {
   loading: boolean
   items: ThreadItem[]
   /** Text still streaming, by item id, until its final item arrives. */
-  streaming: Record<string, string>
+  streaming: Record<string, StreamingText>
   load: (threadId: string | null) => Promise<void>
   applyEvent: (event: Event) => void
   applyDelta: (delta: StreamDelta) => void
@@ -62,18 +63,18 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
           : []
     set({ items: next, streaming: omit(streaming, finished) })
   },
-  applyDelta: ({ threadId, itemId, delta }) => {
+  applyDelta: ({ threadId, itemId, kind, delta }) => {
     if (threadId !== get().threadId) return
     set((state) => ({
       streaming: {
         ...state.streaming,
-        [itemId]: (state.streaming[itemId] ?? '') + delta
+        [itemId]: { kind, text: (state.streaming[itemId]?.text ?? '') + delta }
       }
     }))
   }
 }))
 
-function omit(record: Record<string, string>, keys: string[]) {
+function omit<T>(record: Record<string, T>, keys: string[]) {
   if (!keys.some((key) => key in record)) return record
   const next = { ...record }
   for (const key of keys) delete next[key]

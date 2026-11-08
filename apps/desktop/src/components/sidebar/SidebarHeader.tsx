@@ -1,10 +1,13 @@
 import { SortMenu } from './SortMenu'
-import { ThemeMenu } from './ThemeMenu'
+import { useNewThread } from '@/components/palette/use-new-thread'
 import { m } from '@/paraglide/messages'
+import { Kbd } from '@hoshi/ui/components/kbd'
+import { usePaletteStore } from '@/state/palette-store'
 import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Wordmark } from '@/components/brand/Logo'
 import { IconButton } from '@hoshi/ui/components/icon-button'
+import { PALETTE_SHORTCUT } from '@/components/palette/CommandPalette'
 import {
   FolderAddIcon,
   PencilEdit02Icon,
@@ -16,9 +19,9 @@ export function SidebarHeader() {
   const search = useAppStore((state) => state.search)
   const setSearch = useAppStore((state) => state.setSearch)
   const toggleSidebar = useAppStore((state) => state.toggleSidebar)
-  const createThread = useAppStore((state) => state.createThread)
-  const addProject = useAppStore((state) => state.addProject)
-  const hasProject = useAppStore((state) => state.selectedProjectId !== null)
+  const newThread = useNewThread()
+  const hasProjects = useAppStore((state) => state.projects.length > 0)
+  const openPalette = usePaletteStore((state) => state.setOpen)
 
   return (
     <header className='border-sidebar-border bg-starfield flex flex-col border-b px-2 pb-2.5'>
@@ -34,9 +37,6 @@ export function SidebarHeader() {
         >
           <Wordmark className='pointer-events-none h-3 w-auto' />
         </span>
-        <div className='ml-auto'>
-          <ThemeMenu />
-        </div>
       </div>
       <div className='flex items-center gap-1'>
         <label className='text-sidebar-foreground/70 hover:bg-sidebar-accent/60 focus-within:bg-sidebar-accent flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-sm'>
@@ -53,15 +53,29 @@ export function SidebarHeader() {
             aria-label={m.search_threads()}
             className='placeholder:text-sidebar-foreground/50 min-w-0 flex-1 bg-transparent outline-none'
           />
+          {search === '' ? (
+            <button
+              type='button'
+              title={m.palette_label()}
+              aria-label={m.palette_label()}
+              onClick={() => openPalette(true)}
+              className='shrink-0 cursor-pointer'
+            >
+              <Kbd>{PALETTE_SHORTCUT()}</Kbd>
+            </button>
+          ) : null}
         </label>
         <SortMenu />
-        <IconButton label={m.add_project()} onClick={addProject}>
+        <IconButton
+          label={m.add_project()}
+          onClick={() => openPalette(true, 'addProject')}
+        >
           <HugeiconsIcon icon={FolderAddIcon} strokeWidth={2} />
         </IconButton>
         <IconButton
           label={m.new_thread()}
-          onClick={createThread}
-          disabled={!hasProject}
+          onClick={() => void newThread()}
+          disabled={!hasProjects}
         >
           <HugeiconsIcon icon={PencilEdit02Icon} strokeWidth={2} />
         </IconButton>

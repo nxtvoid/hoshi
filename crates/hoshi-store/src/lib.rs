@@ -4,7 +4,10 @@
 //! transaction, so the projections never disagree with the event log. The
 //! thread projection must match `ReadModel::apply`; a test checks that.
 
-use hoshi_core::{Effort, Event, Project, Snapshot, Thread, ThreadItem, ThreadStatus, TurnOutcome};
+use hoshi_core::{
+    ContextUsage, Effort, Event, Project, PullRequestDetail, Snapshot, Thread, ThreadContextUsage,
+    ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits,
+};
 use rusqlite::{Connection, Row, Transaction, params, types::Type};
 use std::path::Path;
 
@@ -51,7 +54,104 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE threads ADD COLUMN model TEXT;
     ALTER TABLE threads ADD COLUMN effort TEXT;
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE threads ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
+    ",
+    r"
+    CREATE TABLE pull_requests (
+        thread_id TEXT PRIMARY KEY,
+        pull_request_json TEXT NOT NULL
+    );
+    ",
+    r"
+    ALTER TABLE threads ADD COLUMN fast_mode INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE threads ADD COLUMN ultracode INTEGER NOT NULL DEFAULT 0;
+    ",
+    r"
+    ALTER TABLE threads ADD COLUMN access_mode TEXT NOT NULL DEFAULT 'acceptEdits';
+    ALTER TABLE threads ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0;
+    ",
+    r"
+    UPDATE threads SET model = CASE model
+        WHEN 'opus' THEN 'claude-opus-5-5'
+        WHEN 'sonnet' THEN 'claude-sonnet-5-5'
+        WHEN 'fable' THEN 'claude-fable-5-1'
+        WHEN 'haiku' THEN 'claude-haiku-5-5'
+        ELSE model
+    END;
+    ",
+    r"
+    CREATE TABLE pull_request_details (
+        thread_id TEXT PRIMARY KEY,
+        number INTEGER NOT NULL,
+        version TEXT NOT NULL,
+        detail_json TEXT NOT NULL
+    );
+    ",
+    r"
+    CREATE TABLE context_usages (
+        thread_id TEXT PRIMARY KEY,
+        used_tokens INTEGER NOT NULL,
+        max_tokens INTEGER
+    );
+    ",
+    r"
+    ALTER TABLE threads ADD COLUMN worktree_released INTEGER NOT NULL DEFAULT 0;
+    ",
+    r"
+    CREATE TABLE threads_next (
+        id TEXT PRIMARY KEY,
+        project_id TEXT,
+        title TEXT NOT NULL,
+        status TEXT NOT NULL,
+        branch TEXT,
+        worktree_path TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        session_id TEXT,
+        active_turn_id TEXT,
+        model TEXT,
+        effort TEXT,
+        archived INTEGER NOT NULL DEFAULT 0,
+        pinned INTEGER NOT NULL DEFAULT 0,
+        fast_mode INTEGER NOT NULL DEFAULT 0,
+        ultracode INTEGER NOT NULL DEFAULT 0,
+        access_mode TEXT NOT NULL DEFAULT 'acceptEdits',
+        plan_mode INTEGER NOT NULL DEFAULT 0,
+        worktree_released INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO threads_next (
+        id, project_id, title, status, branch, worktree_path, created_at, updated_at,
+        session_id, active_turn_id, model, effort, archived, pinned, fast_mode, ultracode,
+        access_mode, plan_mode, worktree_released
+    )
+    SELECT
+        id, project_id, title, status, branch, worktree_path, created_at, updated_at,
+        session_id, active_turn_id, model, effort, archived, pinned, fast_mode, ultracode,
+        access_mode, plan_mode, worktree_released
+    FROM threads;
+    DROP TABLE threads;
+    ALTER TABLE threads_next RENAME TO threads;
+    CREATE INDEX threads_project_id ON threads (project_id);
+    ",
+    r"
+    CREATE TABLE usage_limits (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        limits_json TEXT NOT NULL
+    );
+    ",
 ];
+
+/// The last detail read of a thread's pull request, to show at once on the next start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedPullRequestDetail {
+    pub thread_id: String,
+    pub number: u32,
+    /// The pull request's `updated_at` when it was read.
+    pub version: String,
+    pub detail: PullRequestDetail,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -131,7 +231,8 @@ impl Store {
             .conn
             .prepare(
                 "SELECT id, project_id, title, status, branch, worktree_path, session_id,
-                        active_turn_id, created_at, updated_at, model, effort
+                        active_turn_id, created_at, updated_at, model, effort, archived, pinned,
+                        fast_mode, ultracode, access_mode, plan_mode, worktree_released
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -148,6 +249,36 @@ impl Store {
                     updated_at: row.get(9)?,
                     model: row.get(10)?,
                     effort: optional_json_column(row, 11)?,
+                    archived: row.get(12)?,
+                    pinned: row.get(13)?,
+                    fast_mode: row.get(14)?,
+                    ultracode: row.get(15)?,
+                    access_mode: json_column(row, 16)?,
+                    plan_mode: row.get(17)?,
+                    worktree_released: row.get(18)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let pull_requests = self
+            .conn
+            .prepare("SELECT thread_id, pull_request_json FROM pull_requests")?
+            .query_map([], |row| {
+                Ok(ThreadPullRequest {
+                    thread_id: row.get(0)?,
+                    pull_request: Some(json_document_column(row, 1)?),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let context_usages = self
+            .conn
+            .prepare("SELECT thread_id, used_tokens, max_tokens FROM context_usages")?
+            .query_map([], |row| {
+                Ok(ThreadContextUsage {
+                    thread_id: row.get(0)?,
+                    usage: ContextUsage {
+                        used_tokens: row.get::<_, i64>(1)? as u64,
+                        max_tokens: row.get::<_, Option<i64>>(2)?.map(|tokens| tokens as u64),
+                    },
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -155,7 +286,92 @@ impl Store {
             sequence: sequence as u64,
             projects,
             threads,
+            pull_requests,
+            context_usages,
         })
+    }
+
+    /// Caches a thread's context usage. Not an event: it changes on every model call.
+    pub fn save_context_usage(&mut self, update: &ThreadContextUsage) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO context_usages (thread_id, used_tokens, max_tokens)
+             VALUES (?1, ?2, ?3)",
+            params![
+                update.thread_id,
+                update.usage.used_tokens as i64,
+                update.usage.max_tokens.map(|tokens| tokens as i64)
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The provider plan's limits as last read, to show at once on the next start.
+    pub fn usage_limits(&self) -> Result<Option<UsageLimits>, StoreError> {
+        let limits = self
+            .conn
+            .prepare("SELECT limits_json FROM usage_limits WHERE id = 1")?
+            .query_map([], |row| json_document_column(row, 0))?
+            .next()
+            .transpose()?;
+        Ok(limits)
+    }
+
+    pub fn save_usage_limits(&mut self, limits: &UsageLimits) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO usage_limits (id, limits_json) VALUES (1, ?1)",
+            [serde_json::to_string(limits)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn save_pull_request_detail(
+        &mut self,
+        cached: &CachedPullRequestDetail,
+    ) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO pull_request_details (thread_id, number, version, detail_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                cached.thread_id,
+                cached.number,
+                cached.version,
+                serde_json::to_string(&cached.detail)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn pull_request_details(&self) -> Result<Vec<CachedPullRequestDetail>, StoreError> {
+        let details = self
+            .conn
+            .prepare("SELECT thread_id, number, version, detail_json FROM pull_request_details")?
+            .query_map([], |row| {
+                Ok(CachedPullRequestDetail {
+                    thread_id: row.get(0)?,
+                    number: row.get(1)?,
+                    version: row.get(2)?,
+                    detail: json_document_column(row, 3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(details)
+    }
+
+    /// Caches what a forge last said about a thread's pull request. Not an event: it is
+    /// read again from the forge, and polling would flood the event log.
+    pub fn save_pull_request(&mut self, update: &ThreadPullRequest) -> Result<(), StoreError> {
+        match &update.pull_request {
+            Some(pull_request) => self.conn.execute(
+                "INSERT OR REPLACE INTO pull_requests (thread_id, pull_request_json)
+                 VALUES (?1, ?2)",
+                params![update.thread_id, serde_json::to_string(pull_request)?],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM pull_requests WHERE thread_id = ?1",
+                [&update.thread_id],
+            )?,
+        };
+        Ok(())
     }
 
     /// A thread's transcript, oldest first.
@@ -188,6 +404,17 @@ fn json_column<T: serde::de::DeserializeOwned>(row: &Row, index: usize) -> rusql
     })
 }
 
+/// A column holding a whole JSON document, not a single JSON string.
+fn json_document_column<T: serde::de::DeserializeOwned>(
+    row: &Row,
+    index: usize,
+) -> rusqlite::Result<T> {
+    let text: String = row.get(index)?;
+    serde_json::from_str(&text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(index, Type::Text, Box::new(error))
+    })
+}
+
 fn optional_json_column<T: serde::de::DeserializeOwned>(
     row: &Row,
     index: usize,
@@ -202,8 +429,8 @@ fn effort_text(effort: Option<Effort>) -> Option<&'static str> {
     effort.map(Effort::as_str)
 }
 
-fn status_text(status: ThreadStatus) -> Result<String, StoreError> {
-    Ok(serde_json::to_value(status)?
+fn enum_text(value: impl serde::Serialize) -> Result<String, StoreError> {
+    Ok(serde_json::to_value(value)?
         .as_str()
         .unwrap_or_default()
         .to_owned())
@@ -230,6 +457,21 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                  (SELECT id FROM threads WHERE project_id = ?1)",
                 [project_id],
             )?;
+            tx.execute(
+                "DELETE FROM pull_requests WHERE thread_id IN
+                 (SELECT id FROM threads WHERE project_id = ?1)",
+                [project_id],
+            )?;
+            tx.execute(
+                "DELETE FROM pull_request_details WHERE thread_id IN
+                 (SELECT id FROM threads WHERE project_id = ?1)",
+                [project_id],
+            )?;
+            tx.execute(
+                "DELETE FROM context_usages WHERE thread_id IN
+                 (SELECT id FROM threads WHERE project_id = ?1)",
+                [project_id],
+            )?;
             tx.execute("DELETE FROM threads WHERE project_id = ?1", [project_id])?;
             tx.execute("DELETE FROM projects WHERE id = ?1", [project_id])?;
         }
@@ -237,13 +479,15 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             tx.execute(
                 "INSERT INTO threads
                  (id, project_id, title, status, branch, worktree_path, session_id,
-                  active_turn_id, created_at, updated_at, model, effort)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                  active_turn_id, created_at, updated_at, model, effort, archived, pinned,
+                  fast_mode, ultracode, access_mode, plan_mode, worktree_released)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                         ?17, ?18, ?19)",
                 params![
                     thread.id,
                     thread.project_id,
                     thread.title,
-                    status_text(thread.status)?,
+                    enum_text(thread.status)?,
                     thread.branch,
                     thread.worktree_path,
                     thread.session_id,
@@ -251,12 +495,31 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     thread.created_at,
                     thread.updated_at,
                     thread.model,
-                    effort_text(thread.effort)
+                    effort_text(thread.effort),
+                    thread.archived,
+                    thread.pinned,
+                    thread.fast_mode,
+                    thread.ultracode,
+                    enum_text(thread.access_mode)?,
+                    thread.plan_mode,
+                    thread.worktree_released
                 ],
             )?;
         }
         Event::ThreadDeleted { thread_id } => {
             tx.execute("DELETE FROM thread_items WHERE thread_id = ?1", [thread_id])?;
+            tx.execute(
+                "DELETE FROM pull_requests WHERE thread_id = ?1",
+                [thread_id],
+            )?;
+            tx.execute(
+                "DELETE FROM pull_request_details WHERE thread_id = ?1",
+                [thread_id],
+            )?;
+            tx.execute(
+                "DELETE FROM context_usages WHERE thread_id = ?1",
+                [thread_id],
+            )?;
             tx.execute("DELETE FROM threads WHERE id = ?1", [thread_id])?;
         }
         Event::ThreadTitleSet { thread_id, title } => {
@@ -271,14 +534,72 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 params![thread_id, branch],
             )?;
         }
+        Event::ThreadWorktreeAttached {
+            thread_id,
+            worktree_path,
+            branch,
+        } => {
+            tx.execute(
+                "UPDATE threads SET worktree_path = ?2, branch = ?3, worktree_released = 0
+                 WHERE id = ?1",
+                params![thread_id, worktree_path, branch],
+            )?;
+        }
+        Event::ThreadWorktreeReleased { thread_id } => {
+            tx.execute(
+                "UPDATE threads SET worktree_released = 1 WHERE id = ?1",
+                [thread_id],
+            )?;
+        }
+        Event::ThreadWorktreeRestored { thread_id } => {
+            tx.execute(
+                "UPDATE threads SET worktree_released = 0 WHERE id = ?1",
+                [thread_id],
+            )?;
+        }
+        Event::ThreadCleanedUp { thread_id } => {
+            tx.execute(
+                "UPDATE threads SET worktree_path = NULL, branch = NULL, session_id = NULL,
+                 worktree_released = 0 WHERE id = ?1",
+                [thread_id],
+            )?;
+        }
+        Event::ThreadArchivedSet {
+            thread_id,
+            archived,
+        } => {
+            tx.execute(
+                "UPDATE threads SET archived = ?2 WHERE id = ?1",
+                params![thread_id, archived],
+            )?;
+        }
+        Event::ThreadPinnedSet { thread_id, pinned } => {
+            tx.execute(
+                "UPDATE threads SET pinned = ?2 WHERE id = ?1",
+                params![thread_id, pinned],
+            )?;
+        }
         Event::ThreadModelSet {
             thread_id,
             model,
             effort,
+            fast_mode,
+            ultracode,
         } => {
             tx.execute(
-                "UPDATE threads SET model = ?2, effort = ?3 WHERE id = ?1",
-                params![thread_id, model, effort_text(*effort)],
+                "UPDATE threads SET model = ?2, effort = ?3, fast_mode = ?4, ultracode = ?5
+                 WHERE id = ?1",
+                params![thread_id, model, effort_text(*effort), fast_mode, ultracode],
+            )?;
+        }
+        Event::ThreadAccessSet {
+            thread_id,
+            access_mode,
+            plan_mode,
+        } => {
+            tx.execute(
+                "UPDATE threads SET access_mode = ?2, plan_mode = ?3 WHERE id = ?1",
+                params![thread_id, enum_text(*access_mode)?, plan_mode],
             )?;
         }
         Event::TurnStarted {
@@ -288,7 +609,7 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
         } => {
             tx.execute(
                 "UPDATE threads SET status = ?2, active_turn_id = ?3, updated_at = ?4 WHERE id = ?1",
-                params![thread_id, status_text(ThreadStatus::Working)?, turn_id, at],
+                params![thread_id, enum_text(ThreadStatus::Working)?, turn_id, at],
             )?;
         }
         Event::SessionAttached {
@@ -343,7 +664,7 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             tx.execute(
                 "UPDATE threads SET status = ?2, active_turn_id = NULL, updated_at = ?3
                  WHERE id = ?1",
-                params![thread_id, status_text(status)?, at],
+                params![thread_id, enum_text(status)?, at],
             )?;
         }
     }
@@ -353,7 +674,11 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hoshi_core::{Command, ItemContent, ProviderOutput, ReadModel, decide, record_output};
+    use hoshi_core::{
+        AccessMode, ChecksState, Command, ForgeKind, ItemContent, Mergeability, ProviderOutput,
+        PullRequest, PullRequestState, ReadModel, UsageWindow, UsageWindowKind, decide,
+        record_output,
+    };
 
     const NOW: &str = "2026-11-07T12:00:00.000Z";
 
@@ -373,7 +698,7 @@ mod tests {
         Event::ThreadCreated {
             thread: Thread {
                 id: id.into(),
-                project_id: project_id.into(),
+                project_id: Some(project_id.into()),
                 title: String::new(),
                 status: ThreadStatus::WaitingForInput,
                 branch: Some("feat/x".into()),
@@ -381,7 +706,14 @@ mod tests {
                 session_id: None,
                 model: Some("sonnet".into()),
                 effort: Some(Effort::High),
+                fast_mode: true,
+                ultracode: false,
+                access_mode: AccessMode::Auto,
+                plan_mode: true,
                 active_turn_id: None,
+                archived: false,
+                pinned: true,
+                worktree_released: false,
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
             },
@@ -406,6 +738,56 @@ mod tests {
         assert_eq!(snapshot.threads, [thread]);
     }
 
+    #[test]
+    fn a_chat_is_kept_without_a_project_and_outlives_project_removal() {
+        let mut store = Store::open_in_memory().unwrap();
+        let Event::ThreadCreated { mut thread } = thread_created("chat", "p") else {
+            unreachable!()
+        };
+        thread.project_id = None;
+        store
+            .append(
+                &[
+                    project_created("p"),
+                    Event::ThreadCreated {
+                        thread: thread.clone(),
+                    },
+                    Event::ProjectRemoved {
+                        project_id: "p".into(),
+                    },
+                ],
+                NOW,
+            )
+            .unwrap();
+
+        assert_eq!(store.snapshot().unwrap().threads, [thread]);
+    }
+
+    #[test]
+    fn threads_from_before_chats_keep_their_project() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let tx = conn.transaction().unwrap();
+        for migration in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+            tx.execute_batch(migration).unwrap();
+        }
+        tx.execute(
+            "INSERT INTO threads (id, project_id, title, status, created_at, updated_at, pinned)
+             VALUES ('t', 'p', 'old', 'idle', ?1, ?1, 1)",
+            [NOW],
+        )
+        .unwrap();
+        tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 1)
+            .unwrap();
+        tx.commit().unwrap();
+
+        let store = Store::init(conn).unwrap();
+
+        let threads = store.snapshot().unwrap().threads;
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].project_id.as_deref(), Some("p"));
+        assert!(threads[0].pinned);
+    }
+
     fn commit(store: &mut Store, model: &mut ReadModel, events: Vec<Event>) {
         events.iter().for_each(|event| model.apply(event));
         store.append(&events, NOW).unwrap();
@@ -420,11 +802,150 @@ mod tests {
         (store, model)
     }
 
+    #[test]
+    fn a_cached_detail_survives_a_restart_and_goes_with_its_thread() {
+        let (mut store, model) = store_with_thread();
+        let cached = CachedPullRequestDetail {
+            thread_id: "t".into(),
+            number: 3,
+            version: NOW.into(),
+            detail: PullRequestDetail {
+                supports: hoshi_core::PullRequestSupport::all(),
+                forge_id: "PR_1".into(),
+                repository: "o/r".into(),
+                mergeability: Mergeability::Mergeable,
+                merge_methods: Vec::new(),
+                can_edit: true,
+                body: "## Summary".into(),
+                changed_files: 2,
+                reviewers: Vec::new(),
+                labels: Vec::new(),
+                checks: Vec::new(),
+                review_threads: Vec::new(),
+                timeline: Vec::new(),
+            },
+        };
+
+        store.save_pull_request_detail(&cached).unwrap();
+        assert_eq!(store.pull_request_details().unwrap(), [cached]);
+
+        let delete = Command::ThreadDelete {
+            thread_id: "t".into(),
+        };
+        store
+            .append(&decide(&model, delete, NOW).unwrap(), NOW)
+            .unwrap();
+        assert!(store.pull_request_details().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_cached_pull_request_survives_a_restart_and_goes_with_its_thread() {
+        let (mut store, model) = store_with_thread();
+        let update = ThreadPullRequest {
+            thread_id: "t".into(),
+            pull_request: Some(PullRequest {
+                forge: ForgeKind::Github,
+                number: 42,
+                title: "Fix".into(),
+                url: "https://github.com/o/r/pull/42".into(),
+                author: Some("me".into()),
+                head_branch: "feat/x".into(),
+                head_sha: None,
+                base_branch: "main".into(),
+                state: PullRequestState::Open,
+                checks: Some(ChecksState::Failing),
+                unresolved_comments: 3,
+                additions: 1,
+                deletions: 2,
+                updated_at: NOW.into(),
+            }),
+        };
+
+        store.save_pull_request(&update).unwrap();
+        assert_eq!(store.snapshot().unwrap().pull_requests, [update]);
+
+        let delete = Command::ThreadDelete {
+            thread_id: "t".into(),
+        };
+        store
+            .append(&decide(&model, delete, NOW).unwrap(), NOW)
+            .unwrap();
+        assert!(store.snapshot().unwrap().pull_requests.is_empty());
+    }
+
+    #[test]
+    fn a_context_usage_survives_a_restart_and_goes_with_its_thread() {
+        let (mut store, model) = store_with_thread();
+        let first = ThreadContextUsage {
+            thread_id: "t".into(),
+            usage: ContextUsage {
+                used_tokens: 9_000,
+                max_tokens: None,
+            },
+        };
+        let latest = ThreadContextUsage {
+            thread_id: "t".into(),
+            usage: ContextUsage {
+                used_tokens: 12_000,
+                max_tokens: Some(1_000_000),
+            },
+        };
+
+        store.save_context_usage(&first).unwrap();
+        store.save_context_usage(&latest).unwrap();
+        assert_eq!(store.snapshot().unwrap().context_usages, [latest]);
+
+        let delete = Command::ThreadDelete {
+            thread_id: "t".into(),
+        };
+        store
+            .append(&decide(&model, delete, NOW).unwrap(), NOW)
+            .unwrap();
+        assert!(store.snapshot().unwrap().context_usages.is_empty());
+    }
+
+    #[test]
+    fn the_last_usage_limits_replace_the_previous_ones() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert_eq!(store.usage_limits().unwrap(), None);
+        let window = |used_percent| UsageLimits {
+            windows: vec![UsageWindow {
+                kind: UsageWindowKind::Session,
+                model: None,
+                used_percent,
+                window_minutes: 300,
+                resets_at: Some("2026-11-08T12:00:00Z".into()),
+            }],
+        };
+
+        store.save_usage_limits(&window(20)).unwrap();
+        store.save_usage_limits(&window(35)).unwrap();
+
+        assert_eq!(store.usage_limits().unwrap(), Some(window(35)));
+    }
+
+    #[test]
+    fn archiving_survives_a_restart() {
+        let (mut store, mut model) = store_with_thread();
+        let command = Command::ThreadArchive {
+            thread_id: "t".into(),
+            archived: true,
+        };
+
+        let events = decide(&model, command, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+
+        let thread = &store.snapshot().unwrap().threads[0];
+        assert!(thread.archived);
+        assert!(!thread.pinned);
+    }
+
     fn send(model: &ReadModel) -> Vec<Event> {
         let command = Command::MessageSend {
             thread_id: "t".into(),
             message_id: "m1".into(),
             text: "Read the file".into(),
+            attachments: Vec::new(),
         };
         decide(model, command, NOW).unwrap()
     }
@@ -454,8 +975,17 @@ mod tests {
             thread_id: "t".into(),
             model: Some("opus".into()),
             effort: Some(Effort::Max),
+            fast_mode: true,
+            ultracode: true,
         };
         let events = decide(&model, model_set, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        let access_set = Command::ThreadAccessSet {
+            thread_id: "t".into(),
+            access_mode: AccessMode::FullAccess,
+            plan_mode: false,
+        };
+        let events = decide(&model, access_set, NOW).unwrap();
         commit(&mut store, &mut model, events);
         let events = hoshi_core::record_branch(&model, "t", Some("main".into()));
         commit(&mut store, &mut model, events);

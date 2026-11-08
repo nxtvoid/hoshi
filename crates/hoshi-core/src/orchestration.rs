@@ -1,6 +1,7 @@
 use crate::{
-    Effort, ItemContent, Project, ProviderOutput, Thread, ThreadItem, ThreadStatus,
-    ThreadWorkspace, TurnFailure, TurnOutcome,
+    AccessMode, Effort, ItemContent, MessageAttachment, Project, ProviderOutput, Thread,
+    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, TurnFailure,
+    TurnOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -26,25 +27,59 @@ pub enum Command {
     },
     ThreadCreate {
         thread_id: String,
-        project_id: String,
+        /// `None` starts a chat, which always works locally in its own folder.
+        project_id: Option<String>,
         title: String,
         workspace: ThreadWorkspace,
         model: Option<String>,
         effort: Option<Effort>,
+        fast_mode: bool,
+        ultracode: bool,
+        access_mode: AccessMode,
+        plan_mode: bool,
     },
     ThreadDelete {
         thread_id: String,
+    },
+    /// Removes the thread's worktree folder and keeps its branch. The engine removes it,
+    /// after checking nothing would be lost, before this reaches `decide`.
+    ThreadWorktreeRelease {
+        thread_id: String,
+    },
+    /// Removes the thread's worktree and local branch once its pull request is merged, and
+    /// archives it. Nothing on the forge is touched. The engine does the git work first.
+    ThreadCleanUp {
+        thread_id: String,
+    },
+    /// Archiving also unpins.
+    ThreadArchive {
+        thread_id: String,
+        archived: bool,
+    },
+    ThreadPin {
+        thread_id: String,
+        pinned: bool,
     },
     /// Applies from the next turn.
     ThreadModelSet {
         thread_id: String,
         model: Option<String>,
         effort: Option<Effort>,
+        fast_mode: bool,
+        ultracode: bool,
+    },
+    /// Applies from the next turn.
+    ThreadAccessSet {
+        thread_id: String,
+        access_mode: AccessMode,
+        plan_mode: bool,
     },
     MessageSend {
         thread_id: String,
         message_id: String,
         text: String,
+        #[serde(default)]
+        attachments: Vec<MessageAttachment>,
     },
     TurnInterrupt {
         thread_id: String,
@@ -79,10 +114,43 @@ pub enum Event {
         thread_id: String,
         branch: Option<String>,
     },
+    /// The thread moved to a worktree it did not start in, such as one its agent created.
+    ThreadWorktreeAttached {
+        thread_id: String,
+        worktree_path: String,
+        branch: Option<String>,
+    },
+    ThreadArchivedSet {
+        thread_id: String,
+        archived: bool,
+    },
+    ThreadWorktreeReleased {
+        thread_id: String,
+    },
+    /// The released worktree was created again, for a new message.
+    ThreadWorktreeRestored {
+        thread_id: String,
+    },
+    /// Its worktree and branch are gone; it runs in the project root from now on, with a new
+    /// session, since the old one belonged to the worktree.
+    ThreadCleanedUp {
+        thread_id: String,
+    },
+    ThreadPinnedSet {
+        thread_id: String,
+        pinned: bool,
+    },
     ThreadModelSet {
         thread_id: String,
         model: Option<String>,
         effort: Option<Effort>,
+        fast_mode: bool,
+        ultracode: bool,
+    },
+    ThreadAccessSet {
+        thread_id: String,
+        access_mode: AccessMode,
+        plan_mode: bool,
     },
     TurnStarted {
         thread_id: String,
@@ -140,6 +208,52 @@ pub enum CommandError {
     WorktreeFailed { detail: String },
     #[error("folder {path} does not exist")]
     WorkspaceRootNotFound { path: String },
+    /// The thread has no pull request, or its project no forge account.
+    #[error("no pull request or forge for this thread")]
+    ForgeUnavailable,
+    #[error("not signed in to the forge")]
+    ForgeUnauthorized,
+    #[error("the forge is rate limiting requests")]
+    ForgeRateLimited,
+    /// The forge refused the change; `detail` is its own message, shown as is.
+    #[error("the forge refused: {detail}")]
+    ForgeRejected { detail: String },
+    #[error("could not reach the forge: {detail}")]
+    ForgeUnreachable { detail: String },
+    /// A git command failed; `detail` is git's own message, shown as is.
+    #[error("git failed: {detail}")]
+    GitFailed { detail: String },
+    #[error("thread {thread_id} has no worktree or branch to remove")]
+    NothingToClean { thread_id: String },
+    /// Removing it would lose uncommitted or untracked files.
+    #[error("the worktree of thread {thread_id} has uncommitted changes")]
+    WorktreeDirty { thread_id: String },
+    #[error("thread {thread_id} has terminals open in its worktree")]
+    TerminalsOpen { thread_id: String },
+    #[error("the pull request of thread {thread_id} is not merged")]
+    PullRequestNotMerged { thread_id: String },
+    /// The branch has commits no remote and no pull request holds.
+    #[error("the branch of thread {thread_id} has commits that exist only here")]
+    UnpushedCommits { thread_id: String },
+    /// Someone locked the worktree with `git worktree lock`; `reason` is theirs, shown as is.
+    #[error("the worktree of thread {thread_id} is locked: {reason}")]
+    WorktreeLocked { thread_id: String, reason: String },
+    /// The shell could not start; `detail` is the system's message, shown as is.
+    #[error("could not start the terminal: {detail}")]
+    TerminalFailed { detail: String },
+    #[error("terminal {terminal_id} is not open")]
+    TerminalNotFound { terminal_id: String },
+    /// A chat has no repository, so it can't work in a worktree.
+    #[error("chat {thread_id} can only work in its own folder")]
+    ChatNotLocal { thread_id: String },
+    #[error("folder {path} cannot be read or created")]
+    FolderUnavailable { path: String },
+    /// A new project or a clone would mix with files already there.
+    #[error("folder {path} is not empty")]
+    FolderNotEmpty { path: String },
+    /// Not `owner/name` or a link to a repository on the chosen forge.
+    #[error("{input} does not name a repository")]
+    RepositoryNameInvalid { input: String },
     /// Storage or other failures outside the domain; `detail` is for logs, not the UI.
     #[error("internal error: {detail}")]
     Internal { detail: String },
@@ -153,6 +267,10 @@ pub struct Snapshot {
     pub sequence: u64,
     pub projects: Vec<Project>,
     pub threads: Vec<Thread>,
+    /// The last known pull request of each thread that has one.
+    pub pull_requests: Vec<ThreadPullRequest>,
+    /// The last known context usage of each thread that ran a turn.
+    pub context_usages: Vec<ThreadContextUsage>,
 }
 
 /// An event as delivered to the UI, with its position in the event log.
@@ -164,6 +282,15 @@ pub struct EventEnvelope {
     pub event: Event,
 }
 
+/// Which item a [`StreamDelta`] is writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum StreamKind {
+    Text,
+    Reasoning,
+}
+
 /// Text an assistant is still writing. Sent to the UI as it streams, never stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +298,7 @@ pub struct EventEnvelope {
 pub struct StreamDelta {
     pub thread_id: String,
     pub item_id: String,
+    pub kind: StreamKind,
     pub delta: String,
 }
 
@@ -213,14 +341,14 @@ impl ReadModel {
     }
 
     /// Where the thread's agent runs: its worktree when it has one, never the
-    /// project root in that case.
+    /// project root in that case. `None` for a chat, whose folder only the engine knows.
     pub fn thread_cwd(&self, thread_id: &str) -> Option<&str> {
         let thread = self.threads.get(thread_id)?;
         match &thread.worktree_path {
             Some(path) => Some(path),
             None => self
                 .projects
-                .get(&thread.project_id)
+                .get(thread.project_id.as_deref()?)
                 .map(|project| project.workspace_root.as_str()),
         }
     }
@@ -233,7 +361,7 @@ impl ReadModel {
             Event::ProjectRemoved { project_id } => {
                 self.projects.remove(project_id);
                 self.threads
-                    .retain(|_, thread| &thread.project_id != project_id);
+                    .retain(|_, thread| thread.project_id.as_ref() != Some(project_id));
             }
             Event::ThreadCreated { thread } => {
                 self.threads.insert(thread.id.clone(), thread.clone());
@@ -251,14 +379,70 @@ impl ReadModel {
                     thread.branch.clone_from(branch);
                 }
             }
+            Event::ThreadWorktreeAttached {
+                thread_id,
+                worktree_path,
+                branch,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.worktree_path = Some(worktree_path.clone());
+                    thread.branch.clone_from(branch);
+                    thread.worktree_released = false;
+                }
+            }
+            Event::ThreadWorktreeReleased { thread_id } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.worktree_released = true;
+                }
+            }
+            Event::ThreadWorktreeRestored { thread_id } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.worktree_released = false;
+                }
+            }
+            Event::ThreadCleanedUp { thread_id } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.worktree_path = None;
+                    thread.branch = None;
+                    thread.worktree_released = false;
+                    thread.session_id = None;
+                }
+            }
+            Event::ThreadArchivedSet {
+                thread_id,
+                archived,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.archived = *archived;
+                }
+            }
+            Event::ThreadPinnedSet { thread_id, pinned } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.pinned = *pinned;
+                }
+            }
             Event::ThreadModelSet {
                 thread_id,
                 model,
                 effort,
+                fast_mode,
+                ultracode,
             } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.model.clone_from(model);
                     thread.effort = *effort;
+                    thread.fast_mode = *fast_mode;
+                    thread.ultracode = *ultracode;
+                }
+            }
+            Event::ThreadAccessSet {
+                thread_id,
+                access_mode,
+                plan_mode,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.access_mode = *access_mode;
+                    thread.plan_mode = *plan_mode;
                 }
             }
             Event::TurnStarted {
@@ -347,17 +531,29 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             workspace,
             model: thread_model,
             effort,
+            fast_mode,
+            ultracode,
+            access_mode,
+            plan_mode,
         } => {
             if model.threads.contains_key(&thread_id) {
                 return Err(CommandError::DuplicateThreadId { thread_id });
             }
-            if !model.projects.contains_key(&project_id) {
-                return Err(CommandError::ProjectNotFound { project_id });
+            match &project_id {
+                Some(id) if !model.projects.contains_key(id) => {
+                    return Err(CommandError::ProjectNotFound {
+                        project_id: id.clone(),
+                    });
+                }
+                None if workspace != ThreadWorkspace::Local => {
+                    return Err(CommandError::ChatNotLocal { thread_id });
+                }
+                _ => {}
             }
             let (worktree_path, branch) = match workspace {
                 ThreadWorkspace::Local => (None, None),
                 ThreadWorkspace::Worktree { path, branch } => (Some(path), Some(branch)),
-                ThreadWorkspace::NewWorktree => {
+                ThreadWorkspace::NewWorktree | ThreadWorkspace::BranchWorktree { .. } => {
                     return Err(CommandError::Internal {
                         detail: "the engine must create the worktree first".into(),
                     });
@@ -374,7 +570,14 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     session_id: None,
                     model: thread_model,
                     effort,
+                    fast_mode,
+                    ultracode,
+                    access_mode,
+                    plan_mode,
                     active_turn_id: None,
+                    archived: false,
+                    pinned: false,
+                    worktree_released: false,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
                 },
@@ -386,10 +589,105 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             Ok(vec![Event::ThreadDeleted { thread_id }])
         }
+        Command::ThreadWorktreeRelease { thread_id } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            if thread.active_turn_id.is_some() {
+                return Err(CommandError::ThreadBusy { thread_id });
+            }
+            if thread.worktree_path.is_none() {
+                return Err(CommandError::NothingToClean { thread_id });
+            }
+            if thread.worktree_released {
+                return Ok(Vec::new());
+            }
+            Ok(vec![Event::ThreadWorktreeReleased { thread_id }])
+        }
+        Command::ThreadCleanUp { thread_id } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            if thread.active_turn_id.is_some() {
+                return Err(CommandError::ThreadBusy { thread_id });
+            }
+            if thread.worktree_path.is_none() && thread.branch.is_none() {
+                return Err(CommandError::NothingToClean { thread_id });
+            }
+            let mut events = Vec::with_capacity(3);
+            if thread.pinned {
+                events.push(Event::ThreadPinnedSet {
+                    thread_id: thread_id.clone(),
+                    pinned: false,
+                });
+            }
+            if !thread.archived {
+                events.push(Event::ThreadArchivedSet {
+                    thread_id: thread_id.clone(),
+                    archived: true,
+                });
+            }
+            events.push(Event::ThreadCleanedUp { thread_id });
+            Ok(events)
+        }
+        Command::ThreadArchive {
+            thread_id,
+            archived,
+        } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            let mut events = Vec::with_capacity(2);
+            if archived && thread.pinned {
+                events.push(Event::ThreadPinnedSet {
+                    thread_id: thread_id.clone(),
+                    pinned: false,
+                });
+            }
+            if thread.archived != archived {
+                events.push(Event::ThreadArchivedSet {
+                    thread_id,
+                    archived,
+                });
+            }
+            Ok(events)
+        }
+        Command::ThreadPin { thread_id, pinned } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            let mut events = Vec::with_capacity(2);
+            if pinned && thread.archived {
+                events.push(Event::ThreadArchivedSet {
+                    thread_id: thread_id.clone(),
+                    archived: false,
+                });
+            }
+            if thread.pinned != pinned {
+                events.push(Event::ThreadPinnedSet { thread_id, pinned });
+            }
+            Ok(events)
+        }
+        Command::ThreadAccessSet {
+            thread_id,
+            access_mode,
+            plan_mode,
+        } => {
+            if !model.threads.contains_key(&thread_id) {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            }
+            Ok(vec![Event::ThreadAccessSet {
+                thread_id,
+                access_mode,
+                plan_mode,
+            }])
+        }
         Command::ThreadModelSet {
             thread_id,
             model: thread_model,
             effort,
+            fast_mode,
+            ultracode,
         } => {
             if !model.threads.contains_key(&thread_id) {
                 return Err(CommandError::ThreadNotFound { thread_id });
@@ -398,12 +696,15 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 thread_id,
                 model: thread_model,
                 effort,
+                fast_mode,
+                ultracode,
             }])
         }
         Command::MessageSend {
             thread_id,
             message_id,
             text,
+            attachments,
         } => {
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
@@ -412,14 +713,29 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 return Err(CommandError::ThreadBusy { thread_id });
             }
             let text = text.trim().to_owned();
-            if text.is_empty() {
+            let images = attachments
+                .iter()
+                .filter(|attachment| matches!(attachment, MessageAttachment::Image { .. }));
+            if text.is_empty() && images.count() == 0 {
                 return Err(CommandError::EmptyMessage);
             }
-            let mut events = Vec::with_capacity(3);
+            let mut events = Vec::with_capacity(5);
+            if thread.worktree_released {
+                // The engine recreated the folder before this command reached here.
+                events.push(Event::ThreadWorktreeRestored {
+                    thread_id: thread_id.clone(),
+                });
+            }
+            if thread.archived {
+                events.push(Event::ThreadArchivedSet {
+                    thread_id: thread_id.clone(),
+                    archived: false,
+                });
+            }
             if thread.title.is_empty() {
                 events.push(Event::ThreadTitleSet {
                     thread_id: thread_id.clone(),
-                    title: title_from(&text),
+                    title: title_from(&text, &attachments),
                 });
             }
             events.push(Event::ItemAdded {
@@ -427,7 +743,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     id: message_id.clone(),
                     thread_id: thread_id.clone(),
                     created_at: now.to_owned(),
-                    content: ItemContent::UserMessage { text },
+                    content: ItemContent::UserMessage { text, attachments },
                 },
             });
             events.push(Event::TurnStarted {
@@ -478,9 +794,15 @@ pub fn record_output(
             thread_id: thread_id.to_owned(),
             session_id,
         }],
-        ProviderOutput::TextDelta { .. } => Vec::new(),
+        ProviderOutput::TextDelta { .. }
+        | ProviderOutput::ReasoningDelta { .. }
+        | ProviderOutput::ContextUsage(_)
+        | ProviderOutput::UsageLimits(_) => Vec::new(),
         ProviderOutput::AssistantMessage { item_id, text } => {
             vec![item(item_id, ItemContent::AssistantMessage { text })]
+        }
+        ProviderOutput::Reasoning { item_id, text } => {
+            vec![item(item_id, ItemContent::Reasoning { text })]
         }
         ProviderOutput::ToolCallStarted {
             item_id,
@@ -529,10 +851,31 @@ pub fn record_output(
 /// Records the branch a thread's folder is on, when it changed.
 pub fn record_branch(model: &ReadModel, thread_id: &str, branch: Option<String>) -> Vec<Event> {
     match model.threads.get(thread_id) {
-        Some(thread) if thread.branch != branch => vec![Event::ThreadBranchSet {
-            thread_id: thread_id.to_owned(),
-            branch,
-        }],
+        // A released worktree has no folder to read; its branch is what brings it back.
+        Some(thread) if !thread.worktree_released && thread.branch != branch => {
+            vec![Event::ThreadBranchSet {
+                thread_id: thread_id.to_owned(),
+                branch,
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+pub fn record_worktree(
+    model: &ReadModel,
+    thread_id: &str,
+    worktree_path: String,
+    branch: Option<String>,
+) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.worktree_path.as_deref() != Some(worktree_path.as_str()) => {
+            vec![Event::ThreadWorktreeAttached {
+                thread_id: thread_id.to_owned(),
+                worktree_path,
+                branch,
+            }]
+        }
         _ => Vec::new(),
     }
 }
@@ -544,9 +887,57 @@ pub fn turn_failed(reason: TurnFailure) -> ProviderOutput {
     }
 }
 
-fn title_from(text: &str) -> String {
-    let line = text.lines().next().unwrap_or_default().trim();
-    line.chars().take(TITLE_MAX_CHARS).collect()
+/// The message's first line of prose, without its markdown, or the name of its
+/// first image when it has none. Stands until a generated title replaces it.
+fn title_from(text: &str, attachments: &[MessageAttachment]) -> String {
+    let mut in_code = false;
+    let prose = text.lines().find_map(|line| {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            in_code = !in_code;
+            return None;
+        }
+        if in_code {
+            return None;
+        }
+        let line = line.trim_start_matches(['#', '>', ' ']);
+        let line = line
+            .strip_prefix("- ")
+            .or_else(|| line.strip_prefix("* "))
+            .unwrap_or(line);
+        let line = match line.split_once(". ") {
+            Some((number, rest)) if number.chars().all(|char| char.is_ascii_digit()) => rest,
+            _ => line,
+        };
+        let line = line.replace(['*', '`', '~'], "");
+        let line = line.trim();
+        (!line.is_empty() && line != "---").then(|| line.to_owned())
+    });
+    let image = attachments.iter().find_map(|attachment| match attachment {
+        MessageAttachment::Image { name, .. } => Some(name.clone()),
+        _ => None,
+    });
+    prose
+        .or(image)
+        .unwrap_or_default()
+        .chars()
+        .take(TITLE_MAX_CHARS)
+        .collect()
+}
+
+/// Names a thread with a generated title, unless its title changed since the
+/// generation started from `previous`.
+pub fn record_title(model: &ReadModel, thread_id: &str, previous: &str, title: &str) -> Vec<Event> {
+    let title: String = title.trim().chars().take(TITLE_MAX_CHARS).collect();
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.title == previous && !title.is_empty() && thread.title != title => {
+            vec![Event::ThreadTitleSet {
+                thread_id: thread_id.to_owned(),
+                title,
+            }]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Windows paths are case-insensitive and accept either separator.
@@ -594,13 +985,21 @@ mod tests {
     }
 
     fn create_thread(id: &str, project_id: &str) -> Command {
+        create_thread_in(id, Some(project_id))
+    }
+
+    fn create_thread_in(id: &str, project_id: Option<&str>) -> Command {
         Command::ThreadCreate {
             thread_id: id.into(),
-            project_id: project_id.into(),
+            project_id: project_id.map(str::to_owned),
             title: String::new(),
             workspace: ThreadWorkspace::Local,
             model: None,
             effort: None,
+            fast_mode: false,
+            ultracode: false,
+            access_mode: AccessMode::AcceptEdits,
+            plan_mode: false,
         }
     }
 
@@ -609,6 +1008,7 @@ mod tests {
             thread_id: "t".into(),
             message_id: message_id.into(),
             text: text.into(),
+            attachments: Vec::new(),
         }
     }
 
@@ -649,6 +1049,39 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_belongs_to_no_project_and_works_only_locally() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+        run(&mut model, create_thread_in("chat", None)).unwrap();
+
+        assert_eq!(model.thread("chat").unwrap().project_id, None);
+        assert_eq!(model.thread_cwd("chat"), None);
+
+        let mut worktree = create_thread_in("c2", None);
+        if let Command::ThreadCreate { workspace, .. } = &mut worktree {
+            *workspace = ThreadWorkspace::Worktree {
+                path: "/wt".into(),
+                branch: "b".into(),
+            };
+        }
+        assert_eq!(
+            run(&mut model, worktree).unwrap_err(),
+            CommandError::ChatNotLocal {
+                thread_id: "c2".into()
+            }
+        );
+
+        run(
+            &mut model,
+            Command::ProjectRemove {
+                project_id: "p".into(),
+            },
+        )
+        .unwrap();
+        assert!(model.thread("chat").is_some());
+    }
+
+    #[test]
     fn removing_a_project_removes_its_threads_and_frees_the_folder() {
         let mut model = ReadModel::default();
         run(&mut model, create_project("p", "/repo")).unwrap();
@@ -682,6 +1115,55 @@ mod tests {
     }
 
     #[test]
+    fn the_first_title_skips_markdown_syntax_and_code() {
+        let title = |text: &str| title_from(text, &[]);
+
+        assert_eq!(
+            title(
+                "```tsx
+const a = 1
+```
+
+## Fix the *login* `bug`"
+            ),
+            "Fix the login bug"
+        );
+        assert_eq!(title("> quoted ask"), "quoted ask");
+        assert_eq!(
+            title(
+                "1. first step
+2. second"
+            ),
+            "first step"
+        );
+        assert_eq!(
+            title(
+                "```tsx
+```"
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_generated_title_replaces_only_the_title_it_started_from() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "fix the login bug")).unwrap();
+
+        assert!(record_title(&model, "t", "something else", "Login Bug").is_empty());
+        assert!(record_title(&model, "t", "fix the login bug", "  ").is_empty());
+        let events = record_title(&model, "t", "fix the login bug", " Fix Login Redirect ");
+
+        assert_eq!(
+            events,
+            [Event::ThreadTitleSet {
+                thread_id: "t".into(),
+                title: "Fix Login Redirect".into()
+            }]
+        );
+    }
+
+    #[test]
     fn a_busy_thread_rejects_another_message() {
         let mut model = model_with_thread();
         run(&mut model, send("m1", "first")).unwrap();
@@ -706,6 +1188,53 @@ mod tests {
         );
     }
 
+    fn image(name: &str) -> MessageAttachment {
+        MessageAttachment::Image {
+            id: "i1".into(),
+            name: name.into(),
+            mime_type: "image/png".into(),
+            size: 10,
+        }
+    }
+
+    #[test]
+    fn an_image_alone_is_a_message_named_after_it() {
+        let mut model = model_with_thread();
+        let command = Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: "m1".into(),
+            text: " ".into(),
+            attachments: vec![image("screenshot.png")],
+        };
+
+        let events = run(&mut model, command).unwrap();
+
+        assert_eq!(model.thread("t").unwrap().title, "screenshot.png");
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ItemAdded { item } if item.content == ItemContent::UserMessage {
+                text: String::new(),
+                attachments: vec![image("screenshot.png")],
+            }
+        )));
+    }
+
+    #[test]
+    fn a_mention_without_text_or_image_is_empty() {
+        let mut model = model_with_thread();
+        let command = Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: "m1".into(),
+            text: String::new(),
+            attachments: vec![MessageAttachment::Skill { name: "pdf".into() }],
+        };
+
+        assert_eq!(
+            run(&mut model, command).unwrap_err(),
+            CommandError::EmptyMessage
+        );
+    }
+
     #[test]
     fn interrupting_an_idle_thread_fails() {
         let mut model = model_with_thread();
@@ -724,6 +1253,36 @@ mod tests {
                 thread_id: "t".into()
             }
         );
+    }
+
+    #[test]
+    fn reasoning_is_kept_as_an_item_and_its_deltas_are_not() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "hi")).unwrap();
+
+        let streamed = record(
+            &mut model,
+            "m1",
+            ProviderOutput::ReasoningDelta {
+                item_id: "r".into(),
+                delta: "Let me".into(),
+            },
+        );
+        let finished = record(
+            &mut model,
+            "m1",
+            ProviderOutput::Reasoning {
+                item_id: "r".into(),
+                text: "Let me check.".into(),
+            },
+        );
+
+        assert!(streamed.is_empty());
+        assert!(matches!(
+            &finished[..],
+            [Event::ItemAdded { item }]
+                if item.id == "r" && item.content == ItemContent::Reasoning { text: "Let me check.".into() }
+        ));
     }
 
     #[test]
@@ -771,6 +1330,66 @@ mod tests {
         let thread = model.thread("t").unwrap();
         assert_eq!(thread.status, ThreadStatus::Error);
         assert_eq!(thread.active_turn_id, None);
+    }
+
+    #[test]
+    fn an_attached_worktree_becomes_the_thread_cwd() {
+        let mut model = model_with_thread();
+
+        let events = record_worktree(&model, "t", "/wt/fix".into(), Some("fix".into()));
+        for event in &events {
+            model.apply(event);
+        }
+
+        assert_eq!(model.thread_cwd("t"), Some("/wt/fix"));
+        assert_eq!(model.thread("t").unwrap().branch.as_deref(), Some("fix"));
+        assert!(record_worktree(&model, "t", "/wt/fix".into(), None).is_empty());
+    }
+
+    fn archive(archived: bool) -> Command {
+        Command::ThreadArchive {
+            thread_id: "t".into(),
+            archived,
+        }
+    }
+
+    fn pin(pinned: bool) -> Command {
+        Command::ThreadPin {
+            thread_id: "t".into(),
+            pinned,
+        }
+    }
+
+    #[test]
+    fn archiving_unpins_and_pinning_unarchives() {
+        let mut model = model_with_thread();
+
+        run(&mut model, pin(true)).unwrap();
+        run(&mut model, archive(true)).unwrap();
+        let thread = model.thread("t").unwrap();
+        assert!(thread.archived && !thread.pinned);
+
+        run(&mut model, pin(true)).unwrap();
+        let thread = model.thread("t").unwrap();
+        assert!(!thread.archived && thread.pinned);
+    }
+
+    #[test]
+    fn archiving_twice_changes_nothing() {
+        let mut model = model_with_thread();
+        run(&mut model, archive(true)).unwrap();
+
+        assert!(run(&mut model, archive(true)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_new_message_brings_an_archived_thread_back() {
+        let mut model = model_with_thread();
+        run(&mut model, archive(true)).unwrap();
+
+        run(&mut model, send("m1", "one more thing")).unwrap();
+
+        assert!(!model.thread("t").unwrap().archived);
     }
 
     #[test]
@@ -847,6 +1466,8 @@ mod tests {
                 thread_id: "t".into(),
                 model: Some("opus".into()),
                 effort: Some(Effort::High),
+                fast_mode: true,
+                ultracode: true,
             },
         )
         .unwrap();
@@ -854,6 +1475,30 @@ mod tests {
         let thread = model.thread("t").unwrap();
         assert_eq!(thread.model.as_deref(), Some("opus"));
         assert_eq!(thread.effort, Some(Effort::High));
+        assert!(thread.fast_mode && thread.ultracode);
+    }
+
+    #[test]
+    fn the_access_choice_is_kept_on_the_thread() {
+        let mut model = model_with_thread();
+        assert_eq!(
+            model.thread("t").unwrap().access_mode,
+            AccessMode::AcceptEdits
+        );
+
+        run(
+            &mut model,
+            Command::ThreadAccessSet {
+                thread_id: "t".into(),
+                access_mode: AccessMode::FullAccess,
+                plan_mode: true,
+            },
+        )
+        .unwrap();
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.access_mode, AccessMode::FullAccess);
+        assert!(thread.plan_mode);
     }
 
     #[cfg(windows)]

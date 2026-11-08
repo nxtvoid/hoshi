@@ -2,17 +2,21 @@ import { m } from '@/paraglide/messages'
 import type { ComponentType } from 'react'
 import { SettingsNav } from './SettingsNav'
 import { AboutSection } from './AboutSection'
+import { GeneralSection } from './GeneralSection'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useNavigate } from '@tanstack/react-router'
 import { ProvidersSection } from './ProvidersSection'
+import { SourceControlSection } from './SourceControlSection'
 import { AppearanceSection } from './AppearanceSection'
 import { ArrowRight01Icon } from '@hugeicons/core-free-icons'
 import { SECTION_META, type SettingsSection } from './sections'
 import { PageModal, PageModalClose } from '@hoshi/ui/components/page-modal'
 
 const CONTENT: Record<SettingsSection, ComponentType> = {
+  general: GeneralSection,
   appearance: AppearanceSection,
   providers: ProvidersSection,
+  forges: SourceControlSection,
   about: AboutSection
 }
 

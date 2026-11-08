@@ -12,6 +12,7 @@ type IconButtonProps = {
   disabled?: boolean
   active?: boolean
   side?: 'top' | 'bottom'
+  className?: string
   children: ReactNode
 }
 
@@ -21,6 +22,7 @@ export function IconButton({
   disabled,
   active = false,
   side = 'bottom',
+  className,
   children
 }: IconButtonProps) {
   return (
@@ -34,6 +36,7 @@ export function IconButton({
             aria-current={active ? 'page' : undefined}
             disabled={disabled}
             onClick={onClick}
+            className={className}
           />
         }
       >
