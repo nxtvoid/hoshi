@@ -380,6 +380,11 @@ pub struct ClaudeParser {
     /// Subagents running in the background, by task id. A turn that ends while they run
     /// is not over: Claude Code goes on once they finish, in a turn of its own.
     background_agents: HashSet<String>,
+    /// Every task that ran in the background, by task id.
+    ever_background: HashSet<String>,
+    /// Background tasks that ended, by run id, until Claude Code's turn about each ends:
+    /// it answers each one in a run of its own.
+    pending_wakes: HashSet<String>,
     /// Calls that started a subagent in the background, whose result comes with the
     /// subagent's end rather than at once.
     async_agents: HashSet<String>,
@@ -426,6 +431,13 @@ impl ClaudeParser {
                 Some("task_started") => self.live_output.started(&value),
                 Some("task_notification") => {
                     self.live_output.ended(&value);
+                    let task = value["task_id"].as_str().unwrap_or_default();
+                    if self.ever_background.contains(task)
+                        && value["status"] != "stopped"
+                        && let Some(run) = value["run_id"].as_str()
+                    {
+                        self.pending_wakes.insert(run.to_owned());
+                    }
                     return self.background_agent_ended(&value);
                 }
                 Some("background_tasks_changed") => {
@@ -440,6 +452,8 @@ impl ClaudeParser {
                                 .then(|| id.to_owned())
                         })
                         .collect();
+                    self.ever_background
+                        .extend(self.background_agents.iter().cloned());
                     return Vec::new();
                 }
                 Some("task_progress") => {
@@ -488,10 +502,17 @@ impl ClaudeParser {
                 .collect(),
             Some("result") => {
                 let mut outputs: Vec<_> = self.reported_window(&value).into_iter().collect();
+                if value["origin"]["kind"] == "task-notification"
+                    && let Some(run) = value["origin"]["runId"].as_str()
+                {
+                    self.pending_wakes.remove(run);
+                }
                 let mut queue = self.queue.state();
                 // A message not yet taken in, or a subagent still working, gets another run.
                 let over = queue.interrupted
-                    || (queue.waiting.is_empty() && self.background_agents.is_empty());
+                    || (queue.waiting.is_empty()
+                        && self.background_agents.is_empty()
+                        && self.pending_wakes.is_empty());
                 if over {
                     queue.closing = true;
                     outputs.push(ProviderOutput::TurnCompleted {
@@ -1038,6 +1059,36 @@ mod tests {
         );
         assert!(matches!(
             parser.parse_line(&result).as_slice(),
+            [ProviderOutput::TurnCompleted { .. }]
+        ));
+    }
+
+    #[test]
+    fn a_turn_waits_for_claude_to_answer_each_background_task_that_ended() {
+        fn parser_line(parser: &mut ClaudeParser, value: Value) -> Vec<ProviderOutput> {
+            parser.parse_line(&value.to_string())
+        }
+        let mut parser = ClaudeParser::new(None);
+        for value in [
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [
+                { "task_id": "a", "task_type": "local_agent" },
+                { "task_id": "b", "task_type": "local_agent" }] }),
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "a",
+                "run_id": "run-a", "status": "completed" }),
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "b",
+                "run_id": "run-b", "status": "completed" }),
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] }),
+        ] {
+            parser_line(&mut parser, value);
+        }
+        let result = |origin: Value| json!({ "type": "result", "subtype": "success", "is_error": false, "origin": origin });
+
+        assert!(parser_line(&mut parser, result(Value::Null)).is_empty());
+        let first = result(json!({ "kind": "task-notification", "runId": "run-a" }));
+        assert!(parser_line(&mut parser, first).is_empty());
+        let second = result(json!({ "kind": "task-notification", "runId": "run-b" }));
+        assert!(matches!(
+            parser_line(&mut parser, second).as_slice(),
             [ProviderOutput::TurnCompleted { .. }]
         ));
     }

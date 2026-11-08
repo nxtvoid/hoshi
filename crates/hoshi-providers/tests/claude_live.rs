@@ -696,3 +696,32 @@ fn a_message_is_answered_at_once_while_a_subagent_keeps_working() {
         .count();
     assert_eq!(completions, 1, "{outputs:#?}");
 }
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_turn_waits_for_claude_to_answer_every_background_subagent() {
+    let cwd = scratch("two-background-agents");
+    let outputs = run_answering(
+        &cwd,
+        "Launch TWO general-purpose subagents with the Agent tool in one message, both IN THE BACKGROUND (run_in_background: true). Each uses no tools and only replies with one word: the first replies ALPHA, the second replies BETA. Then reply 'launched' and end your turn. When both have answered, tell me both words.",
+        AccessMode::FullAccess,
+        |_| RequestResponse::Decision {
+            decision: ApprovalDecision::Accept,
+            feedback: None,
+        },
+    );
+
+    let completions = outputs
+        .iter()
+        .filter(|output| matches!(output, ProviderOutput::TurnCompleted { .. }))
+        .count();
+    assert_eq!(completions, 1, "{outputs:#?}");
+    let last = outputs.iter().rev().find_map(|output| match output {
+        ProviderOutput::AssistantMessage { text, .. } => Some(text.clone()),
+        _ => None,
+    });
+    assert!(
+        last.is_some_and(|text| text.contains("ALPHA") && text.contains("BETA")),
+        "{outputs:#?}"
+    );
+}
