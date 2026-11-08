@@ -162,15 +162,25 @@ export function withDelegatedWork(threads: Thread[]): Thread[] {
   // A task whose thread is gone is the user's to see.
   const delegated = (thread: Thread) =>
     thread.parentThreadId !== null && ids.has(thread.parentThreadId)
+  const byId = new Map(threads.map((thread) => [thread.id, thread]))
+  /** The thread the user started that a task, however deep, works for. */
+  const root = (thread: Thread) => {
+    let current = thread
+    for (let depth = 0; depth < threads.length && delegated(current); depth++) {
+      const parent = byId.get(current.parentThreadId as string)
+      if (!parent) break
+      current = parent
+    }
+    return current.id
+  }
   const busiest = new Map<string, Thread['status']>()
   for (const thread of threads) {
-    const { parentThreadId, status } = thread
-    const rank = ESCALATION[status]
-    if (parentThreadId === null || !delegated(thread) || rank === undefined)
-      continue
-    const current = busiest.get(parentThreadId)
+    const rank = ESCALATION[thread.status]
+    if (!delegated(thread) || rank === undefined) continue
+    const top = root(thread)
+    const current = busiest.get(top)
     if (!current || rank > (ESCALATION[current] ?? 0)) {
-      busiest.set(parentThreadId, status)
+      busiest.set(top, thread.status)
     }
   }
   return threads

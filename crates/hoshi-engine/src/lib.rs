@@ -265,6 +265,8 @@ impl Engine {
                 ProviderOutput::TurnCompleted { outcome },
             );
         }
+        // A task the close cut short answers once the user has it finish.
+        state.delegations = state.pending_delegations();
         let thread_ids = state
             .model
             .threads()
@@ -2316,18 +2318,25 @@ fn start_turn(
         })
     });
     let attachments = state.turn_attachments(attachments);
-    // A project thread's agent can delegate; a delegated task's does its own work.
+    let depth = state.depth(thread_id);
     let mcp = state
         .mcp
         .as_ref()
-        .filter(|_| thread.project_id.is_some() && thread.parent_thread_id.is_none())
+        .filter(|_| thread.project_id.is_some() && depth < delegation::MAX_DEPTH)
         .and_then(|server| {
             Some(hoshi_providers::McpServer {
                 url: server.url.clone(),
                 authorization: format!("Bearer {}", server.token_for(thread_id)?),
             })
         });
-    let instructions = mcp.as_ref().map(|_| delegation::INSTRUCTIONS.to_owned());
+    let instructions = mcp.as_ref().map(|_| match depth {
+        0 => delegation::INSTRUCTIONS.to_owned(),
+        _ => format!(
+            "{}\n{}",
+            delegation::INSTRUCTIONS,
+            delegation::TASK_INSTRUCTIONS
+        ),
+    });
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
@@ -2531,6 +2540,7 @@ mod tests {
         resume: Option<String>,
         model: Option<String>,
         attachments: Vec<TurnAttachment>,
+        instructions: Option<String>,
     }
 
     /// Records each request and replays a script; a turn whose script is
@@ -2603,6 +2613,7 @@ mod tests {
                 resume: request.resume_session_id,
                 model: request.model,
                 attachments: request.attachments,
+                instructions: request.instructions,
             });
             let script: Vec<_> = self
                 .script
@@ -2918,6 +2929,7 @@ mod tests {
             resume: resume.map(Into::into),
             model: Some("haiku".into()),
             attachments: Vec::new(),
+            instructions: Some(delegation::INSTRUCTIONS.into()),
         };
         assert_eq!(
             *harness.adapter.requests.lock().unwrap(),
@@ -3378,6 +3390,109 @@ mod tests {
 
         assert_eq!(adapter.requests.lock().unwrap().len(), 2);
         assert_eq!(harness.thread("t").active_turn_id, None);
+    }
+
+    #[test]
+    fn a_task_delegates_once_more_with_the_model_effort_and_mode_it_was_given() {
+        let harness = Harness::in_memory("delegate-nested", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+
+        let task = delegate(
+            &harness,
+            serde_json::json!({ "task": "plan it", "model": "opus", "effort": "high", "plan": true }),
+        );
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        let thread = harness.thread(&child);
+        assert_eq!(thread.model.as_deref(), Some("opus"));
+        assert_eq!(thread.effort, Some(Effort::High));
+        assert!(thread.plan_mode);
+
+        let deeper = lock(&harness.engine.state)
+            .call_tool(
+                &child,
+                "delegate_task",
+                &serde_json::json!({ "task": "count" }),
+            )
+            .unwrap();
+        let grandchild = deeper["taskId"].as_str().unwrap().to_owned();
+        assert_eq!(
+            harness.thread(&grandchild).parent_thread_id.as_deref(),
+            Some(child.as_str())
+        );
+        let too_deep = lock(&harness.engine.state).call_tool(
+            &grandchild,
+            "delegate_task",
+            &serde_json::json!({ "task": "more" }),
+        );
+        assert!(too_deep.is_err());
+        let wrong = lock(&harness.engine.state).call_tool(
+            "t",
+            "delegate_task",
+            &serde_json::json!({ "task": "x", "effort": "huge" }),
+        );
+        assert!(wrong.is_err());
+
+        let requests = adapter.requests.lock().unwrap();
+        let told = |turn: usize| requests[turn].instructions.clone();
+        assert!(told(0).is_some_and(|told| !told.contains(delegation::TASK_INSTRUCTIONS)));
+        assert!(told(1).is_some_and(|told| told.contains(delegation::TASK_INSTRUCTIONS)));
+        assert_eq!(told(2), None);
+    }
+
+    #[test]
+    fn a_task_a_restart_cut_short_answers_once_the_user_has_it_finish() {
+        let store_dir = scratch_dir("delegate-restart-store");
+        let database = store_dir.join("state.sqlite");
+        let first = adapter(None);
+        let child = {
+            let harness = Harness::new(
+                "delegate-restart",
+                scratch_dir("delegate-restart"),
+                Store::open(&database).unwrap(),
+                Vec::new(),
+            );
+            harness.engine.set_adapter(Some(first.clone()));
+            harness.send("t", "m1", "split the work");
+            let task = delegate(&harness, serde_json::json!({ "task": "count the files" }));
+            finish(&first, 0, TurnOutcome::Completed);
+            harness.wait_for_turn_end();
+            task["taskId"].as_str().unwrap().to_owned()
+        };
+
+        let (sender, events) = mpsc::channel();
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::Event(envelope) = notification {
+                let _ = sender.send(envelope.event);
+            }
+        });
+        let data_dir = scratch_dir("delegate-restart-again");
+        let engine =
+            Engine::from_store(Store::open(&database).unwrap(), &data_dir, notify).unwrap();
+        let again = adapter(None);
+        engine.set_adapter(Some(again.clone()));
+        let harness = Harness {
+            engine,
+            adapter: again.clone(),
+            events,
+            root: String::new(),
+            data_dir,
+        };
+        assert_eq!(harness.thread(&child).active_turn_id, None);
+
+        harness.send(&child, "m9", "go on");
+        finish(&again, 0, TurnOutcome::Completed);
+        harness.wait_for(|event| match event {
+            Event::TurnCompleted { turn_id, .. } if turn_id == "m9" => Some(()),
+            _ => None,
+        });
+        harness.thread("t");
+
+        let requests = again.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].prompt.starts_with("Delegated task"));
+        drop(first);
     }
 
     #[test]

@@ -506,6 +506,19 @@ impl Store {
             .transpose()?)
     }
 
+    /// The delegated tasks whose answer already went back to the thread that delegated them.
+    pub fn answered_tasks(&self) -> Result<Vec<String>, StoreError> {
+        Ok(self
+            .conn
+            .prepare(
+                "SELECT json_extract(content_json, '$.taskResult') FROM thread_items
+                 WHERE json_extract(content_json, '$.kind') = 'userMessage'
+                   AND json_extract(content_json, '$.taskResult') IS NOT NULL",
+            )?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?)
+    }
+
     /// A thread's transcript, oldest first.
     pub fn thread_items(&self, thread_id: &str) -> Result<Vec<ThreadItem>, StoreError> {
         self.items(

@@ -3,9 +3,11 @@
 
 use crate::{State, now};
 use hoshi_core::{
-    Command, ThreadStatus, ThreadWorkspace, TurnOutcome, record_delegation, send_task_result,
+    Command, Effort, ThreadStatus, ThreadWorkspace, TurnOutcome, record_delegation,
+    send_task_result,
 };
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 
 /// What the agent reads with every running task: its answer comes on its own.
 /// Kept short: a page of the transcript keeps only the start of a tool's output, which must
@@ -14,6 +16,14 @@ const NEXT: &str = "End your turn now; the answer arrives here as a message.";
 /// An answer longer than this is cut; `task_status` still has it all.
 const ANSWER_MAX_CHARS: usize = 16_000;
 const TITLE_MAX_CHARS: usize = 60;
+
+/// How many threads deep tasks can go: a thread delegates, and its tasks can delegate once
+/// more.
+pub(crate) const MAX_DEPTH: usize = 2;
+
+/// Added to the system prompt of a delegated task's agent, after [`INSTRUCTIONS`].
+pub(crate) const TASK_INSTRUCTIONS: &str =
+    "You are a delegated task: do the work yourself. Delegate only what your task asks you to.";
 
 /// Added to the system prompt of agents that can delegate.
 pub(crate) const INSTRUCTIONS: &str = "hoshi can run work in child threads the user can open, through the hoshi MCP server's tools (load them with ToolSearch, \"select:mcp__hoshi__delegate_task\").\n- Subagents: use your own Agent tool with run_in_background: false and wait for them; start several in one message to run them in parallel, then answer once with all they found. Never start a background Agent: use delegate_task for work that should go on in the background, run as a thread of its own, or in its own checkout and branch (isolation: \"worktree\").\n- The child gets only `task`: include everything it needs.\n- delegate_task returns at once. The child's answer arrives later as a message in this thread, so end your turn after delegating; don't wait, sleep or poll with task_status.\n- Stop a task with task_cancel.";
@@ -48,6 +58,74 @@ pub(crate) fn new_id() -> String {
 }
 
 impl State {
+    /// How many delegations led to `thread_id`: 0 for a thread the user started.
+    pub(crate) fn depth(&self, thread_id: &str) -> usize {
+        let mut depth = 0;
+        let mut current = self.model.thread(thread_id);
+        while let Some(parent) = current
+            .and_then(|thread| thread.parent_thread_id.as_deref())
+            .and_then(|parent| self.model.thread(parent))
+        {
+            depth += 1;
+            current = Some(parent);
+        }
+        depth
+    }
+
+    /// The tasks whose answer hasn't gone back yet, as the store has them after a restart.
+    pub(crate) fn pending_delegations(&self) -> HashMap<String, Delegation> {
+        let answered: HashSet<String> = self
+            .store
+            .answered_tasks()
+            .unwrap_or_else(|error| {
+                eprintln!("hoshi: failed to read the answered tasks: {error}");
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
+        self.model
+            .threads()
+            .filter(|thread| !answered.contains(&thread.id))
+            .filter_map(|thread| {
+                let parent = thread.parent_thread_id.clone()?;
+                self.model.thread(&parent)?;
+                Some((
+                    thread.id.clone(),
+                    Delegation {
+                        parent,
+                        title: thread.title.clone(),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// The slug of the model the agent named, by slug or name.
+    fn model_slug(&self, wanted: &str) -> Result<String, String> {
+        let Some(adapter) = &self.adapter else {
+            return Ok(wanted.to_owned());
+        };
+        let models = adapter.models().models;
+        if models.is_empty() {
+            return Ok(wanted.to_owned());
+        }
+        models
+            .iter()
+            .find(|model| {
+                [&model.slug, &model.name, &model.short_name]
+                    .iter()
+                    .any(|name| name.eq_ignore_ascii_case(wanted))
+            })
+            .map(|model| model.slug.clone())
+            .ok_or_else(|| {
+                let known: Vec<_> = models.iter().map(|model| model.slug.as_str()).collect();
+                format!(
+                    "there is no model {wanted}; use one of {}",
+                    known.join(", ")
+                )
+            })
+    }
+
     /// A tool call from the agent of thread `caller`.
     pub(crate) fn call_tool(
         &mut self,
@@ -72,6 +150,24 @@ impl State {
         if parent.active_turn_id.is_none() {
             return Err("delegate_task works only while this thread's turn runs".into());
         }
+        if self.depth(caller) >= MAX_DEPTH {
+            return Err("this task is too deep to delegate further: do the work yourself".into());
+        }
+        let model = match arguments["model"]
+            .as_str()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            Some(wanted) => Some(self.model_slug(wanted)?),
+            None => parent.model.clone(),
+        };
+        let effort = match arguments.get("effort").filter(|effort| !effort.is_null()) {
+            Some(effort) => Some(
+                serde_json::from_value::<Effort>(effort.clone())
+                    .map_err(|_| "`effort` is one of low, medium, high, xhigh, max")?,
+            ),
+            None => parent.effort,
+        };
         let task = arguments["task"]
             .as_str()
             .map(str::trim)
@@ -102,12 +198,12 @@ impl State {
             project_id: parent.project_id.clone(),
             title: title.clone(),
             workspace,
-            model: parent.model.clone(),
-            effort: parent.effort,
+            model,
+            effort,
             fast_mode: parent.fast_mode,
             ultracode: parent.ultracode,
             access_mode: parent.access_mode,
-            plan_mode: false,
+            plan_mode: arguments["plan"].as_bool().unwrap_or(false),
         };
         // The parent's worktree is already there; only a new one goes through `prepare`.
         let created = if shared {

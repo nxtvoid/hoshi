@@ -171,6 +171,13 @@ fn tools() -> Value {
                         "enum": ["shared", "worktree"],
                         "description": "shared (default) works in this thread's checkout; worktree in a new one from it.",
                     },
+                    "model": { "type": "string", "description": "The child's model, by slug or name, only when the user asked for one; this thread's model otherwise." },
+                    "effort": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "xhigh", "max"],
+                        "description": "The child's reasoning effort, only when the user asked for one; this thread's otherwise.",
+                    },
+                    "plan": { "type": "boolean", "description": "Start the child in plan mode: it proposes a plan for the user to approve before changing anything." },
                 },
                 "required": ["task"],
             },

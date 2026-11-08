@@ -343,6 +343,18 @@ describe('withDelegatedWork', () => {
     ])
   })
 
+  test('a task of a task works for the thread the user started', () => {
+    const listed = withDelegatedWork([
+      thread('parent'),
+      thread('task', { parentThreadId: 'parent', status: 'working' }),
+      thread('deeper', { parentThreadId: 'task', status: 'waitingForInput' })
+    ])
+
+    expect(listed.map((each) => [each.id, each.status])).toEqual([
+      ['parent', 'waitingForInput']
+    ])
+  })
+
   test('a task whose thread is gone is listed on its own', () => {
     const listed = withDelegatedWork([
       thread('task', { parentThreadId: 'deleted', status: 'working' })

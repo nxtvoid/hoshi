@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { useAppStore } from '@/state/app-store'
+import type { Thread } from '@/bindings/Thread'
 import { useTranscriptStore } from '@/state/transcript-store'
 import { useRequestStore } from '@/state/request-store'
 import type { ApprovalDecision } from '@/bindings/ApprovalDecision'
@@ -20,17 +21,26 @@ export function usePendingRequest() {
 }
 
 /**
- * The oldest request of a task the thread delegated, which the user can answer from the
- * thread, with the task's thread.
+ * The oldest request of a task the thread delegated, however deep, which the user can
+ * answer from the thread, with the task's thread.
  */
 export function useDelegatedRequest(threadId: string | null) {
   const threads = useAppStore((state) => state.threads)
   const pending = useRequestStore((state) => state.pending)
   return useMemo(() => {
     if (!threadId) return null
+    const byId = new Map(threads.map((thread) => [thread.id, thread]))
+    const worksFor = (task: Thread) => {
+      let parentId = task.parentThreadId
+      for (let depth = 0; parentId && depth < threads.length; depth++) {
+        if (parentId === threadId) return true
+        parentId = byId.get(parentId)?.parentThreadId ?? null
+      }
+      return false
+    }
     for (const request of pending) {
-      const child = threads.find((thread) => thread.id === request.threadId)
-      if (child?.parentThreadId === threadId) return { request, child }
+      const child = byId.get(request.threadId)
+      if (child && worksFor(child)) return { request, child }
     }
     return null
   }, [threadId, threads, pending])
