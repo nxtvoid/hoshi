@@ -51,29 +51,31 @@ function onScreen() {
 
 /**
  * Marks a turn that ends while its thread isn't on screen, and unmarks a thread once the
- * user opens it, or comes back to the window with it open.
+ * user opens it, or comes back to the window with it open. Returns how to stop.
  */
+export function trackUnseen(): () => void {
+  const { mark, see } = useUnseenStore.getState()
+  const seeSelected = () => {
+    const { selectedThreadId } = useAppStore.getState()
+    if (selectedThreadId && onScreen()) see(selectedThreadId)
+  }
+  const unsubscribe = useAppStore.subscribe((state, previous) => {
+    if (state.threads !== previous.threads) {
+      const watched = onScreen() ? state.selectedThreadId : null
+      const finished = finishedTurns(previous.threads, state.threads).filter(
+        (id) => id !== watched
+      )
+      if (finished.length > 0) mark(finished)
+    }
+    if (state.selectedThreadId !== previous.selectedThreadId) seeSelected()
+  })
+  window.addEventListener('focus', seeSelected)
+  return () => {
+    unsubscribe()
+    window.removeEventListener('focus', seeSelected)
+  }
+}
+
 export function useUnseenTracking() {
-  useEffect(() => {
-    const { mark, see } = useUnseenStore.getState()
-    const seeSelected = () => {
-      const { selectedThreadId } = useAppStore.getState()
-      if (selectedThreadId && onScreen()) see(selectedThreadId)
-    }
-    const unsubscribe = useAppStore.subscribe((state, previous) => {
-      if (state.threads !== previous.threads) {
-        const watched = onScreen() ? state.selectedThreadId : null
-        const finished = finishedTurns(previous.threads, state.threads).filter(
-          (id) => id !== watched
-        )
-        if (finished.length > 0) mark(finished)
-      }
-      if (state.selectedThreadId !== previous.selectedThreadId) seeSelected()
-    })
-    window.addEventListener('focus', seeSelected)
-    return () => {
-      unsubscribe()
-      window.removeEventListener('focus', seeSelected)
-    }
-  }, [])
+  useEffect(() => trackUnseen(), [])
 }
