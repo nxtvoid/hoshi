@@ -15,8 +15,12 @@
 - `crates/hoshi-core` - Domain model and orchestrator. Pure: commands in, events out. No I/O.
   Its types are the contract with the UI.
 - `crates/hoshi-engine` - Runtime that wires core, store and providers: persists events, runs effects.
-- `crates/hoshi-store` - SQLite persistence for events and projections, in `state.sqlite` under Tauri's app data dir. Each append writes events and projection rows in one transaction.
+- `crates/hoshi-store` - SQLite persistence for events and projections, in `state.sqlite` under hoshi's home. Each append writes events and projection rows in one transaction.
 - `crates/hoshi-providers` - One adapter per agent CLI behind a common trait. Claude Code first, Codex next.
+
+## Data
+
+Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-dev` for debug builds (`bun run dev`) so they never touch the installed app's data. `HOSHI_HOME` overrides both. It holds `settings.json`, `state.sqlite`, `worktrees/`, `chats/`, `attachments/` and `webview/` (the webview's storage). Never write to Tauri's per-identifier folders (`app_data_dir` and the like); `apps/desktop/src-tauri/src/home.rs` moves what older versions left there on first start, except worktrees, whose paths git registered.
 
 ## Commands
 

@@ -25,9 +25,7 @@ const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 /// The provider's CLI against its latest release, and how its update goes.
 const PROVIDER_VERSION_CHANNEL: &str = "hoshi://provider-version";
 
-pub fn init(app: &App) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
+pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let notify: Notify = Arc::new(move |notification| {
         let result = match notification {
@@ -47,7 +45,7 @@ pub fn init(app: &App) -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("hoshi: failed to emit to the UI: {error}");
         }
     });
-    let engine = Engine::open(&data_dir, notify)?;
+    let engine = Engine::open(data_dir, notify)?;
     let settings = crate::settings::load(&crate::settings::settings_path(app.handle())?);
     engine.set_adapter(adapter_for(&settings));
     engine.set_thread_titles(settings.thread_titles.clone());
