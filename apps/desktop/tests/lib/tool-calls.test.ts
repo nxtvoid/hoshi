@@ -258,6 +258,33 @@ describe('foldTurns', () => {
     expect(foldTurns(rows, true).at(-2)?.kind).toBe('work')
   })
 
+  test('folds each run of a turn that went on behind its own answer', () => {
+    const runEnded = (id: string, createdAt: string): ThreadItem => ({
+      id,
+      threadId: 't',
+      createdAt,
+      content: { kind: 'runEnded' }
+    })
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('agent', 'Read'),
+      answer('a1', '2026-11-08T10:00:10Z'),
+      runEnded('run1', '2026-11-08T10:00:11Z'),
+      tool('r', 'Grep'),
+      answer('a2', '2026-11-08T10:00:31Z'),
+      runEnded('run2', '2026-11-08T10:00:32Z'),
+      answer('a3', '2026-11-08T10:00:40Z')
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(
+      folded.map((row) => (row.kind === 'item' ? row.item.id : row.kind))
+    ).toEqual(['u1', 'fold', 'a1', 'fold', 'a2', 'a3'])
+    const second = folded[3]
+    expect(second?.kind === 'fold' && second.durationMs).toBe(20_000)
+  })
+
   test('keeps live rows out of the fold, after it', () => {
     const rows = groupTranscript([
       user('u1', '2026-11-08T10:00:00Z'),

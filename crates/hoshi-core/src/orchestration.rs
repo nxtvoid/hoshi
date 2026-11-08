@@ -1189,6 +1189,9 @@ pub fn record_output(
                 ItemContent::TaskList { tasks },
             )]
         }
+        ProviderOutput::RunEnded { run } => {
+            vec![item(format!("{turn_id}:run{run}"), ItemContent::RunEnded)]
+        }
         ProviderOutput::AssistantMessage { item_id, text } => {
             vec![item(item_id, ItemContent::AssistantMessage { text })]
         }

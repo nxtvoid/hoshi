@@ -199,6 +199,9 @@ pub enum ItemContent {
     },
     /// The turn stopped before it finished, as the user asked or as the app closed.
     TurnInterrupted,
+    /// The agent answered one run of a turn that went on, as each background task that
+    /// ended gets a run of its own.
+    RunEnded,
     /// A tool call held back until the user approves it.
     Approval {
         /// The call it held back, in the thread's transcript or a subagent's; `None` in

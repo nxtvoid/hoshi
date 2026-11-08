@@ -388,6 +388,8 @@ pub struct ClaudeParser {
     /// Calls that started a subagent in the background, whose result comes with the
     /// subagent's end rather than at once.
     async_agents: HashSet<String>,
+    /// The runs of the turn that ended so far.
+    runs: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -513,6 +515,10 @@ impl ClaudeParser {
                     || (queue.waiting.is_empty()
                         && self.background_agents.is_empty()
                         && self.pending_wakes.is_empty());
+                self.runs += 1;
+                if !over {
+                    outputs.push(ProviderOutput::RunEnded { run: self.runs });
+                }
                 if over {
                     queue.closing = true;
                     outputs.push(ProviderOutput::TurnCompleted {
@@ -985,7 +991,7 @@ mod tests {
             .iter()
             .flat_map(|line| parser.parse_line(&line.to_string()))
             .collect();
-        assert!(early.is_empty(), "{early:?}");
+        assert_eq!(early, [ProviderOutput::RunEnded { run: 1 }]);
 
         let ended = parser.parse_line(
             &json!({ "type": "system", "subtype": "task_notification", "task_id": "a1",
@@ -1024,7 +1030,10 @@ mod tests {
         let result =
             json!({ "type": "result", "subtype": "success", "is_error": false }).to_string();
 
-        assert!(parser.parse_line(&result).is_empty());
+        assert!(matches!(
+            parser.parse_line(&result).as_slice(),
+            [ProviderOutput::RunEnded { .. }]
+        ));
         parser.parse_line(
             &json!({ "type": "command_lifecycle", "command_uuid": "m2", "state": "started" })
                 .to_string(),
@@ -1050,7 +1059,10 @@ mod tests {
         );
         let result =
             json!({ "type": "result", "subtype": "success", "is_error": false }).to_string();
-        assert!(parser.parse_line(&result).is_empty());
+        assert!(matches!(
+            parser.parse_line(&result).as_slice(),
+            [ProviderOutput::RunEnded { .. }]
+        ));
 
         parser.parse_line(
             &json!({ "type": "system", "subtype": "background_tasks_changed",
@@ -1083,9 +1095,15 @@ mod tests {
         }
         let result = |origin: Value| json!({ "type": "result", "subtype": "success", "is_error": false, "origin": origin });
 
-        assert!(parser_line(&mut parser, result(Value::Null)).is_empty());
+        assert_eq!(
+            parser_line(&mut parser, result(Value::Null)),
+            [ProviderOutput::RunEnded { run: 1 }]
+        );
         let first = result(json!({ "kind": "task-notification", "runId": "run-a" }));
-        assert!(parser_line(&mut parser, first).is_empty());
+        assert_eq!(
+            parser_line(&mut parser, first),
+            [ProviderOutput::RunEnded { run: 2 }]
+        );
         let second = result(json!({ "kind": "task-notification", "runId": "run-b" }));
         assert!(matches!(
             parser_line(&mut parser, second).as_slice(),

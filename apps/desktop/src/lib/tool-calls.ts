@@ -202,7 +202,8 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
 /**
  * A finished turn's work, between the user's message and the agent's final answer, folds
  * into one row. The running turn, and a turn that ended any other way, stay open. Rows
- * still `live` stay out of the fold, after it.
+ * still `live` stay out of the fold, after it. A turn that went on in more runs folds
+ * each run behind its own answer.
  */
 export function foldTurns(
   rows: TranscriptRow[],
@@ -243,6 +244,9 @@ export function foldTurns(
     if (row.kind === 'item' && row.item.content.kind === 'userMessage') {
       close(false)
       folded.push(row)
+      asked = row.item
+    } else if (row.kind === 'item' && row.item.content.kind === 'runEnded') {
+      close(false)
       asked = row.item
     } else {
       turn.push(row)

@@ -377,6 +377,8 @@ const Item = memo(function Item({
       return <RequestRow content={content} cwd={cwd} />
     case 'taskList':
       return <TaskListRow tasks={content.tasks} working={live} />
+    case 'runEnded':
+      return null
   }
 })
 
