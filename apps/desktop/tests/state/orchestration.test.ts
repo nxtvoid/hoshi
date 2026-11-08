@@ -170,20 +170,30 @@ describe('applyItemEvent', () => {
       name: 'Read',
       input: '{}',
       output: null,
-      isError: false
+      isError: false,
+      detail: null,
+      outputOmitted: false
     }
   }
 
   test('fills in a tool call when it completes', () => {
+    const detail = {
+      kind: 'fileChange' as const,
+      path: '/repo/a.txt',
+      additions: 1,
+      deletions: 0,
+      diff: '@@ -0,0 +1,1 @@\n+a'
+    }
     const items = applyItemEvent('t', [tool], {
       type: 'toolCallCompleted',
       threadId: 't',
       itemId: 'tool',
       output: 'hello',
-      isError: false
+      isError: false,
+      detail
     })
 
-    expect(items[0]?.content).toMatchObject({ output: 'hello' })
+    expect(items[0]?.content).toMatchObject({ output: 'hello', detail })
   })
 
   test('replaces an item that arrives twice and ignores other threads', () => {

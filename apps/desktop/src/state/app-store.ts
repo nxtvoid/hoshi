@@ -28,6 +28,7 @@ import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
 import type { UsageLimits } from '@/bindings/UsageLimits'
 import type { ContextUsage } from '@/bindings/ContextUsage'
+import type { RequestResponse } from '@/bindings/RequestResponse'
 import type { CommandError } from '@/bindings/CommandError'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
 import type { EventEnvelope } from '@/bindings/EventEnvelope'
@@ -88,6 +89,11 @@ type AppState = {
     attachments?: MessageAttachment[]
   ) => Promise<boolean>
   interruptTurn: () => Promise<void>
+  /** Answers what the selected thread's agent asked; `false` when it was refused. */
+  respondToRequest: (
+    requestId: string,
+    response: RequestResponse
+  ) => Promise<boolean>
   /** Sets the selected thread's model and remembers it for new threads. */
   setModel: (choice: ModelChoice) => Promise<void>
   setAccess: (choice: AccessChoice) => Promise<void>
@@ -309,6 +315,19 @@ export const useAppStore = create<AppState>()((set, get) => ({
     const threadId = get().selectedThreadId
     if (!threadId) return
     await dispatch({ type: 'turnInterrupt', threadId }).catch(reportError)
+  },
+  respondToRequest: async (requestId, response) => {
+    const threadId = get().selectedThreadId
+    if (!threadId) return false
+    try {
+      await dispatch({ type: 'requestRespond', threadId, requestId, response })
+      set({ composerError: null })
+      return true
+    } catch (error) {
+      reportError(error)
+      set({ composerError: error as CommandError })
+      return false
+    }
   }
 }))
 

@@ -287,12 +287,20 @@ impl Store {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let pending_requests = self.items(
+            "SELECT id, thread_id, created_at, content_json FROM thread_items
+             WHERE json_extract(content_json, '$.status') = 'pending'
+               AND json_extract(content_json, '$.kind') IN ('approval', 'questions', 'proposedPlan')
+             ORDER BY ordinal",
+            [],
+        )?;
         Ok(Snapshot {
             sequence: sequence as u64,
             projects,
             threads,
             pull_requests,
             context_usages,
+            pending_requests,
         })
     }
 
@@ -379,15 +387,94 @@ impl Store {
         Ok(())
     }
 
-    /// A thread's transcript, oldest first.
-    pub fn thread_items(&self, thread_id: &str) -> Result<Vec<ThreadItem>, StoreError> {
+    /// One item of a thread's transcript, whole.
+    pub fn thread_item(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Result<Option<ThreadItem>, StoreError> {
         Ok(self
+            .items(
+                "SELECT id, thread_id, created_at, content_json
+                 FROM thread_items WHERE thread_id = ?1 AND id = ?2",
+                [thread_id, item_id],
+            )?
+            .pop())
+    }
+
+    /// The last `turns` turns before item `before` (the end when `None`), at most
+    /// `max_items` of their items, oldest first; and whether older items remain.
+    pub fn transcript_page(
+        &self,
+        thread_id: &str,
+        before: Option<&str>,
+        turns: usize,
+        max_items: usize,
+    ) -> Result<(Vec<ThreadItem>, bool), StoreError> {
+        let ordinal_of = |id: &str| -> Result<Option<i64>, StoreError> {
+            Ok(self
+                .conn
+                .prepare("SELECT ordinal FROM thread_items WHERE thread_id = ?1 AND id = ?2")?
+                .query_map([thread_id, id], |row| row.get(0))?
+                .next()
+                .transpose()?)
+        };
+        let end = match before {
+            Some(id) => ordinal_of(id)?.unwrap_or(i64::MAX),
+            None => i64::MAX,
+        };
+        let start: i64 = self
             .conn
             .prepare(
-                "SELECT id, thread_id, created_at, content_json
-                 FROM thread_items WHERE thread_id = ?1 ORDER BY ordinal",
+                "SELECT ordinal FROM thread_items
+                 WHERE thread_id = ?1 AND ordinal < ?2
+                   AND json_extract(content_json, '$.kind') = 'userMessage'
+                 ORDER BY ordinal DESC LIMIT 1 OFFSET ?3",
             )?
-            .query_map([thread_id], |row| {
+            .query_map(
+                params![thread_id, end, turns.saturating_sub(1) as i64],
+                |row| row.get(0),
+            )?
+            .next()
+            .transpose()?
+            .unwrap_or(i64::MIN);
+        let mut items = self.items(
+            "SELECT id, thread_id, created_at, content_json FROM thread_items
+             WHERE thread_id = ?1 AND ordinal >= ?2 AND ordinal < ?3
+             ORDER BY ordinal DESC LIMIT ?4",
+            params![thread_id, start, end, max_items as i64],
+        )?;
+        items.reverse();
+        let first = match items.first() {
+            Some(item) => ordinal_of(&item.id)?.unwrap_or(i64::MIN),
+            None => end,
+        };
+        let has_older: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM thread_items WHERE thread_id = ?1 AND ordinal < ?2)",
+            params![thread_id, first],
+            |row| row.get(0),
+        )?;
+        Ok((items, has_older))
+    }
+
+    /// A thread's transcript, oldest first.
+    pub fn thread_items(&self, thread_id: &str) -> Result<Vec<ThreadItem>, StoreError> {
+        self.items(
+            "SELECT id, thread_id, created_at, content_json
+             FROM thread_items WHERE thread_id = ?1 ORDER BY ordinal",
+            [thread_id],
+        )
+    }
+
+    fn items(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<ThreadItem>, StoreError> {
+        Ok(self
+            .conn
+            .prepare(sql)?
+            .query_map(params, |row| {
                 let content: String = row.get(3)?;
                 Ok(ThreadItem {
                     id: row.get(0)?,
@@ -658,12 +745,20 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             item_id,
             output,
             is_error,
+            detail,
         } => {
             tx.execute(
                 "UPDATE thread_items
-                 SET content_json = json_set(content_json, '$.output', ?3, '$.isError', json(?4))
+                 SET content_json = json_set(content_json, '$.output', ?3, '$.isError', json(?4),
+                                             '$.detail', json(?5))
                  WHERE thread_id = ?1 AND id = ?2",
-                params![thread_id, item_id, output, is_error.to_string()],
+                params![
+                    thread_id,
+                    item_id,
+                    output,
+                    is_error.to_string(),
+                    serde_json::to_string(detail)?
+                ],
             )?;
         }
         Event::TurnCompleted {
@@ -682,6 +777,12 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 params![thread_id, enum_text(status)?, at],
             )?;
         }
+        Event::ThreadStatusSet { thread_id, status } => {
+            tx.execute(
+                "UPDATE threads SET status = ?2 WHERE id = ?1",
+                params![thread_id, enum_text(*status)?],
+            )?;
+        }
     }
     Ok(())
 }
@@ -691,7 +792,7 @@ mod tests {
     use super::*;
     use hoshi_core::{
         AccessMode, ChecksState, Command, ForgeKind, ItemContent, Mergeability, ProviderOutput,
-        PullRequest, PullRequestState, ReadModel, UsageWindow, UsageWindowKind, decide,
+        PullRequest, PullRequestState, ReadModel, ToolDetail, UsageWindow, UsageWindowKind, decide,
         record_output,
     };
 
@@ -981,6 +1082,15 @@ mod tests {
         assert!(!thread.pinned);
     }
 
+    fn send_text(message_id: &str) -> Command {
+        Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: message_id.into(),
+            text: "Read the file".into(),
+            attachments: Vec::new(),
+        }
+    }
+
     fn send(model: &ReadModel) -> Vec<Event> {
         let command = Command::MessageSend {
             thread_id: "t".into(),
@@ -1043,6 +1153,7 @@ mod tests {
                 item_id: "tool".into(),
                 output: "hello".into(),
                 is_error: false,
+                detail: Some(change()),
             },
             ProviderOutput::AssistantMessage {
                 item_id: "a".into(),
@@ -1072,8 +1183,58 @@ mod tests {
                 input: "{}".into(),
                 output: Some("hello".into()),
                 is_error: false,
+                detail: Some(change()),
+                output_omitted: false,
             }
         );
+    }
+
+    #[test]
+    fn a_page_holds_the_latest_turns_and_says_whether_older_ones_remain() {
+        let (mut store, mut model) = store_with_thread();
+        for turn in 0..5 {
+            let events = decide(&model, send_text(&format!("m{turn}")), NOW).unwrap();
+            commit(&mut store, &mut model, events);
+            let reply = ProviderOutput::AssistantMessage {
+                item_id: format!("a{turn}"),
+                text: "ok".into(),
+            };
+            let done = ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            };
+            for output in [reply, done] {
+                let events = record_output(&model, "t", &format!("m{turn}"), output, NOW);
+                commit(&mut store, &mut model, events);
+            }
+        }
+        let ids = |items: &[ThreadItem]| -> Vec<String> {
+            items.iter().map(|item| item.id.clone()).collect()
+        };
+
+        let (latest, older) = store.transcript_page("t", None, 2, 100).unwrap();
+        assert_eq!(ids(&latest), ["m3", "a3", "m4", "a4"]);
+        assert!(older);
+
+        let (earlier, older) = store.transcript_page("t", Some("m3"), 2, 100).unwrap();
+        assert_eq!(ids(&earlier), ["m1", "a1", "m2", "a2"]);
+        assert!(older);
+
+        let (first, older) = store.transcript_page("t", Some("m1"), 2, 100).unwrap();
+        assert_eq!(ids(&first), ["m0", "a0"]);
+        assert!(!older);
+
+        let (capped, older) = store.transcript_page("t", None, 2, 3).unwrap();
+        assert_eq!(ids(&capped), ["a3", "m4", "a4"]);
+        assert!(older);
+    }
+
+    fn change() -> ToolDetail {
+        ToolDetail::FileChange {
+            path: "/repo/a.txt".into(),
+            additions: 1,
+            deletions: 0,
+            diff: Some("@@ -0,0 +1,1 @@\n+a".into()),
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { ModelPicker } from './ModelPicker'
 import { stepHistory } from '@/lib/prompt-history'
 import { ContextMeter } from './ContextMeter'
+import { RequestPanel } from './RequestPanel'
 import { ComposerImages } from './ComposerImages'
 import { Button } from '@hoshi/ui/components/button'
 import { useComposerImages } from './use-composer-images'
@@ -23,6 +24,7 @@ import {
   WorkspaceMenu
 } from './ComposerMenus'
 import { ComposerSuggestions, suggestionOptionId } from './ComposerSuggestions'
+import { usePendingRequest, useRequestActions } from './use-request-actions'
 import {
   ArrowUp02Icon,
   Attachment01Icon,
@@ -54,6 +56,8 @@ type ComposerProps = {
   variant: 'hero' | 'docked'
   /** Where unsent text is kept, so each thread and each new thread has its own. */
   draftKey: string
+  /** The thread's working directory, to show paths relative to it. */
+  cwd?: string | null
 }
 
 const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp,image/*'
@@ -73,7 +77,12 @@ const EMPTY: ComposerSnapshot = {
 const sameTrigger = (a: LocatedTrigger, b: LocatedTrigger | null) =>
   b !== null && a.kind === b.kind && a.from === b.from
 
-export function Composer({ working, variant, draftKey }: ComposerProps) {
+export function Composer({
+  working,
+  variant,
+  draftKey,
+  cwd = null
+}: ComposerProps) {
   const saveDraft = useDraftStore((state) => state.save)
   const [initialDraft] = useState(
     () => useDraftStore.getState().drafts[draftKey]
@@ -98,12 +107,16 @@ export function Composer({ working, variant, draftKey }: ComposerProps) {
   const interruptTurn = useAppStore((state) => state.interruptTurn)
   const openModelPicker = useModelPickerStore((state) => state.setOpen)
   const [, updateAccess] = useAccess()
+  const request = usePendingRequest()
+  const requestActions = useRequestActions(request)
   const { text } = snapshot
-  const canSend =
-    (text.trim() !== '' || images.saved.length > 0) &&
-    !images.saving &&
-    !working &&
-    !sending
+  const answering = request !== null && text.trim() !== ''
+  const canSend = request
+    ? answering && !sending
+    : (text.trim() !== '' || images.saved.length > 0) &&
+      !images.saving &&
+      !working &&
+      !sending
   const hero = variant === 'hero'
   const stacked = hero || tall
 
@@ -211,9 +224,27 @@ export function Composer({ working, variant, draftKey }: ComposerProps) {
     }
   }
 
+  /** Typed text answers the pending request: feedback that declines, or an own answer. */
+  const answerRequest = async () => {
+    if (!request || !canSend) return
+    setSending(true)
+    const answered =
+      request.content.kind === 'questions'
+        ? requestActions.advance(text)
+        : await requestActions.decide('decline', text)
+    setSending(false)
+    if (!answered) return
+    saveDraft(draftKey, null)
+    editorRef.current?.setText('')
+  }
+
   const submit = async () => {
     const editor = editorRef.current
     if (!editor) return
+    if (request) {
+      await answerRequest()
+      return
+    }
     const action = /^\/(\w+)$/.exec(text.trim())?.[1]
     const standalone = suggestions.actions.find((known) => known === action)
     if (standalone && images.images.length === 0) {
@@ -332,28 +363,29 @@ export function Composer({ working, variant, draftKey }: ComposerProps) {
     </Tooltip>
   )
 
-  const action = working ? (
-    <Button
-      type='button'
-      size='icon-sm'
-      variant='secondary'
-      aria-label={m.stop_turn()}
-      className='shrink-0 rounded-full'
-      onClick={() => void interruptTurn()}
-    >
-      <HugeiconsIcon icon={StopIcon} strokeWidth={2} />
-    </Button>
-  ) : (
-    <Button
-      type='submit'
-      size='icon-sm'
-      aria-label={m.send_message()}
-      className='shrink-0 rounded-full'
-      disabled={!canSend}
-    >
-      <HugeiconsIcon icon={ArrowUp02Icon} strokeWidth={2} />
-    </Button>
-  )
+  const action =
+    working && !answering ? (
+      <Button
+        type='button'
+        size='icon-sm'
+        variant='secondary'
+        aria-label={m.stop_turn()}
+        className='shrink-0 rounded-full'
+        onClick={() => void interruptTurn()}
+      >
+        <HugeiconsIcon icon={StopIcon} strokeWidth={2} />
+      </Button>
+    ) : (
+      <Button
+        type='submit'
+        size='icon-sm'
+        aria-label={m.send_message()}
+        className='shrink-0 rounded-full'
+        disabled={!canSend}
+      >
+        <HugeiconsIcon icon={ArrowUp02Icon} strokeWidth={2} />
+      </Button>
+    )
 
   return (
     <div className={cn(CHAT_LANE, 'flex flex-col gap-1.5')}>
@@ -369,6 +401,7 @@ export function Composer({ working, variant, draftKey }: ComposerProps) {
             onPick={pick}
           />
         ) : null}
+        {request ? <RequestPanel request={request} cwd={cwd} /> : null}
         <form
           className={cn(
             'border-border bg-card focus-within:border-ring/60 relative flex flex-col rounded-2xl border shadow-xs transition-colors',
@@ -411,7 +444,7 @@ export function Composer({ working, variant, draftKey }: ComposerProps) {
             <div ref={editorBoxRef} className='min-w-0 flex-1'>
               <ComposerEditor
                 ref={editorRef}
-                placeholder={m.composer_placeholder()}
+                placeholder={placeholder(request?.content.kind)}
                 label={m.composer_label()}
                 className='max-h-60 overflow-y-auto'
                 contentClassName={hero ? 'min-h-16 py-2' : 'min-h-8 py-1.5'}
@@ -487,6 +520,21 @@ function ComposerFooter() {
   )
 }
 
+function placeholder(
+  request: 'approval' | 'questions' | 'proposedPlan' | undefined
+) {
+  switch (request) {
+    case 'approval':
+      return m.request_approval_placeholder()
+    case 'questions':
+      return m.request_question_placeholder()
+    case 'proposedPlan':
+      return m.request_plan_placeholder()
+    case undefined:
+      return m.composer_placeholder()
+  }
+}
+
 function commandErrorMessage(error: CommandError) {
   switch (error.code) {
     case 'notAGitRepository':
@@ -495,6 +543,8 @@ function commandErrorMessage(error: CommandError) {
       return m.error_worktree_failed()
     case 'threadBusy':
       return m.error_thread_busy()
+    case 'requestNotPending':
+      return m.error_request_not_pending()
     default:
       return m.error_generic()
   }

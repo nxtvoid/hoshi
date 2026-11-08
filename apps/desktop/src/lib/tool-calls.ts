@@ -1,6 +1,7 @@
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamKind } from '@/bindings/StreamKind'
 import type { ItemContent } from '@/bindings/ItemContent'
+import { REQUEST_TOOLS } from './requests'
 
 export type ToolCallContent = Extract<ItemContent, { kind: 'toolCall' }>
 export type ReasoningContent = Extract<ItemContent, { kind: 'reasoning' }>
@@ -17,6 +18,13 @@ export type StreamingText = { kind: StreamKind; text: string }
 export type TranscriptRow =
   | { kind: 'item'; item: TranscriptItem }
   | { kind: 'work'; id: string; entries: WorkItem[] }
+  | {
+      kind: 'fold'
+      id: string
+      rows: TranscriptRow[]
+      /** From the user's message to the agent's answer; `null` when unknown. */
+      durationMs: number | null
+    }
 
 export type ToolAction =
   | 'command'
@@ -45,6 +53,21 @@ export function toolAction(name: string): ToolAction {
   return ACTIONS[name] ?? 'other'
 }
 
+/** The name to show for a tool: an MCP tool's own name, with the server it comes from. */
+export function toolName(name: string): {
+  label: string
+  source: string | null
+} {
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
+  if (!mcp) return { label: name, source: null }
+  const words = (text: string) =>
+    text
+      .replace(/^claude_ai_/, '')
+      .replaceAll('_', ' ')
+      .trim()
+  return { label: words(mcp[2] ?? ''), source: words(mcp[1] ?? '') }
+}
+
 function isWork(item: TranscriptItem): item is WorkItem {
   return item.content.kind === 'toolCall' || item.content.kind === 'reasoning'
 }
@@ -61,7 +84,9 @@ export function withStreaming(
   items: ThreadItem[],
   streaming: Record<string, StreamingText>
 ): TranscriptItem[] {
-  const ids = Object.keys(streaming)
+  const ids = Object.keys(streaming).filter(
+    (id) => streaming[id]?.kind !== 'toolOutput'
+  )
   if (ids.length === 0) return items
   const stored = new Set(items.map((item) => item.id))
   const pending = ids.filter((id) => !stored.has(id))
@@ -91,12 +116,63 @@ export function withStreaming(
 export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
   const rows: TranscriptRow[] = []
   for (const item of items) {
+    if (isToolCall(item) && REQUEST_TOOLS.has(item.content.name)) continue
     const last = rows.at(-1)
     if (!isWork(item)) rows.push({ kind: 'item', item })
     else if (last?.kind === 'work') last.entries.push(item)
     else rows.push({ kind: 'work', id: item.id, entries: [item] })
   }
   return rows
+}
+
+/**
+ * A finished turn's work, between the user's message and the agent's final answer, folds
+ * into one row. The running turn, and a turn that ended any other way, stay open.
+ */
+export function foldTurns(
+  rows: TranscriptRow[],
+  working: boolean
+): TranscriptRow[] {
+  const folded: TranscriptRow[] = []
+  let asked: TranscriptItem | null = null
+  let turn: TranscriptRow[] = []
+  const close = (running: boolean) => {
+    const answer = turn.at(-1)
+    const work = turn.slice(0, -1)
+    const foldable =
+      !running &&
+      asked !== null &&
+      answer?.kind === 'item' &&
+      answer.item.content.kind === 'assistantMessage' &&
+      work.some((row) => row.kind === 'work')
+    if (asked && answer?.kind === 'item' && foldable) {
+      const duration =
+        Date.parse(answer.item.createdAt) - Date.parse(asked.createdAt)
+      folded.push(
+        {
+          kind: 'fold',
+          id: `fold:${asked.id}`,
+          rows: work,
+          durationMs: Number.isFinite(duration) ? duration : null
+        },
+        answer
+      )
+    } else {
+      folded.push(...turn)
+    }
+    turn = []
+  }
+  for (const row of rows) {
+    if (row.kind === 'item' && row.item.content.kind === 'userMessage') {
+      close(false)
+      folded.push(row)
+      asked = row.item
+    } else {
+      turn.push(row)
+    }
+  }
+  close(working)
+  return folded
 }
 
 /** The latest entry still going: a call without output, or reasoning still streaming. */

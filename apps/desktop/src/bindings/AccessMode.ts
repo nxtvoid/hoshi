@@ -3,4 +3,4 @@
 /**
  * What the agent may do without asking.
  */
-export type AccessMode = "acceptEdits" | "auto" | "fullAccess";
+export type AccessMode = "ask" | "acceptEdits" | "auto" | "fullAccess";

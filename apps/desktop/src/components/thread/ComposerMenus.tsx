@@ -21,6 +21,7 @@ import {
   ComputerIcon,
   GitForkIcon,
   PencilEdit02Icon,
+  ShieldUserIcon,
   SquareUnlock02Icon,
   TaskEdit01Icon
 } from '@hugeicons/core-free-icons'
@@ -75,6 +76,12 @@ export function WorkspaceMenu() {
 
 const ACCESS_MODES = [
   {
+    value: 'ask',
+    label: m.access_ask,
+    description: m.access_ask_description,
+    icon: ShieldUserIcon
+  },
+  {
     value: 'acceptEdits',
     label: m.access_accept_edits,
     description: m.access_accept_edits_description,
@@ -115,7 +122,7 @@ export function AccessMenu() {
   const [choice, update] = useAccess()
   const current =
     ACCESS_MODES.find((option) => option.value === choice.accessMode) ??
-    ACCESS_MODES[0]
+    ACCESS_MODES[1]
 
   return (
     <DropdownMenu>

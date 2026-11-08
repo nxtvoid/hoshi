@@ -1,7 +1,7 @@
 use crate::{
-    AccessMode, Effort, ItemContent, MessageAttachment, Project, ProviderOutput, Thread,
-    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, TurnFailure,
-    TurnOutcome,
+    AccessMode, ApprovalDecision, Effort, ItemContent, MessageAttachment, Project, ProviderOutput,
+    RequestResponse, RequestStatus, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest,
+    ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -83,6 +83,12 @@ pub enum Command {
     },
     TurnInterrupt {
         thread_id: String,
+    },
+    /// Answers what the agent asked mid-turn; the engine passes it on to the agent.
+    RequestRespond {
+        thread_id: String,
+        request_id: String,
+        response: RequestResponse,
     },
 }
 
@@ -177,12 +183,19 @@ pub enum Event {
         item_id: String,
         output: String,
         is_error: bool,
+        #[serde(default)]
+        detail: Option<ToolDetail>,
     },
     TurnCompleted {
         thread_id: String,
         turn_id: String,
         outcome: TurnOutcome,
         at: String,
+    },
+    /// Mid-turn: the agent waits for the user, or works again.
+    ThreadStatusSet {
+        thread_id: String,
+        status: ThreadStatus,
     },
 }
 
@@ -210,6 +223,12 @@ pub enum CommandError {
     ThreadNotWorking { thread_id: String },
     #[error("message is empty")]
     EmptyMessage,
+    /// Answered already, withdrawn, or its turn is over.
+    #[error("request {request_id} is not waiting for an answer")]
+    RequestNotPending { request_id: String },
+    /// The answer does not fit the request, such as answers to an approval.
+    #[error("the response does not fit request {request_id}")]
+    RequestResponseInvalid { request_id: String },
     #[error("{path} is not a git repository")]
     NotAGitRepository { path: String },
     #[error("could not create the worktree: {detail}")]
@@ -282,6 +301,8 @@ pub struct Snapshot {
     pub pull_requests: Vec<ThreadPullRequest>,
     /// The last known context usage of each thread that ran a turn.
     pub context_usages: Vec<ThreadContextUsage>,
+    /// What agents asked and still wait for, oldest first.
+    pub pending_requests: Vec<ThreadItem>,
 }
 
 /// An event as delivered to the UI, with its position in the event log.
@@ -300,6 +321,8 @@ pub struct EventEnvelope {
 pub enum StreamKind {
     Text,
     Reasoning,
+    /// A running tool's output so far: each delta replaces the previous one.
+    ToolOutput,
 }
 
 /// Text an assistant is still writing. Sent to the UI as it streams, never stored.
@@ -317,6 +340,8 @@ pub struct StreamDelta {
 pub struct ReadModel {
     projects: BTreeMap<String, Project>,
     threads: BTreeMap<String, Thread>,
+    /// Requests waiting for an answer, by id.
+    requests: BTreeMap<String, ThreadItem>,
 }
 
 impl ReadModel {
@@ -332,7 +357,30 @@ impl ReadModel {
                 .iter()
                 .map(|thread| (thread.id.clone(), thread.clone()))
                 .collect(),
+            requests: snapshot
+                .pending_requests
+                .iter()
+                .map(|item| (item.id.clone(), item.clone()))
+                .collect(),
         }
+    }
+
+    /// Every request waiting for an answer, oldest first.
+    pub fn all_pending_requests(&self) -> Vec<ThreadItem> {
+        let mut pending: Vec<_> = self.requests.values().cloned().collect();
+        pending.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        pending
+    }
+
+    /// The thread's requests waiting for an answer, oldest first.
+    pub fn pending_requests(&self, thread_id: &str) -> Vec<&ThreadItem> {
+        let mut pending: Vec<_> = self
+            .requests
+            .values()
+            .filter(|item| item.thread_id == thread_id)
+            .collect();
+        pending.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        pending
     }
 
     pub fn projects(&self) -> impl Iterator<Item = &Project> {
@@ -373,12 +421,16 @@ impl ReadModel {
                 self.projects.remove(project_id);
                 self.threads
                     .retain(|_, thread| thread.project_id.as_ref() != Some(project_id));
+                let threads = &self.threads;
+                self.requests
+                    .retain(|_, item| threads.contains_key(&item.thread_id));
             }
             Event::ThreadCreated { thread } => {
                 self.threads.insert(thread.id.clone(), thread.clone());
             }
             Event::ThreadDeleted { thread_id } => {
                 self.threads.remove(thread_id);
+                self.requests.retain(|_, item| &item.thread_id != thread_id);
             }
             Event::ThreadTitleSet { thread_id, title } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
@@ -490,6 +542,15 @@ impl ReadModel {
                 if let Some(thread) = self.threads.get_mut(&item.thread_id) {
                     thread.updated_at.clone_from(&item.created_at);
                 }
+                match item.content.request_status() {
+                    Some(RequestStatus::Pending) => {
+                        self.requests.insert(item.id.clone(), item.clone());
+                    }
+                    Some(_) => {
+                        self.requests.remove(&item.id);
+                    }
+                    None => {}
+                }
             }
             Event::ToolCallCompleted { .. } => {}
             Event::TurnCompleted {
@@ -505,6 +566,11 @@ impl ReadModel {
                         TurnOutcome::Completed | TurnOutcome::Interrupted => ThreadStatus::Idle,
                     };
                     thread.updated_at.clone_from(at);
+                }
+            }
+            Event::ThreadStatusSet { thread_id, status } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.status = *status;
                 }
             }
         }
@@ -791,7 +857,132 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             Ok(Vec::new())
         }
+        Command::RequestRespond {
+            thread_id,
+            request_id,
+            response,
+        } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            let Some(item) = model
+                .requests
+                .get(&request_id)
+                .filter(|item| item.thread_id == thread_id)
+            else {
+                return Err(CommandError::RequestNotPending { request_id });
+            };
+            let Some(content) = resolved(&item.content, &response) else {
+                return Err(CommandError::RequestResponseInvalid { request_id });
+            };
+            let implements_plan = matches!(
+                (&item.content, &response),
+                (ItemContent::ProposedPlan { .. }, RequestResponse::Decision { decision, .. })
+                    if decision.accepts()
+            );
+            let mut events = vec![Event::ItemAdded {
+                item: ThreadItem {
+                    id: request_id.clone(),
+                    thread_id: thread_id.clone(),
+                    created_at: now.to_owned(),
+                    content,
+                },
+            }];
+            if implements_plan && thread.plan_mode {
+                events.push(Event::ThreadAccessSet {
+                    thread_id: thread_id.clone(),
+                    access_mode: thread.access_mode,
+                    plan_mode: false,
+                });
+            }
+            events.extend(working_again(model, thread, &request_id));
+            Ok(events)
+        }
     }
+}
+
+/// The request with the user's response, or `None` when the response does not fit it.
+fn resolved(content: &ItemContent, response: &RequestResponse) -> Option<ItemContent> {
+    let feedback = |decision: ApprovalDecision, feedback: &Option<String>| {
+        let feedback = feedback.as_deref().map(str::trim).unwrap_or_default();
+        (decision == ApprovalDecision::Decline && !feedback.is_empty()).then(|| feedback.to_owned())
+    };
+    match (content.clone(), response) {
+        (
+            ItemContent::Approval {
+                tool_call_id,
+                tool_name,
+                input,
+                reason,
+                can_accept_for_session,
+                ..
+            },
+            RequestResponse::Decision {
+                decision,
+                feedback: text,
+            },
+        ) => {
+            if *decision == ApprovalDecision::AcceptForSession && !can_accept_for_session {
+                return None;
+            }
+            Some(ItemContent::Approval {
+                tool_call_id,
+                tool_name,
+                input,
+                reason,
+                can_accept_for_session,
+                status: RequestStatus::Resolved,
+                decision: Some(*decision),
+                feedback: feedback(*decision, text),
+            })
+        }
+        (
+            ItemContent::ProposedPlan { plan, .. },
+            RequestResponse::Decision {
+                decision,
+                feedback: text,
+            },
+        ) if *decision != ApprovalDecision::AcceptForSession => Some(ItemContent::ProposedPlan {
+            plan,
+            status: RequestStatus::Resolved,
+            decision: Some(*decision),
+            feedback: feedback(*decision, text),
+        }),
+        (ItemContent::Questions { questions, .. }, RequestResponse::Answers { answers })
+            if answers.len() == questions.len() =>
+        {
+            Some(ItemContent::Questions {
+                questions,
+                status: RequestStatus::Resolved,
+                answers: Some(answers.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// The request as it stands once nobody waits for it any more.
+fn cancelled(content: &ItemContent) -> ItemContent {
+    let mut content = content.clone();
+    match &mut content {
+        ItemContent::Approval { status, .. }
+        | ItemContent::Questions { status, .. }
+        | ItemContent::ProposedPlan { status, .. } => *status = RequestStatus::Cancelled,
+        _ => {}
+    }
+    content
+}
+
+/// Puts the thread back to work once `closed` was its last pending request.
+fn working_again(model: &ReadModel, thread: &Thread, closed: &str) -> Option<Event> {
+    let others = model
+        .pending_requests(&thread.id)
+        .iter()
+        .any(|item| item.id != closed);
+    (thread.status == ThreadStatus::WaitingForInput && !others).then(|| Event::ThreadStatusSet {
+        thread_id: thread.id.clone(),
+        status: ThreadStatus::Working,
+    })
 }
 
 /// Turns provider output into events. Output from a turn that is no longer
@@ -803,13 +994,13 @@ pub fn record_output(
     output: ProviderOutput,
     now: &str,
 ) -> Vec<Event> {
-    let active = model
+    let Some(thread) = model
         .threads
         .get(thread_id)
-        .is_some_and(|thread| thread.active_turn_id.as_deref() == Some(turn_id));
-    if !active {
+        .filter(|thread| thread.active_turn_id.as_deref() == Some(turn_id))
+    else {
         return Vec::new();
-    }
+    };
     let item = |id: String, content: ItemContent| Event::ItemAdded {
         item: ThreadItem {
             id,
@@ -823,11 +1014,48 @@ pub fn record_output(
             thread_id: thread_id.to_owned(),
             session_id,
         }],
+        ProviderOutput::RequestOpened {
+            request_id,
+            content,
+        } => {
+            if content.request_status() != Some(RequestStatus::Pending)
+                || model.requests.contains_key(&request_id)
+            {
+                return Vec::new();
+            }
+            let mut events = vec![item(request_id, content)];
+            if thread.status != ThreadStatus::WaitingForInput {
+                events.push(Event::ThreadStatusSet {
+                    thread_id: thread_id.to_owned(),
+                    status: ThreadStatus::WaitingForInput,
+                });
+            }
+            events
+        }
+        ProviderOutput::RequestWithdrawn { request_id } => {
+            let Some(pending) = model
+                .requests
+                .get(&request_id)
+                .filter(|item| item.thread_id == thread_id)
+            else {
+                return Vec::new();
+            };
+            let mut events = vec![item(request_id.clone(), cancelled(&pending.content))];
+            events.extend(working_again(model, thread, &request_id));
+            events
+        }
         ProviderOutput::TextDelta { .. }
         | ProviderOutput::ReasoningDelta { .. }
+        | ProviderOutput::ToolOutput { .. }
         | ProviderOutput::ContextUsage(_)
         | ProviderOutput::UsageLimits(_)
         | ProviderOutput::WorkingDirectory { .. } => Vec::new(),
+        ProviderOutput::TaskList { tasks } => {
+            vec![item(
+                format!("{turn_id}:tasks"),
+                ItemContent::TaskList { tasks },
+            )]
+        }
         ProviderOutput::AssistantMessage { item_id, text } => {
             vec![item(item_id, ItemContent::AssistantMessage { text })]
         }
@@ -845,20 +1073,28 @@ pub fn record_output(
                 input,
                 output: None,
                 is_error: false,
+                detail: None,
+                output_omitted: false,
             },
         )],
         ProviderOutput::ToolCallCompleted {
             item_id,
             output,
             is_error,
+            detail,
         } => vec![Event::ToolCallCompleted {
             thread_id: thread_id.to_owned(),
             item_id,
             output,
             is_error,
+            detail,
         }],
         ProviderOutput::TurnCompleted { outcome } => {
-            let mut events = Vec::with_capacity(2);
+            let mut events: Vec<_> = model
+                .pending_requests(thread_id)
+                .into_iter()
+                .map(|pending| item(pending.id.clone(), cancelled(&pending.content)))
+                .collect();
             if let TurnOutcome::Failed { reason } = &outcome {
                 events.push(item(
                     format!("{turn_id}:failed"),
@@ -1006,6 +1242,7 @@ fn same_path(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Question;
 
     const NOW: &str = "2026-11-07T12:00:00.000Z";
 
@@ -1593,6 +1830,281 @@ const a = 1
         let thread = model.thread("t").unwrap();
         assert_eq!(thread.access_mode, AccessMode::FullAccess);
         assert!(thread.plan_mode);
+    }
+
+    fn approval() -> ItemContent {
+        ItemContent::Approval {
+            tool_call_id: Some("toolu_1".into()),
+            tool_name: "Bash".into(),
+            input: r#"{"command":"npm test"}"#.into(),
+            reason: None,
+            can_accept_for_session: false,
+            status: RequestStatus::Pending,
+            decision: None,
+            feedback: None,
+        }
+    }
+
+    fn open(model: &mut ReadModel, request_id: &str, content: ItemContent) -> Vec<Event> {
+        record(
+            model,
+            "m1",
+            ProviderOutput::RequestOpened {
+                request_id: request_id.into(),
+                content,
+            },
+        )
+    }
+
+    fn respond(request_id: &str, response: RequestResponse) -> Command {
+        Command::RequestRespond {
+            thread_id: "t".into(),
+            request_id: request_id.into(),
+            response,
+        }
+    }
+
+    fn decision(decision: ApprovalDecision) -> RequestResponse {
+        RequestResponse::Decision {
+            decision,
+            feedback: None,
+        }
+    }
+
+    fn status(model: &ReadModel) -> ThreadStatus {
+        model.thread("t").unwrap().status
+    }
+
+    #[test]
+    fn a_request_waits_for_the_user_until_answered() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+        open(&mut model, "r1", approval());
+        assert_eq!(status(&model), ThreadStatus::WaitingForInput);
+        assert_eq!(model.pending_requests("t").len(), 1);
+
+        let events = run(
+            &mut model,
+            respond(
+                "r1",
+                RequestResponse::Decision {
+                    decision: ApprovalDecision::Decline,
+                    feedback: Some("  run the unit tests only ".into()),
+                },
+            ),
+        )
+        .unwrap();
+
+        let Event::ItemAdded { item } = &events[0] else {
+            panic!("expected the resolved request, got {events:?}");
+        };
+        assert!(matches!(
+            &item.content,
+            ItemContent::Approval {
+                status: RequestStatus::Resolved,
+                decision: Some(ApprovalDecision::Decline),
+                feedback: Some(feedback),
+                ..
+            } if feedback == "run the unit tests only"
+        ));
+        assert_eq!(status(&model), ThreadStatus::Working);
+        assert!(model.pending_requests("t").is_empty());
+    }
+
+    #[test]
+    fn the_thread_waits_while_any_request_is_open() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+        open(&mut model, "r1", approval());
+        let again = open(&mut model, "r2", approval());
+        assert_eq!(again.len(), 1, "already waiting: {again:?}");
+
+        run(
+            &mut model,
+            respond("r1", decision(ApprovalDecision::Accept)),
+        )
+        .unwrap();
+        assert_eq!(status(&model), ThreadStatus::WaitingForInput);
+
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::RequestWithdrawn {
+                request_id: "r2".into(),
+            },
+        );
+        assert_eq!(status(&model), ThreadStatus::Working);
+    }
+
+    #[test]
+    fn a_request_is_answered_once_and_only_as_it_asks() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+        open(&mut model, "r1", approval());
+
+        let answers = RequestResponse::Answers {
+            answers: vec!["yes".into()],
+        };
+        assert_eq!(
+            run(&mut model, respond("r1", answers)),
+            Err(CommandError::RequestResponseInvalid {
+                request_id: "r1".into()
+            })
+        );
+        assert_eq!(
+            run(
+                &mut model,
+                respond("r1", decision(ApprovalDecision::AcceptForSession))
+            ),
+            Err(CommandError::RequestResponseInvalid {
+                request_id: "r1".into()
+            }),
+            "this approval offers no session grant"
+        );
+        run(
+            &mut model,
+            respond("r1", decision(ApprovalDecision::Accept)),
+        )
+        .unwrap();
+        assert_eq!(
+            run(
+                &mut model,
+                respond("r1", decision(ApprovalDecision::Accept))
+            ),
+            Err(CommandError::RequestNotPending {
+                request_id: "r1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn questions_take_one_answer_each() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "ask me")).unwrap();
+        let question = Question {
+            header: "Color".into(),
+            question: "Which color?".into(),
+            options: Vec::new(),
+            multi_select: false,
+        };
+        open(
+            &mut model,
+            "r1",
+            ItemContent::Questions {
+                questions: vec![question.clone(), question],
+                status: RequestStatus::Pending,
+                answers: None,
+            },
+        );
+
+        let one = RequestResponse::Answers {
+            answers: vec!["Red".into()],
+        };
+        assert!(run(&mut model, respond("r1", one)).is_err());
+        let both = RequestResponse::Answers {
+            answers: vec!["Red".into(), "Blue".into()],
+        };
+        let events = run(&mut model, respond("r1", both)).unwrap();
+        assert!(matches!(
+            &events[0],
+            Event::ItemAdded { item } if matches!(
+                &item.content,
+                ItemContent::Questions { answers: Some(answers), status: RequestStatus::Resolved, .. }
+                    if answers.len() == 2
+            )
+        ));
+    }
+
+    #[test]
+    fn an_accepted_plan_takes_the_thread_out_of_plan_mode() {
+        let mut model = model_with_thread();
+        run(
+            &mut model,
+            Command::ThreadAccessSet {
+                thread_id: "t".into(),
+                access_mode: AccessMode::Ask,
+                plan_mode: true,
+            },
+        )
+        .unwrap();
+        run(&mut model, send("m1", "plan it")).unwrap();
+        open(
+            &mut model,
+            "r1",
+            ItemContent::ProposedPlan {
+                plan: "1. Do it".into(),
+                status: RequestStatus::Pending,
+                decision: None,
+                feedback: None,
+            },
+        );
+
+        run(
+            &mut model,
+            respond("r1", decision(ApprovalDecision::Accept)),
+        )
+        .unwrap();
+
+        let thread = model.thread("t").unwrap();
+        assert!(!thread.plan_mode);
+        assert_eq!(thread.access_mode, AccessMode::Ask);
+        assert_eq!(thread.status, ThreadStatus::Working);
+    }
+
+    #[test]
+    fn requests_left_open_are_cancelled_when_the_turn_ends() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+        open(&mut model, "r1", approval());
+
+        let events = record(
+            &mut model,
+            "m1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+            },
+        );
+
+        assert!(matches!(
+            &events[0],
+            Event::ItemAdded { item } if item.content.request_status() == Some(RequestStatus::Cancelled)
+        ));
+        assert!(model.pending_requests("t").is_empty());
+        assert_eq!(status(&model), ThreadStatus::Idle);
+        assert_eq!(
+            run(
+                &mut model,
+                respond("r1", decision(ApprovalDecision::Accept))
+            ),
+            Err(CommandError::RequestNotPending {
+                request_id: "r1".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_page_keeps_only_the_start_of_long_tool_output() {
+        let call = |output: &str| ItemContent::ToolCall {
+            name: "Bash".into(),
+            input: "{}".into(),
+            output: Some(output.into()),
+            is_error: false,
+            detail: None,
+            output_omitted: false,
+        };
+        let long = "x".repeat(1_000);
+
+        let ItemContent::ToolCall {
+            output,
+            output_omitted,
+            ..
+        } = call(&long).summary()
+        else {
+            unreachable!()
+        };
+        assert_eq!(output.map(|text| text.len()), Some(200));
+        assert!(output_omitted);
+        assert_eq!(call("short").summary(), call("short"));
     }
 
     #[cfg(windows)]

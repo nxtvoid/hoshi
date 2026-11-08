@@ -39,6 +39,7 @@ fn a_turn_with_a_tool_call_becomes_session_tool_and_reply() {
             item_id: result_id,
             output,
             is_error,
+            ..
         },
         ProviderOutput::AssistantMessage { text, .. },
         ProviderOutput::TurnCompleted { outcome },

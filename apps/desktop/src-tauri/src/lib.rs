@@ -22,6 +22,7 @@ pub fn run() {
             orchestration::get_snapshot,
             orchestration::dispatch,
             orchestration::get_thread_items,
+            orchestration::get_thread_item,
             orchestration::get_forge_accounts,
             orchestration::list_folders,
             orchestration::create_folder,

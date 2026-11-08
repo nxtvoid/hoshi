@@ -30,7 +30,7 @@ use hoshi_core::{
     TurnOutcome, UsageLimits, WorkspaceEntry, decide, record_branch, record_output, record_title,
     record_worktree, record_worktree_left, turn_failed,
 };
-use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion};
+use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage};
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
     parse_pull_request_url, parse_remote, parse_repository_name,
@@ -95,6 +95,10 @@ const UPDATE_PROGRESS_EVERY: Duration = Duration::from_millis(250);
 const PATH_SEARCH_LIMIT: usize = 50;
 /// A first title is tried this many times, waiting longer before each retry.
 const TITLE_ATTEMPTS: u32 = 3;
+/// A transcript loads this many turns at a time,
+const PAGE_TURNS: usize = 20;
+/// and no more items, however long a turn ran.
+const PAGE_MAX_ITEMS: usize = 600;
 const TITLE_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 struct State {
@@ -921,6 +925,7 @@ impl Engine {
             sequence: state.sequence,
             projects: state.model.projects().cloned().collect(),
             threads: state.model.threads().cloned().collect(),
+            pending_requests: state.model.all_pending_requests(),
             pull_requests: state
                 .pull_requests
                 .known()
@@ -940,11 +945,37 @@ impl Engine {
         }
     }
 
-    pub fn thread_items(&self, thread_id: &str) -> Result<Vec<ThreadItem>, CommandError> {
+    /// One transcript item, with what the whole transcript leaves out.
+    pub fn thread_item(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Result<Option<ThreadItem>, CommandError> {
         lock(&self.state)
             .store
-            .thread_items(thread_id)
+            .thread_item(thread_id, item_id)
             .map_err(internal)
+    }
+
+    /// The latest turns before item `before`, the end when `None`, light enough to send
+    /// as a whole: `thread_item` returns what they leave out.
+    pub fn transcript(
+        &self,
+        thread_id: &str,
+        before: Option<&str>,
+    ) -> Result<TranscriptPage, CommandError> {
+        let (items, has_older) = lock(&self.state)
+            .store
+            .transcript_page(thread_id, before, PAGE_TURNS, PAGE_MAX_ITEMS)
+            .map_err(internal)?;
+        let items = items
+            .into_iter()
+            .map(|item| ThreadItem {
+                content: item.content.summary(),
+                ..item
+            })
+            .collect();
+        Ok(TranscriptPage { items, has_older })
     }
 
     pub fn dispatch(&self, command: Command) -> Result<(), CommandError> {
@@ -952,6 +983,14 @@ impl Engine {
         let command = state.prepare(command)?;
         let interrupt = match &command {
             Command::TurnInterrupt { thread_id } => Some(thread_id.clone()),
+            _ => None,
+        };
+        let answer = match &command {
+            Command::RequestRespond {
+                thread_id,
+                request_id,
+                response,
+            } => Some((thread_id.clone(), request_id.clone(), response.clone())),
             _ => None,
         };
         let freed_worktrees = state.worktrees_freed_by(&command);
@@ -1031,6 +1070,11 @@ impl Engine {
             && let Some(turn) = state.turns.get(&thread_id)
         {
             turn.running.interrupt();
+        }
+        if let Some((thread_id, request_id, response)) = answer
+            && let Some(turn) = state.turns.get(&thread_id)
+        {
+            turn.running.respond(&request_id, &response);
         }
         // A deleted thread (or a removed project's threads) must not keep an agent running.
         let orphaned: Vec<_> = state
@@ -1473,6 +1517,9 @@ impl State {
             ProviderOutput::TextDelta { item_id, delta } => (item_id, StreamKind::Text, delta),
             ProviderOutput::ReasoningDelta { item_id, delta } => {
                 (item_id, StreamKind::Reasoning, delta)
+            }
+            ProviderOutput::ToolOutput { item_id, output } => {
+                (item_id, StreamKind::ToolOutput, output)
             }
             other => return self.record(thread_id, turn_id, other),
         };
@@ -2327,7 +2374,10 @@ fn internal(error: StoreError) -> CommandError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hoshi_core::{AccessMode, Effort, ThreadStatus};
+    use hoshi_core::{
+        AccessMode, ApprovalDecision, Effort, RequestResponse, RequestStatus, ThreadStatus,
+        ToolDetail,
+    };
     use hoshi_providers::OutputSink;
     use std::sync::mpsc::{self, Receiver, Sender};
 
@@ -2347,13 +2397,25 @@ mod tests {
         script: Vec<ProviderOutput>,
         /// What a title request answers; `None` declines.
         title: Option<String>,
+        /// What the user answered the turns' requests, by request id.
+        responses: Arc<Mutex<Vec<(String, RequestResponse)>>>,
     }
 
-    struct FakeTurn(Sender<()>);
+    struct FakeTurn {
+        stop: Sender<()>,
+        responses: Arc<Mutex<Vec<(String, RequestResponse)>>>,
+    }
 
     impl RunningTurn for FakeTurn {
         fn interrupt(&self) {
-            let _ = self.0.send(());
+            let _ = self.stop.send(());
+        }
+
+        fn respond(&self, request_id: &str, response: &RequestResponse) {
+            self.responses
+                .lock()
+                .unwrap()
+                .push((request_id.to_owned(), response.clone()));
         }
     }
 
@@ -2407,7 +2469,10 @@ mod tests {
                 }
                 script.into_iter().for_each(&mut sink);
             });
-            Ok(Box::new(FakeTurn(stop)))
+            Ok(Box::new(FakeTurn {
+                stop,
+                responses: self.responses.clone(),
+            }))
         }
     }
 
@@ -2574,6 +2639,7 @@ mod tests {
                 requests: Mutex::new(Vec::new()),
                 script,
                 title: None,
+                responses: Arc::default(),
             });
             engine.set_adapter(Some(adapter.clone()));
             let root = dunce::canonicalize(root)
@@ -2699,7 +2765,7 @@ mod tests {
             [request("first", None), request("second", Some("s1"))]
         );
         assert_eq!(harness.thread("t").status, ThreadStatus::Idle);
-        assert_eq!(harness.engine.thread_items("t").unwrap().len(), 4);
+        assert_eq!(harness.engine.transcript("t", None).unwrap().items.len(), 4);
     }
 
     #[test]
@@ -2774,6 +2840,7 @@ mod tests {
             requests: Mutex::new(Vec::new()),
             script: completed_turn(),
             title: Some("Empty TSX Snippet".into()),
+            responses: Arc::default(),
         })));
         harness
     }
@@ -2861,6 +2928,126 @@ mod tests {
         let thread = &engine.snapshot().threads[0];
         assert_eq!(thread.status, ThreadStatus::Idle);
         assert_eq!(thread.active_turn_id, None);
+    }
+
+    fn approval_requested() -> Vec<ProviderOutput> {
+        vec![ProviderOutput::RequestOpened {
+            request_id: "r1".into(),
+            content: ItemContent::Approval {
+                tool_call_id: None,
+                tool_name: "Bash".into(),
+                input: "{}".into(),
+                reason: None,
+                can_accept_for_session: true,
+                status: RequestStatus::Pending,
+                decision: None,
+                feedback: None,
+            },
+        }]
+    }
+
+    #[test]
+    fn an_answer_reaches_the_turn_that_asked() {
+        let harness = Harness::in_memory("answer", approval_requested());
+        harness.send("t", "m1", "run the tests");
+        harness.wait_for(|event| match event {
+            Event::ThreadStatusSet { status, .. } => Some(status),
+            _ => None,
+        });
+        assert_eq!(harness.thread("t").status, ThreadStatus::WaitingForInput);
+
+        let response = RequestResponse::Decision {
+            decision: ApprovalDecision::AcceptForSession,
+            feedback: None,
+        };
+        harness
+            .engine
+            .dispatch(Command::RequestRespond {
+                thread_id: "t".into(),
+                request_id: "r1".into(),
+                response: response.clone(),
+            })
+            .unwrap();
+
+        assert_eq!(
+            *harness.adapter.responses.lock().unwrap(),
+            vec![("r1".to_owned(), response)]
+        );
+        assert_eq!(harness.thread("t").status, ThreadStatus::Working);
+        assert!(harness.engine.snapshot().pending_requests.is_empty());
+    }
+
+    #[test]
+    fn a_request_left_open_by_a_crash_is_cancelled_on_startup() {
+        let dir = scratch_dir("crash-request");
+        let database = dir.join("state.sqlite");
+        let harness = Harness::new(
+            "crash-request",
+            dir,
+            Store::open(&database).unwrap(),
+            approval_requested(),
+        );
+        harness.send("t", "m1", "run the tests");
+        harness.wait_for(|event| match event {
+            Event::ThreadStatusSet { .. } => Some(()),
+            _ => None,
+        });
+        drop(harness);
+
+        let engine = Engine::from_store(
+            Store::open(&database).unwrap(),
+            &scratch_dir("crash-request-reopened"),
+            Arc::new(|_| {}),
+        )
+        .unwrap();
+
+        assert!(engine.snapshot().pending_requests.is_empty());
+        let items = engine.transcript("t", None).unwrap().items;
+        let request = items.iter().find(|item| item.id == "r1").unwrap();
+        assert_eq!(
+            request.content.request_status(),
+            Some(RequestStatus::Cancelled)
+        );
+        assert_eq!(engine.snapshot().threads[0].status, ThreadStatus::Idle);
+    }
+
+    #[test]
+    fn a_whole_transcript_leaves_diffs_to_their_item() {
+        let change = ToolDetail::FileChange {
+            path: "/repo/a.txt".into(),
+            additions: 1,
+            deletions: 0,
+            diff: Some("@@ -0,0 +1,1 @@\n+a".into()),
+        };
+        let script = vec![
+            ProviderOutput::ToolCallStarted {
+                item_id: "edit".into(),
+                name: "Write".into(),
+                input: "{}".into(),
+            },
+            ProviderOutput::ToolCallCompleted {
+                item_id: "edit".into(),
+                output: "written".into(),
+                is_error: false,
+                detail: Some(change.clone()),
+            },
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        ];
+        let harness = Harness::in_memory("diffs", script);
+        harness.send("t", "m1", "write a");
+        harness.wait_for_turn_end();
+
+        let detail_of = |item: &ThreadItem| match &item.content {
+            ItemContent::ToolCall { detail, .. } => detail.clone(),
+            _ => None,
+        };
+        let items = harness.engine.transcript("t", None).unwrap().items;
+        let listed = items.iter().find(|item| item.id == "edit").unwrap();
+        assert_eq!(detail_of(listed), Some(change.summary()));
+        let whole = harness.engine.thread_item("t", "edit").unwrap().unwrap();
+        assert_eq!(detail_of(&whole), Some(change));
     }
 
     #[test]

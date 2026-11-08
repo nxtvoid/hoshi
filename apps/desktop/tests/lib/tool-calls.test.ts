@@ -2,10 +2,12 @@ import { describe, expect, test } from 'bun:test'
 import type { ThreadItem } from '../../src/bindings/ThreadItem'
 import {
   activeEntry,
+  foldTurns,
   groupTranscript,
   reasoningPreview,
   relativePath,
   summarizeToolCalls,
+  toolName,
   toolTarget,
   withStreaming,
   type ToolCallItem
@@ -21,7 +23,9 @@ function tool(id: string, name: string, input: object = {}): ToolCallItem {
       name,
       input: JSON.stringify(input),
       output: '',
-      isError: false
+      isError: false,
+      detail: null,
+      outputOmitted: false
     }
   }
 }
@@ -48,6 +52,26 @@ const ids = (rows: ReturnType<typeof groupTranscript>) =>
   rows.map((row) =>
     row.kind === 'item' ? row.item.id : row.entries.map((entry) => entry.id)
   )
+
+test('the calls a request stands for are left to the request', () => {
+  const rows = groupTranscript([
+    tool('a', 'AskUserQuestion'),
+    tool('b', 'Read'),
+    tool('c', 'ExitPlanMode'),
+    tool('d', 'TaskUpdate')
+  ])
+  expect(rows).toEqual([
+    { kind: 'work', id: 'b', entries: [tool('b', 'Read')] }
+  ])
+})
+
+test('an MCP tool shows its own name and its server', () => {
+  expect(toolName('mcp__claude_ai_Google_Drive__search_files')).toEqual({
+    label: 'search files',
+    source: 'Google Drive'
+  })
+  expect(toolName('Bash')).toEqual({ label: 'Bash', source: null })
+})
 
 describe('groupTranscript', () => {
   test('folds consecutive tool calls into one row between messages', () => {
@@ -165,5 +189,58 @@ describe('toolTarget', () => {
   test('shows the command of a shell call', () => {
     const input = JSON.stringify({ command: 'git status', description: 'x' })
     expect(toolTarget('Bash', input, null)).toBe('git status')
+  })
+})
+
+describe('foldTurns', () => {
+  const user = (id: string, createdAt: string): ThreadItem => ({
+    id,
+    threadId: 't',
+    createdAt,
+    content: { kind: 'userMessage', text: id, attachments: [] }
+  })
+  const answer = (id: string, createdAt: string): ThreadItem => ({
+    ...text(id),
+    createdAt
+  })
+
+  test('folds the work of a finished turn behind its answer', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      text('note'),
+      tool('e', 'Edit'),
+      answer('a1', '2026-11-08T10:01:12Z')
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(folded.map((row) => row.kind)).toEqual(['item', 'fold', 'item'])
+    const fold = folded[1]
+    expect(fold?.kind === 'fold' && fold.durationMs).toBe(72_000)
+    expect(fold?.kind === 'fold' && fold.rows.length).toBe(3)
+  })
+
+  test('leaves the running turn, and turns without work or answer, open', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      answer('a1', '2026-11-08T10:00:05Z'),
+      user('u2', '2026-11-08T10:01:00Z'),
+      tool('r', 'Read'),
+      user('u3', '2026-11-08T10:02:00Z'),
+      tool('s', 'Grep'),
+      answer('a3', '2026-11-08T10:02:30Z')
+    ])
+
+    expect(foldTurns(rows, false).map((row) => row.kind)).toEqual([
+      'item',
+      'item',
+      'item',
+      'work',
+      'item',
+      'fold',
+      'item'
+    ])
+    expect(foldTurns(rows, true).at(-2)?.kind).toBe('work')
   })
 })

@@ -6,16 +6,19 @@ mod claude_commands;
 mod claude_control;
 mod claude_install;
 mod claude_models;
+mod claude_output;
 mod claude_prompt;
+mod claude_requests;
 mod claude_titles;
+mod claude_tools;
 mod claude_usage;
 mod process;
 mod updater;
 
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
 use hoshi_core::{
-    AccessMode, Effort, MessageAttachment, ProviderModels, ProviderOutput, SlashCommand,
-    TurnFailure, UsageLimits,
+    AccessMode, Effort, MessageAttachment, ProviderModels, ProviderOutput, RequestResponse,
+    SlashCommand, TurnFailure, UsageLimits,
 };
 use std::path::{Path, PathBuf};
 pub use updater::{UpdateFailure, Updater, run as run_update};
@@ -132,6 +135,10 @@ pub trait ProviderAdapter: Send + Sync {
 pub trait RunningTurn: Send {
     /// Stops the turn. The sink still receives a final `TurnCompleted`.
     fn interrupt(&self);
+
+    /// Answers a request the turn reported with `ProviderOutput::RequestOpened`. Ignored
+    /// once the agent no longer waits for it.
+    fn respond(&self, request_id: &str, response: &RequestResponse);
 }
 
 /// Truncates long tool inputs and outputs so a transcript stays light.

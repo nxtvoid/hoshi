@@ -1,4 +1,4 @@
-use crate::MessageAttachment;
+use crate::{ApprovalDecision, MessageAttachment, Question, RequestStatus};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -82,12 +82,15 @@ impl Effort {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum AccessMode {
+    /// Asks before anything the agent's settings don't allow, file edits included.
+    Ask,
     /// File edits apply on their own; anything else the agent's settings don't
-    /// allow is refused.
+    /// allow is asked first.
     #[default]
     AcceptEdits,
     /// The provider judges what is safe to run.
     Auto,
+    /// Runs everything, except what the agent's own rules and safety checks ask about.
     FullAccess,
 }
 
@@ -112,6 +115,17 @@ pub enum ThreadWorkspace {
         path: String,
         branch: String,
     },
+}
+
+/// Part of a thread's transcript, latest turns first loaded, older ones on request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TranscriptPage {
+    /// Oldest first, each as `ItemContent::summary` leaves it.
+    pub items: Vec<ThreadItem>,
+    /// Items before these remain.
+    pub has_older: bool,
 }
 
 /// One entry in a thread's transcript.
@@ -150,10 +164,153 @@ pub enum ItemContent {
         input: String,
         output: Option<String>,
         is_error: bool,
+        /// What the call did, beyond its output, once it completed.
+        #[serde(default)]
+        detail: Option<ToolDetail>,
+        /// `output` is only its start: a page of the transcript leaves the rest out.
+        #[serde(default)]
+        output_omitted: bool,
     },
     TurnFailed {
         reason: TurnFailure,
     },
+    /// A tool call held back until the user approves it.
+    Approval {
+        /// The call in the transcript; `None` when a subagent made it.
+        tool_call_id: Option<String>,
+        tool_name: String,
+        /// The tool input as JSON, truncated for display.
+        input: String,
+        /// Why the agent asks, in its own words.
+        reason: Option<String>,
+        can_accept_for_session: bool,
+        status: RequestStatus,
+        decision: Option<ApprovalDecision>,
+        feedback: Option<String>,
+    },
+    Questions {
+        questions: Vec<Question>,
+        status: RequestStatus,
+        answers: Option<Vec<String>>,
+    },
+    /// The agent's task list as it stands, one per turn, kept up to date in place.
+    TaskList {
+        tasks: Vec<Task>,
+    },
+    /// A plan mode turn's plan, which the agent carries out once accepted.
+    ProposedPlan {
+        /// Markdown.
+        plan: String,
+        status: RequestStatus,
+        decision: Option<ApprovalDecision>,
+        feedback: Option<String>,
+    },
+}
+
+/// How much of a tool's output a page of the transcript keeps; the item alone has it all.
+const OUTPUT_PREVIEW_CHARS: usize = 200;
+
+impl ItemContent {
+    /// The item as a page of the transcript carries it: tool output cut to its start and
+    /// diffs left out, which the item alone returns.
+    pub fn summary(self) -> Self {
+        match self {
+            Self::ToolCall {
+                name,
+                input,
+                output,
+                is_error,
+                detail,
+                output_omitted,
+            } => {
+                let long = output
+                    .as_ref()
+                    .is_some_and(|text| text.chars().nth(OUTPUT_PREVIEW_CHARS).is_some());
+                Self::ToolCall {
+                    name,
+                    input,
+                    output: match output {
+                        Some(text) if long => {
+                            Some(text.chars().take(OUTPUT_PREVIEW_CHARS).collect())
+                        }
+                        other => other,
+                    },
+                    is_error,
+                    detail: detail.as_ref().map(ToolDetail::summary),
+                    output_omitted: output_omitted || long,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Set on the requests the agent makes mid-turn.
+    pub fn request_status(&self) -> Option<RequestStatus> {
+        match self {
+            Self::Approval { status, .. }
+            | Self::Questions { status, .. }
+            | Self::ProposedPlan { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+/// One step of the agent's task list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Task {
+    pub subject: String,
+    /// How the agent words it while working on it, such as "Writing a.txt".
+    pub active_form: Option<String>,
+    pub status: TaskStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// What a tool call did, as the provider reported it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export)]
+pub enum ToolDetail {
+    FileChange {
+        path: String,
+        additions: u32,
+        deletions: u32,
+        /// The change as unified diff hunks, capped in size. `None` in a whole
+        /// transcript, which leaves diffs out; the item alone carries it.
+        diff: Option<String>,
+    },
+}
+
+impl ToolDetail {
+    /// The detail without what a whole transcript leaves out.
+    pub fn summary(&self) -> Self {
+        match self {
+            Self::FileChange {
+                path,
+                additions,
+                deletions,
+                ..
+            } => Self::FileChange {
+                path: path.clone(),
+                additions: *additions,
+                deletions: *deletions,
+                diff: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

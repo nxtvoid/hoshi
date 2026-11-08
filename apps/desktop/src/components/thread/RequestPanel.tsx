@@ -1,0 +1,252 @@
+import { useEffect } from 'react'
+import { cn } from '@hoshi/utils'
+import { m } from '@/paraglide/messages'
+import { toolTarget } from '@/lib/tool-calls'
+import { HugeiconsIcon } from '@hugeicons/react'
+import { Kbd } from '@hoshi/ui/components/kbd'
+import { Button } from '@hoshi/ui/components/button'
+import { Markdown } from '@/components/markdown/Markdown'
+import { useRequestActions } from './use-request-actions'
+import type { QuestionsContent, RequestItem } from '@/lib/requests'
+import {
+  ShieldUserIcon,
+  TaskDone01Icon,
+  UserQuestion01Icon
+} from '@hugeicons/core-free-icons'
+
+const PANEL =
+  'border-border bg-card mb-2 flex flex-col gap-2.5 rounded-2xl border p-3 shadow-xs'
+
+/** What the agent waits on, above the composer, which takes typed answers and feedback. */
+export function RequestPanel({
+  request,
+  cwd
+}: {
+  request: RequestItem
+  cwd: string | null
+}) {
+  const { content } = request
+  switch (content.kind) {
+    case 'approval':
+      return <ApprovalPanel request={request} cwd={cwd} />
+    case 'proposedPlan':
+      return <PlanPanel request={request} plan={content.plan} />
+    case 'questions':
+      return <QuestionsPanel request={request} content={content} />
+  }
+}
+
+function PanelTitle({
+  icon,
+  children,
+  aside
+}: {
+  icon: typeof ShieldUserIcon
+  children: React.ReactNode
+  aside?: React.ReactNode
+}) {
+  return (
+    <div className='flex items-center gap-2 text-sm'>
+      <HugeiconsIcon
+        icon={icon}
+        strokeWidth={2}
+        className='text-status-waiting size-4 shrink-0'
+      />
+      <span className='text-foreground min-w-0 flex-1 font-medium'>
+        {children}
+      </span>
+      {aside}
+    </div>
+  )
+}
+
+function ApprovalPanel({
+  request,
+  cwd
+}: {
+  request: RequestItem
+  cwd: string | null
+}) {
+  const { decide } = useRequestActions(request)
+  if (request.content.kind !== 'approval') return null
+  const { toolName, input, reason, canAcceptForSession } = request.content
+  const target = toolTarget(toolName, input, cwd) || input
+
+  return (
+    <div className={PANEL} role='alertdialog' aria-label={m.request_waiting()}>
+      <PanelTitle icon={ShieldUserIcon}>
+        {m.request_approval_title({ tool: toolName })}
+      </PanelTitle>
+      <pre className='bg-muted/40 text-foreground/85 max-h-32 overflow-auto rounded-md px-3 py-2 font-mono text-xs break-all whitespace-pre-wrap'>
+        {target}
+      </pre>
+      {reason ? (
+        <p className='text-muted-foreground text-xs'>{reason}</p>
+      ) : null}
+      <div className='flex flex-wrap justify-end gap-1.5'>
+        <Button
+          size='sm'
+          variant='ghost'
+          onClick={() => void decide('decline')}
+        >
+          {m.request_decline()}
+        </Button>
+        {canAcceptForSession ? (
+          <Button
+            size='sm'
+            variant='outline'
+            onClick={() => void decide('acceptForSession')}
+          >
+            {m.request_approve_session()}
+          </Button>
+        ) : null}
+        <Button size='sm' onClick={() => void decide('accept')}>
+          {m.request_approve()}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function PlanPanel({ request, plan }: { request: RequestItem; plan: string }) {
+  const { decide } = useRequestActions(request)
+  return (
+    <div className={PANEL} role='alertdialog' aria-label={m.request_waiting()}>
+      <PanelTitle icon={TaskDone01Icon}>{m.request_plan_title()}</PanelTitle>
+      <div className='bg-muted/40 max-h-72 overflow-auto rounded-md px-3 py-2'>
+        <Markdown text={plan} className='text-sm' />
+      </div>
+      <div className='flex justify-end gap-1.5'>
+        <Button
+          size='sm'
+          variant='ghost'
+          onClick={() => void decide('decline')}
+        >
+          {m.request_plan_keep_planning()}
+        </Button>
+        <Button size='sm' onClick={() => void decide('accept')}>
+          {m.request_plan_implement()}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function QuestionsPanel({
+  request,
+  content
+}: {
+  request: RequestItem
+  content: QuestionsContent
+}) {
+  const { progress, pick, back, advance } = useRequestActions(request)
+  const { questions } = content
+  const question = questions[progress.index]
+  const total = questions.length
+  const last = progress.index === total - 1
+
+  useEffect(() => {
+    if (!question) return
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return
+      const target = event.target
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable ||
+          target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA')
+      )
+        return
+      const option = question.options[Number(event.key) - 1]
+      if (!option) return
+      event.preventDefault()
+      pick(option.label, question.multiSelect)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [question, pick])
+
+  if (!question) return null
+  const preview = question.options.find(
+    (option) => option.preview && progress.selected.includes(option.label)
+  )?.preview
+
+  return (
+    <div className={PANEL} role='alertdialog' aria-label={m.request_waiting()}>
+      <PanelTitle
+        icon={UserQuestion01Icon}
+        aside={
+          total > 1 ? (
+            <span className='text-muted-foreground shrink-0 text-xs'>
+              {m.request_question_count({
+                current: progress.index + 1,
+                total
+              })}
+            </span>
+          ) : null
+        }
+      >
+        <span className='text-muted-foreground me-2 text-xs font-normal'>
+          {question.header}
+        </span>
+        {question.question}
+      </PanelTitle>
+      {question.multiSelect ? (
+        <p className='text-muted-foreground text-xs'>
+          {m.request_question_multi()}
+        </p>
+      ) : null}
+      <ol className='flex flex-col gap-1'>
+        {question.options.map((option, index) => {
+          const selected = progress.selected.includes(option.label)
+          return (
+            <li key={option.label}>
+              <button
+                type='button'
+                aria-pressed={selected}
+                onClick={() => pick(option.label, question.multiSelect)}
+                className={cn(
+                  'hover:bg-muted focus-visible:ring-ring flex w-full items-start gap-2.5 rounded-lg px-2 py-1.5 text-left text-sm outline-none focus-visible:ring-2',
+                  selected && 'bg-accent'
+                )}
+              >
+                {index < 9 ? <Kbd className='mt-0.5'>{index + 1}</Kbd> : null}
+                <span className='flex min-w-0 flex-col'>
+                  <span className='text-foreground'>{option.label}</span>
+                  {option.description && option.description !== option.label ? (
+                    <span className='text-muted-foreground text-xs'>
+                      {option.description}
+                    </span>
+                  ) : null}
+                </span>
+              </button>
+            </li>
+          )
+        })}
+      </ol>
+      {preview ? (
+        <div className='bg-muted/40 max-h-48 overflow-auto rounded-md px-3 py-2'>
+          <Markdown text={preview} className='text-xs' />
+        </div>
+      ) : null}
+      {progress.index > 0 || question.multiSelect ? (
+        <div className='flex justify-end gap-1.5'>
+          {progress.index > 0 ? (
+            <Button size='sm' variant='ghost' onClick={back}>
+              {m.request_question_back()}
+            </Button>
+          ) : null}
+          {question.multiSelect ? (
+            <Button
+              size='sm'
+              disabled={progress.selected.length === 0}
+              onClick={() => advance()}
+            >
+              {last ? m.request_question_submit() : m.request_question_next()}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}

@@ -1,11 +1,15 @@
-import { cn } from '@hoshi/utils'
+import { cn, formatDuration } from '@hoshi/utils'
 import { CHAT_LANE } from '@/lib/chat-lane'
 import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { TurnFailure } from '@/bindings/TurnFailure'
 import { Markdown } from '@/components/markdown/Markdown'
+import { RequestRow } from './RequestRow'
+import { TaskListRow } from './TaskListRow'
 import { UserMessage } from './UserMessage'
+import { useWholeToolCall } from './use-whole-tool-call'
+import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
 import { useTranscriptStore } from '@/state/transcript-store'
 import {
@@ -22,6 +26,7 @@ import {
   ArrowDown01Icon,
   ArrowRight01Icon,
   Cancel01Icon,
+  Clock01Icon,
   CommandLineIcon,
   File01Icon,
   FileEditIcon,
@@ -32,16 +37,19 @@ import {
 } from '@hugeicons/core-free-icons'
 import {
   activeEntry,
+  foldTurns,
   groupTranscript,
   isToolCall,
   reasoningPreview,
   summarizeToolCalls,
   toolAction,
+  toolName,
   toolTarget,
   withStreaming,
   type ToolAction,
-  type ToolCallContent,
+  type ToolCallItem,
   type ToolSummaryPart,
+  type TranscriptRow,
   type TranscriptItem,
   type WorkItem
 } from '@/lib/tool-calls'
@@ -65,12 +73,45 @@ export function Transcript({
   const items = useTranscriptStore((state) => state.items)
   const streaming = useTranscriptStore((state) => state.streaming)
   const rows = useMemo(
-    () => groupTranscript(withStreaming(items, streaming)),
-    [items, streaming]
+    () => foldTurns(groupTranscript(withStreaming(items, streaming)), working),
+    [items, streaming, working]
   )
+  const liveTasks = working
+    ? items.filter((item) => item.content.kind === 'taskList').at(-1)?.id
+    : undefined
   const scrollRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLOListElement>(null)
+  const olderRef = useRef<HTMLLIElement>(null)
   const pinned = useRef(true)
+  const hasOlder = useTranscriptStore((state) => state.hasOlder)
+  const loadOlder = useTranscriptStore((state) => state.loadOlder)
+  /** The scroll height before older items went in above, to keep the view where it was. */
+  const heightBeforeOlder = useRef<number | null>(null)
+  const firstId = items[0]?.id
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current
+    const before = heightBeforeOlder.current
+    if (!element || before === null || firstId === undefined) return
+    heightBeforeOlder.current = null
+    element.scrollTop += element.scrollHeight - before
+  }, [firstId])
+
+  useEffect(() => {
+    const element = scrollRef.current
+    const sentinel = olderRef.current
+    if (!element || !sentinel || !hasOlder) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return
+        heightBeforeOlder.current = element.scrollHeight
+        void loadOlder()
+      },
+      { root: element, rootMargin: '800px 0px 0px 0px' }
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hasOlder, loadOlder, firstId])
   const [atEnd, setAtEnd] = useState(true)
 
   // Scroll position is DOM state: follow new content only if the reader was at the bottom.
@@ -125,21 +166,8 @@ export function Transcript({
           ref={listRef}
           className={cn(CHAT_LANE, 'flex flex-col gap-4 px-4 py-6')}
         >
-          {rows.map((row) =>
-            row.kind === 'item' ? (
-              <li
-                key={row.item.id}
-                data-item-id={row.item.id}
-                className={cn(ROW, 'scroll-mt-6')}
-              >
-                <Item item={row.item} />
-              </li>
-            ) : (
-              <li key={row.id} className={ROW}>
-                <WorkGroup entries={row.entries} cwd={cwd} />
-              </li>
-            )
-          )}
+          {hasOlder ? <li ref={olderRef} aria-hidden className='h-px' /> : null}
+          <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
           {working ? (
             <li className='text-muted-foreground text-sm'>{m.working()}</li>
           ) : null}
@@ -171,7 +199,97 @@ export function Transcript({
   )
 }
 
-const Item = memo(function Item({ item }: { item: TranscriptItem }) {
+type RowsProps = {
+  rows: TranscriptRow[]
+  cwd: string | null
+  /** The task list of the running turn, which shows what is being worked on. */
+  liveTasks: string | undefined
+}
+
+function Rows({ rows, cwd, liveTasks }: RowsProps) {
+  return rows.map((row) => {
+    switch (row.kind) {
+      case 'item':
+        return (
+          <li
+            key={row.item.id}
+            data-item-id={row.item.id}
+            className={cn(ROW, 'scroll-mt-6')}
+          >
+            <Item item={row.item} cwd={cwd} live={row.item.id === liveTasks} />
+          </li>
+        )
+      case 'work':
+        return (
+          <li key={row.id} className={ROW}>
+            <WorkGroup entries={row.entries} cwd={cwd} />
+          </li>
+        )
+      default:
+        return (
+          <li key={row.id} className={ROW}>
+            <TurnFold
+              rows={row.rows}
+              durationMs={row.durationMs}
+              cwd={cwd}
+              liveTasks={liveTasks}
+            />
+          </li>
+        )
+    }
+  })
+}
+
+/** A finished turn's work, folded behind one line until opened. */
+function TurnFold({
+  durationMs,
+  ...rows
+}: RowsProps & { durationMs: number | null }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button
+        type='button'
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className='group/fold text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-6 items-center gap-2 rounded-md text-sm outline-none focus-visible:ring-2'
+      >
+        <HugeiconsIcon
+          icon={Clock01Icon}
+          strokeWidth={2}
+          className='size-4 shrink-0'
+        />
+        {durationMs === null
+          ? m.worked()
+          : m.worked_for({ duration: formatDuration(durationMs, getLocale()) })}
+        <HugeiconsIcon
+          icon={ArrowRight01Icon}
+          strokeWidth={2}
+          className={cn(
+            'size-3.5 shrink-0 opacity-0 transition-transform group-hover/fold:opacity-100',
+            open && 'rotate-90 opacity-100'
+          )}
+        />
+      </button>
+      {open ? (
+        <ol className='border-border/60 ms-2 mt-2 flex flex-col gap-4 border-s ps-4'>
+          <Rows {...rows} />
+        </ol>
+      ) : null}
+    </div>
+  )
+}
+
+const Item = memo(function Item({
+  item,
+  cwd,
+  live
+}: {
+  item: TranscriptItem
+  cwd: string | null
+  /** The turn this item belongs to is still running. */
+  live: boolean
+}) {
   const { content } = item
   switch (content.kind) {
     case 'userMessage':
@@ -185,13 +303,19 @@ const Item = memo(function Item({ item }: { item: TranscriptItem }) {
         <ReasoningRow text={content.text} streaming={item.streaming === true} />
       )
     case 'toolCall':
-      return <ToolCallRow call={content} cwd={null} />
+      return <ToolCallRow item={{ ...item, content }} cwd={cwd} />
     case 'turnFailed':
       return (
         <p className='text-destructive text-sm'>
           {failureMessage(content.reason)}
         </p>
       )
+    case 'approval':
+    case 'questions':
+    case 'proposedPlan':
+      return <RequestRow content={content} cwd={cwd} />
+    case 'taskList':
+      return <TaskListRow tasks={content.tasks} working={live} />
   }
 })
 
@@ -294,13 +418,11 @@ function sameWorkGroup(previous: WorkGroupProps, next: WorkGroupProps) {
 }
 
 function WorkEntry({ entry, cwd }: { entry: WorkItem; cwd: string | null }) {
-  return entry.content.kind === 'toolCall' ? (
-    <ToolCallRow call={entry.content} cwd={cwd} />
+  const { content } = entry
+  return content.kind === 'toolCall' ? (
+    <ToolCallRow item={{ ...entry, content }} cwd={cwd} />
   ) : (
-    <ReasoningRow
-      text={entry.content.text}
-      streaming={entry.streaming === true}
-    />
+    <ReasoningRow text={content.text} streaming={entry.streaming === true} />
   )
 }
 
@@ -367,18 +489,29 @@ function summaryText(parts: ToolSummaryPart[]) {
 }
 
 function ToolCallRow({
-  call,
+  item,
   cwd
 }: {
-  call: ToolCallContent
+  item: ToolCallItem
   cwd: string | null
 }) {
-  const { name, input, output, isError } = call
+  const { name, input, output, isError, detail } = item.content
+  const [open, setOpen] = useState(false)
+  const whole = useWholeToolCall(item, open)
+  const diff = whole.detail?.kind === 'fileChange' ? whole.detail.diff : null
   const running = output === null
+  const live = useTranscriptStore((state) =>
+    running && open ? state.streaming[item.id]?.text : undefined
+  )
   const target = toolTarget(name, input, cwd)
-  const expandable = Boolean(target || output)
+  const shown = toolName(name)
+  const change = detail?.kind === 'fileChange' ? detail : null
+  const expandable = Boolean(target || output || change || running)
   return (
-    <details className='group/call'>
+    <details
+      className='group/call'
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary className={ENTRY_SUMMARY}>
         <HugeiconsIcon
           icon={
@@ -398,8 +531,19 @@ function ToolCallRow({
             isError && 'text-destructive'
           )}
         />
-        <span className='text-foreground shrink-0 font-medium'>{name}</span>
+        <span className='text-foreground shrink-0 font-medium'>
+          {shown.label}
+        </span>
+        {shown.source ? (
+          <span className='shrink-0 text-xs'>{shown.source}</span>
+        ) : null}
         <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+        {change ? (
+          <span className='shrink-0 font-mono text-xs tabular-nums'>
+            <span className='text-pr-open'>+{change.additions}</span>{' '}
+            <span className='text-status-error'>−{change.deletions}</span>
+          </span>
+        ) : null}
         {expandable ? (
           <HugeiconsIcon
             icon={ArrowRight01Icon}
@@ -415,19 +559,53 @@ function ToolCallRow({
               {target}
             </pre>
           ) : null}
-          {output ? (
+          {change && !isError ? (
+            diff ? (
+              <div className='border-border/60 max-h-96 overflow-auto border-t py-1'>
+                <DiffView text={diff} />
+              </div>
+            ) : null
+          ) : output ? (
             <pre
               className={cn(
                 'text-muted-foreground max-h-80 overflow-auto px-3 py-2 whitespace-pre-wrap',
                 target && 'border-border/60 border-t'
               )}
             >
-              {output}
+              {whole.output}
             </pre>
+          ) : live ? (
+            <LiveOutput text={live} framed={Boolean(target)} />
           ) : null}
         </div>
       ) : null}
     </details>
+  )
+}
+
+/** A running command's output so far, following its end unless scrolled up. */
+function LiveOutput({ text, framed }: { text: string; framed: boolean }) {
+  const ref = useRef<HTMLPreElement>(null)
+  const following = useRef(true)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (element && following.current) element.scrollTop = element.scrollHeight
+  })
+  return (
+    <pre
+      ref={ref}
+      onScroll={(event) => {
+        const element = event.currentTarget
+        following.current =
+          element.scrollHeight - element.scrollTop - element.clientHeight < 8
+      }}
+      className={cn(
+        'text-muted-foreground max-h-80 overflow-auto px-3 py-2 whitespace-pre-wrap',
+        framed && 'border-border/60 border-t'
+      )}
+    >
+      {text}
+    </pre>
   )
 }
 

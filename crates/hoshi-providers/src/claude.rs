@@ -1,20 +1,23 @@
 use crate::claude_commands;
 use crate::claude_install;
 use crate::claude_models::{TurnModel, Version, manifest, parse_version};
+use crate::claude_output::LiveOutput;
 use crate::claude_prompt;
+use crate::claude_requests::{self, Access, Grants, Requests};
 use crate::claude_titles;
+use crate::claude_tools;
 use crate::claude_usage;
-use crate::process::{hide_console, spawn_turn};
+use crate::process::{ProcessTurn, hide_console, spawn_turn};
 use crate::{
     GeneratedTitle, Installation, OutputSink, ProviderAdapter, RunningTurn, TitleRequest,
     TurnRequest, truncate,
 };
 use hoshi_core::{
-    AccessMode, ContextUsage, ProviderModels, ProviderOutput, SlashCommand, TurnFailure,
-    TurnOutcome, UsageLimits,
+    AccessMode, ContextUsage, ProviderModels, ProviderOutput, RequestResponse, SlashCommand,
+    TurnFailure, TurnOutcome, UsageLimits,
 };
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -30,6 +33,7 @@ pub struct ClaudeCodeAdapter {
     model: Option<String>,
     /// `None` until asked; then `Some(None)` when the CLI can't be run.
     version: Mutex<Option<Option<Version>>>,
+    grants: Grants,
 }
 
 impl ClaudeCodeAdapter {
@@ -38,6 +42,7 @@ impl ClaudeCodeAdapter {
             binary_path,
             model,
             version: Mutex::default(),
+            grants: Grants::default(),
         }
     }
 
@@ -110,6 +115,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             request.fast_mode,
             request.ultracode,
         );
+        let access = Access {
+            mode: request.access_mode,
+            plan_mode: request.plan_mode,
+        };
         let mut command = Command::new(self.binary());
         command
             .current_dir(&request.cwd)
@@ -117,8 +126,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .args(["--output-format", "stream-json", "--verbose"])
             .arg("--include-partial-messages")
             .args(["--thinking-display", "summarized"])
-            .args(["--permission-mode", permission_mode(&request)]);
-        if request.access_mode == AccessMode::FullAccess && !request.plan_mode {
+            .args(["--permission-prompt-tool", "stdio"])
+            // `-p` leaves the task list tools out unless asked for.
+            .env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+            .args(["--permission-mode", access.permission_mode()]);
+        // Also lets an accepted plan hand the session back to full access.
+        if request.access_mode == AccessMode::FullAccess {
             command.arg("--allow-dangerously-skip-permissions");
         }
         command.args(["--model", &turn_model.slug]);
@@ -130,6 +143,13 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         }
         if let Some(session_id) = &request.resume_session_id {
             command.args(["--resume", session_id]);
+            let (rules, directories) = self.grants.arguments(session_id);
+            for rule in rules {
+                command.args(["--allowedTools", &rule]);
+            }
+            for directory in directories {
+                command.args(["--add-dir", &directory]);
+            }
         }
         let input = json!({
             "type": "user",
@@ -138,22 +158,53 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 "content": claude_prompt::message_content(&request.prompt, &request.attachments),
             },
         });
-        let mut parser = ClaudeParser::new(manifest().context_window(&turn_model.slug));
-        let turn = spawn_turn(command, format!("{input}\n"), sink, move |line| {
-            parser.parse_line(line)
+        let requests = Requests::default();
+        let live_output = LiveOutput::default();
+        let mut parser = ClaudeParser {
+            access,
+            requests: requests.clone(),
+            live_output: live_output.clone(),
+            ..ClaudeParser::new(manifest().context_window(&turn_model.slug))
+        };
+        let process = spawn_turn(command, input.to_string(), sink, move |line, stdin| {
+            let outputs = parser.parse_line(line);
+            for reply in parser.take_replies() {
+                stdin.write_line(&reply);
+            }
+            outputs
         })?;
-        Ok(Box::new(turn))
+        live_output.poll(process.stdin().clone());
+        Ok(Box::new(ClaudeTurn {
+            process,
+            requests,
+            grants: self.grants.clone(),
+            access,
+        }))
     }
 }
 
-fn permission_mode(request: &TurnRequest) -> &'static str {
-    if request.plan_mode {
-        return "plan";
+struct ClaudeTurn {
+    process: ProcessTurn,
+    requests: Requests,
+    grants: Grants,
+    access: Access,
+}
+
+impl RunningTurn for ClaudeTurn {
+    fn interrupt(&self) {
+        self.process.interrupt();
     }
-    match request.access_mode {
-        AccessMode::AcceptEdits => "acceptEdits",
-        AccessMode::Auto => "auto",
-        AccessMode::FullAccess => "bypassPermissions",
+
+    fn respond(&self, request_id: &str, response: &RequestResponse) {
+        let Some(pending) = self.requests.take(request_id) else {
+            return;
+        };
+        let session = self.requests.session();
+        let session = session
+            .as_deref()
+            .map(|session_id| (session_id, &self.grants));
+        let line = claude_requests::reply(request_id, &pending, response, self.access, session);
+        self.process.stdin().write_line(&line);
     }
 }
 
@@ -187,6 +238,14 @@ pub struct ClaudeParser {
     used_tokens: Option<u64>,
     /// Calls of the tools that move the session, by id, to read where their results lead.
     moves: HashMap<String, WorktreeMove>,
+    access: Access,
+    requests: Requests,
+    /// Lines to write back to the agent, such as answers it does not need the user for.
+    replies: Vec<String>,
+    session_id: Option<String>,
+    /// Calls that change the task list Claude Code keeps on disk, by id.
+    task_calls: HashSet<String>,
+    live_output: LiveOutput,
 }
 
 #[derive(Clone, Copy)]
@@ -204,16 +263,45 @@ impl ClaudeParser {
         }
     }
 
+    /// What to write back to the agent after the last lines, oldest first.
+    pub fn take_replies(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.replies)
+    }
+
     pub fn parse_line(&mut self, line: &str) -> Vec<ProviderOutput> {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
+        match value["type"].as_str() {
+            Some("control_request") => {
+                let (outputs, reply) =
+                    claude_requests::receive(&value, self.access, &self.requests);
+                self.replies.extend(reply);
+                return outputs;
+            }
+            Some("control_cancel_request") => {
+                return claude_requests::withdraw(&value, &self.requests);
+            }
+            Some("control_response") => {
+                return self.live_output.answer(&value).into_iter().collect();
+            }
+            Some("system") => match value["subtype"].as_str() {
+                Some("task_started") => self.live_output.started(&value),
+                Some("task_notification") => self.live_output.ended(&value),
+                _ => {}
+            },
+            _ => {}
+        }
         // Subagent traffic belongs to its parent tool call; the transcript shows only the top level.
         if !value["parent_tool_use_id"].is_null() {
             return Vec::new();
         }
         match value["type"].as_str() {
             Some("system") if value["subtype"] == "init" => {
+                if let Some(session_id) = value["session_id"].as_str() {
+                    self.requests.set_session(session_id);
+                    self.session_id = Some(session_id.to_owned());
+                }
                 let session =
                     value["session_id"]
                         .as_str()
@@ -231,8 +319,9 @@ impl ClaudeParser {
             Some("stream_event") => self.parse_stream_event(&value),
             Some("assistant") => self.parse_assistant(&value["message"]),
             Some("user") => {
-                let mut outputs = parse_tool_results(&value["message"]);
+                let mut outputs = parse_tool_results(&value["message"], &value["tool_use_result"]);
                 outputs.extend(self.worktree_move(&value));
+                outputs.extend(self.changed_task_list(&value["message"]));
                 outputs
             }
             Some("rate_limit_event") => claude_usage::rate_limit_event(&value["rate_limit_info"])
@@ -333,11 +422,20 @@ impl ClaudeParser {
                     if let (Some(movement), Some(id)) = (movement, block["id"].as_str()) {
                         self.moves.insert(id.to_owned(), movement);
                     }
+                    if matches!(name, "TaskCreate" | "TaskUpdate")
+                        && let Some(id) = block["id"].as_str()
+                    {
+                        self.task_calls.insert(id.to_owned());
+                    }
+                    let todos = (name == "TodoWrite")
+                        .then(|| claude_tools::todo_list(&block["input"]))
+                        .flatten();
                     outputs.push(ProviderOutput::ToolCallStarted {
                         item_id: block["id"].as_str().unwrap_or(&item_id).to_owned(),
                         name: name.to_owned(),
                         input: truncate(&block["input"].to_string(), TOOL_INPUT_MAX_CHARS),
                     });
+                    outputs.extend(todos.map(|tasks| ProviderOutput::TaskList { tasks }));
                 }
                 _ => {}
             }
@@ -347,6 +445,37 @@ impl ClaudeParser {
 }
 
 impl ClaudeParser {
+    /// The task list as Claude Code saved it, once a call that changes it succeeded.
+    fn changed_task_list(&mut self, message: &Value) -> Option<ProviderOutput> {
+        let blocks = message["content"].as_array()?;
+        let changed = blocks.iter().fold(false, |changed, block| {
+            let call = block["tool_use_id"].as_str();
+            let ours = call.is_some_and(|id| self.task_calls.remove(id));
+            changed || (ours && block["is_error"] != true)
+        });
+        if !changed {
+            return None;
+        }
+        let list_id = std::env::var("CLAUDE_CODE_TASK_LIST_ID")
+            .ok()
+            .filter(|id| !id.trim().is_empty())
+            .or_else(|| self.session_id.clone())?;
+        let dir = claude_install::config_dir()?.join("tasks").join(
+            list_id
+                .chars()
+                .map(|char| {
+                    if char.is_ascii_alphanumeric() || char == '_' || char == '-' {
+                        char
+                    } else {
+                        '-'
+                    }
+                })
+                .collect::<String>(),
+        );
+        let tasks = claude_tools::saved_task_list(&dir)?;
+        Some(ProviderOutput::TaskList { tasks })
+    }
+
     /// Where a successful `EnterWorktree` or `ExitWorktree` left the session, from the
     /// structured result the CLI sends along with the tool's text.
     fn worktree_move(&mut self, value: &Value) -> Option<ProviderOutput> {
@@ -399,9 +528,20 @@ impl ClaudeParser {
     }
 }
 
-fn parse_tool_results(message: &Value) -> Vec<ProviderOutput> {
+/// `structured` is the CLI's own reading of the result, sent along when the message holds a
+/// single one.
+fn parse_tool_results(message: &Value, structured: &Value) -> Vec<ProviderOutput> {
     let Some(blocks) = message["content"].as_array() else {
         return Vec::new();
+    };
+    let results = blocks
+        .iter()
+        .filter(|block| block["type"] == "tool_result")
+        .count();
+    let detail = if results == 1 {
+        claude_tools::detail(structured)
+    } else {
+        None
     };
     blocks
         .iter()
@@ -417,10 +557,12 @@ fn parse_tool_results(message: &Value) -> Vec<ProviderOutput> {
                     .join("\n"),
                 _ => String::new(),
             };
+            let is_error = block["is_error"].as_bool().unwrap_or(false);
             Some(ProviderOutput::ToolCallCompleted {
                 item_id,
                 output: truncate(&output, TOOL_OUTPUT_MAX_CHARS),
-                is_error: block["is_error"].as_bool().unwrap_or(false),
+                is_error,
+                detail: detail.clone().filter(|_| !is_error),
             })
         })
         .collect()
@@ -444,21 +586,6 @@ fn parse_result(value: &Value) -> TurnOutcome {
 mod tests {
     use super::*;
 
-    fn request() -> TurnRequest {
-        TurnRequest {
-            cwd: ".".into(),
-            prompt: "hi".into(),
-            attachments: Vec::new(),
-            resume_session_id: None,
-            model: None,
-            effort: None,
-            fast_mode: false,
-            ultracode: false,
-            access_mode: AccessMode::AcceptEdits,
-            plan_mode: false,
-        }
-    }
-
     fn model(fast_mode: bool, ultracode: bool) -> TurnModel {
         TurnModel {
             slug: "claude-opus-5-5".into(),
@@ -470,12 +597,33 @@ mod tests {
 
     #[test]
     fn plan_mode_wins_over_the_access_mode() {
-        let mut request = request();
-        assert_eq!(permission_mode(&request), "acceptEdits");
-        request.access_mode = AccessMode::FullAccess;
-        assert_eq!(permission_mode(&request), "bypassPermissions");
-        request.plan_mode = true;
-        assert_eq!(permission_mode(&request), "plan");
+        let mut access = Access {
+            mode: AccessMode::AcceptEdits,
+            plan_mode: false,
+        };
+        assert_eq!(access.permission_mode(), "acceptEdits");
+        access.mode = AccessMode::Ask;
+        assert_eq!(access.permission_mode(), "default");
+        access.mode = AccessMode::FullAccess;
+        assert_eq!(access.permission_mode(), "bypassPermissions");
+        access.plan_mode = true;
+        assert_eq!(access.permission_mode(), "plan");
+    }
+
+    #[test]
+    fn approvals_are_answered_on_the_same_turn() {
+        let mut parser = ClaudeParser::new(None);
+        let request = json!({ "type": "control_request", "request_id": "r1", "request": {
+            "subtype": "can_use_tool", "tool_name": "Bash", "input": { "command": "ls" },
+            "tool_use_id": "toolu_1" } });
+        let outputs = parser.parse_line(&request.to_string());
+
+        assert!(matches!(
+            outputs.as_slice(),
+            [ProviderOutput::RequestOpened { request_id, .. }] if request_id == "r1"
+        ));
+        assert!(parser.take_replies().is_empty());
+        assert!(parser.requests.take("r1").is_some());
     }
 
     #[test]

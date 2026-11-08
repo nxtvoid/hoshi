@@ -2,6 +2,7 @@
 import type { Project } from "./Project";
 import type { Thread } from "./Thread";
 import type { ThreadContextUsage } from "./ThreadContextUsage";
+import type { ThreadItem } from "./ThreadItem";
 import type { ThreadPullRequest } from "./ThreadPullRequest";
 
 /**
@@ -15,4 +16,8 @@ pullRequests: Array<ThreadPullRequest>,
 /**
  * The last known context usage of each thread that ran a turn.
  */
-contextUsages: Array<ThreadContextUsage>, };
+contextUsages: Array<ThreadContextUsage>, 
+/**
+ * What agents asked and still wait for, oldest first.
+ */
+pendingRequests: Array<ThreadItem>, };

@@ -34,3 +34,28 @@ export function formatRelativeTime(iso: string, now: Date, locale: string) {
   const { value, unit } = relativeTimeParts(new Date(iso), now)
   return formatter.format(value, unit)
 }
+
+const DURATION_UNITS = [
+  ['hour', 3_600],
+  ['minute', 60],
+  ['second', 1]
+] as const
+
+/** A short duration such as "1m 12s", its two largest units, in `locale`. */
+export function formatDuration(milliseconds: number, locale: string) {
+  let rest = Math.max(0, Math.round(milliseconds / 1000))
+  const parts: string[] = []
+  for (const [unit, size] of DURATION_UNITS) {
+    const value = Math.floor(rest / size)
+    rest -= value * size
+    if (value === 0 && !(unit === 'second' && parts.length === 0)) continue
+    parts.push(
+      new Intl.NumberFormat(locale, {
+        style: 'unit',
+        unit,
+        unitDisplay: 'narrow'
+      }).format(value)
+    )
+  }
+  return parts.slice(0, 2).join(' ')
+}

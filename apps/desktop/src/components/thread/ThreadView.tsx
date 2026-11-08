@@ -71,7 +71,8 @@ export function ThreadView() {
   const showDetailsCard = Boolean(thread && detailsOpen && detailsInline)
   const loading = useTranscriptStore((state) => state.loading)
   const empty = useTranscriptStore((state) => state.items.length === 0)
-  const working = thread?.status === 'working'
+  const working =
+    thread?.status === 'working' || thread?.status === 'waitingForInput'
   const draft = !loading && empty && !working
   const composerDraft = draftKey(thread?.id ?? null, scopeProjectId, chat)
 
@@ -213,6 +214,7 @@ export function ThreadView() {
                   draftKey={composerDraft}
                   working={working}
                   variant='docked'
+                  cwd={thread?.worktreePath ?? workspaceRoot ?? null}
                 />
               </div>
             </>

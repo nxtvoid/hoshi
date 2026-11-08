@@ -104,6 +104,8 @@ export function applyEvent(
         activeTurnId: null,
         updatedAt: event.at
       })
+    case 'threadStatusSet':
+      return updateThread(event.threadId, { status: event.status })
   }
 }
 
@@ -128,7 +130,8 @@ export function applyItemEvent(
             content: {
               ...item.content,
               output: event.output,
-              isError: event.isError
+              isError: event.isError,
+              detail: event.detail
             }
           }
         : item

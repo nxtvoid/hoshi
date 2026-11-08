@@ -8,6 +8,7 @@ mod project;
 mod provider;
 mod provider_update;
 mod pull_request;
+mod request;
 mod settings;
 mod terminal;
 mod thread;
@@ -31,14 +32,15 @@ pub use pull_request::{
     PullRequestSupport, ReviewComment, ReviewState, ReviewThread, Reviewer, ThreadPullRequest,
     ThreadPullRequestDetail, TimelineItem,
 };
+pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
 pub use settings::{
     AppSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
     ThreadTitleSettings,
 };
 pub use terminal::{TerminalAttach, TerminalEvent, TerminalExit};
 pub use thread::{
-    AccessMode, Effort, ItemContent, Thread, ThreadItem, ThreadStatus, ThreadWorkspace,
-    TurnFailure, TurnOutcome,
+    AccessMode, Effort, ItemContent, Task, TaskStatus, Thread, ThreadItem, ThreadStatus,
+    ThreadWorkspace, ToolDetail, TranscriptPage, TurnFailure, TurnOutcome,
 };
 pub use usage::{ContextUsage, ThreadContextUsage, UsageLimits, UsageWindow, UsageWindowKind};
 pub use workspace::{ChangesSummary, Editor};

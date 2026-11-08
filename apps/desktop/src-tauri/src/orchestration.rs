@@ -2,7 +2,8 @@ use hoshi_core::{
     AppSettings, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor, FileDiff,
     FolderListing, ForgeAccount, ForgeKind, MessageAttachment, ProviderModels, ProviderVersion,
     PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository,
-    SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem, UsageLimits, WorkspaceEntry,
+    SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem, TranscriptPage, UsageLimits,
+    WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
@@ -67,12 +68,24 @@ pub fn get_snapshot(engine: State<'_, Engine>) -> Snapshot {
     engine.snapshot()
 }
 
+/// The latest turns before item `before`, or the last ones when it is `None`.
 #[tauri::command(async)]
 pub fn get_thread_items(
     engine: State<'_, Engine>,
     thread_id: String,
-) -> Result<Vec<ThreadItem>, CommandError> {
-    engine.thread_items(&thread_id)
+    before: Option<String>,
+) -> Result<TranscriptPage, CommandError> {
+    engine.transcript(&thread_id, before.as_deref())
+}
+
+/// One transcript item with what `get_thread_items` leaves out, such as a diff.
+#[tauri::command(async)]
+pub fn get_thread_item(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    item_id: String,
+) -> Result<Option<ThreadItem>, CommandError> {
+    engine.thread_item(&thread_id, &item_id)
 }
 
 #[tauri::command(async)]

@@ -1,4 +1,4 @@
-use crate::{ContextUsage, TurnOutcome, UsageLimits};
+use crate::{ContextUsage, ItemContent, Task, ToolDetail, TurnOutcome, UsageLimits};
 
 /// What a provider adapter reports while it runs a turn, in provider-neutral terms.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,12 @@ pub enum ProviderOutput {
     ReasoningDelta {
         item_id: String,
         delta: String,
+    },
+    /// A tool's output so far while it runs, replacing what was reported before. Its final
+    /// output comes with `ToolCallCompleted`.
+    ToolOutput {
+        item_id: String,
+        output: String,
     },
     /// The model's reasoning before it answers or calls a tool, as the provider shows it.
     Reasoning {
@@ -39,6 +45,21 @@ pub enum ProviderOutput {
         item_id: String,
         output: String,
         is_error: bool,
+        detail: Option<ToolDetail>,
+    },
+    /// The agent's whole task list, after it changed.
+    TaskList {
+        tasks: Vec<Task>,
+    },
+    /// The agent waits for the user: `content` is an approval, questions or a proposed plan,
+    /// pending.
+    RequestOpened {
+        request_id: String,
+        content: ItemContent,
+    },
+    /// The agent stopped waiting for an answer to the request.
+    RequestWithdrawn {
+        request_id: String,
     },
     /// After each model call of the thread's own agent, not its subagents.
     ContextUsage(ContextUsage),
