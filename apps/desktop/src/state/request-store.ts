@@ -63,7 +63,7 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
       return
     }
     const answered =
-      event.type === 'taskCancelled'
+      event.type === 'taskCancelled' || event.type === 'taskAnswered'
         ? event.threadId
         : event.type === 'itemAdded' &&
             event.item.content.kind === 'userMessage'

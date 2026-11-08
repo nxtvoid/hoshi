@@ -45,6 +45,9 @@ pub struct Thread {
     /// As a delegated task, it was cancelled: its answer never goes back.
     #[serde(default)]
     pub task_cancelled: bool,
+    /// As a delegated task, its answer went back to the agent that delegated it.
+    #[serde(default)]
+    pub task_answered: bool,
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,

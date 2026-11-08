@@ -16,4 +16,4 @@ adopted: boolean, } | { "type": "threadWorktreeDetached", threadId: string, bran
 /**
  * It works in the parent's worktree, which stays the parent's to remove.
  */
-sharesWorktree: boolean, } | { "type": "taskCancelled", threadId: string, } | { "type": "threadStatusSet", threadId: string, status: ThreadStatus, };
+sharesWorktree: boolean, } | { "type": "taskCancelled", threadId: string, } | { "type": "taskAnswered", threadId: string, } | { "type": "threadStatusSet", threadId: string, status: ThreadStatus, };

@@ -119,7 +119,9 @@ impl State {
             .collect();
         self.model
             .threads()
-            .filter(|thread| !answered.contains(&thread.id) && !thread.task_cancelled)
+            .filter(|thread| {
+                !answered.contains(&thread.id) && !thread.task_cancelled && !thread.task_answered
+            })
             .filter_map(|thread| {
                 let parent = thread.parent_thread_id.clone()?;
                 self.model.thread(&parent)?;
@@ -280,6 +282,11 @@ impl State {
         } else {
             // Read here, the answer needn't come again as a message.
             self.delegations.remove(&child.id);
+            let now = now();
+            let answered = hoshi_core::answer_task(&self.model, &child.id);
+            if let Err(error) = self.commit(&answered, &now) {
+                eprintln!("hoshi: failed to record a read answer: {error}");
+            }
             status["answer"] = json!(self.answer_of(&child.id));
         }
         Ok(status)
@@ -365,7 +372,7 @@ impl State {
         );
         let message_id = new_id();
         let now = now();
-        let Ok(events) = send_task_result(
+        let Ok(mut events) = send_task_result(
             &self.model,
             &delegation.parent,
             child,
@@ -375,6 +382,7 @@ impl State {
         ) else {
             return;
         };
+        events.extend(hoshi_core::answer_task(&self.model, child));
         if let Err(error) = self.commit(&events, &now) {
             eprintln!("hoshi: failed to hand back a task's answer: {error}");
             return;

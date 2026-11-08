@@ -3356,6 +3356,8 @@ mod tests {
             ItemContent::UserMessage { task_result: Some(from), text, .. }
                 if *from == child && text.contains("[completed]")
         )));
+        assert!(harness.thread(&child).task_answered);
+        assert!(lock(&harness.engine.state).pending_delegations().is_empty());
     }
 
     #[test]
@@ -4095,10 +4097,10 @@ mod tests {
         harness.send("t", "m1", "go in and out");
         harness.wait_for_turn_end();
         wait_until(|| lock(&harness.engine.state).session_moves.is_empty());
-
-        let thread = harness.thread("t");
         // The root's branch is read in the background once the turn ends.
         wait_until(|| harness.thread("t").branch.is_some());
+
+        let thread = harness.thread("t");
         assert_eq!(thread.worktree_path, None);
         assert_eq!(thread.branch.as_deref(), Some("main"));
         assert!(!thread.worktree_adopted);

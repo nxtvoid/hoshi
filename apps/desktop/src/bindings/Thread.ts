@@ -57,7 +57,11 @@ parentThreadId: string | null,
 /**
  * As a delegated task, it was cancelled: its answer never goes back.
  */
-taskCancelled: boolean, createdAt: string, 
+taskCancelled: boolean, 
+/**
+ * As a delegated task, its answer went back to the agent that delegated it.
+ */
+taskAnswered: boolean, createdAt: string, 
 /**
  * RFC 3339 timestamp of the last activity.
  */

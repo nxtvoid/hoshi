@@ -215,6 +215,10 @@ pub enum Event {
     TaskCancelled {
         thread_id: String,
     },
+    /// The thread's task answered the agent that delegated it.
+    TaskAnswered {
+        thread_id: String,
+    },
     /// Mid-turn: the agent waits for the user, or works again.
     ThreadStatusSet {
         thread_id: String,
@@ -651,6 +655,11 @@ impl ReadModel {
                     thread.task_cancelled = true;
                 }
             }
+            Event::TaskAnswered { thread_id } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.task_answered = true;
+                }
+            }
         }
     }
 }
@@ -747,6 +756,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     worktree_adopted: false,
                     parent_thread_id: None,
                     task_cancelled: false,
+                    task_answered: false,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
                 },
@@ -1116,6 +1126,18 @@ pub fn cancel_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
     match model.threads.get(thread_id) {
         Some(thread) if thread.parent_thread_id.is_some() && !thread.task_cancelled => {
             vec![Event::TaskCancelled {
+                thread_id: thread_id.to_owned(),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Records that the delegated task thread `thread_id` works on answered, once.
+pub fn answer_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.parent_thread_id.is_some() && !thread.task_answered => {
+            vec![Event::TaskAnswered {
                 thread_id: thread_id.to_owned(),
             }]
         }

@@ -114,6 +114,8 @@ export function applyEvent(
       })
     case 'taskCancelled':
       return updateThread(event.threadId, { taskCancelled: true })
+    case 'taskAnswered':
+      return updateThread(event.threadId, { taskAnswered: true })
   }
 }
 
