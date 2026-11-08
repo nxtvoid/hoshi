@@ -992,152 +992,10 @@ impl Engine {
 
     pub fn dispatch(&self, command: Command) -> Result<(), CommandError> {
         let mut state = lock(&self.state);
-        let command = state.prepare(command)?;
-        let interrupt = match &command {
-            Command::TurnInterrupt { thread_id } => Some(thread_id.clone()),
-            _ => None,
-        };
-        let stop = match &command {
-            Command::SubagentStop {
-                thread_id,
-                tool_use_id,
-            } => Some((thread_id.clone(), tool_use_id.clone())),
-            _ => None,
-        };
-        let answer = match &command {
-            Command::RequestRespond {
-                thread_id,
-                request_id,
-                response,
-            } => Some((thread_id.clone(), request_id.clone(), response.clone())),
-            _ => None,
-        };
-        let freed_worktrees = state.worktrees_freed_by(&command);
-        let freed_images = state.images_freed_by(&command);
-        let now = now();
-        let events = decide(&state.model, command, &now)?;
-        state.commit(&events, &now)?;
-
-        let mut message: Option<QueuedMessage> = None;
-        let mut joining: Option<String> = None;
-        let titled: Vec<_> = events
-            .iter()
-            .filter_map(|event| match event {
-                Event::ThreadTitleSet { thread_id, title } => {
-                    Some((thread_id.clone(), title.clone()))
-                }
-                _ => None,
-            })
-            .collect();
-        for event in &events {
-            match event {
-                Event::ItemAdded {
-                    item:
-                        ThreadItem {
-                            id,
-                            thread_id,
-                            content:
-                                ItemContent::UserMessage {
-                                    text, attachments, ..
-                                },
-                            ..
-                        },
-                } => {
-                    message = Some(QueuedMessage {
-                        id: id.clone(),
-                        text: text.clone(),
-                        attachments: attachments.clone(),
-                    });
-                    joining = Some(thread_id.clone());
-                    if let Some((thread_id, provisional)) = titled.first() {
-                        let request = TitleRequest {
-                            context: text.clone(),
-                            previous_title: None,
-                            images: titles::image_names(attachments),
-                            model: None,
-                            instructions: String::new(),
-                        };
-                        state.name_thread(thread_id, provisional, request);
-                    }
-                }
-                Event::TurnStarted {
-                    thread_id, turn_id, ..
-                } => {
-                    let started = message.take();
-                    let (prompt, attachments) = started
-                        .map(|message| (message.text, message.attachments))
-                        .unwrap_or_default();
-                    start_turn(&mut state, thread_id, turn_id, prompt, attachments);
-                }
-                Event::ThreadCreated { thread } if thread.worktree_path.is_none() => {
-                    refresh_branches(state.this.clone(), vec![thread.id.clone()]);
-                }
-                Event::ProjectCreated { project } => {
-                    let watched = (project.id.clone(), project.workspace_root.clone());
-                    watch_projects(state.this.clone(), vec![watched]);
-                }
-                Event::ProjectRemoved { project_id } => {
-                    if let Some(watcher) = &mut state.watcher {
-                        watcher.unwatch(project_id);
-                    }
-                    state.repositories.remove(project_id);
-                }
-                Event::ThreadDeleted { thread_id } => {
-                    state.pull_requests.forget(thread_id);
-                    state.pull_request_cache.forget(thread_id);
-                    if let Some(folder) = state.chat_folder(thread_id) {
-                        let _ = std::fs::remove_dir_all(folder);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let (Some(message), Some(thread_id)) = (message, joining) {
-            state.join_turn(&thread_id, message);
-        }
-        if let Some(thread_id) = interrupt
-            && let Some(turn) = state.turns.get(&thread_id)
-        {
-            turn.running.interrupt();
-        }
-        if let Some((thread_id, request_id, response)) = answer
-            && let Some(turn) = state.turns.get(&thread_id)
-        {
-            turn.running.respond(&request_id, &response);
-        }
-        if let Some((thread_id, tool_use_id)) = stop
-            && let Some(turn) = state.turns.get(&thread_id)
-        {
-            turn.running.stop_subagent(&tool_use_id);
-        }
-        // A deleted thread (or a removed project's threads) must not keep an agent running.
-        let orphaned: Vec<_> = state
-            .turns
-            .keys()
-            .filter(|thread_id| state.model.thread(thread_id).is_none())
-            .cloned()
-            .collect();
-        for thread_id in orphaned {
-            if let Some(turn) = state.turns.remove(&thread_id) {
-                turn.running.interrupt();
-            }
-        }
-        let State {
-            model,
-            context_usages,
-            ..
-        } = &mut *state;
-        context_usages.retain(|thread_id, _| model.thread(thread_id).is_some());
+        state.run_command(command)?;
+        let model = &state.model;
         self.terminals
             .retain_threads(|thread_id| model.thread(thread_id).is_some());
-        for (repository, path) in freed_worktrees {
-            if let Err(error) = git::remove_worktree(&repository, &path) {
-                eprintln!("hoshi: kept worktree {path}: {error}");
-            }
-        }
-        for image in &freed_images {
-            state.attachments.remove(image);
-        }
         Ok(())
     }
 
@@ -1617,6 +1475,155 @@ impl State {
             refresh_after_turn(self.this.clone(), thread_id.to_owned(), check);
             self.start_next_queued(thread_id);
         }
+    }
+
+    /// Carries out a command: decides its events, records them, and starts what they call for.
+    fn run_command(&mut self, command: Command) -> Result<(), CommandError> {
+        let command = self.prepare(command)?;
+        let interrupt = match &command {
+            Command::TurnInterrupt { thread_id } => Some(thread_id.clone()),
+            _ => None,
+        };
+        let stop = match &command {
+            Command::SubagentStop {
+                thread_id,
+                tool_use_id,
+            } => Some((thread_id.clone(), tool_use_id.clone())),
+            _ => None,
+        };
+        let answer = match &command {
+            Command::RequestRespond {
+                thread_id,
+                request_id,
+                response,
+            } => Some((thread_id.clone(), request_id.clone(), response.clone())),
+            _ => None,
+        };
+        let freed_worktrees = self.worktrees_freed_by(&command);
+        let freed_images = self.images_freed_by(&command);
+        let now = now();
+        let events = decide(&self.model, command, &now)?;
+        self.commit(&events, &now)?;
+
+        let mut message: Option<QueuedMessage> = None;
+        let mut joining: Option<String> = None;
+        let titled: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::ThreadTitleSet { thread_id, title } => {
+                    Some((thread_id.clone(), title.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for event in &events {
+            match event {
+                Event::ItemAdded {
+                    item:
+                        ThreadItem {
+                            id,
+                            thread_id,
+                            content:
+                                ItemContent::UserMessage {
+                                    text, attachments, ..
+                                },
+                            ..
+                        },
+                } => {
+                    message = Some(QueuedMessage {
+                        id: id.clone(),
+                        text: text.clone(),
+                        attachments: attachments.clone(),
+                    });
+                    joining = Some(thread_id.clone());
+                    if let Some((thread_id, provisional)) = titled.first() {
+                        let request = TitleRequest {
+                            context: text.clone(),
+                            previous_title: None,
+                            images: titles::image_names(attachments),
+                            model: None,
+                            instructions: String::new(),
+                        };
+                        self.name_thread(thread_id, provisional, request);
+                    }
+                }
+                Event::TurnStarted {
+                    thread_id, turn_id, ..
+                } => {
+                    let started = message.take();
+                    let (prompt, attachments) = started
+                        .map(|message| (message.text, message.attachments))
+                        .unwrap_or_default();
+                    start_turn(self, thread_id, turn_id, prompt, attachments);
+                }
+                Event::ThreadCreated { thread } if thread.worktree_path.is_none() => {
+                    refresh_branches(self.this.clone(), vec![thread.id.clone()]);
+                }
+                Event::ProjectCreated { project } => {
+                    let watched = (project.id.clone(), project.workspace_root.clone());
+                    watch_projects(self.this.clone(), vec![watched]);
+                }
+                Event::ProjectRemoved { project_id } => {
+                    if let Some(watcher) = &mut self.watcher {
+                        watcher.unwatch(project_id);
+                    }
+                    self.repositories.remove(project_id);
+                }
+                Event::ThreadDeleted { thread_id } => {
+                    self.pull_requests.forget(thread_id);
+                    self.pull_request_cache.forget(thread_id);
+                    if let Some(folder) = self.chat_folder(thread_id) {
+                        let _ = std::fs::remove_dir_all(folder);
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (Some(message), Some(thread_id)) = (message, joining) {
+            self.join_turn(&thread_id, message);
+        }
+        if let Some(thread_id) = interrupt
+            && let Some(turn) = self.turns.get(&thread_id)
+        {
+            turn.running.interrupt();
+        }
+        if let Some((thread_id, request_id, response)) = answer
+            && let Some(turn) = self.turns.get(&thread_id)
+        {
+            turn.running.respond(&request_id, &response);
+        }
+        if let Some((thread_id, tool_use_id)) = stop
+            && let Some(turn) = self.turns.get(&thread_id)
+        {
+            turn.running.stop_subagent(&tool_use_id);
+        }
+        // A deleted thread (or a removed project's threads) must not keep an agent running.
+        let orphaned: Vec<_> = self
+            .turns
+            .keys()
+            .filter(|thread_id| self.model.thread(thread_id).is_none())
+            .cloned()
+            .collect();
+        for thread_id in orphaned {
+            if let Some(turn) = self.turns.remove(&thread_id) {
+                turn.running.interrupt();
+            }
+        }
+        let State {
+            model,
+            context_usages,
+            ..
+        } = self;
+        context_usages.retain(|thread_id, _| model.thread(thread_id).is_some());
+        for (repository, path) in freed_worktrees {
+            if let Err(error) = git::remove_worktree(&repository, &path) {
+                eprintln!("hoshi: kept worktree {path}: {error}");
+            }
+        }
+        for image in &freed_images {
+            self.attachments.remove(image);
+        }
+        Ok(())
     }
 
     /// Passes a message sent to a busy thread on to its running turn, or keeps it for a turn
