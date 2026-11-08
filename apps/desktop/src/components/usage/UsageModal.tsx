@@ -165,6 +165,24 @@ function WindowCard({
   const mark = timeLeftPercent(window, now)
   const pace = paceOf(window, now)
   const reset = timeToReset(window, now)
+  const meter = (
+    <>
+      <div className='bg-muted absolute inset-x-0 inset-y-1.5 rounded-full' />
+      <div
+        className={cn(
+          'absolute inset-y-1.5 left-0 rounded-full transition-[width] duration-500',
+          left <= LOW_PERCENT ? 'bg-status-error/60' : bar
+        )}
+        style={{ width: `${left}%` }}
+      />
+      {mark === null ? null : (
+        <div
+          className='bg-foreground absolute inset-y-0.5 w-0.5 -translate-x-1/2 rounded-full'
+          style={{ left: `${mark}%` }}
+        />
+      )}
+    </>
+  )
 
   return (
     <div className='border-border flex items-center gap-6 rounded-xl border px-4 py-3'>
@@ -187,32 +205,23 @@ function WindowCard({
           ) : null}
         </span>
       </div>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <div className='relative h-7 min-w-0 flex-1 cursor-default' />
-          }
-        >
-          <div className='bg-muted absolute inset-x-0 inset-y-1.5 rounded-full' />
-          <div
-            className={cn(
-              'absolute inset-y-1.5 left-0 rounded-full transition-[width] duration-500',
-              left <= LOW_PERCENT ? 'bg-status-error/60' : bar
-            )}
-            style={{ width: `${left}%` }}
-          />
-          {mark === null ? null : (
-            <div
-              className='bg-foreground absolute inset-y-0.5 w-0.5 -translate-x-1/2 rounded-full'
-              style={{ left: `${mark}%` }}
-            />
-          )}
-        </TooltipTrigger>
-        <TooltipContent side='top' className='flex flex-col gap-0.5'>
-          {pace ? <span>{PACE[pace].label()}</span> : null}
-          {mark === null ? null : <span>{m.usage_pace_mark()}</span>}
-        </TooltipContent>
-      </Tooltip>
+      {pace === null && mark === null ? (
+        <div className='relative h-7 min-w-0 flex-1'>{meter}</div>
+      ) : (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <div className='relative h-7 min-w-0 flex-1 cursor-default' />
+            }
+          >
+            {meter}
+          </TooltipTrigger>
+          <TooltipContent side='top' className='flex flex-col gap-0.5'>
+            {pace ? <span>{PACE[pace].label()}</span> : null}
+            {mark === null ? null : <span>{m.usage_pace_mark()}</span>}
+          </TooltipContent>
+        </Tooltip>
+      )}
       <span className='text-muted-foreground w-28 shrink-0 text-right text-xs tabular-nums'>
         {reset ? m.usage_resets_in({ time: formatDuration(reset) }) : null}
       </span>
