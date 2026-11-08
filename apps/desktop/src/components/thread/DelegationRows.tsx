@@ -5,6 +5,7 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
 import { isPlanningWithUser } from '@/lib/agents'
 import { useRequestStore } from '@/state/request-store'
+import { confirm } from '@/state/dialog-store'
 import { Button } from '@hoshi/ui/components/button'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import { useWholeToolCall } from './use-whole-tool-call'
@@ -136,6 +137,17 @@ function PlanningTray({ threadId }: { threadId: string }) {
   const cancelTask = useRequestStore((state) => state.cancelTask)
   const setOnScreen = useRequestStore((state) => state.setTaskOnScreen)
   const ref = useRef<HTMLDivElement>(null)
+  const title = useThread(threadId)?.title ?? ''
+  const cancel = async () => {
+    const confirmed = await confirm({
+      title: m.delegation_cancel_title({ task: title }),
+      description: m.delegation_cancel_description(),
+      confirmLabel: m.delegation_cancel(),
+      cancelLabel: m.delegation_cancel_keep(),
+      tone: 'destructive'
+    })
+    if (confirmed) await cancelTask(threadId)
+  }
 
   useEffect(() => {
     const element = ref.current
@@ -166,13 +178,15 @@ function PlanningTray({ threadId }: { threadId: string }) {
       <IconButton
         label={m.delegation_cancel()}
         side='top'
-        onClick={() => void cancelTask(threadId)}
+        className='bg-destructive/10 text-destructive hover:bg-destructive/15 hover:text-destructive'
+        onClick={() => void cancel()}
       >
         <HugeiconsIcon icon={CancelCircleIcon} strokeWidth={2} />
       </IconButton>
       <IconButton
         label={m.delegation_send_plan()}
         side='top'
+        className='bg-send/10 text-send hover:bg-send/15 hover:text-send'
         onClick={() => void sendTaskAnswer(threadId)}
       >
         <HugeiconsIcon icon={SentIcon} strokeWidth={2} />
