@@ -20,6 +20,9 @@ type RequestState = {
   applyEvent: (event: Event) => void
   /** Hands a task's answer back to its thread now, as it stands. */
   sendTaskAnswer: (threadId: string) => Promise<void>
+  /** Tasks whose card, waiting on the user, is on screen. */
+  onScreenTasks: Record<string, true>
+  setTaskOnScreen: (threadId: string, onScreen: boolean) => void
 }
 
 export const useRequestStore = create<RequestState>()((set, get) => ({
@@ -30,6 +33,13 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
     })),
   pending: [],
   pendingTasks: {},
+  onScreenTasks: {},
+  setTaskOnScreen: (threadId, onScreen) =>
+    set((state) => {
+      if (Boolean(state.onScreenTasks[threadId]) === onScreen) return state
+      const { [threadId]: _, ...rest } = state.onScreenTasks
+      return { onScreenTasks: onScreen ? { ...rest, [threadId]: true } : rest }
+    }),
   seed: (items, pendingTasks) =>
     set({
       pending: items.filter(isRequest),

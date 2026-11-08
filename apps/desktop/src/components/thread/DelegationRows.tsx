@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -46,21 +46,10 @@ function OpenButton({ threadId }: { threadId: string }) {
   )
 }
 
-function TaskStatus({
-  child,
-  planning
-}: {
-  child: Thread | undefined
-  planning: boolean
-}) {
+function TaskStatus({ child }: { child: Thread | undefined }) {
   if (!child) return null
-  const { icon, label, tone } = planning
-    ? {
-        icon: UserQuestion01Icon,
-        label: m.delegation_waiting_changes(),
-        tone: 'text-status-waiting'
-      }
-    : child.status === 'working'
+  const { icon, label, tone } =
+    child.status === 'working'
       ? { icon: Loading03Icon, label: m.tool_running(), tone: 'animate-spin' }
       : child.status === 'waitingForInput'
         ? {
@@ -97,10 +86,14 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
   const { title, taskId, error } = delegationOf(whole)
   const child = useThread(taskId)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
-  const sendTaskAnswer = useRequestStore((state) => state.sendTaskAnswer)
   const planning = child ? isPlanningWithUser(child, pendingTasks) : false
-  return (
-    <div className='border-border/70 flex items-center gap-2.5 rounded-xl border px-3 py-2 text-sm'>
+  const card = (
+    <div
+      className={cn(
+        'border-border/70 flex items-center gap-2.5 rounded-xl border px-3 py-2 text-sm',
+        planning && 'bg-background relative'
+      )}
+    >
       <HugeiconsIcon
         icon={GitForkIcon}
         strokeWidth={2}
@@ -114,18 +107,70 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
           {error ?? m.delegation_task()}
         </span>
       </span>
-      <TaskStatus child={child} planning={planning} />
-      {child && planning ? (
-        <Button
-          size='xs'
-          variant='ghost'
-          className='text-muted-foreground shrink-0'
-          onClick={() => void sendTaskAnswer(child.id)}
-        >
-          {m.delegation_send_plan()}
-        </Button>
-      ) : null}
+      {planning ? null : <TaskStatus child={child} />}
       {child ? <OpenButton threadId={child.id} /> : null}
+    </div>
+  )
+  if (!child || !planning) return card
+  return (
+    <div>
+      {card}
+      <PlanningTray threadId={child.id} />
+    </div>
+  )
+}
+
+/**
+ * Under a task's card, while the task waits for the user's changes to its plan: what it
+ * waits for, and the ways to answer. Says when it is on screen, so the composer needn't.
+ */
+function PlanningTray({ threadId }: { threadId: string }) {
+  const selectThread = useAppStore((state) => state.selectThread)
+  const sendTaskAnswer = useRequestStore((state) => state.sendTaskAnswer)
+  const setOnScreen = useRequestStore((state) => state.setTaskOnScreen)
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const element = ref.current
+    if (!element) return
+    const observer = new IntersectionObserver(([entry]) =>
+      setOnScreen(threadId, entry?.isIntersecting ?? false)
+    )
+    observer.observe(element)
+    return () => {
+      observer.disconnect()
+      setOnScreen(threadId, false)
+    }
+  }, [threadId, setOnScreen])
+
+  return (
+    <div
+      ref={ref}
+      className='border-status-waiting/40 bg-status-waiting/10 mx-3.5 -mt-2 flex items-center gap-2 rounded-b-lg border border-t-0 px-3 pt-3.5 pb-1.5 text-xs'
+    >
+      <HugeiconsIcon
+        icon={UserQuestion01Icon}
+        strokeWidth={2}
+        className='text-status-waiting size-3.5 shrink-0'
+      />
+      <span className='text-status-waiting min-w-0 flex-1 truncate'>
+        {m.delegation_waiting_changes()}
+      </span>
+      <Button
+        size='xs'
+        variant='ghost'
+        className='text-muted-foreground shrink-0'
+        onClick={() => void sendTaskAnswer(threadId)}
+      >
+        {m.delegation_send_plan()}
+      </Button>
+      <Button
+        size='xs'
+        className='shrink-0'
+        onClick={() => selectThread(threadId)}
+      >
+        {m.delegation_change_plan()}
+      </Button>
     </div>
   )
 }

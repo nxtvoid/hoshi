@@ -67,12 +67,13 @@ export function DelegatedRequestPanel({
 }
 
 /**
- * The tasks the thread delegated that wait for the user's changes to their plan, in one
- * line above the composer: the oldest, and how many more.
+ * The tasks the thread delegated that wait for the user's changes to their plan, and whose
+ * card is off screen, in one line above the composer: the oldest, and how many more.
  */
 export function PlanningTasksNote({ threadId }: { threadId: string }) {
   const threads = useAppStore((state) => state.threads)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const onScreen = useRequestStore((state) => state.onScreenTasks)
   const selectThread = useAppStore((state) => state.selectThread)
   const sendTaskAnswer = useRequestStore((state) => state.sendTaskAnswer)
   const planning = useMemo(
@@ -81,10 +82,11 @@ export function PlanningTasksNote({ threadId }: { threadId: string }) {
         .filter(
           (thread) =>
             thread.parentThreadId === threadId &&
-            isPlanningWithUser(thread, pendingTasks)
+            isPlanningWithUser(thread, pendingTasks) &&
+            !onScreen[thread.id]
         )
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
-    [threads, pendingTasks, threadId]
+    [threads, pendingTasks, onScreen, threadId]
   )
   const [task] = planning
   if (!task) return null
