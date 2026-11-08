@@ -199,9 +199,15 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
   return rows
 }
 
+function isAgent(row: TranscriptRow) {
+  return (
+    row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
+  )
+}
+
 /**
  * A finished turn's work, between the user's message and the agent's final answer, folds
- * into one row. The running turn, and a turn that ended any other way, stay open. Rows
+ * into one row, as do the agents it started once they are done. The running turn, and a turn that ended any other way, stay open. Rows
  * still `live` stay out of the fold, after it. A turn that went on in more runs folds
  * each run behind its own answer.
  */
@@ -221,7 +227,7 @@ export function foldTurns(
       asked !== null &&
       answer?.kind === 'item' &&
       answer.item.content.kind === 'assistantMessage' &&
-      work.some((row) => row.kind === 'work')
+      work.some((row) => !live(row) && (row.kind === 'work' || isAgent(row)))
     if (asked && answer?.kind === 'item' && foldable) {
       const duration =
         Date.parse(answer.item.createdAt) - Date.parse(asked.createdAt)

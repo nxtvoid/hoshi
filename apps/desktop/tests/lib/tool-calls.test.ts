@@ -11,7 +11,8 @@ import {
   toolName,
   toolTarget,
   withStreaming,
-  type ToolCallItem
+  type ToolCallItem,
+  type TranscriptRow
 } from '../../src/lib/tool-calls'
 
 function tool(id: string, name: string, input: object = {}): ToolCallItem {
@@ -283,6 +284,22 @@ describe('foldTurns', () => {
     ).toEqual(['u1', 'fold', 'a1', 'fold', 'a2', 'a3'])
     const second = folded[3]
     expect(second?.kind === 'fold' && second.durationMs).toBe(20_000)
+  })
+
+  test('folds a turn whose only work was agents, once they are done', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('one', 'Agent'),
+      tool('two', 'Agent'),
+      answer('a1', '2026-11-08T10:00:10Z')
+    ])
+    const kinds = (folded: TranscriptRow[]) =>
+      folded.map((row) => (row.kind === 'item' ? row.item.id : row.kind))
+
+    expect(kinds(foldTurns(rows, false))).toEqual(['u1', 'fold', 'a1'])
+    expect(kinds(foldTurns(rows, false, (row) => row.kind === 'item'))).toEqual(
+      ['u1', 'one', 'two', 'a1']
+    )
   })
 
   test('keeps live rows out of the fold, after it', () => {
