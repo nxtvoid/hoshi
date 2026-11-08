@@ -20,6 +20,8 @@ export function cleanupErrorMessage(error: CommandError): string {
         : m.cleanup_error_locked()
     case 'nothingToClean':
       return m.cleanup_error_nothing()
+    case 'worktreeAdopted':
+      return m.cleanup_error_adopted()
     case 'threadBusy':
       return m.error_thread_busy()
     case 'gitFailed':

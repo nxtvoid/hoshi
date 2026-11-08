@@ -37,6 +37,7 @@ const thread = (id: string, projectId: string): Thread => ({
   archived: false,
   pinned: false,
   worktreeReleased: false,
+  worktreeAdopted: false,
   createdAt: NOW,
   updatedAt: NOW
 })
@@ -87,6 +88,34 @@ describe('applyEvent', () => {
     expect(failed.threads[0]).toMatchObject({
       status: 'error',
       activeTurnId: null
+    })
+  })
+
+  test('a thread adopts a worktree its agent entered, then leaves it', () => {
+    const state = { projects: [project('p')], threads: [thread('t', 'p')] }
+
+    const adopted = applyEvent(state, {
+      type: 'threadWorktreeAttached',
+      threadId: 't',
+      worktreePath: '/repo-pr',
+      branch: 'feat/pr',
+      adopted: true
+    })
+    const left = applyEvent(adopted, {
+      type: 'threadWorktreeDetached',
+      threadId: 't',
+      branch: 'main'
+    })
+
+    expect(adopted.threads[0]).toMatchObject({
+      worktreePath: '/repo-pr',
+      branch: 'feat/pr',
+      worktreeAdopted: true
+    })
+    expect(left.threads[0]).toMatchObject({
+      worktreePath: null,
+      branch: 'main',
+      worktreeAdopted: false
     })
   })
 

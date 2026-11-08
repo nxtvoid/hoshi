@@ -46,7 +46,15 @@ export function applyEvent(
       return updateThread(event.threadId, {
         worktreePath: event.worktreePath,
         branch: event.branch,
-        worktreeReleased: false
+        worktreeReleased: false,
+        worktreeAdopted: event.adopted
+      })
+    case 'threadWorktreeDetached':
+      return updateThread(event.threadId, {
+        worktreePath: null,
+        branch: event.branch,
+        worktreeReleased: false,
+        worktreeAdopted: false
       })
     case 'threadWorktreeReleased':
       return updateThread(event.threadId, { worktreeReleased: true })
@@ -57,6 +65,7 @@ export function applyEvent(
         worktreePath: null,
         branch: null,
         worktreeReleased: false,
+        worktreeAdopted: false,
         sessionId: null
       })
     case 'threadArchivedSet':

@@ -44,7 +44,12 @@ pinned: boolean,
  * Its worktree folder was removed to free the disk; the next message recreates it at
  * the same path from the branch, which stays.
  */
-worktreeReleased: boolean, createdAt: string, 
+worktreeReleased: boolean, 
+/**
+ * Its worktree existed before the thread moved into it, as one the user made; hoshi
+ * never removes it.
+ */
+worktreeAdopted: boolean, createdAt: string, 
 /**
  * RFC 3339 timestamp of the last activity.
  */

@@ -141,6 +141,9 @@ const MIGRATIONS: &[&str] = &[
         limits_json TEXT NOT NULL
     );
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN worktree_adopted INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
@@ -232,7 +235,8 @@ impl Store {
             .prepare(
                 "SELECT id, project_id, title, status, branch, worktree_path, session_id,
                         active_turn_id, created_at, updated_at, model, effort, archived, pinned,
-                        fast_mode, ultracode, access_mode, plan_mode, worktree_released
+                        fast_mode, ultracode, access_mode, plan_mode, worktree_released,
+                        worktree_adopted
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -256,6 +260,7 @@ impl Store {
                     access_mode: json_column(row, 16)?,
                     plan_mode: row.get(17)?,
                     worktree_released: row.get(18)?,
+                    worktree_adopted: row.get(19)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -480,9 +485,10 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 "INSERT INTO threads
                  (id, project_id, title, status, branch, worktree_path, session_id,
                   active_turn_id, created_at, updated_at, model, effort, archived, pinned,
-                  fast_mode, ultracode, access_mode, plan_mode, worktree_released)
+                  fast_mode, ultracode, access_mode, plan_mode, worktree_released,
+                  worktree_adopted)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18, ?19)",
+                         ?17, ?18, ?19, ?20)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -502,7 +508,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     thread.ultracode,
                     enum_text(thread.access_mode)?,
                     thread.plan_mode,
-                    thread.worktree_released
+                    thread.worktree_released,
+                    thread.worktree_adopted
                 ],
             )?;
         }
@@ -538,11 +545,19 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             thread_id,
             worktree_path,
             branch,
+            adopted,
         } => {
             tx.execute(
-                "UPDATE threads SET worktree_path = ?2, branch = ?3, worktree_released = 0
-                 WHERE id = ?1",
-                params![thread_id, worktree_path, branch],
+                "UPDATE threads SET worktree_path = ?2, branch = ?3, worktree_released = 0,
+                 worktree_adopted = ?4 WHERE id = ?1",
+                params![thread_id, worktree_path, branch, adopted],
+            )?;
+        }
+        Event::ThreadWorktreeDetached { thread_id, branch } => {
+            tx.execute(
+                "UPDATE threads SET worktree_path = NULL, branch = ?2, worktree_released = 0,
+                 worktree_adopted = 0 WHERE id = ?1",
+                params![thread_id, branch],
             )?;
         }
         Event::ThreadWorktreeReleased { thread_id } => {
@@ -560,7 +575,7 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
         Event::ThreadCleanedUp { thread_id } => {
             tx.execute(
                 "UPDATE threads SET worktree_path = NULL, branch = NULL, session_id = NULL,
-                 worktree_released = 0 WHERE id = ?1",
+                 worktree_released = 0, worktree_adopted = 0 WHERE id = ?1",
                 [thread_id],
             )?;
         }
@@ -714,6 +729,7 @@ mod tests {
                 archived: false,
                 pinned: true,
                 worktree_released: false,
+                worktree_adopted: false,
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
             },
@@ -922,6 +938,31 @@ mod tests {
         store.save_usage_limits(&window(35)).unwrap();
 
         assert_eq!(store.usage_limits().unwrap(), Some(window(35)));
+    }
+
+    #[test]
+    fn an_adopted_worktree_survives_a_restart_and_leaving_it_clears_it() {
+        let (mut store, mut model) = store_with_thread();
+        let attached = hoshi_core::record_worktree(
+            &model,
+            "t",
+            "/home/me/repo-pr".into(),
+            Some("feat/pr".into()),
+            true,
+        );
+        commit(&mut store, &mut model, attached);
+
+        let thread = &store.snapshot().unwrap().threads[0];
+        assert_eq!(thread.worktree_path.as_deref(), Some("/home/me/repo-pr"));
+        assert!(thread.worktree_adopted);
+
+        let left = hoshi_core::record_worktree_left(&model, "t", Some("main".into()));
+        commit(&mut store, &mut model, left);
+
+        let thread = &store.snapshot().unwrap().threads[0];
+        assert_eq!(thread.worktree_path, None);
+        assert_eq!(thread.branch.as_deref(), Some("main"));
+        assert!(!thread.worktree_adopted);
     }
 
     #[test]

@@ -445,6 +445,7 @@
   "cleanup_error_not_merged": "Its pull request isn't merged yet.",
   "cleanup_error_unpushed": "The branch has commits that exist only on this machine. Push them first, or remove only the worktree folder.",
   "cleanup_error_nothing": "There is no worktree or branch left to remove.",
+  "cleanup_error_adopted": "This worktree was already there before the thread moved into it, so hoshi leaves it as it is.",
   "cleanup_merged": "Clean up merged ({count})",
   "cleanup_merged_failed": "{count} threads were kept: {reasons}",
   "worktree_released_badge": "released",

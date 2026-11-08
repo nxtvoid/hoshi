@@ -29,6 +29,7 @@ fn a_turn_with_a_tool_call_becomes_session_tool_and_reply() {
 
     let [
         ProviderOutput::SessionStarted { session_id },
+        ProviderOutput::WorkingDirectory { path: cwd },
         ProviderOutput::ToolCallStarted {
             item_id: tool_id,
             name,
@@ -46,6 +47,7 @@ fn a_turn_with_a_tool_call_becomes_session_tool_and_reply() {
         panic!("unexpected outputs: {outputs:#?}");
     };
     assert_eq!(session_id, "efe578f3-875d-4ecb-9bd7-af911b691388");
+    assert_eq!(cwd, r"C:\work");
     assert_eq!(name, "Read");
     assert!(input.contains("note.txt"));
     assert_eq!(tool_id, result_id);
@@ -212,4 +214,54 @@ fn a_rate_limit_event_reports_the_plan_limits() {
     assert_eq!(limits.windows[0].kind, UsageWindowKind::Session);
     assert_eq!(limits.windows[0].used_percent, 34);
     assert_eq!(limits.windows[1].kind, UsageWindowKind::Weekly);
+}
+
+/// Lines as Claude Code 2.1.319 prints them when the agent enters an existing worktree and
+/// leaves it again; paths shortened.
+const ENTER_WORKTREE: [&str; 2] = [
+    r#"{"type":"assistant","message":{"id":"msg_1","content":[{"type":"tool_use","id":"toolu_enter","name":"EnterWorktree","input":{"path":"C:/repo-feature"}}]},"parent_tool_use_id":null}"#,
+    r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_enter","type":"tool_result","content":"Entered worktree at “C:\\repo-feature” on branch “feat/existing”."}]},"parent_tool_use_id":null,"tool_use_result":{"worktreePath":"C:\\repo-feature","worktreeBranch":"feat/existing","message":"Entered worktree"}}"#,
+];
+const EXIT_WORKTREE: [&str; 2] = [
+    r#"{"type":"assistant","message":{"id":"msg_2","content":[{"type":"tool_use","id":"toolu_exit","name":"ExitWorktree","input":{"action":"keep"}}]},"parent_tool_use_id":null}"#,
+    r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_exit","type":"tool_result","content":"Exited worktree."}]},"parent_tool_use_id":null,"tool_use_result":{"action":"keep","originalCwd":"C:\\repo","worktreePath":"C:\\repo-feature","restoredCwd":"C:\\repo","message":"Exited worktree."}}"#,
+];
+
+fn working_directories(lines: &[&str]) -> Vec<String> {
+    let mut parser = ClaudeParser::default();
+    lines
+        .iter()
+        .flat_map(|line| parser.parse_line(line))
+        .filter_map(|output| match output {
+            ProviderOutput::WorkingDirectory { path } => Some(path),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn entering_and_leaving_a_worktree_report_where_the_session_works() {
+    let lines: Vec<&str> = ENTER_WORKTREE
+        .iter()
+        .chain(&EXIT_WORKTREE)
+        .copied()
+        .collect();
+
+    assert_eq!(
+        working_directories(&lines),
+        [r"C:\repo-feature", r"C:\repo"]
+    );
+}
+
+#[test]
+fn a_refused_move_or_another_tool_with_a_similar_result_moves_nothing() {
+    let refused = ENTER_WORKTREE[1].replace(
+        r#""type":"tool_result","#,
+        r#""type":"tool_result","is_error":true,"#,
+    );
+    let other_tool = ENTER_WORKTREE[0].replace("EnterWorktree", "Bash");
+
+    assert!(working_directories(&[ENTER_WORKTREE[0], &refused]).is_empty());
+    assert!(working_directories(&[&other_tool, ENTER_WORKTREE[1]]).is_empty());
+    assert!(working_directories(&[ENTER_WORKTREE[1]]).is_empty());
 }

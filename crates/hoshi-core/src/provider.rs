@@ -25,6 +25,11 @@ pub enum ProviderOutput {
         item_id: String,
         text: String,
     },
+    /// Where the agent's session works: reported as a turn starts, and again whenever the
+    /// agent moves, such as into a worktree.
+    WorkingDirectory {
+        path: String,
+    },
     ToolCallStarted {
         item_id: String,
         name: String,

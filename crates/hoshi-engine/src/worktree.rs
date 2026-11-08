@@ -8,6 +8,8 @@ pub struct TurnWorkspace {
     pub worktrees_before: Vec<String>,
     /// Inputs of the turn's tool calls, the evidence when several turns ran at once.
     pub tool_inputs: Vec<String>,
+    /// The agent reported moving its session, which says where it went better than guessing.
+    pub moved: bool,
 }
 
 const MAX_TOOL_INPUTS: usize = 200;
@@ -122,6 +124,7 @@ mod tests {
             repository: "/repo".into(),
             worktrees_before: before.iter().map(|path| path.to_string()).collect(),
             tool_inputs: Vec::new(),
+            moved: false,
         };
         for input in tool_inputs {
             workspace.record_tool_input(input);

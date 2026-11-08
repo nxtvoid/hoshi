@@ -119,6 +119,14 @@ pub enum Event {
         thread_id: String,
         worktree_path: String,
         branch: Option<String>,
+        /// The worktree existed before, so it is not the thread's to remove.
+        #[serde(default)]
+        adopted: bool,
+    },
+    /// The agent left its worktree for the project root; its session goes on there.
+    ThreadWorktreeDetached {
+        thread_id: String,
+        branch: Option<String>,
     },
     ThreadArchivedSet {
         thread_id: String,
@@ -225,6 +233,9 @@ pub enum CommandError {
     GitFailed { detail: String },
     #[error("thread {thread_id} has no worktree or branch to remove")]
     NothingToClean { thread_id: String },
+    /// The thread works in a worktree it did not create, which stays as it is.
+    #[error("the worktree of thread {thread_id} is not hoshi's to remove")]
+    WorktreeAdopted { thread_id: String },
     /// Removing it would lose uncommitted or untracked files.
     #[error("the worktree of thread {thread_id} has uncommitted changes")]
     WorktreeDirty { thread_id: String },
@@ -383,11 +394,21 @@ impl ReadModel {
                 thread_id,
                 worktree_path,
                 branch,
+                adopted,
             } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.worktree_path = Some(worktree_path.clone());
                     thread.branch.clone_from(branch);
                     thread.worktree_released = false;
+                    thread.worktree_adopted = *adopted;
+                }
+            }
+            Event::ThreadWorktreeDetached { thread_id, branch } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.worktree_path = None;
+                    thread.branch.clone_from(branch);
+                    thread.worktree_released = false;
+                    thread.worktree_adopted = false;
                 }
             }
             Event::ThreadWorktreeReleased { thread_id } => {
@@ -405,6 +426,7 @@ impl ReadModel {
                     thread.worktree_path = None;
                     thread.branch = None;
                     thread.worktree_released = false;
+                    thread.worktree_adopted = false;
                     thread.session_id = None;
                 }
             }
@@ -578,6 +600,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     archived: false,
                     pinned: false,
                     worktree_released: false,
+                    worktree_adopted: false,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
                 },
@@ -599,6 +622,9 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             if thread.worktree_path.is_none() {
                 return Err(CommandError::NothingToClean { thread_id });
             }
+            if thread.worktree_adopted {
+                return Err(CommandError::WorktreeAdopted { thread_id });
+            }
             if thread.worktree_released {
                 return Ok(Vec::new());
             }
@@ -613,6 +639,9 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             if thread.worktree_path.is_none() && thread.branch.is_none() {
                 return Err(CommandError::NothingToClean { thread_id });
+            }
+            if thread.worktree_adopted {
+                return Err(CommandError::WorktreeAdopted { thread_id });
             }
             let mut events = Vec::with_capacity(3);
             if thread.pinned {
@@ -797,7 +826,8 @@ pub fn record_output(
         ProviderOutput::TextDelta { .. }
         | ProviderOutput::ReasoningDelta { .. }
         | ProviderOutput::ContextUsage(_)
-        | ProviderOutput::UsageLimits(_) => Vec::new(),
+        | ProviderOutput::UsageLimits(_)
+        | ProviderOutput::WorkingDirectory { .. } => Vec::new(),
         ProviderOutput::AssistantMessage { item_id, text } => {
             vec![item(item_id, ItemContent::AssistantMessage { text })]
         }
@@ -862,11 +892,14 @@ pub fn record_branch(model: &ReadModel, thread_id: &str, branch: Option<String>)
     }
 }
 
+/// Moves the thread into a worktree; `adopted` when it existed before, so it is not the
+/// thread's to remove.
 pub fn record_worktree(
     model: &ReadModel,
     thread_id: &str,
     worktree_path: String,
     branch: Option<String>,
+    adopted: bool,
 ) -> Vec<Event> {
     match model.threads.get(thread_id) {
         Some(thread) if thread.worktree_path.as_deref() != Some(worktree_path.as_str()) => {
@@ -874,8 +907,24 @@ pub fn record_worktree(
                 thread_id: thread_id.to_owned(),
                 worktree_path,
                 branch,
+                adopted,
             }]
         }
+        _ => Vec::new(),
+    }
+}
+
+/// Moves the thread back to its project root, on the branch the root is on.
+pub fn record_worktree_left(
+    model: &ReadModel,
+    thread_id: &str,
+    branch: Option<String>,
+) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.worktree_path.is_some() => vec![Event::ThreadWorktreeDetached {
+            thread_id: thread_id.to_owned(),
+            branch,
+        }],
         _ => Vec::new(),
     }
 }
@@ -1332,18 +1381,63 @@ const a = 1
         assert_eq!(thread.active_turn_id, None);
     }
 
+    fn apply_all(model: &mut ReadModel, events: &[Event]) {
+        for event in events {
+            model.apply(event);
+        }
+    }
+
     #[test]
     fn an_attached_worktree_becomes_the_thread_cwd() {
         let mut model = model_with_thread();
 
-        let events = record_worktree(&model, "t", "/wt/fix".into(), Some("fix".into()));
-        for event in &events {
-            model.apply(event);
-        }
+        let events = record_worktree(&model, "t", "/wt/fix".into(), Some("fix".into()), false);
+        apply_all(&mut model, &events);
 
         assert_eq!(model.thread_cwd("t"), Some("/wt/fix"));
         assert_eq!(model.thread("t").unwrap().branch.as_deref(), Some("fix"));
-        assert!(record_worktree(&model, "t", "/wt/fix".into(), None).is_empty());
+        assert!(!model.thread("t").unwrap().worktree_adopted);
+        assert!(record_worktree(&model, "t", "/wt/fix".into(), None, false).is_empty());
+    }
+
+    #[test]
+    fn an_adopted_worktree_is_never_removed_by_the_thread() {
+        let mut model = model_with_thread();
+        let events = record_worktree(&model, "t", "/wt/pr".into(), Some("feat/pr".into()), true);
+        apply_all(&mut model, &events);
+
+        assert!(model.thread("t").unwrap().worktree_adopted);
+        for command in [
+            Command::ThreadWorktreeRelease {
+                thread_id: "t".into(),
+            },
+            Command::ThreadCleanUp {
+                thread_id: "t".into(),
+            },
+        ] {
+            assert_eq!(
+                decide(&model, command, NOW).unwrap_err(),
+                CommandError::WorktreeAdopted {
+                    thread_id: "t".into()
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn leaving_the_worktree_returns_the_thread_to_the_project_root() {
+        let mut model = model_with_thread();
+        let events = record_worktree(&model, "t", "/wt/pr".into(), Some("feat/pr".into()), true);
+        apply_all(&mut model, &events);
+
+        let events = record_worktree_left(&model, "t", Some("main".into()));
+        apply_all(&mut model, &events);
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(model.thread_cwd("t"), Some("/repo"));
+        assert_eq!(thread.branch.as_deref(), Some("main"));
+        assert!(!thread.worktree_adopted);
+        assert!(record_worktree_left(&model, "t", None).is_empty());
     }
 
     fn archive(archived: bool) -> Command {

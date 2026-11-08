@@ -28,7 +28,7 @@ use hoshi_core::{
     StreamDelta, StreamKind, TerminalAttach, ThreadContextUsage, ThreadItem, ThreadPullRequest,
     ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace, TurnFailure,
     TurnOutcome, UsageLimits, WorkspaceEntry, decide, record_branch, record_output, record_title,
-    record_worktree, turn_failed,
+    record_worktree, record_worktree_left, turn_failed,
 };
 use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion};
 use hoshi_forge::{
@@ -137,6 +137,8 @@ struct State {
     usage_checked_at: Option<Instant>,
     /// `None` until the enabled provider's CLI was checked.
     provider_version: Option<ProviderVersion>,
+    /// Where each thread's agent last moved its session, until git confirmed it.
+    session_moves: HashMap<String, String>,
 }
 
 /// A thread whose pull request is due to be read.
@@ -221,6 +223,7 @@ impl Engine {
             usage_limits,
             usage_checked_at: None,
             provider_version: None,
+            session_moves: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -1294,6 +1297,11 @@ impl State {
                 thread_id: thread_id.to_owned(),
             });
         }
+        if thread.worktree_adopted {
+            return Err(CommandError::WorktreeAdopted {
+                thread_id: thread_id.to_owned(),
+            });
+        }
         let root = self.project_root(thread)?;
         Ok((thread, root))
     }
@@ -1435,6 +1443,7 @@ impl State {
     fn worktrees_freed_by(&self, command: &Command) -> Vec<(String, String)> {
         self.threads_deleted_by(command)
             .into_iter()
+            .filter(|thread| !thread.worktree_adopted)
             .filter_map(|thread| {
                 let path = thread.worktree_path.clone()?;
                 let project = self.model.project(thread.project_id.as_deref()?)?;
@@ -1491,6 +1500,10 @@ impl State {
                 let mut limits = self.usage_limits.clone().unwrap_or_default();
                 limits.merge(update);
                 self.keep_usage_limits(limits);
+                return;
+            }
+            ProviderOutput::WorkingDirectory { path } => {
+                self.follow_session(thread_id, turn_id, &path);
                 return;
             }
             _ => {}
@@ -1639,6 +1652,33 @@ impl State {
         (self.notify)(Notification::ContextUsage(update));
     }
 
+    /// The agent's session works elsewhere than the thread's folder: in a worktree it
+    /// entered, or back in the project root. git confirms which in the background; when
+    /// moves overlap, the latest one wins.
+    fn follow_session(&mut self, thread_id: &str, turn_id: &str, path: &str) {
+        let Some(cwd) = self.model.thread_cwd(thread_id).map(git::normalize) else {
+            return;
+        };
+        let path = git::normalize(path);
+        if path == cwd && !self.session_moves.contains_key(thread_id) {
+            return;
+        }
+        let Some(workspace) = self
+            .turns
+            .get_mut(thread_id)
+            .filter(|turn| turn.id == turn_id)
+            .and_then(|turn| turn.workspace.as_mut())
+        else {
+            return;
+        };
+        workspace.moved = true;
+        let workspace = workspace.clone();
+        let check = self.worktree_check(thread_id, workspace);
+        self.session_moves
+            .insert(thread_id.to_owned(), path.clone());
+        follow_session_move(self.this.clone(), thread_id.to_owned(), path, check);
+    }
+
     fn worktree_check(&self, thread_id: &str, workspace: TurnWorkspace) -> WorktreeCheck {
         let project_id = self
             .model
@@ -1682,6 +1722,9 @@ fn refresh_after_turn(state: Weak<Mutex<State>>, thread_id: String, check: Optio
 
 /// Moves a thread to the worktree its turn created, if git shows one.
 fn attach_created_worktree(state: &Weak<Mutex<State>>, thread_id: &str, check: &WorktreeCheck) {
+    if check.workspace.moved {
+        return;
+    }
     let Some(after) = git::worktrees(&check.workspace.repository) else {
         return;
     };
@@ -1696,10 +1739,62 @@ fn attach_created_worktree(state: &Weak<Mutex<State>>, thread_id: &str, check: &
     };
     let branch = git::current_branch(&path);
     let mut state = lock(&shared);
-    let events = record_worktree(&state.model, thread_id, path, branch);
+    let events = record_worktree(&state.model, thread_id, path, branch, false);
     if let Err(error) = state.commit(&events, &now()) {
         eprintln!("hoshi: failed to record a worktree: {error}");
     }
+}
+
+/// Moves the thread where its agent's session went, once git shows it is the project root
+/// or one of its worktrees; anywhere else stays the agent's own business. A worktree that
+/// existed before the turn, or that another thread owns, is adopted: hoshi never removes it.
+fn follow_session_move(
+    state: Weak<Mutex<State>>,
+    thread_id: String,
+    path: String,
+    check: WorktreeCheck,
+) {
+    thread::spawn(move || {
+        let root = &check.workspace.repository;
+        let in_root = path == git::normalize(root);
+        let found =
+            in_root || git::worktrees(root).is_some_and(|worktrees| worktrees.contains(&path));
+        let branch = if in_root {
+            git::current_branch(root)
+        } else if found {
+            git::current_branch(&path)
+        } else {
+            None
+        };
+        let adopted = check.workspace.worktrees_before.contains(&path)
+            || check
+                .claimed
+                .iter()
+                .any(|claimed| git::normalize(claimed) == path);
+        let Some(shared) = state.upgrade() else {
+            return;
+        };
+        let mut state = lock(&shared);
+        if state.session_moves.get(&thread_id) != Some(&path) {
+            return;
+        }
+        state.session_moves.remove(&thread_id);
+        if !found {
+            return;
+        }
+        let events = if in_root {
+            record_worktree_left(&state.model, &thread_id, branch)
+        } else {
+            record_worktree(&state.model, &thread_id, path, branch, adopted)
+        };
+        if events.is_empty() {
+            return;
+        }
+        state.pull_requests.check_soon(&thread_id);
+        if let Err(error) = state.commit(&events, &now()) {
+            eprintln!("hoshi: failed to follow the agent's session: {error}");
+        }
+    });
 }
 
 fn in_any(project_ids: &[String], thread: &hoshi_core::Thread) -> bool {
@@ -2030,6 +2125,7 @@ fn start_turn(
             repository,
             worktrees_before,
             tool_inputs: Vec::new(),
+            moved: false,
         })
     });
     let attachments = attachments
@@ -3163,6 +3259,91 @@ mod tests {
         harness.send("t", "m2", "continue");
         assert_eq!(harness.adapter.requests.lock().unwrap()[1].cwd, expected);
         let _ = git::remove_worktree(&harness.root, &expected);
+    }
+
+    fn wait_until(mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + std::time::Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out");
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn an_existing_worktree_the_agent_enters_is_adopted_and_never_removed() {
+        let repo = git::tests::temp_repository("engine-adopt-worktree");
+        let worktree = repo.with_extension("adopt-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        git::add_worktree(&repo.to_string_lossy(), &worktree, "feat/mine").unwrap();
+        let path = git::normalize(&worktree.to_string_lossy());
+        let script = vec![
+            ProviderOutput::WorkingDirectory { path: path.clone() },
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        ];
+        let harness = Harness::new(
+            "adopt-worktree",
+            repo,
+            Store::open_in_memory().unwrap(),
+            script,
+        );
+
+        harness.send("t", "m1", "work in my worktree");
+        harness.wait_for_turn_end();
+        wait_until(|| harness.thread("t").worktree_path.is_some());
+
+        let thread = harness.thread("t");
+        assert_eq!(thread.worktree_path.as_deref(), Some(path.as_str()));
+        assert_eq!(thread.branch.as_deref(), Some("feat/mine"));
+        assert!(thread.worktree_adopted);
+        assert_eq!(
+            harness.engine.release_worktree("t").unwrap_err(),
+            CommandError::WorktreeAdopted {
+                thread_id: "t".into()
+            }
+        );
+        harness
+            .engine
+            .dispatch(Command::ThreadDelete {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert!(worktree.is_dir());
+        let _ = git::remove_worktree(&harness.root, &path);
+    }
+
+    #[test]
+    fn leaving_the_worktree_brings_the_thread_back_to_the_project_root() {
+        let repo = git::tests::temp_repository("engine-leave-worktree");
+        let worktree = repo.with_extension("leave-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        git::add_worktree(&repo.to_string_lossy(), &worktree, "feat/leave").unwrap();
+        let path = git::normalize(&worktree.to_string_lossy());
+        let root = git::normalize(&repo.to_string_lossy());
+        let script = vec![
+            ProviderOutput::WorkingDirectory { path: path.clone() },
+            ProviderOutput::WorkingDirectory { path: root },
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        ];
+        let harness = Harness::new(
+            "leave-worktree",
+            repo,
+            Store::open_in_memory().unwrap(),
+            script,
+        );
+
+        harness.send("t", "m1", "go in and out");
+        harness.wait_for_turn_end();
+        wait_until(|| lock(&harness.engine.state).session_moves.is_empty());
+
+        let thread = harness.thread("t");
+        assert_eq!(thread.worktree_path, None);
+        assert_eq!(thread.branch.as_deref(), Some("main"));
+        assert!(!thread.worktree_adopted);
+        let _ = git::remove_worktree(&harness.root, &path);
     }
 
     #[test]

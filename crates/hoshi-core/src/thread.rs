@@ -35,6 +35,10 @@ pub struct Thread {
     /// the same path from the branch, which stays.
     #[serde(default)]
     pub worktree_released: bool,
+    /// Its worktree existed before the thread moved into it, as one the user made; hoshi
+    /// never removes it.
+    #[serde(default)]
+    pub worktree_adopted: bool,
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,

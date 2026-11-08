@@ -35,6 +35,7 @@ const thread = (id: string, changes: Partial<Thread> = {}): Thread => ({
   archived: false,
   pinned: false,
   worktreeReleased: false,
+  worktreeAdopted: false,
   createdAt: new Date(NOW).toISOString(),
   updatedAt: new Date(NOW).toISOString(),
   ...changes

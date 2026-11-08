@@ -185,6 +185,14 @@ pub struct ClaudeParser {
     /// The model of the agent's latest call, whose window the result reports.
     model: Option<String>,
     used_tokens: Option<u64>,
+    /// Calls of the tools that move the session, by id, to read where their results lead.
+    moves: HashMap<String, WorktreeMove>,
+}
+
+#[derive(Clone, Copy)]
+enum WorktreeMove {
+    Enter,
+    Exit,
 }
 
 impl ClaudeParser {
@@ -205,16 +213,28 @@ impl ClaudeParser {
             return Vec::new();
         }
         match value["type"].as_str() {
-            Some("system") if value["subtype"] == "init" => value["session_id"]
-                .as_str()
-                .map(|session_id| ProviderOutput::SessionStarted {
-                    session_id: session_id.to_owned(),
-                })
-                .into_iter()
-                .collect(),
+            Some("system") if value["subtype"] == "init" => {
+                let session =
+                    value["session_id"]
+                        .as_str()
+                        .map(|session_id| ProviderOutput::SessionStarted {
+                            session_id: session_id.to_owned(),
+                        });
+                // A resumed session reopens the worktree it was in, wherever it was started.
+                let cwd = value["cwd"]
+                    .as_str()
+                    .map(|path| ProviderOutput::WorkingDirectory {
+                        path: path.to_owned(),
+                    });
+                session.into_iter().chain(cwd).collect()
+            }
             Some("stream_event") => self.parse_stream_event(&value),
             Some("assistant") => self.parse_assistant(&value["message"]),
-            Some("user") => parse_tool_results(&value["message"]),
+            Some("user") => {
+                let mut outputs = parse_tool_results(&value["message"]);
+                outputs.extend(self.worktree_move(&value));
+                outputs
+            }
             Some("rate_limit_event") => claude_usage::rate_limit_event(&value["rate_limit_info"])
                 .map(ProviderOutput::UsageLimits)
                 .into_iter()
@@ -303,11 +323,22 @@ impl ClaudeParser {
                         });
                     }
                 }
-                Some("tool_use") => outputs.push(ProviderOutput::ToolCallStarted {
-                    item_id: block["id"].as_str().unwrap_or(&item_id).to_owned(),
-                    name: block["name"].as_str().unwrap_or_default().to_owned(),
-                    input: truncate(&block["input"].to_string(), TOOL_INPUT_MAX_CHARS),
-                }),
+                Some("tool_use") => {
+                    let name = block["name"].as_str().unwrap_or_default();
+                    let movement = match name {
+                        "EnterWorktree" => Some(WorktreeMove::Enter),
+                        "ExitWorktree" => Some(WorktreeMove::Exit),
+                        _ => None,
+                    };
+                    if let (Some(movement), Some(id)) = (movement, block["id"].as_str()) {
+                        self.moves.insert(id.to_owned(), movement);
+                    }
+                    outputs.push(ProviderOutput::ToolCallStarted {
+                        item_id: block["id"].as_str().unwrap_or(&item_id).to_owned(),
+                        name: name.to_owned(),
+                        input: truncate(&block["input"].to_string(), TOOL_INPUT_MAX_CHARS),
+                    });
+                }
                 _ => {}
             }
         }
@@ -316,6 +347,25 @@ impl ClaudeParser {
 }
 
 impl ClaudeParser {
+    /// Where a successful `EnterWorktree` or `ExitWorktree` left the session, from the
+    /// structured result the CLI sends along with the tool's text.
+    fn worktree_move(&mut self, value: &Value) -> Option<ProviderOutput> {
+        let blocks = value["message"]["content"].as_array()?;
+        let movement = blocks.iter().find_map(|block| {
+            let id = block["tool_use_id"].as_str()?;
+            let movement = self.moves.remove(id)?;
+            (block["is_error"] != true).then_some(movement)
+        })?;
+        let result = &value["tool_use_result"];
+        let path = match movement {
+            WorktreeMove::Enter => result["worktreePath"].as_str(),
+            WorktreeMove::Exit => result["restoredCwd"].as_str(),
+        }?;
+        Some(ProviderOutput::WorkingDirectory {
+            path: path.to_owned(),
+        })
+    }
+
     /// Everything the call sent and wrote stays in the context, cached or not.
     fn context_usage(&mut self, usage: &Value) -> Option<ProviderOutput> {
         let input = usage["input_tokens"].as_u64()?;
