@@ -302,6 +302,129 @@ describe('foldTurns', () => {
     )
   })
 
+  const marker = (
+    id: string,
+    createdAt: string,
+    content: ThreadItem['content']
+  ): ThreadItem => ({ id, threadId: 't', createdAt, content })
+  const shape = (folded: TranscriptRow[]) =>
+    folded.map((row) =>
+      row.kind === 'item'
+        ? row.item.id
+        : row.kind === 'fold'
+          ? `${row.ending}:${row.after}:${row.rows.length}`
+          : row.kind
+    )
+
+  test('starts a run at a background task that ended, which stays in view', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:10Z'),
+      marker('run1', '2026-11-08T10:00:11Z', { kind: 'runEnded' }),
+      marker('ended', '2026-11-08T10:00:20Z', {
+        kind: 'backgroundTaskEnded',
+        toolCallId: 'agent',
+        failed: false
+      }),
+      tool('g', 'Grep'),
+      answer('a2', '2026-11-08T10:00:30Z')
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(shape(folded)).toEqual([
+      'u1',
+      'answered:start:1',
+      'a1',
+      'ended',
+      'answered:start:1',
+      'a2'
+    ])
+    const second = folded[4]
+    expect(second?.kind === 'fold' && second.durationMs).toBe(10_000)
+  })
+
+  test('folds what a steer cut once the turn is over, and what followed apart', () => {
+    const steer = marker('s', '2026-11-08T10:00:20Z', {
+      kind: 'userMessage',
+      text: 's',
+      attachments: [],
+      steer: true,
+      taskResult: null
+    })
+    const items = [
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      text('partial'),
+      steer,
+      tool('e', 'Edit'),
+      answer('a1', '2026-11-08T10:00:50Z')
+    ]
+
+    expect(shape(foldTurns(groupTranscript(items), false))).toEqual([
+      'u1',
+      'steered:start:2',
+      's',
+      'answered:steer:1',
+      'a1'
+    ])
+    expect(shape(foldTurns(groupTranscript(items.slice(0, 5)), true))).toEqual([
+      'u1',
+      'work',
+      'partial',
+      's',
+      'work'
+    ])
+  })
+
+  test('folds a stopped turn whole, with what the agent said last in view', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('said', '2026-11-08T10:00:05Z'),
+      marker('stop', '2026-11-08T10:00:12Z', { kind: 'turnInterrupted' })
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(shape(folded)).toEqual(['u1', 'stopped:start:1', 'said'])
+    const fold = folded[1]
+    expect(fold?.kind === 'fold' && fold.durationMs).toBe(12_000)
+  })
+
+  test('folds settled work after the answer, and leaves a failed turn open', () => {
+    const failed = { ...tool('x', 'Bash') }
+    failed.content = { ...failed.content, isError: true }
+    const start = [
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:05Z')
+    ]
+    expect(
+      shape(foldTurns(groupTranscript([...start, tool('w', 'Write')]), false))
+    ).toEqual(['u1', 'answered:start:2', 'a1'])
+    expect(
+      shape(foldTurns(groupTranscript([...start, failed]), false))
+    ).toEqual(['u1', 'answered:start:1', 'a1', 'work'])
+
+    const errored = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:05Z'),
+      marker('fail', '2026-11-08T10:00:06Z', {
+        kind: 'turnFailed',
+        reason: { code: 'providerError', detail: 'x' }
+      })
+    ])
+    expect(shape(foldTurns(errored, false))).toEqual([
+      'u1',
+      'work',
+      'a1',
+      'fail'
+    ])
+  })
+
   test('keeps live rows out of the fold, after it', () => {
     const rows = groupTranscript([
       user('u1', '2026-11-08T10:00:00Z'),

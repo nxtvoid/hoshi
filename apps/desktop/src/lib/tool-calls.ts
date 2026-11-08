@@ -22,9 +22,15 @@ export type TranscriptRow =
       kind: 'fold'
       id: string
       rows: TranscriptRow[]
-      /** From the user's message to the agent's answer; `null` when unknown. */
+      /** How the work it holds ended: answered, cut by the user's steer, or stopped. */
+      ending: FoldEnding
+      /** What the work follows: a steer, or anything else that started it. */
+      after: 'start' | 'steer'
+      /** From what started the work to its end; `null` when unknown. */
       durationMs: number | null
     }
+
+export type FoldEnding = 'answered' | 'steered' | 'stopped'
 
 export type ToolAction =
   | 'command'
@@ -206,10 +212,11 @@ function isAgent(row: TranscriptRow) {
 }
 
 /**
- * A finished turn's work, between the user's message and the agent's final answer, folds
- * into one row, as do the agents it started once they are done. The running turn, and a turn that ended any other way, stay open. Rows
- * still `live` stay out of the fold, after it. A turn that went on in more runs folds
- * each run behind its own answer.
+ * The work of each finished run folds into one row, as t3code does: between what started
+ * it (the user's message, a background task that ended, or the run before) and the agent's
+ * answer, which stays in view, with the finished work after it. A steer cuts the run: what
+ * came before folds whole, and what follows folds on its own. A stopped run folds whole.
+ * The running turn, and a failed one, stay open, as do rows still `live`, after the fold.
  */
 export function foldTurns(
   rows: TranscriptRow[],
@@ -217,43 +224,117 @@ export function foldTurns(
   live: (row: TranscriptRow) => boolean = () => false
 ): TranscriptRow[] {
   const folded: TranscriptRow[] = []
-  let asked: TranscriptItem | null = null
+  let started: TranscriptItem | null = null
+  let after: 'start' | 'steer' = 'start'
   let turn: TranscriptRow[] = []
-  const close = (running: boolean) => {
-    const answer = turn.at(-1)
-    const work = turn.slice(0, -1)
-    const foldable =
-      !running &&
-      asked !== null &&
-      answer?.kind === 'item' &&
-      answer.item.content.kind === 'assistantMessage' &&
-      work.some((row) => !live(row) && (row.kind === 'work' || isAgent(row)))
-    if (asked && answer?.kind === 'item' && foldable) {
-      const duration =
-        Date.parse(answer.item.createdAt) - Date.parse(asked.createdAt)
-      folded.push(
-        {
-          kind: 'fold',
-          id: `fold:${asked.id}`,
-          rows: work.filter((row) => !live(row)),
-          durationMs: Number.isFinite(duration) ? duration : null
-        },
-        ...work.filter(live),
-        answer
+  const hasWork = (part: TranscriptRow[]) =>
+    part.some((row) => !live(row) && (row.kind === 'work' || isAgent(row)))
+  const fold = (
+    part: TranscriptRow[],
+    ending: FoldEnding,
+    endedAt: string
+  ): TranscriptRow[] => {
+    if (!started) return part
+    const duration = Date.parse(endedAt) - Date.parse(started.createdAt)
+    return [
+      {
+        kind: 'fold',
+        id: `fold:${started.id}`,
+        rows: part.filter((row) => !live(row)),
+        ending,
+        after,
+        durationMs: Number.isFinite(duration) ? duration : null
+      },
+      ...part.filter(live)
+    ]
+  }
+  const settle = (
+    part: TranscriptRow[],
+    steer: TranscriptItem | null
+  ): TranscriptRow[] => {
+    if (
+      !started ||
+      !hasWork(part) ||
+      part.some(
+        (row) => row.kind === 'item' && row.item.content.kind === 'turnFailed'
       )
-    } else {
-      folded.push(...turn)
+    ) {
+      return part
     }
+    if (steer) return fold(part, 'steered', steer.createdAt)
+    const last = part.at(-1)
+    if (last?.kind === 'item' && last.item.content.kind === 'turnInterrupted') {
+      const before = part.slice(0, -1)
+      const said = before.at(-1)
+      const answer =
+        said?.kind === 'item' && said.item.content.kind === 'assistantMessage'
+          ? said
+          : null
+      const work = answer ? before.slice(0, -1) : before
+      if (!hasWork(work)) return part
+      return [
+        ...fold(work, 'stopped', last.item.createdAt),
+        ...(answer ? [answer] : [])
+      ]
+    }
+    let answerAt = part.length - 1
+    while (answerAt >= 0) {
+      const row = part[answerAt] as TranscriptRow
+      if (row.kind === 'item' && row.item.content.kind === 'assistantMessage') {
+        break
+      }
+      answerAt -= 1
+    }
+    const answer = part[answerAt]
+    if (answer?.kind !== 'item') return part
+    const trailing = part.slice(answerAt + 1)
+    const settled = (row: TranscriptRow) =>
+      row.kind === 'work' &&
+      !live(row) &&
+      !row.entries.some(
+        (entry) => entry.content.kind === 'toolCall' && entry.content.isError
+      )
+    const work = [...part.slice(0, answerAt), ...trailing.filter(settled)]
+    if (!hasWork(work)) return part
+    return [
+      ...fold(work, 'answered', answer.item.createdAt),
+      answer,
+      ...trailing.filter((row) => !settled(row))
+    ]
+  }
+  /** Parts of the turn a steer cut, folded only once the turn is over. */
+  let held: { open: TranscriptRow[]; settled: TranscriptRow[] }[] = []
+  const close = (running: boolean) => {
+    for (const part of held)
+      folded.push(...(running ? part.open : part.settled))
+    held = []
+    folded.push(...(running ? turn : settle(turn, null)))
     turn = []
   }
   for (const row of rows) {
-    if (row.kind === 'item' && row.item.content.kind === 'userMessage') {
+    const content = row.kind === 'item' ? row.item.content : null
+    if (row.kind !== 'item' || !content) {
+      turn.push(row)
+    } else if (content.kind === 'userMessage' && content.steer) {
+      held.push({
+        open: [...turn, row],
+        settled: [...settle(turn, row.item), row]
+      })
+      turn = []
+      started = row.item
+      after = 'steer'
+    } else if (
+      content.kind === 'userMessage' ||
+      content.kind === 'backgroundTaskEnded'
+    ) {
       close(false)
       folded.push(row)
-      asked = row.item
-    } else if (row.kind === 'item' && row.item.content.kind === 'runEnded') {
+      started = row.item
+      after = 'start'
+    } else if (content.kind === 'runEnded') {
       close(false)
-      asked = row.item
+      started = row.item
+      after = 'start'
     } else {
       turn.push(row)
     }

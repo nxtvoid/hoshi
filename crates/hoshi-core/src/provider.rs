@@ -76,6 +76,13 @@ pub enum ProviderOutput {
     ContextUsage(ContextUsage),
     /// Plan limits the provider reported mid-turn; may cover only some windows.
     UsageLimits(UsageLimits),
+    /// A task that ran in the background ended, and the agent's next run answers it.
+    /// `tool_use_id` is the call that started it, when one did.
+    BackgroundTaskEnded {
+        task_id: String,
+        tool_use_id: Option<String>,
+        failed: bool,
+    },
     /// The agent answered, but its turn goes on: a background task that ended or a message
     /// it took in starts another run. `run` counts the turn's runs from 1.
     RunEnded {

@@ -724,4 +724,21 @@ fn a_turn_waits_for_claude_to_answer_every_background_subagent() {
         last.is_some_and(|text| text.contains("ALPHA") && text.contains("BETA")),
         "{outputs:#?}"
     );
+    let runs: Vec<_> = outputs
+        .iter()
+        .filter_map(|output| match output {
+            ProviderOutput::RunEnded { .. } => Some("run ended"),
+            ProviderOutput::BackgroundTaskEnded { .. } => Some("task ended"),
+            ProviderOutput::AssistantMessage { .. } => Some("message"),
+            _ => None,
+        })
+        .collect();
+    let ended = runs.iter().filter(|kind| **kind == "task ended").count();
+    assert_eq!(ended, 2, "{runs:?}");
+    for (index, kind) in runs.iter().enumerate() {
+        if *kind == "task ended" {
+            assert_eq!(runs.get(index - 1), Some(&"run ended"), "{runs:?}");
+        }
+    }
+    assert_eq!(runs.last(), Some(&"message"), "{runs:?}");
 }

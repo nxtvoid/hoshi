@@ -11,6 +11,7 @@ import { approvalsByCall } from '@/lib/requests'
 import { SubagentRow } from './SubagentRow'
 import { DelegationRow, TaskResultRow } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
+import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
 import { DiffView } from '@/components/panel/DiffView'
@@ -58,6 +59,7 @@ import {
   withStreaming,
   type ToolAction,
   type ToolCallItem,
+  type FoldEnding,
   type ToolSummaryPart,
   type TranscriptRow,
   type TranscriptItem,
@@ -261,6 +263,8 @@ function Rows({ rows, cwd, liveTasks }: RowsProps) {
             <TurnFold
               rows={row.rows}
               durationMs={row.durationMs}
+              ending={row.ending}
+              after={row.after}
               cwd={cwd}
               liveTasks={liveTasks}
             />
@@ -273,9 +277,17 @@ function Rows({ rows, cwd, liveTasks }: RowsProps) {
 /** A finished turn's work, folded behind one line until opened. */
 function TurnFold({
   durationMs,
+  ending,
+  after,
   ...rows
-}: RowsProps & { durationMs: number | null }) {
+}: RowsProps & {
+  durationMs: number | null
+  ending: FoldEnding
+  after: 'start' | 'steer'
+}) {
   const [open, setOpen] = useState(false)
+  const duration =
+    durationMs === null ? null : formatDuration(durationMs, getLocale())
   return (
     <div>
       <button
@@ -289,9 +301,17 @@ function TurnFold({
           strokeWidth={2}
           className='size-4 shrink-0'
         />
-        {durationMs === null
-          ? m.worked()
-          : m.worked_for({ duration: formatDuration(durationMs, getLocale()) })}
+        {ending === 'stopped'
+          ? duration === null
+            ? m.stopped_response()
+            : m.stopped_after({ duration })
+          : after === 'steer'
+            ? duration === null
+              ? m.continued()
+              : m.continued_for({ duration })
+            : duration === null
+              ? m.worked()
+              : m.worked_for({ duration })}
         <HugeiconsIcon
           icon={ArrowRight01Icon}
           strokeWidth={2}
@@ -379,6 +399,14 @@ const Item = memo(function Item({
       return <TaskListRow tasks={content.tasks} working={live} />
     case 'runEnded':
       return null
+    case 'backgroundTaskEnded':
+      return (
+        <BackgroundTaskRow
+          toolCallId={content.toolCallId}
+          failed={content.failed}
+          cwd={cwd}
+        />
+      )
   }
 })
 

@@ -1192,6 +1192,17 @@ pub fn record_output(
         ProviderOutput::RunEnded { run } => {
             vec![item(format!("{turn_id}:run{run}"), ItemContent::RunEnded)]
         }
+        ProviderOutput::BackgroundTaskEnded {
+            task_id,
+            tool_use_id,
+            failed,
+        } => vec![item(
+            format!("{turn_id}:ended:{task_id}"),
+            ItemContent::BackgroundTaskEnded {
+                tool_call_id: tool_use_id,
+                failed,
+            },
+        )],
         ProviderOutput::AssistantMessage { item_id, text } => {
             vec![item(item_id, ItemContent::AssistantMessage { text })]
         }

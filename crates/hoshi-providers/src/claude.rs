@@ -17,7 +17,7 @@ use hoshi_core::{
     TurnFailure, TurnOutcome, UsageLimits,
 };
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -390,6 +390,11 @@ pub struct ClaudeParser {
     async_agents: HashSet<String>,
     /// The runs of the turn that ended so far.
     runs: u32,
+    /// A run ended and no other started yet.
+    between_runs: bool,
+    /// Background tasks that ended while a run went on, each told as the run that answers
+    /// it starts.
+    ended_tasks: VecDeque<ProviderOutput>,
 }
 
 #[derive(Clone, Copy)]
@@ -434,13 +439,24 @@ impl ClaudeParser {
                 Some("task_notification") => {
                     self.live_output.ended(&value);
                     let task = value["task_id"].as_str().unwrap_or_default();
+                    let mut outputs = self.background_agent_ended(&value);
                     if self.ever_background.contains(task)
                         && value["status"] != "stopped"
                         && let Some(run) = value["run_id"].as_str()
                     {
                         self.pending_wakes.insert(run.to_owned());
+                        let ended = ProviderOutput::BackgroundTaskEnded {
+                            task_id: task.to_owned(),
+                            tool_use_id: value["tool_use_id"].as_str().map(str::to_owned),
+                            failed: value["status"] == "failed",
+                        };
+                        if std::mem::take(&mut self.between_runs) {
+                            outputs.push(ended);
+                        } else {
+                            self.ended_tasks.push_back(ended);
+                        }
                     }
-                    return self.background_agent_ended(&value);
+                    return outputs;
                 }
                 Some("background_tasks_changed") => {
                     let moved = self.queue.state().moved.clone();
@@ -518,6 +534,10 @@ impl ClaudeParser {
                 self.runs += 1;
                 if !over {
                     outputs.push(ProviderOutput::RunEnded { run: self.runs });
+                    match self.ended_tasks.pop_front() {
+                        Some(ended) => outputs.push(ended),
+                        None => self.between_runs = true,
+                    }
                 }
                 if over {
                     queue.closing = true;
@@ -538,6 +558,9 @@ impl ClaudeParser {
                 ) && let Some(message_id) = value["command_uuid"].as_str()
                 {
                     self.queue.state().waiting.remove(message_id);
+                    if value["state"] == "started" {
+                        self.between_runs = false;
+                    }
                 }
                 Vec::new()
             }
@@ -995,25 +1018,34 @@ mod tests {
 
         let ended = parser.parse_line(
             &json!({ "type": "system", "subtype": "task_notification", "task_id": "a1",
-                "tool_use_id": "toolu_agent", "status": "completed", "summary": "tick 6" })
+                "tool_use_id": "toolu_agent", "run_id": "run-a1", "status": "completed",
+                "summary": "tick 6" })
             .to_string(),
         );
         assert_eq!(
             ended,
-            vec![ProviderOutput::ToolCallCompleted {
-                item_id: "toolu_agent".into(),
-                output: "tick 6".into(),
-                is_error: false,
-                detail: None,
-            }]
+            vec![
+                ProviderOutput::ToolCallCompleted {
+                    item_id: "toolu_agent".into(),
+                    output: "tick 6".into(),
+                    is_error: false,
+                    detail: None,
+                },
+                ProviderOutput::BackgroundTaskEnded {
+                    task_id: "a1".into(),
+                    tool_use_id: Some("toolu_agent".into()),
+                    failed: false,
+                }
+            ]
         );
         parser.parse_line(
             &json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] })
                 .to_string(),
         );
         let continued = parser.parse_line(
-            &json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done" })
-                .to_string(),
+            &json!({ "type": "result", "subtype": "success", "is_error": false, "result": "done",
+                "origin": { "kind": "task-notification", "runId": "run-a1" } })
+            .to_string(),
         );
         assert!(matches!(
             continued.as_slice(),
@@ -1095,14 +1127,20 @@ mod tests {
         }
         let result = |origin: Value| json!({ "type": "result", "subtype": "success", "is_error": false, "origin": origin });
 
+        let ended = |task: &str| ProviderOutput::BackgroundTaskEnded {
+            task_id: task.to_owned(),
+            tool_use_id: None,
+            failed: false,
+        };
+
         assert_eq!(
             parser_line(&mut parser, result(Value::Null)),
-            [ProviderOutput::RunEnded { run: 1 }]
+            [ProviderOutput::RunEnded { run: 1 }, ended("a")]
         );
         let first = result(json!({ "kind": "task-notification", "runId": "run-a" }));
         assert_eq!(
             parser_line(&mut parser, first),
-            [ProviderOutput::RunEnded { run: 2 }]
+            [ProviderOutput::RunEnded { run: 2 }, ended("b")]
         );
         let second = result(json!({ "kind": "task-notification", "runId": "run-b" }));
         assert!(matches!(

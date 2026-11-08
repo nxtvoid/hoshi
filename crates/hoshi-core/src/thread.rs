@@ -202,6 +202,12 @@ pub enum ItemContent {
     /// The agent answered one run of a turn that went on, as each background task that
     /// ended gets a run of its own.
     RunEnded,
+    /// A task that ran in the background ended; the agent's answer to it follows. The call
+    /// that started it, when one did, is `tool_call_id`.
+    BackgroundTaskEnded {
+        tool_call_id: Option<String>,
+        failed: bool,
+    },
     /// A tool call held back until the user approves it.
     Approval {
         /// The call it held back, in the thread's transcript or a subagent's; `None` in

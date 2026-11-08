@@ -32,7 +32,7 @@ outputOmitted: boolean,
 /**
  * Its turn ended before it did, so it has no output.
  */
-interrupted: boolean, } | { "kind": "turnFailed", reason: TurnFailure, } | { "kind": "turnInterrupted" } | { "kind": "runEnded" } | { "kind": "approval", 
+interrupted: boolean, } | { "kind": "turnFailed", reason: TurnFailure, } | { "kind": "turnInterrupted" } | { "kind": "runEnded" } | { "kind": "backgroundTaskEnded", toolCallId: string | null, failed: boolean, } | { "kind": "approval", 
 /**
  * The call it held back, in the thread's transcript or a subagent's; `None` in
  * approvals recorded before calls were kept.
