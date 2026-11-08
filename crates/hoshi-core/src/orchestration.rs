@@ -410,6 +410,11 @@ impl ReadModel {
         pending
     }
 
+    /// The request `request_id`, while it waits for an answer.
+    pub fn pending_request(&self, request_id: &str) -> Option<&ThreadItem> {
+        self.requests.get(request_id)
+    }
+
     /// The thread's requests waiting for an answer, oldest first.
     pub fn pending_requests(&self, thread_id: &str) -> Vec<&ThreadItem> {
         let mut pending: Vec<_> = self
@@ -1121,6 +1126,50 @@ pub fn send_task_result(
 }
 
 /// Links a thread to the one whose agent delegated its task to it.
+/// Closes a turn the app's close cut short. Its questions stay open: the agent that asked
+/// is gone, so the user's answers go to the thread as a message.
+pub fn close_stale_turn(
+    model: &ReadModel,
+    thread_id: &str,
+    turn_id: &str,
+    now: &str,
+) -> Vec<Event> {
+    let questions: Vec<&str> = model
+        .pending_requests(thread_id)
+        .into_iter()
+        .filter(|item| matches!(item.content, ItemContent::Questions { .. }))
+        .map(|item| item.id.as_str())
+        .collect();
+    let outcome = TurnOutcome::Interrupted;
+    record_output(
+        model,
+        thread_id,
+        turn_id,
+        ProviderOutput::TurnCompleted { outcome },
+        now,
+    )
+    .into_iter()
+    .filter(|event| !matches!(event, Event::ItemAdded { item } if questions.contains(&item.id.as_str())))
+    .collect()
+}
+
+/// The user's answers to `questions`, as a message to the agent: each question, then its
+/// answer.
+pub fn answers_message(questions: &ItemContent, response: &RequestResponse) -> Option<String> {
+    let (ItemContent::Questions { questions, .. }, RequestResponse::Answers { answers }) =
+        (questions, response)
+    else {
+        return None;
+    };
+    let replies: Vec<String> = questions
+        .iter()
+        .zip(answers)
+        .filter(|(_, answer)| !answer.trim().is_empty())
+        .map(|(question, answer)| format!("{}\n{}", question.question, answer.trim()))
+        .collect();
+    (!replies.is_empty()).then(|| replies.join("\n\n"))
+}
+
 /// Cancels the delegated task thread `thread_id` works on, once.
 pub fn cancel_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
     match model.threads.get(thread_id) {
@@ -2393,6 +2442,47 @@ const a = 1
             Err(CommandError::RequestNotPending {
                 request_id: "r1".into()
             })
+        );
+    }
+
+    #[test]
+    fn a_turn_the_app_cut_short_keeps_its_questions_for_an_answer_by_message() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+        open(&mut model, "r1", approval());
+        let asked = ItemContent::Questions {
+            questions: vec![Question {
+                header: "Color".into(),
+                question: "Which color?".into(),
+                options: Vec::new(),
+                multi_select: false,
+            }],
+            status: RequestStatus::Pending,
+            answers: None,
+        };
+        open(&mut model, "r2", asked.clone());
+
+        let events = close_stale_turn(&model, "t", "m1", NOW);
+        for event in &events {
+            model.apply(event);
+        }
+
+        let pending: Vec<_> = model
+            .pending_requests("t")
+            .iter()
+            .map(|item| item.id.clone())
+            .collect();
+        assert_eq!(pending, ["r2"]);
+        assert_eq!(status(&model), ThreadStatus::Idle);
+        let answers = RequestResponse::Answers {
+            answers: vec![" Blue ".into()],
+        };
+        assert_eq!(
+            answers_message(&asked, &answers).as_deref(),
+            Some(
+                "Which color?
+Blue"
+            )
         );
     }
 

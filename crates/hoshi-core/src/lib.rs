@@ -20,9 +20,9 @@ pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
 pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
-    answer_task, cancel_task, decide, record_branch, record_delegation, record_output,
-    record_title, record_worktree, record_worktree_left, send_task_result, start_queued_turn,
-    subagent_thread_id, turn_failed,
+    answer_task, answers_message, cancel_task, close_stale_turn, decide, record_branch,
+    record_delegation, record_output, record_title, record_worktree, record_worktree_left,
+    send_task_result, start_queued_turn, subagent_thread_id, turn_failed,
 };
 pub use project::{FolderListing, Project, RemoteRepository};
 pub use provider::ProviderOutput;

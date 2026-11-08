@@ -31,8 +31,9 @@ use hoshi_core::{
     PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository, SlashCommand, Snapshot,
     StreamDelta, StreamKind, TerminalAttach, ThreadContextUsage, ThreadItem, ThreadPullRequest,
     ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace, TurnFailure,
-    TurnOutcome, UsageLimits, WorkspaceEntry, decide, record_branch, record_output, record_title,
-    record_worktree, record_worktree_left, start_queued_turn, turn_failed,
+    TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn, decide,
+    record_branch, record_output, record_title, record_worktree, record_worktree_left,
+    start_queued_turn, turn_failed,
 };
 use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage};
 use hoshi_forge::{
@@ -258,12 +259,11 @@ impl Engine {
             .filter_map(|thread| Some((thread.id.clone(), thread.active_turn_id.clone()?)))
             .collect();
         for (thread_id, turn_id) in stale {
-            let outcome = TurnOutcome::Interrupted;
-            state.receive(
-                &thread_id,
-                &turn_id,
-                ProviderOutput::TurnCompleted { outcome },
-            );
+            let now = now();
+            let events = close_stale_turn(&state.model, &thread_id, &turn_id, &now);
+            if let Err(error) = state.commit(&events, &now) {
+                eprintln!("hoshi: failed to close a turn the app's close cut short: {error}");
+            }
         }
         // A task the close cut short answers once the user has it finish.
         state.delegations = state.pending_delegations();
@@ -1544,6 +1544,19 @@ impl State {
             } => Some((thread_id.clone(), request_id.clone(), response.clone())),
             _ => None,
         };
+        // A question whose turn is gone, as after a restart, is answered in a message.
+        let by_message = answer
+            .as_ref()
+            .and_then(|(thread_id, request_id, response)| {
+                if self.turns.contains_key(thread_id) {
+                    return None;
+                }
+                let asked = self.model.pending_request(request_id)?;
+                Some((
+                    thread_id.clone(),
+                    answers_message(&asked.content, response)?,
+                ))
+            });
         let freed_worktrees = self.worktrees_freed_by(&command);
         let freed_images = self.images_freed_by(&command);
         let now = now();
@@ -1559,6 +1572,14 @@ impl State {
             && let Some(turn) = self.turns.get(&thread_id)
         {
             turn.running.respond(&request_id, &response);
+        }
+        if let Some((thread_id, text)) = by_message {
+            self.run_command(Command::MessageSend {
+                thread_id,
+                message_id: delegation::new_id(),
+                text,
+                attachments: Vec::new(),
+            })?;
         }
         if let Some((thread_id, tool_use_id)) = stop
             && let Some(turn) = self.turns.get(&thread_id)
@@ -3194,6 +3215,72 @@ mod tests {
             Some(RequestStatus::Cancelled)
         );
         assert_eq!(engine.snapshot().threads[0].status, ThreadStatus::Idle);
+    }
+
+    #[test]
+    fn a_question_left_open_by_a_crash_is_answered_in_a_message() {
+        let dir = scratch_dir("crash-question");
+        let database = dir.join("state.sqlite");
+        let asked = vec![ProviderOutput::RequestOpened {
+            request_id: "q1".into(),
+            content: ItemContent::Questions {
+                questions: vec![hoshi_core::Question {
+                    header: "Color".into(),
+                    question: "Which color?".into(),
+                    options: Vec::new(),
+                    multi_select: false,
+                }],
+                status: RequestStatus::Pending,
+                answers: None,
+            },
+        }];
+        let harness = Harness::new(
+            "crash-question",
+            dir,
+            Store::open(&database).unwrap(),
+            asked,
+        );
+        harness.send("t", "m1", "paint it");
+        harness.wait_for(|event| match event {
+            Event::ThreadStatusSet { .. } => Some(()),
+            _ => None,
+        });
+        drop(harness);
+
+        let (sender, events) = mpsc::channel();
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::Event(envelope) = notification {
+                let _ = sender.send(envelope.event);
+            }
+        });
+        let data_dir = scratch_dir("crash-question-reopened");
+        let engine =
+            Engine::from_store(Store::open(&database).unwrap(), &data_dir, notify).unwrap();
+        let again = adapter(None);
+        engine.set_adapter(Some(again.clone()));
+        assert_eq!(engine.snapshot().pending_requests.len(), 1);
+        assert_eq!(engine.snapshot().threads[0].status, ThreadStatus::Idle);
+
+        engine
+            .dispatch(Command::RequestRespond {
+                thread_id: "t".into(),
+                request_id: "q1".into(),
+                response: RequestResponse::Answers {
+                    answers: vec!["Blue".into()],
+                },
+            })
+            .unwrap();
+        events
+            .iter()
+            .find(|event| matches!(event, Event::TurnStarted { .. }))
+            .unwrap();
+
+        assert!(engine.snapshot().pending_requests.is_empty());
+        assert_eq!(
+            again.requests.lock().unwrap()[0].prompt,
+            "Which color?
+Blue"
+        );
     }
 
     #[test]
