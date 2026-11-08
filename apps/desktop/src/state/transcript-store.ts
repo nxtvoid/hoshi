@@ -92,8 +92,14 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
     }
     const next = applyItemEvent(threadId, items, event)
     if (next === items && event.type !== 'turnCompleted') return
-    const finished =
-      event.type === 'itemAdded'
+    // A steer cuts short whatever the agent was still writing.
+    const steered =
+      event.type === 'itemAdded' &&
+      event.item.content.kind === 'userMessage' &&
+      event.item.content.steer
+    const finished = steered
+      ? Object.keys(streaming)
+      : event.type === 'itemAdded'
         ? [event.item.id]
         : event.type === 'toolCallCompleted'
           ? [event.itemId]

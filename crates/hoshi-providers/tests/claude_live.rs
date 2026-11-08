@@ -612,3 +612,75 @@ fn an_interrupted_turn_winds_down_on_its_own() {
         "a call cut by the stop shows as failed: {outputs:#?}"
     );
 }
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_message_is_answered_at_once_while_a_subagent_keeps_working() {
+    let cwd = scratch("steer-subagent");
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let (sender, receiver) = mpsc::channel();
+    let request = TurnRequest {
+        cwd: cwd.to_string_lossy().into_owned(),
+        prompt: "Use the Agent tool to launch one general-purpose subagent IN THE FOREGROUND whose job is to run `1..12 | % { Start-Sleep 1; \"tick $_\" }` (or `for i in $(seq 12); do sleep 1; echo tick $i; done`) and report the last line. Then tell me the last line.".into(),
+        attachments: Vec::new(),
+        resume_session_id: None,
+        model: None,
+        effort: Some(hoshi_core::Effort::Low),
+        fast_mode: false,
+        ultracode: false,
+        access_mode: AccessMode::FullAccess,
+        plan_mode: false,
+    };
+    let sink = Box::new(move |output| {
+        let _ = sender.send(output);
+    });
+    let turn = adapter.start_turn(request, sink).unwrap();
+    let mut agent: Option<String> = None;
+    let mut steered = false;
+    let mut outputs = Vec::new();
+    let started = std::time::Instant::now();
+    loop {
+        let Ok(output) = receiver.recv_timeout(std::time::Duration::from_millis(100)) else {
+            if agent.is_some() && !steered && started.elapsed() > std::time::Duration::from_secs(7)
+            {
+                assert!(turn.steer(
+                    "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+                    "Now just say HOLA.",
+                    &[]
+                ));
+                steered = true;
+            }
+            continue;
+        };
+        if let ProviderOutput::ToolCallStarted { item_id, name, .. } = &output
+            && name == "Agent"
+        {
+            agent = Some(item_id.clone());
+        }
+        let done = matches!(output, ProviderOutput::TurnCompleted { .. });
+        outputs.push(output);
+        if done {
+            break;
+        }
+    }
+
+    let agent = agent.unwrap_or_else(|| panic!("no subagent: {outputs:#?}"));
+    let hola = outputs.iter().position(|output| {
+        matches!(output, ProviderOutput::AssistantMessage { text, .. } if text.contains("HOLA"))
+    });
+    let agent_done = outputs.iter().position(|output| {
+        matches!(output, ProviderOutput::ToolCallCompleted { item_id, output, .. }
+            if *item_id == agent && !output.contains("Async agent launched"))
+    });
+    let hola = hola.unwrap_or_else(|| panic!("never said HOLA: {outputs:#?}"));
+    let agent_done = agent_done.unwrap_or_else(|| panic!("the subagent never ended: {outputs:#?}"));
+    assert!(
+        hola < agent_done,
+        "HOLA waited for the subagent: {outputs:#?}"
+    );
+    let completions = outputs
+        .iter()
+        .filter(|output| matches!(output, ProviderOutput::TurnCompleted { .. }))
+        .count();
+    assert_eq!(completions, 1, "{outputs:#?}");
+}

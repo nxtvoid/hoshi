@@ -25,7 +25,9 @@ pub(crate) fn conversation(items: &[ThreadItem]) -> (String, Vec<String>) {
     let sections: Vec<(bool, String)> = items
         .iter()
         .filter_map(|item| match &item.content {
-            ItemContent::UserMessage { text, attachments } => {
+            ItemContent::UserMessage {
+                text, attachments, ..
+            } => {
                 let names = image_names(attachments);
                 let mut body = text.trim().to_owned();
                 if !names.is_empty() {
@@ -102,6 +104,7 @@ mod tests {
         item(ItemContent::UserMessage {
             text: text.into(),
             attachments: Vec::new(),
+            steer: false,
         })
     }
 
@@ -113,6 +116,7 @@ mod tests {
     fn the_conversation_keeps_messages_and_names_images() {
         let items = [
             item(ItemContent::UserMessage {
+                steer: false,
                 text: "why is this red?".into(),
                 attachments: vec![MessageAttachment::Image {
                     id: "1".into(),

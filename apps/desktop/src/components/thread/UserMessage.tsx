@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { m } from '@/paraglide/messages'
+import { HugeiconsIcon } from '@hugeicons/react'
+import { ArrowTurnForwardIcon } from '@hugeicons/core-free-icons'
 import { knownMentions } from '@/lib/prompt-segments'
 import { useImageStore } from '@/state/image-store'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
@@ -11,15 +13,27 @@ type Image = Extract<MessageAttachment, { type: 'image' }>
 type UserMessageProps = {
   text: string
   attachments: MessageAttachment[]
+  /** Sent while the agent worked, to steer it. */
+  steer?: boolean
 }
 
-export function UserMessage({ text, attachments }: UserMessageProps) {
+export function UserMessage({ text, attachments, steer }: UserMessageProps) {
   const images = attachments.filter(
     (attachment): attachment is Image => attachment.type === 'image'
   )
 
   return (
     <div className='flex flex-col items-end gap-1.5'>
+      {steer ? (
+        <span className='text-muted-foreground flex items-center gap-1 text-xs'>
+          <HugeiconsIcon
+            icon={ArrowTurnForwardIcon}
+            strokeWidth={2}
+            className='size-3.5'
+          />
+          {m.message_steer()}
+        </span>
+      ) : null}
       {images.length > 0 ? (
         <ul className='flex max-w-[85%] flex-wrap justify-end gap-1.5'>
           {images.map((image) => (

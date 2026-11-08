@@ -885,7 +885,11 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     id: message_id.clone(),
                     thread_id: thread_id.clone(),
                     created_at: now.to_owned(),
-                    content: ItemContent::UserMessage { text, attachments },
+                    content: ItemContent::UserMessage {
+                        text,
+                        attachments,
+                        steer: thread.active_turn_id.is_some(),
+                    },
                 },
             });
             // A running turn takes the message in; the engine passes it on.
@@ -1625,6 +1629,7 @@ const a = 1
         assert!(matches!(
             events.as_slice(),
             [Event::ItemAdded { item }] if item.id == "m2"
+                && matches!(item.content, ItemContent::UserMessage { steer: true, .. })
         ));
         assert_eq!(
             model.thread("t").unwrap().active_turn_id.as_deref(),
@@ -1682,6 +1687,7 @@ const a = 1
             Event::ItemAdded { item } if item.content == ItemContent::UserMessage {
                 text: String::new(),
                 attachments: vec![image("screenshot.png")],
+                steer: false,
             }
         )));
     }

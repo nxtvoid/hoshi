@@ -211,7 +211,7 @@ describe('foldTurns', () => {
     id,
     threadId: 't',
     createdAt,
-    content: { kind: 'userMessage', text: id, attachments: [] }
+    content: { kind: 'userMessage', text: id, attachments: [], steer: false }
   })
   const answer = (id: string, createdAt: string): ThreadItem => ({
     ...text(id),

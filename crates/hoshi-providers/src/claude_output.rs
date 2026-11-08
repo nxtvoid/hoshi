@@ -75,6 +75,17 @@ impl LiveOutput {
         self.tasks().commands.contains_key(task_id)
     }
 
+    /// Whether a command or subagent runs, which a message sent now would move aside.
+    pub fn anything_running(&self) -> bool {
+        let tasks = self.tasks();
+        !tasks.commands.is_empty() || !tasks.agents.is_empty()
+    }
+
+    /// The commands running in the foreground, by task id.
+    pub fn commands(&self) -> Vec<String> {
+        self.tasks().commands.keys().cloned().collect()
+    }
+
     pub fn ended(&self, value: &Value) {
         if let Some(task_id) = value["task_id"].as_str() {
             let mut tasks = self.tasks();

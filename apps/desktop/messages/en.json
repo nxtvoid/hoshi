@@ -588,5 +588,6 @@
   "composer_steer_placeholder": "Add to what Claude is doing\u2026 it reads it at its next step",
   "working_for": "Working for {duration}",
   "stopping_for": "Stopping {duration}",
-  "turn_interrupted": "Turn interrupted"
+  "turn_interrupted": "Turn interrupted",
+  "message_steer": "Steer"
 }

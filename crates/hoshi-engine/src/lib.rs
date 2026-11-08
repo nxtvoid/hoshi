@@ -1036,7 +1036,10 @@ impl Engine {
                         ThreadItem {
                             id,
                             thread_id,
-                            content: ItemContent::UserMessage { text, attachments },
+                            content:
+                                ItemContent::UserMessage {
+                                    text, attachments, ..
+                                },
                             ..
                         },
                 } => {

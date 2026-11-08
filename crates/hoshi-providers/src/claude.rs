@@ -203,6 +203,9 @@ struct QueueState {
     closing: bool,
     /// The user asked the turn to stop.
     interrupted: bool,
+    /// Commands a message moved to the background, by task id: the turn waits for them, as
+    /// it would have had they stayed in the foreground.
+    moved: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -249,10 +252,23 @@ impl RunningTurn for ClaudeTurn {
         });
     }
 
+    /// The agent reads the message at once: what runs in the foreground moves to the
+    /// background first and keeps running, rather than being cut by the message.
     fn steer(&self, message_id: &str, prompt: &str, attachments: &[TurnAttachment]) -> bool {
         let mut queue = self.queue.state();
         if queue.closing || queue.interrupted {
             return false;
+        }
+        let stdin = self.process.stdin();
+        if self.live_output.anything_running() {
+            let move_aside = json!({
+                "type": "control_request",
+                "request_id": format!("hoshi-background:{message_id}"),
+                "request": { "subtype": "background_tasks" },
+            });
+            if stdin.write_line(&move_aside.to_string()) {
+                queue.moved.extend(self.live_output.commands());
+            }
         }
         let message = json!({
             "type": "user",
@@ -262,8 +278,9 @@ impl RunningTurn for ClaudeTurn {
             },
             "parent_tool_use_id": null,
             "uuid": message_id,
+            "priority": "now",
         });
-        let sent = self.process.stdin().write_line(&message.to_string());
+        let sent = stdin.write_line(&message.to_string());
         if sent {
             queue.waiting.insert(message_id.to_owned());
         }
@@ -386,12 +403,16 @@ impl ClaudeParser {
                     return self.background_agent_ended(&value);
                 }
                 Some("background_tasks_changed") => {
+                    let moved = self.queue.state().moved.clone();
                     self.background_agents = value["tasks"]
                         .as_array()
                         .into_iter()
                         .flatten()
-                        .filter(|task| task["task_type"] == "local_agent")
-                        .filter_map(|task| task["task_id"].as_str().map(str::to_owned))
+                        .filter_map(|task| {
+                            let id = task["task_id"].as_str()?;
+                            (task["task_type"] == "local_agent" || moved.contains(id))
+                                .then(|| id.to_owned())
+                        })
                         .collect();
                     return Vec::new();
                 }
@@ -458,8 +479,10 @@ impl ClaudeParser {
                 outputs
             }
             Some("command_lifecycle") => {
-                if matches!(value["state"].as_str(), Some("started" | "completed"))
-                    && let Some(message_id) = value["command_uuid"].as_str()
+                if matches!(
+                    value["state"].as_str(),
+                    Some("started" | "completed" | "cancelled")
+                ) && let Some(message_id) = value["command_uuid"].as_str()
                 {
                     self.queue.state().waiting.remove(message_id);
                 }
@@ -966,6 +989,31 @@ mod tests {
             }]
         ));
         assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn a_command_moved_aside_by_a_message_keeps_the_turn_going() {
+        let mut parser = ClaudeParser::new(None);
+        parser.queue.state().moved.insert("b1".into());
+        parser.parse_line(
+            &json!({ "type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{ "task_id": "b1", "task_type": "local_bash" },
+                          { "task_id": "b2", "task_type": "local_bash" }] })
+            .to_string(),
+        );
+        let result =
+            json!({ "type": "result", "subtype": "success", "is_error": false }).to_string();
+        assert!(parser.parse_line(&result).is_empty());
+
+        parser.parse_line(
+            &json!({ "type": "system", "subtype": "background_tasks_changed",
+                "tasks": [{ "task_id": "b2", "task_type": "local_bash" }] })
+            .to_string(),
+        );
+        assert!(matches!(
+            parser.parse_line(&result).as_slice(),
+            [ProviderOutput::TurnCompleted { .. }]
+        ));
     }
 
     #[test]

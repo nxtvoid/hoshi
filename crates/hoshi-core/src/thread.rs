@@ -161,6 +161,9 @@ pub enum ItemContent {
         text: String,
         #[serde(default)]
         attachments: Vec<MessageAttachment>,
+        /// Sent while the agent worked, to steer the running turn.
+        #[serde(default)]
+        steer: bool,
     },
     AssistantMessage {
         text: String,

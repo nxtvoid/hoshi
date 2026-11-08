@@ -7,7 +7,11 @@ import type { Task } from "./Task";
 import type { ToolDetail } from "./ToolDetail";
 import type { TurnFailure } from "./TurnFailure";
 
-export type ItemContent = { "kind": "userMessage", text: string, attachments: Array<MessageAttachment>, } | { "kind": "assistantMessage", text: string, } | { "kind": "reasoning", text: string, } | { "kind": "toolCall", name: string, 
+export type ItemContent = { "kind": "userMessage", text: string, attachments: Array<MessageAttachment>, 
+/**
+ * Sent while the agent worked, to steer the running turn.
+ */
+steer: boolean, } | { "kind": "assistantMessage", text: string, } | { "kind": "reasoning", text: string, } | { "kind": "toolCall", name: string, 
 /**
  * The tool input as JSON, truncated for display.
  */

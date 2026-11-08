@@ -306,7 +306,11 @@ const Item = memo(function Item({
   switch (content.kind) {
     case 'userMessage':
       return (
-        <UserMessage text={content.text} attachments={content.attachments} />
+        <UserMessage
+          text={content.text}
+          attachments={content.attachments}
+          steer={content.steer}
+        />
       )
     case 'assistantMessage':
       return <Markdown text={content.text} />
