@@ -28,7 +28,7 @@ use hoshi_core::{
     StreamDelta, StreamKind, TerminalAttach, ThreadContextUsage, ThreadItem, ThreadPullRequest,
     ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace, TurnFailure,
     TurnOutcome, UsageLimits, WorkspaceEntry, decide, record_branch, record_output, record_title,
-    record_worktree, record_worktree_left, turn_failed,
+    record_worktree, record_worktree_left, start_queued_turn, turn_failed,
 };
 use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage};
 use hoshi_forge::{
@@ -44,7 +44,7 @@ use pull_request_cache::{PullRequestCache, Version};
 use pull_requests::PullRequestSync;
 use refreshing::Refreshing;
 use secrets::SecretKey;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak, mpsc};
 use std::thread;
@@ -143,6 +143,16 @@ struct State {
     provider_version: Option<ProviderVersion>,
     /// Where each thread's agent last moved its session, until git confirmed it.
     session_moves: HashMap<String, String>,
+    /// Messages sent while a thread's turn was ending, too late to join it, oldest first.
+    /// Each starts a turn of its own once the running one ends.
+    queued: HashMap<String, VecDeque<QueuedMessage>>,
+}
+
+/// A message waiting for the thread's running turn to end.
+struct QueuedMessage {
+    id: String,
+    text: String,
+    attachments: Vec<MessageAttachment>,
 }
 
 /// A thread whose pull request is due to be read.
@@ -228,6 +238,7 @@ impl Engine {
             usage_checked_at: None,
             provider_version: None,
             session_moves: HashMap::new(),
+            queued: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -1007,7 +1018,8 @@ impl Engine {
         let events = decide(&state.model, command, &now)?;
         state.commit(&events, &now)?;
 
-        let mut message = None;
+        let mut message: Option<QueuedMessage> = None;
+        let mut joining: Option<String> = None;
         let titled: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
@@ -1022,11 +1034,18 @@ impl Engine {
                 Event::ItemAdded {
                     item:
                         ThreadItem {
+                            id,
+                            thread_id,
                             content: ItemContent::UserMessage { text, attachments },
                             ..
                         },
                 } => {
-                    message = Some((text.clone(), attachments.clone()));
+                    message = Some(QueuedMessage {
+                        id: id.clone(),
+                        text: text.clone(),
+                        attachments: attachments.clone(),
+                    });
+                    joining = Some(thread_id.clone());
                     if let Some((thread_id, provisional)) = titled.first() {
                         let request = TitleRequest {
                             context: text.clone(),
@@ -1041,15 +1060,11 @@ impl Engine {
                 Event::TurnStarted {
                     thread_id, turn_id, ..
                 } => {
-                    let (prompt, attachments) = message.take().unwrap_or_default();
-                    start_turn(
-                        &self.state,
-                        &mut state,
-                        thread_id,
-                        turn_id,
-                        prompt,
-                        attachments,
-                    );
+                    let started = message.take();
+                    let (prompt, attachments) = started
+                        .map(|message| (message.text, message.attachments))
+                        .unwrap_or_default();
+                    start_turn(&mut state, thread_id, turn_id, prompt, attachments);
                 }
                 Event::ThreadCreated { thread } if thread.worktree_path.is_none() => {
                     refresh_branches(state.this.clone(), vec![thread.id.clone()]);
@@ -1073,6 +1088,9 @@ impl Engine {
                 }
                 _ => {}
             }
+        }
+        if let (Some(message), Some(thread_id)) = (message, joining) {
+            state.join_turn(&thread_id, message);
         }
         if let Some(thread_id) = interrupt
             && let Some(turn) = state.turns.get(&thread_id)
@@ -1576,6 +1594,12 @@ impl State {
             workspace.record_tool_input(input);
         }
         let completed = matches!(output, ProviderOutput::TurnCompleted { .. });
+        let stopped = matches!(
+            output,
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted
+            }
+        );
         let now = now();
         let events = record_output(&self.model, thread_id, turn_id, output, &now);
         if let Err(error) = self.commit(&events, &now) {
@@ -1594,7 +1618,72 @@ impl State {
             // The agent may have created a worktree or switched branches.
             let check = workspace.map(|workspace| self.worktree_check(thread_id, workspace));
             refresh_after_turn(self.this.clone(), thread_id.to_owned(), check);
+            self.start_next_queued(thread_id, stopped);
         }
+    }
+
+    /// Passes a message sent to a busy thread on to its running turn, or keeps it for a turn
+    /// of its own when the turn is ending.
+    fn join_turn(&mut self, thread_id: &str, message: QueuedMessage) {
+        let attachments = self.turn_attachments(message.attachments.clone());
+        let joined = self
+            .turns
+            .get(thread_id)
+            .is_some_and(|turn| turn.running.steer(&message.id, &message.text, &attachments));
+        if joined {
+            return;
+        }
+        self.queued
+            .entry(thread_id.to_owned())
+            .or_default()
+            .push_back(message);
+        // The turn may have ended between the message's events and this call.
+        if !self.turns.contains_key(thread_id) {
+            self.start_next_queued(thread_id, false);
+        }
+    }
+
+    /// Starts the oldest message waiting for its own turn. A turn the user stopped drops them:
+    /// they were sent to the turn just stopped.
+    fn start_next_queued(&mut self, thread_id: &str, stopped: bool) {
+        if stopped {
+            self.queued.remove(thread_id);
+            return;
+        }
+        let Some(message) = self.queued.get_mut(thread_id).and_then(VecDeque::pop_front) else {
+            return;
+        };
+        let now = now();
+        let events = start_queued_turn(&self.model, thread_id, &message.id, &now);
+        if events.is_empty() {
+            return;
+        }
+        if let Err(error) = self.commit(&events, &now) {
+            eprintln!("hoshi: failed to start a queued message: {error}");
+            return;
+        }
+        start_turn(
+            self,
+            thread_id,
+            &message.id,
+            message.text,
+            message.attachments,
+        );
+    }
+
+    fn turn_attachments(&self, attachments: Vec<MessageAttachment>) -> Vec<TurnAttachment> {
+        attachments
+            .into_iter()
+            .map(|attachment| TurnAttachment {
+                path: match &attachment {
+                    MessageAttachment::Image { id, mime_type, .. } => {
+                        self.attachments.path(id, mime_type)
+                    }
+                    _ => None,
+                },
+                attachment,
+            })
+            .collect()
     }
 
     /// Asks the provider for a title in the background, retrying a first title twice.
@@ -2156,7 +2245,6 @@ fn slug(title: &str) -> String {
 }
 
 fn start_turn(
-    shared: &Arc<Mutex<State>>,
     state: &mut State,
     thread_id: &str,
     turn_id: &str,
@@ -2188,18 +2276,7 @@ fn start_turn(
             moved: false,
         })
     });
-    let attachments = attachments
-        .into_iter()
-        .map(|attachment| TurnAttachment {
-            path: match &attachment {
-                MessageAttachment::Image { id, mime_type, .. } => {
-                    state.attachments.path(id, mime_type)
-                }
-                _ => None,
-            },
-            attachment,
-        })
-        .collect();
+    let attachments = state.turn_attachments(attachments);
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
@@ -2212,7 +2289,7 @@ fn start_turn(
         access_mode: thread.access_mode,
         plan_mode: thread.plan_mode,
     };
-    let weak: Weak<Mutex<State>> = Arc::downgrade(shared);
+    let weak: Weak<Mutex<State>> = state.this.clone();
     let (sink_thread, sink_turn) = (thread_id.to_owned(), turn_id.to_owned());
     let sink = Box::new(move |output| {
         if let Some(shared) = weak.upgrade() {
@@ -2412,16 +2489,29 @@ mod tests {
         title: Option<String>,
         /// What the user answered the turns' requests, by request id.
         responses: Arc<Mutex<Vec<(String, RequestResponse)>>>,
+        /// Messages that joined a running turn, by id; `None` refuses them all.
+        steers: Option<Arc<Mutex<Vec<String>>>>,
+        /// Ends each waiting turn, in the order they started.
+        finishers: Mutex<Vec<Sender<TurnOutcome>>>,
     }
 
     struct FakeTurn {
-        stop: Sender<()>,
+        stop: Sender<TurnOutcome>,
         responses: Arc<Mutex<Vec<(String, RequestResponse)>>>,
+        steers: Option<Arc<Mutex<Vec<String>>>>,
     }
 
     impl RunningTurn for FakeTurn {
         fn interrupt(&self) {
-            let _ = self.stop.send(());
+            let _ = self.stop.send(TurnOutcome::Interrupted);
+        }
+
+        fn steer(&self, message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
+            let Some(steers) = &self.steers else {
+                return false;
+            };
+            steers.lock().unwrap().push(message_id.to_owned());
+            true
         }
 
         fn respond(&self, request_id: &str, response: &RequestResponse) {
@@ -2474,10 +2564,10 @@ mod tests {
                 })
                 .collect();
             let (stop, stopped) = mpsc::channel();
+            self.finishers.lock().unwrap().push(stop.clone());
             thread::spawn(move || {
                 if script.is_empty() {
-                    let _ = stopped.recv();
-                    let outcome = TurnOutcome::Interrupted;
+                    let outcome = stopped.recv().unwrap_or(TurnOutcome::Interrupted);
                     sink(ProviderOutput::TurnCompleted { outcome });
                 }
                 script.into_iter().for_each(&mut sink);
@@ -2485,6 +2575,7 @@ mod tests {
             Ok(Box::new(FakeTurn {
                 stop,
                 responses: self.responses.clone(),
+                steers: self.steers.clone(),
             }))
         }
     }
@@ -2653,6 +2744,8 @@ mod tests {
                 script,
                 title: None,
                 responses: Arc::default(),
+                steers: None,
+                finishers: Mutex::default(),
             });
             engine.set_adapter(Some(adapter.clone()));
             let root = dunce::canonicalize(root)
@@ -2854,6 +2947,8 @@ mod tests {
             script: completed_turn(),
             title: Some("Empty TSX Snippet".into()),
             responses: Arc::default(),
+            steers: None,
+            finishers: Mutex::default(),
         })));
         harness
     }
@@ -3061,6 +3156,79 @@ mod tests {
         assert_eq!(detail_of(listed), Some(change.summary()));
         let whole = harness.engine.thread_item("t", "edit").unwrap().unwrap();
         assert_eq!(detail_of(&whole), Some(change));
+    }
+
+    fn adapter(steers: Option<Arc<Mutex<Vec<String>>>>) -> Arc<FakeAdapter> {
+        Arc::new(FakeAdapter {
+            requests: Mutex::new(Vec::new()),
+            script: Vec::new(),
+            title: None,
+            responses: Arc::default(),
+            steers,
+            finishers: Mutex::default(),
+        })
+    }
+
+    fn finish(adapter: &FakeAdapter, turn: usize, outcome: TurnOutcome) {
+        let finisher = adapter.finishers.lock().unwrap()[turn].clone();
+        finisher.send(outcome).unwrap();
+    }
+
+    #[test]
+    fn a_message_to_a_working_thread_joins_its_turn() {
+        let harness = Harness::in_memory("steer", Vec::new());
+        let steers = Arc::<Mutex<Vec<String>>>::default();
+        let adapter = adapter(Some(steers.clone()));
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+
+        assert_eq!(*steers.lock().unwrap(), ["m2"]);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_message_too_late_for_its_turn_starts_the_next_one() {
+        let harness = Harness::in_memory("late-message", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } if turn_id == "m2" => Some(()),
+            _ => None,
+        });
+
+        assert_eq!(harness.thread("t").active_turn_id.as_deref(), Some("m2"));
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].prompt, "also this");
+    }
+
+    #[test]
+    fn stopping_a_turn_drops_the_messages_waiting_for_it() {
+        let harness = Harness::in_memory("stopped-queue", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+
+        harness
+            .engine
+            .dispatch(Command::TurnInterrupt {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        harness.wait_for_turn_end();
+
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+        assert_eq!(harness.thread("t").active_turn_id, None);
     }
 
     #[test]

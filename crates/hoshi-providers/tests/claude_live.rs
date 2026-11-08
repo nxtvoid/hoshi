@@ -506,3 +506,94 @@ fn a_turn_waits_for_a_background_subagent() {
         .any(|output| matches!(output, ProviderOutput::AssistantMessage { .. }));
     assert!(answered_after, "{outputs:#?}");
 }
+
+/// Starts a turn running a slow command, calls `act` on it after `after`, and collects
+/// everything until it ends.
+fn run_acting(
+    name: &str,
+    after: std::time::Duration,
+    act: impl FnOnce(&dyn hoshi_providers::RunningTurn),
+) -> (Vec<ProviderOutput>, std::time::Duration) {
+    let cwd = scratch(name);
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let (sender, receiver) = mpsc::channel();
+    let request = TurnRequest {
+        cwd: cwd.to_string_lossy().into_owned(),
+        prompt: "Run this exact shell command in the foreground: `1..12 | % { Start-Sleep 1; \"tick $_\" }` (or `for i in $(seq 12); do sleep 1; echo tick $i; done`). Then reply with the last line it printed.".into(),
+        attachments: Vec::new(),
+        resume_session_id: None,
+        model: None,
+        effort: Some(hoshi_core::Effort::Low),
+        fast_mode: false,
+        ultracode: false,
+        access_mode: AccessMode::FullAccess,
+        plan_mode: false,
+    };
+    let sink = Box::new(move |output| {
+        let _ = sender.send(output);
+    });
+    let turn = adapter.start_turn(request, sink).unwrap();
+    let started = std::time::Instant::now();
+    let mut act = Some(act);
+    let mut acted_at = None;
+    let mut outputs = Vec::new();
+    loop {
+        if let Ok(output) = receiver.recv_timeout(std::time::Duration::from_millis(100)) {
+            let done = matches!(output, ProviderOutput::TurnCompleted { .. });
+            outputs.push(output);
+            if done {
+                break;
+            }
+        }
+        if started.elapsed() > after
+            && let Some(act) = act.take()
+        {
+            act(turn.as_ref());
+            acted_at = Some(std::time::Instant::now());
+        }
+    }
+    let since_act = acted_at.map(|at| at.elapsed()).unwrap_or_default();
+    (outputs, since_act)
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_message_sent_mid_turn_reaches_the_agent() {
+    let (outputs, _) = run_acting("steer", std::time::Duration::from_secs(4), |turn| {
+        assert!(turn.steer(
+            "5b8f3c2e-1d4a-4e6b-9f70-2a1c3d4e5f60",
+            "Also: end your reply with the word BANANA.",
+            &[]
+        ));
+    });
+
+    let completions = outputs
+        .iter()
+        .filter(|output| matches!(output, ProviderOutput::TurnCompleted { .. }))
+        .count();
+    let banana = outputs.iter().any(|output| {
+        matches!(output, ProviderOutput::AssistantMessage { text, .. } if text.contains("BANANA"))
+    });
+    assert_eq!(completions, 1, "{outputs:#?}");
+    assert!(banana, "{outputs:#?}");
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn an_interrupted_turn_winds_down_on_its_own() {
+    let (outputs, since_interrupt) =
+        run_acting("interrupt", std::time::Duration::from_secs(5), |turn| {
+            turn.interrupt()
+        });
+
+    assert!(matches!(
+        outputs.last(),
+        Some(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Interrupted
+        })
+    ));
+    assert!(
+        since_interrupt < std::time::Duration::from_secs(4),
+        "it took {since_interrupt:?}, so it was killed"
+    );
+}

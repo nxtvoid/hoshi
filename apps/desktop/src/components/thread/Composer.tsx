@@ -111,12 +111,11 @@ export function Composer({
   const requestActions = useRequestActions(request)
   const { text } = snapshot
   const answering = request !== null && text.trim() !== ''
+  const written = text.trim() !== '' || images.saved.length > 0
+  /** A message sent while the agent works joins its turn. */
   const canSend = request
     ? answering && !sending
-    : (text.trim() !== '' || images.saved.length > 0) &&
-      !images.saving &&
-      !working &&
-      !sending
+    : written && !images.saving && !sending
   const hero = variant === 'hero'
   const stacked = hero || tall
 
@@ -364,7 +363,7 @@ export function Composer({
   )
 
   const action =
-    working && !answering ? (
+    working && !answering && !written ? (
       <Button
         type='button'
         size='icon-sm'
@@ -444,7 +443,7 @@ export function Composer({
             <div ref={editorBoxRef} className='min-w-0 flex-1'>
               <ComposerEditor
                 ref={editorRef}
-                placeholder={placeholder(request?.content.kind)}
+                placeholder={placeholder(request?.content.kind, working)}
                 label={m.composer_label()}
                 className='max-h-60 overflow-y-auto'
                 contentClassName={hero ? 'min-h-16 py-2' : 'min-h-8 py-1.5'}
@@ -521,7 +520,8 @@ function ComposerFooter() {
 }
 
 function placeholder(
-  request: 'approval' | 'questions' | 'proposedPlan' | undefined
+  request: 'approval' | 'questions' | 'proposedPlan' | undefined,
+  working: boolean
 ) {
   switch (request) {
     case 'approval':
@@ -531,7 +531,7 @@ function placeholder(
     case 'proposedPlan':
       return m.request_plan_placeholder()
     case undefined:
-      return m.composer_placeholder()
+      return working ? m.composer_steer_placeholder() : m.composer_placeholder()
   }
 }
 

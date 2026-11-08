@@ -143,6 +143,12 @@ pub trait RunningTurn: Send {
     /// Stops the subagent that call `tool_use_id` started; the turn goes on. Ignored when it
     /// already ended or the provider can't stop one alone.
     fn stop_subagent(&self, _tool_use_id: &str) {}
+
+    /// Gives the running turn another message, which the agent reads at its next step.
+    /// `false` when the turn is ending and can't take it: it then needs a turn of its own.
+    fn steer(&self, _message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
+        false
+    }
 }
 
 /// Truncates long tool inputs and outputs so a transcript stays light.

@@ -10,7 +10,7 @@ use crate::claude_usage;
 use crate::process::{ProcessTurn, hide_console, spawn_turn};
 use crate::{
     GeneratedTitle, Installation, OutputSink, ProviderAdapter, RunningTurn, TitleRequest,
-    TurnRequest, truncate,
+    TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
     AccessMode, ContextUsage, ProviderModels, ProviderOutput, RequestResponse, SlashCommand,
@@ -20,7 +20,9 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const TOOL_INPUT_MAX_CHARS: usize = 2_000;
@@ -127,6 +129,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .arg("--include-partial-messages")
             .args(["--thinking-display", "summarized"])
             .args(["--permission-prompt-tool", "stdio"])
+            // Reports when each message sent mid-turn is taken in, to know when a turn is over.
+            .arg("--replay-user-messages")
             // `-p` leaves the task list tools out unless asked for.
             .env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
             .args(["--permission-mode", access.permission_mode()]);
@@ -160,10 +164,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         });
         let requests = Requests::default();
         let live_output = LiveOutput::default();
+        let queue = Queue::default();
         let mut parser = ClaudeParser {
             access,
             requests: requests.clone(),
             live_output: live_output.clone(),
+            queue: queue.clone(),
             ..ClaudeParser::new(manifest().context_window(&turn_model.slug))
         };
         let process = spawn_turn(command, input.to_string(), sink, move |line, stdin| {
@@ -180,7 +186,33 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             grants: self.grants.clone(),
             access,
             live_output,
+            queue,
         }))
+    }
+}
+
+/// How long a turn asked to stop may take to wind down before its process is killed.
+const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
+
+/// Messages sent to a running turn, and whether it may still take them.
+#[derive(Debug, Default)]
+struct QueueState {
+    /// Sent, but not yet taken in by the agent, by message id.
+    waiting: HashSet<String>,
+    /// The turn reported its end: its stdin closes, so nothing more can join.
+    closing: bool,
+    /// The user asked the turn to stop.
+    interrupted: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Queue(Arc<Mutex<QueueState>>);
+
+impl Queue {
+    fn state(&self) -> MutexGuard<'_, QueueState> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -190,11 +222,52 @@ struct ClaudeTurn {
     grants: Grants,
     access: Access,
     live_output: LiveOutput,
+    queue: Queue,
 }
 
 impl RunningTurn for ClaudeTurn {
+    /// Asks Claude Code to stop, which lets it record the stop in its session; kills it when it
+    /// takes too long.
     fn interrupt(&self) {
-        self.process.interrupt();
+        let request = json!({
+            "type": "control_request",
+            "request_id": "hoshi-interrupt",
+            "request": { "subtype": "interrupt" },
+        });
+        self.queue.state().interrupted = true;
+        let stdin = self.process.stdin().clone();
+        if !stdin.write_line(&request.to_string()) {
+            self.process.interrupt();
+            return;
+        }
+        let process = self.process.clone();
+        thread::spawn(move || {
+            thread::sleep(INTERRUPT_GRACE);
+            if stdin.is_open() {
+                process.interrupt();
+            }
+        });
+    }
+
+    fn steer(&self, message_id: &str, prompt: &str, attachments: &[TurnAttachment]) -> bool {
+        let mut queue = self.queue.state();
+        if queue.closing || queue.interrupted {
+            return false;
+        }
+        let message = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": claude_prompt::message_content(prompt, attachments),
+            },
+            "parent_tool_use_id": null,
+            "uuid": message_id,
+        });
+        let sent = self.process.stdin().write_line(&message.to_string());
+        if sent {
+            queue.waiting.insert(message_id.to_owned());
+        }
+        sent
     }
 
     fn respond(&self, request_id: &str, response: &RequestResponse) {
@@ -260,6 +333,7 @@ pub struct ClaudeParser {
     /// Calls that change the task list Claude Code keeps on disk, by id.
     task_calls: HashSet<String>,
     live_output: LiveOutput,
+    queue: Queue,
     /// Subagents running in the background, by task id. A turn that ends while they run
     /// is not over: Claude Code goes on once they finish, in a turn of its own.
     background_agents: HashSet<String>,
@@ -365,12 +439,29 @@ impl ClaudeParser {
                 .collect(),
             Some("result") => {
                 let mut outputs: Vec<_> = self.reported_window(&value).into_iter().collect();
-                if self.background_agents.is_empty() {
+                let mut queue = self.queue.state();
+                // A message not yet taken in, or a subagent still working, gets another run.
+                let over = queue.interrupted
+                    || (queue.waiting.is_empty() && self.background_agents.is_empty());
+                if over {
+                    queue.closing = true;
                     outputs.push(ProviderOutput::TurnCompleted {
-                        outcome: parse_result(&value),
+                        outcome: if queue.interrupted {
+                            TurnOutcome::Interrupted
+                        } else {
+                            parse_result(&value)
+                        },
                     });
                 }
                 outputs
+            }
+            Some("command_lifecycle") => {
+                if matches!(value["state"].as_str(), Some("started" | "completed"))
+                    && let Some(message_id) = value["command_uuid"].as_str()
+                {
+                    self.queue.state().waiting.remove(message_id);
+                }
+                Vec::new()
             }
             _ => Vec::new(),
         }
@@ -835,6 +926,44 @@ mod tests {
             continued.as_slice(),
             [ProviderOutput::TurnCompleted {
                 outcome: TurnOutcome::Completed
+            }]
+        ));
+    }
+
+    #[test]
+    fn a_turn_goes_on_while_a_message_sent_to_it_waits() {
+        let mut parser = ClaudeParser::new(None);
+        parser.queue.state().waiting.insert("m2".into());
+        let result =
+            json!({ "type": "result", "subtype": "success", "is_error": false }).to_string();
+
+        assert!(parser.parse_line(&result).is_empty());
+        parser.parse_line(
+            &json!({ "type": "command_lifecycle", "command_uuid": "m2", "state": "started" })
+                .to_string(),
+        );
+        assert!(matches!(
+            parser.parse_line(&result).as_slice(),
+            [ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed
+            }]
+        ));
+        assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn an_interrupted_turn_ends_at_its_result_as_interrupted() {
+        let mut parser = ClaudeParser::new(None);
+        parser.queue.state().interrupted = true;
+        parser.queue.state().waiting.insert("m2".into());
+        let result = json!({ "type": "result", "subtype": "error_during_execution",
+            "is_error": true })
+        .to_string();
+
+        assert!(matches!(
+            parser.parse_line(&result).as_slice(),
+            [ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted
             }]
         ));
     }

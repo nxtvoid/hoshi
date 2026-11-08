@@ -584,5 +584,6 @@
   "subagent_prompt": "What it was asked",
   "subagent_no_activity": "No activity yet",
   "subagent_stop": "Stop this subagent",
-  "tool_stopped": "Stopped"
+  "tool_stopped": "Stopped",
+  "composer_steer_placeholder": "Add to what Claude is doing\u2026 it reads it at its next step"
 }

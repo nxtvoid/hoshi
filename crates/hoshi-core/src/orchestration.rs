@@ -74,6 +74,7 @@ pub enum Command {
         access_mode: AccessMode,
         plan_mode: bool,
     },
+    /// Starts a turn, or joins the running one: the agent reads it at its next step.
     MessageSend {
         thread_id: String,
         message_id: String,
@@ -853,9 +854,6 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
-            if thread.active_turn_id.is_some() {
-                return Err(CommandError::ThreadBusy { thread_id });
-            }
             let text = text.trim().to_owned();
             let images = attachments
                 .iter()
@@ -890,11 +888,14 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     content: ItemContent::UserMessage { text, attachments },
                 },
             });
-            events.push(Event::TurnStarted {
-                thread_id,
-                turn_id: message_id,
-                at: now.to_owned(),
-            });
+            // A running turn takes the message in; the engine passes it on.
+            if thread.active_turn_id.is_none() {
+                events.push(Event::TurnStarted {
+                    thread_id,
+                    turn_id: message_id,
+                    at: now.to_owned(),
+                });
+            }
             Ok(events)
         }
         Command::TurnInterrupt { thread_id } => {
@@ -1307,6 +1308,24 @@ pub fn record_worktree_left(
     }
 }
 
+/// Starts a turn for a message sent while the previous turn was ending, too late to join
+/// it. Nothing when the thread is gone or busy again.
+pub fn start_queued_turn(
+    model: &ReadModel,
+    thread_id: &str,
+    message_id: &str,
+    now: &str,
+) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.active_turn_id.is_none() => vec![Event::TurnStarted {
+            thread_id: thread_id.to_owned(),
+            turn_id: message_id.to_owned(),
+            at: now.to_owned(),
+        }],
+        _ => Vec::new(),
+    }
+}
+
 /// The failure recorded when a turn cannot start at all.
 pub fn turn_failed(reason: TurnFailure) -> ProviderOutput {
     ProviderOutput::TurnCompleted {
@@ -1592,18 +1611,33 @@ const a = 1
     }
 
     #[test]
-    fn a_busy_thread_rejects_another_message() {
+    fn a_message_to_a_busy_thread_joins_its_turn() {
         let mut model = model_with_thread();
         run(&mut model, send("m1", "first")).unwrap();
 
-        let error = run(&mut model, send("m2", "second")).unwrap_err();
+        let events = run(&mut model, send("m2", "second")).unwrap();
 
+        assert!(matches!(
+            events.as_slice(),
+            [Event::ItemAdded { item }] if item.id == "m2"
+        ));
         assert_eq!(
-            error,
-            CommandError::ThreadBusy {
-                thread_id: "t".into()
-            }
+            model.thread("t").unwrap().active_turn_id.as_deref(),
+            Some("m1")
         );
+        assert!(start_queued_turn(&model, "t", "m2", NOW).is_empty());
+
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+        assert!(matches!(
+            start_queued_turn(&model, "t", "m2", NOW).as_slice(),
+            [Event::TurnStarted { turn_id, .. }] if turn_id == "m2"
+        ));
     }
 
     #[test]

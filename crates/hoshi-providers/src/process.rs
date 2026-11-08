@@ -9,6 +9,7 @@ use std::thread;
 const STDERR_TAIL_BYTES: usize = 2_000;
 
 /// One agent process running one turn. Dropping it does not stop the process.
+#[derive(Clone)]
 pub struct ProcessTurn {
     child: Arc<Mutex<Child>>,
     pid: u32,
