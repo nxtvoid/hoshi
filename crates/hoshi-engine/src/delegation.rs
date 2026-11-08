@@ -3,7 +3,7 @@
 
 use crate::{State, now};
 use hoshi_core::{
-    Command, Effort, ThreadStatus, ThreadWorkspace, TurnOutcome, record_delegation,
+    Command, Effort, ModelInfo, ThreadStatus, ThreadWorkspace, TurnOutcome, record_delegation,
     send_task_result,
 };
 use serde_json::{Value, json};
@@ -57,6 +57,37 @@ pub(crate) fn new_id() -> String {
     )
 }
 
+/// The slug of the model `wanted` names among `models`: by slug or name, or as a family,
+/// such as "haiku", whose newest model the catalog lists first.
+fn pick_model(models: &[ModelInfo], wanted: &str) -> Result<String, String> {
+    if models.is_empty() {
+        return Ok(wanted.to_owned());
+    }
+    let family = wanted.to_lowercase();
+    models
+        .iter()
+        .find(|model| {
+            [&model.slug, &model.name, &model.short_name]
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(wanted))
+        })
+        .or_else(|| {
+            models.iter().find(|model| {
+                !model.legacy
+                    && !model.update_required
+                    && model.slug.to_lowercase().contains(&family)
+            })
+        })
+        .map(|model| model.slug.clone())
+        .ok_or_else(|| {
+            let known: Vec<_> = models.iter().map(|model| model.slug.as_str()).collect();
+            format!(
+                "there is no model {wanted}; use one of {}",
+                known.join(", ")
+            )
+        })
+}
+
 impl State {
     /// How many delegations led to `thread_id`: 0 for a thread the user started.
     pub(crate) fn depth(&self, thread_id: &str) -> usize {
@@ -100,30 +131,12 @@ impl State {
             .collect()
     }
 
-    /// The slug of the model the agent named, by slug or name.
+    /// The slug of the model the agent named, by slug, name or family.
     fn model_slug(&self, wanted: &str) -> Result<String, String> {
-        let Some(adapter) = &self.adapter else {
-            return Ok(wanted.to_owned());
-        };
-        let models = adapter.models().models;
-        if models.is_empty() {
-            return Ok(wanted.to_owned());
+        match &self.adapter {
+            Some(adapter) => pick_model(&adapter.models().models, wanted),
+            None => Ok(wanted.to_owned()),
         }
-        models
-            .iter()
-            .find(|model| {
-                [&model.slug, &model.name, &model.short_name]
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(wanted))
-            })
-            .map(|model| model.slug.clone())
-            .ok_or_else(|| {
-                let known: Vec<_> = models.iter().map(|model| model.slug.as_str()).collect();
-                format!(
-                    "there is no model {wanted}; use one of {}",
-                    known.join(", ")
-                )
-            })
     }
 
     /// A tool call from the agent of thread `caller`.
@@ -326,5 +339,49 @@ impl State {
             return;
         }
         self.react(&events);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(slug: &str, name: &str, legacy: bool) -> ModelInfo {
+        ModelInfo {
+            slug: slug.into(),
+            name: name.into(),
+            short_name: name.into(),
+            legacy,
+            is_new: false,
+            update_required: false,
+            efforts: Vec::new(),
+            default_effort: None,
+            fast_mode: false,
+            ultracode: false,
+        }
+    }
+
+    #[test]
+    fn a_model_is_found_by_slug_name_or_family() {
+        let models = [
+            model("claude-opus-5-5", "Opus 5.5", false),
+            model("claude-haiku-5-5", "Haiku 5.5", false),
+            model("claude-haiku-4-5", "Haiku 4.5", true),
+        ];
+
+        assert_eq!(
+            pick_model(&models, "Haiku 4.5").unwrap(),
+            "claude-haiku-4-5"
+        );
+        assert_eq!(
+            pick_model(&models, "claude-opus-5-5").unwrap(),
+            "claude-opus-5-5"
+        );
+        assert_eq!(pick_model(&models, "haiku").unwrap(), "claude-haiku-5-5");
+        assert!(
+            pick_model(&models, "gpt")
+                .unwrap_err()
+                .contains("claude-opus-5-5")
+        );
     }
 }
