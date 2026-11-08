@@ -7,6 +7,32 @@ export type RequestContent = Extract<
 >
 export type RequestItem = ThreadItem & { content: RequestContent }
 export type QuestionsContent = Extract<ItemContent, { kind: 'questions' }>
+export type ApprovalContent = Extract<ItemContent, { kind: 'approval' }>
+
+/**
+ * Approvals by the tool call they held back, for calls the transcript shows: those show on
+ * the call's own row rather than as rows of their own.
+ */
+export function approvalsByCall(
+  items: ThreadItem[]
+): Map<string, ApprovalContent> {
+  const calls = new Set(
+    items
+      .filter((item) => item.content.kind === 'toolCall')
+      .map((item) => item.id)
+  )
+  const approvals = new Map<string, ApprovalContent>()
+  for (const { content } of items) {
+    if (
+      content.kind === 'approval' &&
+      content.toolCallId !== null &&
+      calls.has(content.toolCallId)
+    ) {
+      approvals.set(content.toolCallId, content)
+    }
+  }
+  return approvals
+}
 
 /** Tools whose call is shown by what it makes, a request or the task list, not as a call. */
 export const REQUEST_TOOLS = new Set([

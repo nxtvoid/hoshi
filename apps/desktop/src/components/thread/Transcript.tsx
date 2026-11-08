@@ -6,6 +6,8 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import type { TurnFailure } from '@/bindings/TurnFailure'
 import { Markdown } from '@/components/markdown/Markdown'
 import { RequestRow } from './RequestRow'
+import { ApprovalBadge, ApprovalsContext } from './ApprovalBadge'
+import { approvalsByCall } from '@/lib/requests'
 import { SubagentRow } from './SubagentRow'
 import { TaskListRow } from './TaskListRow'
 import { UserMessage } from './UserMessage'
@@ -81,6 +83,7 @@ export function Transcript({
     () => foldTurns(groupTranscript(withStreaming(items, streaming)), working),
     [items, streaming, working]
   )
+  const approvals = useMemo(() => approvalsByCall(items), [items])
   const liveTasks = working
     ? items.filter((item) => item.content.kind === 'taskList').at(-1)?.id
     : undefined
@@ -172,7 +175,9 @@ export function Transcript({
           className={cn(CHAT_LANE, 'flex flex-col gap-4 px-4 py-6')}
         >
           {hasOlder ? <li ref={olderRef} aria-hidden className='h-px' /> : null}
-          <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
+          <ApprovalsContext.Provider value={approvals}>
+            <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
+          </ApprovalsContext.Provider>
           {working ? (
             <li>
               <TurnStatus />
@@ -578,6 +583,7 @@ function ToolCallRow({
           <span className='shrink-0 text-xs'>{shown.source}</span>
         ) : null}
         <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+        <ApprovalBadge callId={item.id} />
         {change ? (
           <span className='shrink-0 font-mono text-xs tabular-nums'>
             <span className='text-pr-open'>+{change.additions}</span>{' '}

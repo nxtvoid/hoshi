@@ -1,7 +1,7 @@
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamKind } from '@/bindings/StreamKind'
 import type { ItemContent } from '@/bindings/ItemContent'
-import { REQUEST_TOOLS } from './requests'
+import { approvalsByCall, REQUEST_TOOLS } from './requests'
 
 export type ToolCallContent = Extract<ItemContent, { kind: 'toolCall' }>
 export type ReasoningContent = Extract<ItemContent, { kind: 'reasoning' }>
@@ -144,8 +144,17 @@ export function withStreaming(
  */
 export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
   const rows: TranscriptRow[] = []
+  const onCalls = approvalsByCall(items)
   for (const item of items) {
     if (isToolCall(item) && REQUEST_TOOLS.has(item.content.name)) continue
+    const { content } = item
+    if (
+      content.kind === 'approval' &&
+      content.toolCallId !== null &&
+      onCalls.has(content.toolCallId)
+    ) {
+      continue
+    }
     const last = rows.at(-1)
     if (!isWork(item)) rows.push({ kind: 'item', item })
     else if (last?.kind === 'work') last.entries.push(item)

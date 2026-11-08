@@ -3,6 +3,7 @@ import type { ThreadItem } from '../../src/bindings/ThreadItem'
 import type { RequestStatus } from '../../src/bindings/RequestStatus'
 import {
   answerQuestion,
+  approvalsByCall,
   answerText,
   pendingRequest,
   previousQuestion,
@@ -55,6 +56,40 @@ const questions: QuestionsContent = {
     }
   ]
 }
+
+describe('approvalsByCall', () => {
+  test('pairs an approval with the call it held back, when the call is shown', () => {
+    const call: ThreadItem = {
+      id: 'toolu_1',
+      threadId: 't',
+      createdAt: '',
+      content: {
+        kind: 'toolCall',
+        name: 'Bash',
+        input: '{}',
+        output: null,
+        isError: false,
+        detail: null,
+        outputOmitted: false,
+        interrupted: false
+      }
+    }
+    const held = approval('a', 'resolved')
+    const onCall = {
+      ...held,
+      content: { ...held.content, toolCallId: 'toolu_1' }
+    } as ThreadItem
+    const elsewhere = {
+      ...held,
+      id: 'b',
+      content: { ...held.content, toolCallId: 'toolu_9' }
+    } as ThreadItem
+
+    const approvals = approvalsByCall([call, onCall, elsewhere])
+
+    expect([...approvals.keys()]).toEqual(['toolu_1'])
+  })
+})
 
 describe('pendingRequest', () => {
   test('is the oldest request still waiting', () => {
