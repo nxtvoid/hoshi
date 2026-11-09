@@ -197,6 +197,7 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
     if (isToolCall(item) && REQUEST_TOOLS.has(item.content.name)) continue
     const { content } = item
     if (content.kind === 'approval' && content.toolCallId !== null) continue
+    if (content.kind === 'turnChanges') continue
     const last = rows.at(-1)
     if (!isWork(item)) rows.push({ kind: 'item', item })
     else if (last?.kind === 'work') last.entries.push(item)

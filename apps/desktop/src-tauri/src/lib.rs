@@ -55,6 +55,7 @@ pub fn run() {
             orchestration::get_pull_request_file_diff,
             orchestration::get_thread_diff_files,
             orchestration::get_thread_file_diff,
+            orchestration::get_turn_file_diff,
             orchestration::get_models,
             orchestration::get_known_usage_limits,
             orchestration::get_usage_limits,

@@ -1,7 +1,8 @@
 use crate::{
-    AccessMode, ApprovalDecision, Effort, ItemContent, MessageAttachment, OpenToolCall, Project,
-    ProviderOutput, RequestResponse, RequestStatus, Thread, ThreadContextUsage, ThreadItem,
-    ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
+    AccessMode, ApprovalDecision, DiffFile, Effort, ItemContent, MessageAttachment, OpenToolCall,
+    Project, ProviderOutput, RequestResponse, RequestStatus, Thread, ThreadContextUsage,
+    ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure,
+    TurnOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1508,6 +1509,28 @@ pub fn start_queued_turn(
         }],
         _ => Vec::new(),
     }
+}
+
+/// What a turn changed in its working tree, after it ended. Also replaces the item while
+/// the files were still being read.
+pub fn record_turn_changes(
+    model: &ReadModel,
+    thread_id: &str,
+    turn_id: &str,
+    files: Option<Vec<DiffFile>>,
+    now: &str,
+) -> Vec<Event> {
+    if model.thread(thread_id).is_none() {
+        return Vec::new();
+    }
+    vec![Event::ItemAdded {
+        item: ThreadItem {
+            id: format!("{turn_id}:changes"),
+            thread_id: thread_id.to_owned(),
+            created_at: now.to_owned(),
+            content: ItemContent::TurnChanges { files },
+        },
+    }]
 }
 
 /// The failure recorded when a turn cannot start at all.

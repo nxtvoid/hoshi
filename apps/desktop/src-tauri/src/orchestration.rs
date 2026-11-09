@@ -455,6 +455,16 @@ pub fn get_thread_file_diff(
     engine.thread_file_diff(&thread_id, scope, &file)
 }
 
+#[tauri::command(async)]
+pub fn get_turn_file_diff(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    turn_id: String,
+    file: DiffFile,
+) -> Result<FileDiff, CommandError> {
+    engine.turn_file_diff(&thread_id, &turn_id, &file)
+}
+
 /// Lets `AppHandle` users reach the engine without a `State` parameter.
 pub fn engine(app: &AppHandle) -> State<'_, Engine> {
     app.state::<Engine>()

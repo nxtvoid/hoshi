@@ -3,6 +3,7 @@
 //! (provider turns, git). Provider output comes back through the same path.
 
 mod attachments;
+mod checkpoint;
 mod delegation;
 mod diff;
 mod editors;
@@ -23,6 +24,7 @@ mod watch;
 mod worktree;
 
 use attachments::Attachments;
+use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
 use hoshi_core::{
     ChangesSummary, Command, CommandError, ContextUsage, DiffFile, DiffScope, Editor, Event,
@@ -32,8 +34,8 @@ use hoshi_core::{
     StreamDelta, StreamKind, TerminalAttach, ThreadContextUsage, ThreadItem, ThreadPullRequest,
     ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace, TurnFailure,
     TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn, decide,
-    record_branch, record_output, record_title, record_worktree, record_worktree_left,
-    start_queued_turn, turn_failed,
+    record_branch, record_output, record_title, record_turn_changes, record_worktree,
+    record_worktree_left, start_queued_turn, turn_failed,
 };
 use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage};
 use hoshi_forge::{
@@ -155,6 +157,7 @@ struct State {
     mcp: Option<McpServer>,
     /// Tasks delegated to child threads, by child thread id, until their answer goes back.
     delegations: HashMap<String, Delegation>,
+    checkpoints: Arc<Checkpointer>,
 }
 
 /// A message waiting for the thread's running turn to end.
@@ -177,6 +180,8 @@ struct Turn {
     running: Box<dyn RunningTurn>,
     /// `None` outside a git repository.
     workspace: Option<TurnWorkspace>,
+    /// The folder whose working tree was checkpointed before the turn started.
+    checkpointed: Option<String>,
 }
 
 /// What a background check for a worktree the turn created needs from the state.
@@ -250,6 +255,7 @@ impl Engine {
             queued: HashMap::new(),
             mcp: None,
             delegations: HashMap::new(),
+            checkpoints: Arc::new(Checkpointer::new()),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -499,6 +505,20 @@ impl Engine {
         diff::file(&cwd, scope, file).map_err(|detail| CommandError::Internal { detail })
     }
 
+    /// How one file listed in a turn's changes changed during that turn.
+    pub fn turn_file_diff(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        file: &DiffFile,
+    ) -> Result<FileDiff, CommandError> {
+        let cwd = self.repository_cwd(thread_id)?;
+        let before = checkpoint::reference(thread_id, turn_id, Moment::Before);
+        let after = checkpoint::reference(thread_id, turn_id, Moment::After);
+        checkpoint::file_diff(&cwd, &before, &after, file)
+            .map_err(|detail| CommandError::Internal { detail })
+    }
+
     /// The code editors installed on this machine; found once, then answered at once.
     pub fn editors(&self) -> Vec<Editor> {
         editors::installed()
@@ -626,6 +646,7 @@ impl Engine {
                 thread_id: thread_id.to_owned(),
             })?;
         if !thread.worktree_released {
+            state.checkpoints.settle(&path);
             State::remove_clean_worktree(&root, &path, thread_id)?;
         }
         state.decide_and_commit(Command::ThreadWorktreeRelease {
@@ -712,6 +733,7 @@ impl Engine {
                 .map_err(|detail| CommandError::GitFailed { detail })?;
         }
         if let Some(path) = &worktree {
+            state.checkpoints.settle(path);
             State::remove_clean_worktree(&root, path, thread_id)?;
         }
         if let Some((_, name)) = &branch
@@ -1493,9 +1515,24 @@ impl State {
         };
         let completed = ended.is_some();
         let now = now();
+        let checkpointed = self
+            .turns
+            .get(thread_id)
+            .filter(|turn| completed && turn.id == turn_id)
+            .and_then(|turn| turn.checkpointed.clone());
+        if checkpointed.is_some() {
+            // Holds the turn's place in the transcript while its changes are read.
+            let pending = record_turn_changes(&self.model, thread_id, turn_id, None, &now);
+            if let Err(error) = self.commit(&pending, &now) {
+                eprintln!("hoshi: failed to record a turn's changes: {error}");
+            }
+        }
         let events = record_output(&self.model, thread_id, turn_id, output, &now);
         if let Err(error) = self.commit(&events, &now) {
             eprintln!("hoshi: failed to record provider output: {error}");
+        }
+        if let Some(dir) = checkpointed {
+            self.read_turn_changes(thread_id, turn_id, dir);
         }
         if completed {
             let workspace = match self.turns.get(thread_id) {
@@ -1515,6 +1552,32 @@ impl State {
             }
             self.start_next_queued(thread_id);
         }
+    }
+
+    /// Checkpoints the tree a finished turn left, then records what changed since it began.
+    fn read_turn_changes(&self, thread_id: &str, turn_id: &str, dir: String) {
+        let weak = self.this.clone();
+        let before = checkpoint::reference(thread_id, turn_id, Moment::Before);
+        let after = checkpoint::reference(thread_id, turn_id, Moment::After);
+        let (thread_id, turn_id) = (thread_id.to_owned(), turn_id.to_owned());
+        self.checkpoints.queue(&dir.clone(), move || {
+            let files = checkpoint::capture(&dir, &after)
+                .and_then(|()| checkpoint::changes(&dir, &before, &after))
+                .unwrap_or_else(|error| {
+                    eprintln!("hoshi: no checkpoint after the turn in {dir}: {error}");
+                    Vec::new()
+                });
+            thread::spawn(move || {
+                let Some(shared) = weak.upgrade() else { return };
+                let mut state = lock(&shared);
+                let now = now();
+                let events =
+                    record_turn_changes(&state.model, &thread_id, &turn_id, Some(files), &now);
+                if let Err(error) = state.commit(&events, &now) {
+                    eprintln!("hoshi: failed to record a turn's changes: {error}");
+                }
+            });
+        });
     }
 
     /// Carries out a command: decides its events, records them, and starts what they call for.
@@ -1559,6 +1622,11 @@ impl State {
             });
         let freed_worktrees = self.worktrees_freed_by(&command);
         let freed_images = self.images_freed_by(&command);
+        let forgotten_checkpoints: Vec<(String, String)> = self
+            .threads_deleted_by(&command)
+            .into_iter()
+            .filter_map(|thread| Some((self.project_root(thread).ok()?, thread.id.clone())))
+            .collect();
         let now = now();
         let events = decide(&self.model, command, &now)?;
         self.commit(&events, &now)?;
@@ -1605,12 +1673,20 @@ impl State {
         } = self;
         context_usages.retain(|thread_id, _| model.thread(thread_id).is_some());
         for (repository, path) in freed_worktrees {
+            self.checkpoints.settle(&path);
             if let Err(error) = git::remove_worktree(&repository, &path) {
                 eprintln!("hoshi: kept worktree {path}: {error}");
             }
         }
         for image in &freed_images {
             self.attachments.remove(image);
+        }
+        for (root, thread_id) in forgotten_checkpoints {
+            self.checkpoints.queue(&root.clone(), move || {
+                if let Err(error) = checkpoint::forget(&root, &thread_id) {
+                    eprintln!("hoshi: kept the checkpoints of thread {thread_id}: {error}");
+                }
+            });
         }
         Ok(())
     }
@@ -2384,6 +2460,18 @@ fn start_turn(
         mcp,
         instructions,
     };
+    let checkpointed = workspace.as_ref().map(|_| cwd.to_owned());
+    if let Some(dir) = &checkpointed {
+        let (dir, reference) = (
+            dir.clone(),
+            checkpoint::reference(thread_id, turn_id, Moment::Before),
+        );
+        state.checkpoints.queue(&dir.clone(), move || {
+            if let Err(error) = checkpoint::capture(&dir, &reference) {
+                eprintln!("hoshi: no checkpoint before the turn in {dir}: {error}");
+            }
+        });
+    }
     let weak: Weak<Mutex<State>> = state.this.clone();
     let (sink_thread, sink_turn) = (thread_id.to_owned(), turn_id.to_owned());
     let sink = Box::new(move |output| {
@@ -2397,6 +2485,7 @@ fn start_turn(
                 id: turn_id.to_owned(),
                 running,
                 workspace,
+                checkpointed,
             };
             state.turns.insert(thread_id.to_owned(), turn);
         }
@@ -4105,6 +4194,39 @@ Blue"
         harness.send("t", "m2", "continue");
         assert_eq!(harness.adapter.requests.lock().unwrap()[1].cwd, expected);
         let _ = git::remove_worktree(&harness.root, &expected);
+    }
+
+    #[test]
+    fn a_finished_turn_lists_the_files_it_changed_and_shows_their_diff() {
+        let repo = git::tests::temp_repository("engine-turn-changes");
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("turn-changes", repo.clone(), store, Vec::new());
+        harness.send("t", "m1", "add a file");
+        let before = checkpoint::reference("t", "m1", Moment::Before);
+        wait_until(|| git::stdout(&harness.root, &["rev-parse", "--verify", &before]).is_ok());
+
+        std::fs::write(repo.join("notes.txt"), "one\ntwo\n").unwrap();
+        harness
+            .engine
+            .dispatch(Command::TurnInterrupt {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+
+        let files = harness.wait_for(|event| match event {
+            Event::ItemAdded { item } => match item.content {
+                ItemContent::TurnChanges { files: Some(files) } => Some(files),
+                _ => None,
+            },
+            _ => None,
+        });
+        let summary: Vec<_> = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.additions))
+            .collect();
+        assert_eq!(summary, [("notes.txt", Some(2))]);
+        let diff = harness.engine.turn_file_diff("t", "m1", &files[0]).unwrap();
+        assert!(diff.text.contains("+two"));
     }
 
     fn wait_until(mut done: impl FnMut() -> bool) {

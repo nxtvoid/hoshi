@@ -1,4 +1,4 @@
-use crate::{ApprovalDecision, MessageAttachment, Question, RequestStatus};
+use crate::{ApprovalDecision, DiffFile, MessageAttachment, Question, RequestStatus};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -213,6 +213,11 @@ pub enum ItemContent {
     BackgroundTaskEnded {
         tool_call_id: Option<String>,
         failed: bool,
+    },
+    /// The files a turn changed in its working tree, read from its checkpoints once it
+    /// ended; `None` while they are still being read.
+    TurnChanges {
+        files: Option<Vec<DiffFile>>,
     },
     /// A tool call held back until the user approves it.
     Approval {

@@ -140,7 +140,7 @@ struct RawChange {
 ///
 /// Without a refreshed index, a file only touched is listed as modified in the raw
 /// entries but has no count; those are dropped.
-fn parse_changes(output: &str) -> Vec<DiffFile> {
+pub(crate) fn parse_changes(output: &str) -> Vec<DiffFile> {
     let mut tokens = output.split('\0').filter(|token| !token.is_empty());
     let mut changes = Vec::new();
     let mut counts = HashMap::new();

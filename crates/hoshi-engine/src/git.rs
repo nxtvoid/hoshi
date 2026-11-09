@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Condvar, Mutex, PoisonError, mpsc};
@@ -205,9 +205,29 @@ fn run(dir: &str, args: &[&str], success_codes: &[i32]) -> Result<String, String
     printed(output, success_codes)
 }
 
+/// Like [`stdout`], with extra environment variables, such as another `GIT_INDEX_FILE`.
+pub fn stdout_with_env(
+    dir: &str,
+    args: &[&str],
+    env: &[(&str, &std::ffi::OsStr)],
+) -> Result<String, String> {
+    let mut command = command(dir, args);
+    command.envs(env.iter().copied());
+    let output = execute(command, Pace::Quick, None).map_err(|error| error.to_string())?;
+    printed(output, &[0])
+}
+
+/// Like [`stdout`], writing `input` to git's standard input, as `--stdin` options read it.
+pub fn stdout_with_input(dir: &str, args: &[&str], input: String) -> Result<String, String> {
+    let output =
+        execute(command(dir, args), Pace::Quick, Some(input)).map_err(|error| error.to_string())?;
+    printed(output, &[0])
+}
+
 /// For commands that copy or download a whole tree, which may take minutes.
 fn slow(dir: &str, args: &[&str]) -> Result<String, String> {
-    let output = execute(command(dir, args), Pace::Slow).map_err(|error| error.to_string())?;
+    let output =
+        execute(command(dir, args), Pace::Slow, None).map_err(|error| error.to_string())?;
     printed(output, &[0])
 }
 
@@ -236,12 +256,12 @@ pub fn clone(url: &str, destination: &Path) -> Result<(), String> {
         .ok_or_else(|| format!("{} has no parent folder", destination.display()))?;
     let mut command = command(&parent.to_string_lossy(), &["clone", "--", url]);
     command.arg(destination);
-    let output = execute(command, Pace::Slow).map_err(|error| error.to_string())?;
+    let output = execute(command, Pace::Slow, None).map_err(|error| error.to_string())?;
     printed(output, &[0]).map(|_| ())
 }
 
 fn git(dir: &str, args: &[&str]) -> std::io::Result<Output> {
-    execute(command(dir, args), Pace::Quick)
+    execute(command(dir, args), Pace::Quick, None)
 }
 
 fn command(dir: &str, args: &[&str]) -> Command {
@@ -304,15 +324,23 @@ impl Drop for Slot {
 }
 
 /// Runs `command` to its end, killed once it takes longer than its pace allows.
-fn execute(mut command: Command, pace: Pace) -> std::io::Result<Output> {
+fn execute(mut command: Command, pace: Pace, input: Option<String>) -> std::io::Result<Output> {
     let (_slot, timeout) = match pace {
         Pace::Quick => (Some(Slot::take()), QUICK_TIMEOUT),
         Pace::Slow => (None, SLOW_TIMEOUT),
     };
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    if let (Some(input), Some(mut stdin)) = (input, child.stdin.take()) {
+        thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
+    }
     let (sender, receiver) = mpsc::channel();
     let pipes: [Option<Box<dyn Read + Send>>; 2] = [
         child.stdout.take().map(|pipe| Box::new(pipe) as _),
