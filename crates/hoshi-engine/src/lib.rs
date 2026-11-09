@@ -189,6 +189,13 @@ struct State {
     delegations: HashMap<String, Delegation>,
     /// Messages waiting for their thread's `/compact` turn to end, sent once it does.
     after_compaction: HashMap<String, QueuedMessage>,
+    /// Folders git changes outside the lock, normalized: a worktree being created, restored
+    /// or removed, or the files a rewind puts back. No turn starts in one until it's done.
+    folder_ops: HashSet<String>,
+    /// Turns that were to start in a folder git was changing, by that folder.
+    parked: HashMap<String, Vec<ParkedTurn>>,
+    /// Threads git works on outside the lock, with the messages sent to them meanwhile.
+    thread_ops: HashMap<String, Vec<Command>>,
     checkpoints: Arc<Checkpointer>,
     /// Secrets the user typed for agents, one file each.
     secrets_dir: PathBuf,
@@ -213,6 +220,135 @@ struct QueuedMessage {
 }
 
 /// A thread whose pull request is due to be read.
+/// Where a new thread's worktree goes, read under the lock.
+struct WorktreePlan {
+    root: String,
+    path: PathBuf,
+    branch: String,
+    /// Checks out a branch that exists, fetched first, instead of creating one.
+    existing: bool,
+}
+
+impl WorktreePlan {
+    /// Creates the worktree; on a new branch, it keeps the branch it started from.
+    fn create(&self) -> Result<ThreadWorkspace, CommandError> {
+        let failed = |detail: String| CommandError::WorktreeFailed { detail };
+        let (root, branch) = (&self.root, &self.branch);
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| failed(error.to_string()))?;
+        }
+        if self.existing {
+            git::add_branch_worktree(root, &self.path, branch).map_err(failed)?;
+        } else {
+            let base = git::current_branch(root);
+            git::add_worktree(root, &self.path, branch).map_err(failed)?;
+            if let Some(base) = base
+                && let Err(error) = git::set_branch_config(root, branch, git::BASE_CONFIG, &base)
+            {
+                eprintln!("hoshi: didn't keep the base of {branch}: {error}");
+            }
+        }
+        Ok(ThreadWorkspace::Worktree {
+            path: self.path.to_string_lossy().into_owned(),
+            branch: branch.clone(),
+        })
+    }
+
+    /// Takes back a worktree made for a thread that couldn't be created.
+    fn discard(&self) {
+        let path = self.path.to_string_lossy().into_owned();
+        if let Err(error) = git::remove_worktree(&self.root, &path) {
+            eprintln!("hoshi: kept worktree {path}: {error}");
+        }
+        if !self.existing
+            && let Err(error) = git::delete_branch(&self.root, &self.branch)
+        {
+            eprintln!("hoshi: kept branch {}: {error}", self.branch);
+        }
+    }
+}
+
+/// What cleaning up a thread whose pull request merged takes, read under the lock.
+struct CleanUpPlan {
+    root: String,
+    pull_request: PullRequest,
+    worktree: Option<String>,
+    /// The merged branch and its tip.
+    branch: Option<(String, String)>,
+    /// The thread works in the project root, on the merged branch.
+    in_root: bool,
+    sharing_root: Vec<String>,
+}
+
+impl CleanUpPlan {
+    /// Refuses when anything would be lost, then removes the worktree and the branch. On
+    /// failure, also tells whether the worktree was already removed.
+    fn run(&self, thread_id: &str, checkpoints: &Checkpointer) -> Result<(), (bool, CommandError)> {
+        let git_failed = |detail: String| (false, CommandError::GitFailed { detail });
+        let dirty = || {
+            (
+                false,
+                CommandError::WorktreeDirty {
+                    thread_id: thread_id.to_owned(),
+                },
+            )
+        };
+        let root = &self.root;
+        if let Some(path) = &self.worktree
+            && Path::new(path).is_dir()
+            && !git::is_clean(path).map_err(git_failed)?
+        {
+            return Err(dirty());
+        }
+        if let Some((tip, _)) = &self.branch {
+            let held_by_pull_request = self.pull_request.head_sha.as_deref().is_some_and(|head| {
+                head.starts_with(tip.as_str())
+                    || tip.starts_with(head)
+                    || git::is_ancestor(root, tip, head)
+            });
+            if !held_by_pull_request && !git::on_a_remote(root, tip) {
+                return Err((
+                    false,
+                    CommandError::UnpushedCommits {
+                        thread_id: thread_id.to_owned(),
+                    },
+                ));
+            }
+        }
+        if self.in_root {
+            if !git::is_clean(root).map_err(git_failed)? {
+                return Err(dirty());
+            }
+            git::switch(root, &self.pull_request.base_branch).map_err(git_failed)?;
+        }
+        if let Some(path) = &self.worktree {
+            checkpoints.settle(path);
+            State::remove_clean_worktree(root, path, thread_id).map_err(|error| (false, error))?;
+        }
+        if let Some((_, name)) = &self.branch
+            && let Err(detail) = git::delete_branch(root, name)
+        {
+            return Err((self.worktree.is_some(), CommandError::GitFailed { detail }));
+        }
+        Ok(())
+    }
+}
+
+/// Git work on a thread's folders that runs outside the lock; see [`State::begin_op`].
+#[must_use]
+struct WorkspaceOp {
+    thread_id: String,
+    folders: Vec<String>,
+}
+
+/// A turn whose events are recorded, waiting for git to finish with its folder.
+struct ParkedTurn {
+    thread_id: String,
+    turn_id: String,
+    prompt: String,
+    attachments: Vec<MessageAttachment>,
+}
+
 struct PullRequestJob {
     thread_id: String,
     branch: String,
@@ -307,6 +443,9 @@ impl Engine {
             mcp: None,
             delegations: HashMap::new(),
             after_compaction: HashMap::new(),
+            folder_ops: HashSet::new(),
+            parked: HashMap::new(),
+            thread_ops: HashMap::new(),
             checkpoints: Arc::new(Checkpointer::new()),
             secrets_dir: data_dir.join("secrets"),
             secret_waits: HashMap::new(),
@@ -592,11 +731,21 @@ impl Engine {
         message_id: &str,
         revert_files: bool,
     ) -> Result<(), CommandError> {
-        let mut state = lock(&self.state);
         let cannot = || CommandError::CannotRewind {
             thread_id: thread_id.to_owned(),
             message_id: message_id.to_owned(),
         };
+        let rewind_files = |cwd: &str| {
+            let before = checkpoint::reference(thread_id, message_id, Moment::Before);
+            if !checkpoint::exists(cwd, &before) {
+                return Err(CommandError::NoCheckpoint {
+                    thread_id: thread_id.to_owned(),
+                    message_id: message_id.to_owned(),
+                });
+            }
+            checkpoint::restore(cwd, &before).map_err(|detail| CommandError::GitFailed { detail })
+        };
+        let mut state = lock(&self.state);
         let thread = state
             .model
             .thread(thread_id)
@@ -620,31 +769,31 @@ impl Engine {
         else {
             return Err(cannot());
         };
-        if revert_files {
-            let cwd = state
-                .cwd(thread_id)
-                .ok_or_else(|| CommandError::ThreadNotFound {
-                    thread_id: thread_id.to_owned(),
-                })?;
-            if let Some(busy) = state.working_in(&cwd, thread_id) {
-                return Err(CommandError::ThreadBusy { thread_id: busy });
-            }
-            state.checkpoints.settle(&cwd);
-            let before = checkpoint::reference(thread_id, message_id, Moment::Before);
-            if !checkpoint::exists(&cwd, &before) {
-                return Err(CommandError::NoCheckpoint {
-                    thread_id: thread_id.to_owned(),
-                    message_id: message_id.to_owned(),
-                });
-            }
-            checkpoint::restore(&cwd, &before)
-                .map_err(|detail| CommandError::GitFailed { detail })?;
-        }
-        state.decide_and_commit(Command::ThreadRewind {
+        let command = Command::ThreadRewind {
             thread_id: thread_id.to_owned(),
             message_id: message_id.to_owned(),
             rewind,
-        })
+        };
+        if !revert_files {
+            return state.decide_and_commit(command);
+        }
+        let cwd = state
+            .cwd(thread_id)
+            .ok_or_else(|| CommandError::ThreadNotFound {
+                thread_id: thread_id.to_owned(),
+            })?;
+        if let Some(busy) = state.working_in(&cwd, thread_id) {
+            return Err(CommandError::ThreadBusy { thread_id: busy });
+        }
+        let op = state.begin_op(thread_id, &[&cwd])?;
+        let checkpoints = state.checkpoints.clone();
+        drop(state);
+        checkpoints.settle(&cwd);
+        let reverted = rewind_files(&cwd);
+        let mut state = lock(&self.state);
+        let rewound = reverted.and_then(|()| state.decide_and_commit(command));
+        state.end_op(op, None)?;
+        rewound
     }
 
     /// The files a finished turn changed, read from its checkpoints.
@@ -792,21 +941,31 @@ impl Engine {
                 thread_id: thread_id.to_owned(),
             });
         }
-        let mut state = lock(&self.state);
-        let (thread, root) = state.removable(thread_id)?;
-        let path = thread
-            .worktree_path
-            .clone()
-            .ok_or_else(|| CommandError::NothingToClean {
-                thread_id: thread_id.to_owned(),
-            })?;
-        if !thread.worktree_released {
-            state.checkpoints.settle(&path);
-            State::remove_clean_worktree(&root, &path, thread_id)?;
-        }
-        state.decide_and_commit(Command::ThreadWorktreeRelease {
+        let release = Command::ThreadWorktreeRelease {
             thread_id: thread_id.to_owned(),
-        })
+        };
+        let (op, root, path, checkpoints) = {
+            let mut state = lock(&self.state);
+            let (thread, root) = state.removable(thread_id)?;
+            let path =
+                thread
+                    .worktree_path
+                    .clone()
+                    .ok_or_else(|| CommandError::NothingToClean {
+                        thread_id: thread_id.to_owned(),
+                    })?;
+            if thread.worktree_released {
+                return state.decide_and_commit(release);
+            }
+            let op = state.begin_op(thread_id, &[&path])?;
+            (op, root, path, state.checkpoints.clone())
+        };
+        checkpoints.settle(&path);
+        let removed = State::remove_clean_worktree(&root, &path, thread_id);
+        let mut state = lock(&self.state);
+        let released = removed.and_then(|()| state.decide_and_commit(release));
+        state.end_op(op, None)?;
+        released
     }
 
     /// Once the thread's pull request is merged: removes its worktree and its local branch,
@@ -827,84 +986,75 @@ impl Engine {
         Ok(())
     }
 
-    /// The cleanup itself; returns the root threads whose branch changed under them.
+    /// The cleanup itself; returns the root threads whose branch changed under them. What
+    /// git does runs outside the lock.
     fn clean_up_locked(&self, thread_id: &str) -> Result<Vec<String>, CommandError> {
-        let mut state = lock(&self.state);
-        let (thread, root) = state.removable(thread_id)?;
-        let thread = thread.clone();
-        let pull_request = state
-            .pull_requests
-            .get(thread_id)
-            .filter(|pull_request| pull_request.state == hoshi_core::PullRequestState::Merged)
-            .cloned()
-            .ok_or_else(|| CommandError::PullRequestNotMerged {
-                thread_id: thread_id.to_owned(),
-            })?;
-        let worktree = thread
-            .worktree_path
-            .clone()
-            .filter(|_| !thread.worktree_released);
-        if let Some(path) = &worktree
-            && Path::new(path).is_dir()
-            && !git::is_clean(path).map_err(|detail| CommandError::GitFailed { detail })?
-        {
-            return Err(CommandError::WorktreeDirty {
-                thread_id: thread_id.to_owned(),
-            });
-        }
-        // Only the branch the pull request merged; one the thread moved to since stays.
-        let branch = thread
-            .branch
-            .clone()
-            .filter(|branch| *branch == pull_request.head_branch)
-            .and_then(|branch| Some((git::branch_tip(&root, &branch)?, branch)));
-        if let Some((tip, _)) = &branch {
-            let held_by_pull_request = pull_request.head_sha.as_deref().is_some_and(|head| {
-                head.starts_with(tip.as_str())
-                    || tip.starts_with(head)
-                    || git::is_ancestor(&root, tip, head)
-            });
-            if !held_by_pull_request && !git::on_a_remote(&root, tip) {
-                return Err(CommandError::UnpushedCommits {
-                    thread_id: thread_id.to_owned(),
-                });
-            }
-        }
-        let in_root = thread.worktree_path.is_none()
-            && branch.is_some()
-            && git::current_branch(&root).as_deref() == Some(pull_request.head_branch.as_str());
-        let sharing_root = if in_root {
-            state.root_threads_sharing(&thread)?
-        } else {
-            Vec::new()
-        };
-        if in_root {
-            if !git::is_clean(&root).map_err(|detail| CommandError::GitFailed { detail })? {
-                return Err(CommandError::WorktreeDirty {
-                    thread_id: thread_id.to_owned(),
-                });
-            }
-            git::switch(&root, &pull_request.base_branch)
-                .map_err(|detail| CommandError::GitFailed { detail })?;
-        }
-        if let Some(path) = &worktree {
-            state.checkpoints.settle(path);
-            State::remove_clean_worktree(&root, path, thread_id)?;
-        }
-        if let Some((_, name)) = &branch
-            && let Err(detail) = git::delete_branch(&root, name)
-        {
-            if worktree.is_some() {
-                state.decide_and_commit(Command::ThreadWorktreeRelease {
+        let (op, plan, checkpoints) = {
+            let mut state = lock(&self.state);
+            let (thread, root) = state.removable(thread_id)?;
+            let thread = thread.clone();
+            let pull_request = state
+                .pull_requests
+                .get(thread_id)
+                .filter(|pull_request| pull_request.state == hoshi_core::PullRequestState::Merged)
+                .cloned()
+                .ok_or_else(|| CommandError::PullRequestNotMerged {
                     thread_id: thread_id.to_owned(),
                 })?;
+            let worktree = thread
+                .worktree_path
+                .clone()
+                .filter(|_| !thread.worktree_released);
+            // Only the branch the pull request merged; one the thread moved to since stays.
+            let branch = thread
+                .branch
+                .clone()
+                .filter(|branch| *branch == pull_request.head_branch)
+                .and_then(|branch| Some((git::branch_tip(&root, &branch)?, branch)));
+            let in_root = thread.worktree_path.is_none()
+                && branch.is_some()
+                && git::current_branch(&root).as_deref() == Some(pull_request.head_branch.as_str());
+            let sharing_root = if in_root {
+                state.root_threads_sharing(&thread)?
+            } else {
+                Vec::new()
+            };
+            let mut folders: Vec<&str> = worktree.as_deref().into_iter().collect();
+            if in_root {
+                folders.push(&root);
             }
-            return Err(CommandError::GitFailed { detail });
-        }
-        state.decide_and_commit(Command::ThreadCleanUp {
-            thread_id: thread_id.to_owned(),
-        })?;
-        Ok(sharing_root)
+            let op = state.begin_op(thread_id, &folders)?;
+            let plan = CleanUpPlan {
+                root,
+                pull_request,
+                worktree,
+                branch,
+                in_root,
+                sharing_root,
+            };
+            (op, plan, state.checkpoints.clone())
+        };
+        let cleaned = plan.run(thread_id, &checkpoints);
+        let mut state = lock(&self.state);
+        let committed = match cleaned {
+            Ok(()) => state.decide_and_commit(Command::ThreadCleanUp {
+                thread_id: thread_id.to_owned(),
+            }),
+            Err((worktree_removed, error)) => {
+                if worktree_removed
+                    && let Err(released) = state.decide_and_commit(Command::ThreadWorktreeRelease {
+                        thread_id: thread_id.to_owned(),
+                    })
+                {
+                    eprintln!(
+                        "hoshi: removed the worktree of {thread_id} but didn't record it: {released}"
+                    );
+                }
+                Err(error)
+            }
+        };
+        state.end_op(op, None)?;
+        committed.map(|()| plan.sharing_root)
     }
 
     /// The folders inside `path`, to choose where a project lives.
@@ -1208,7 +1358,20 @@ impl Engine {
         Ok(TranscriptPage { items, has_older })
     }
 
+    /// Carries out a command from the UI. Git work it needs, such as creating a worktree,
+    /// runs outside the lock.
     pub fn dispatch(&self, command: Command) -> Result<(), CommandError> {
+        let command = match command {
+            Command::ThreadCreate {
+                workspace: ThreadWorkspace::NewWorktree | ThreadWorkspace::BranchWorktree { .. },
+                ..
+            } => return self.create_worktree_thread(command),
+            Command::MessageSend { .. } => match self.restore_before_sending(command)? {
+                Some(command) => command,
+                None => return Ok(()),
+            },
+            other => other,
+        };
         let mut state = lock(&self.state);
         let deleted: Vec<String> = state
             .threads_deleted_by(&command)
@@ -1227,6 +1390,118 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Creates a new thread's worktree outside the lock, then the thread in it. Messages
+    /// sent to the thread meanwhile wait for it.
+    fn create_worktree_thread(&self, command: Command) -> Result<(), CommandError> {
+        let Command::ThreadCreate {
+            thread_id,
+            project_id,
+            title,
+            workspace,
+            model,
+            effort,
+            fast_mode,
+            ultracode,
+            access_mode,
+            plan_mode,
+        } = command
+        else {
+            return self.dispatch(command);
+        };
+        let existing = match workspace {
+            ThreadWorkspace::BranchWorktree { branch } => Some(branch),
+            _ => None,
+        };
+        let (op, plan) = {
+            let mut state = lock(&self.state);
+            let Some(project) = project_id.as_deref() else {
+                return Err(CommandError::ChatNotLocal { thread_id });
+            };
+            let plan = state.plan_worktree(&thread_id, project, existing.as_deref())?;
+            let path = plan.path.to_string_lossy().into_owned();
+            let op = state.begin_op(&thread_id, &[&path])?;
+            (op, plan)
+        };
+        let created = plan.create();
+        let mut state = lock(&self.state);
+        let workspace = match created {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                state.end_op(op, None)?;
+                return Err(error);
+            }
+        };
+        let create = Command::ThreadCreate {
+            thread_id: thread_id.clone(),
+            project_id,
+            title,
+            workspace,
+            model,
+            effort,
+            fast_mode,
+            ultracode,
+            access_mode,
+            plan_mode,
+        };
+        let result = state.run_prepared(create);
+        match &result {
+            Ok(()) => state.start_worktree_setup(&thread_id),
+            Err(_) => {
+                thread::spawn(move || plan.discard());
+            }
+        }
+        state.end_op(op, None)?;
+        result
+    }
+
+    /// Creates again outside the lock the worktree a message's released thread had. `None`
+    /// when the message went, or waits for git work on its thread.
+    fn restore_before_sending(&self, command: Command) -> Result<Option<Command>, CommandError> {
+        let Command::MessageSend { thread_id, .. } = &command else {
+            return Ok(Some(command));
+        };
+        let thread_id = thread_id.clone();
+        let (op, root, path, branch) = {
+            let mut state = lock(&self.state);
+            let restore = state
+                .model
+                .thread(&thread_id)
+                .filter(|_| !state.thread_ops.contains_key(&thread_id))
+                .filter(|thread| thread.worktree_released && !thread.worktree_adopted)
+                .and_then(|thread| {
+                    let path = thread.worktree_path.clone()?;
+                    let missing = !Path::new(&path).is_dir()
+                        && !state.folder_ops.contains(&git::normalize(&path));
+                    missing.then(|| (thread.clone(), path))
+                });
+            let Some((thread, path)) = restore else {
+                return Ok(Some(command));
+            };
+            let branch = thread
+                .branch
+                .clone()
+                .ok_or_else(|| CommandError::WorktreeFailed {
+                    detail: "the thread has no branch to check out".into(),
+                })?;
+            let root = state.project_root(&thread)?;
+            let op = state.begin_op(&thread_id, &[&path])?;
+            (op, root, path, branch)
+        };
+        let restored = git::restore_worktree(&root, &path, &branch);
+        let mut state = lock(&self.state);
+        match restored {
+            Ok(()) => {
+                state.start_worktree_setup(&thread_id);
+                state.end_op(op, Some(command))?;
+            }
+            Err(detail) => {
+                state.end_op(op, None)?;
+                return Err(CommandError::WorktreeFailed { detail });
+            }
+        }
+        Ok(None)
     }
 
     fn browsing(&self) -> std::sync::MutexGuard<'_, Browsing> {
@@ -1568,11 +1843,31 @@ impl State {
     }
 
     /// Creates again the worktree a released thread had, before a message runs in it.
+    /// Left to the git work that runs in its folder, if any, which starts the turn after.
     fn restore_released_worktree(&self, thread_id: &str) -> Result<(), CommandError> {
+        let released = self.model.thread(thread_id).is_some_and(|thread| {
+            thread.worktree_released
+                && !thread
+                    .worktree_path
+                    .as_deref()
+                    .is_some_and(|path| self.folder_ops.contains(&git::normalize(path)))
+        });
+        if !released {
+            return Ok(());
+        }
+        self.restore_worktree(thread_id)
+    }
+
+    /// Creates the thread's worktree again from its branch when its folder is gone.
+    fn restore_worktree(&self, thread_id: &str) -> Result<(), CommandError> {
         let Some(thread) = self.model.thread(thread_id) else {
             return Ok(());
         };
-        let (true, Some(path)) = (thread.worktree_released, &thread.worktree_path) else {
+        let Some(path) = thread
+            .worktree_path
+            .as_deref()
+            .filter(|_| !thread.worktree_adopted)
+        else {
             return Ok(());
         };
         if Path::new(path).is_dir() {
@@ -1703,15 +1998,26 @@ impl State {
         project_id: &str,
         existing: Option<&str>,
     ) -> Result<ThreadWorkspace, CommandError> {
+        self.plan_worktree(thread_id, project_id, existing)?
+            .create()
+    }
+
+    /// Where a new thread's worktree goes; [`WorktreePlan::create`] makes it.
+    fn plan_worktree(
+        &self,
+        thread_id: &str,
+        project_id: &str,
+        existing: Option<&str>,
+    ) -> Result<WorktreePlan, CommandError> {
         let project =
             self.model
                 .project(project_id)
                 .ok_or_else(|| CommandError::ProjectNotFound {
                     project_id: project_id.to_owned(),
                 })?;
-        let root = &project.workspace_root;
-        if !git::is_repository(root) {
-            return Err(CommandError::NotAGitRepository { path: root.clone() });
+        let root = project.workspace_root.clone();
+        if !git::is_repository(&root) {
+            return Err(CommandError::NotAGitRepository { path: root });
         }
         let short_id: String = thread_id.chars().take(8).collect();
         let branch = existing.map_or_else(|| format!("hoshi/{short_id}"), str::to_owned);
@@ -1720,28 +2026,11 @@ impl State {
             slug(&project.title),
             project_id.chars().take(8).collect::<String>()
         );
-        let path = self.worktrees_dir.join(folder).join(&short_id);
-        let failed = |detail: String| CommandError::WorktreeFailed { detail };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| failed(error.to_string()))?;
-        }
-        let base = existing
-            .is_none()
-            .then(|| git::current_branch(root))
-            .flatten();
-        match existing {
-            Some(_) => git::add_branch_worktree(root, &path, &branch),
-            None => git::add_worktree(root, &path, &branch),
-        }
-        .map_err(failed)?;
-        if let Some(base) = base
-            && let Err(error) = git::set_branch_config(root, &branch, git::BASE_CONFIG, &base)
-        {
-            eprintln!("hoshi: didn't keep the base of {branch}: {error}");
-        }
-        Ok(ThreadWorkspace::Worktree {
-            path: path.to_string_lossy().into_owned(),
+        Ok(WorktreePlan {
+            path: self.worktrees_dir.join(folder).join(&short_id),
+            root,
             branch,
+            existing: existing.is_some(),
         })
     }
 
@@ -1939,7 +2228,14 @@ impl State {
     }
 
     /// Carries out a command: decides its events, records them, and starts what they call for.
+    /// A message to a thread git works on waits for that work to end.
     fn run_command(&mut self, command: Command) -> Result<(), CommandError> {
+        if let Command::MessageSend { thread_id, .. } = &command
+            && let Some(held) = self.thread_ops.get_mut(thread_id)
+        {
+            held.push(command);
+            return Ok(());
+        }
         let restoring = match &command {
             Command::MessageSend { thread_id, .. } if self.worktree_missing(thread_id) => {
                 Some(thread_id.clone())
@@ -2078,10 +2374,11 @@ impl State {
         for thread_id in &removed_with_project {
             self.forget_thread(thread_id);
         }
-        if let Some(thread_id) = interrupt
-            && let Some(turn) = self.turns.get(&thread_id)
-        {
-            turn.running.interrupt();
+        if let Some(thread_id) = interrupt {
+            match self.turns.get(&thread_id) {
+                Some(turn) => turn.running.interrupt(),
+                None => self.interrupt_parked(&thread_id),
+            }
         }
         if let Some((thread_id, request_id, response)) = answer
             && let Some(turn) = self.turns.get(&thread_id)
@@ -2121,11 +2418,16 @@ impl State {
         context_usages.retain(|thread_id, _| model.thread(thread_id).is_some());
         self.setups
             .retain_threads(|thread_id| self.model.thread(thread_id).is_some());
-        for (repository, path) in freed_worktrees {
-            self.checkpoints.settle(&path);
-            if let Err(error) = git::remove_worktree(&repository, &path) {
-                eprintln!("hoshi: kept worktree {path}: {error}");
-            }
+        if !freed_worktrees.is_empty() {
+            let checkpoints = self.checkpoints.clone();
+            thread::spawn(move || {
+                for (repository, path) in freed_worktrees {
+                    checkpoints.settle(&path);
+                    if let Err(error) = git::remove_worktree(&repository, &path) {
+                        eprintln!("hoshi: kept worktree {path}: {error}");
+                    }
+                }
+            });
         }
         for image in &freed_images {
             self.attachments.remove(image);
@@ -2215,8 +2517,106 @@ impl State {
         }
     }
 
+    /// Marks `folders` as ones git changes outside the lock for `thread_id`. Refused while
+    /// other git work runs on the thread or in one of the folders.
+    fn begin_op(&mut self, thread_id: &str, folders: &[&str]) -> Result<WorkspaceOp, CommandError> {
+        let folders: Vec<String> = folders
+            .iter()
+            .map(|folder| git::normalize(folder))
+            .collect();
+        let taken = self.thread_ops.contains_key(thread_id)
+            || folders
+                .iter()
+                .any(|folder| self.folder_ops.contains(folder));
+        if taken {
+            return Err(CommandError::ThreadBusy {
+                thread_id: thread_id.to_owned(),
+            });
+        }
+        self.thread_ops.insert(thread_id.to_owned(), Vec::new());
+        self.folder_ops.extend(folders.iter().cloned());
+        Ok(WorkspaceOp {
+            thread_id: thread_id.to_owned(),
+            folders,
+        })
+    }
+
+    /// Ends git work [`State::begin_op`] started: runs `first`, then the messages sent to the
+    /// thread meanwhile, then the turns that waited for its folders. Returns how `first` went.
+    fn end_op(&mut self, op: WorkspaceOp, first: Option<Command>) -> Result<(), CommandError> {
+        let held = self.thread_ops.remove(&op.thread_id).unwrap_or_default();
+        for folder in &op.folders {
+            self.folder_ops.remove(folder);
+        }
+        let result = first.map_or(Ok(()), |command| self.run_command(command));
+        for command in held {
+            if let Err(error) = self.run_command(command) {
+                eprintln!("hoshi: failed to send a message held for git work: {error}");
+            }
+        }
+        for folder in &op.folders {
+            self.start_parked(folder);
+        }
+        result
+    }
+
+    /// Starts the turns that waited for git to finish with `folder`, creating their worktree
+    /// again if the work removed it.
+    fn start_parked(&mut self, folder: &str) {
+        for turn in self.parked.remove(folder).unwrap_or_default() {
+            let current = self.model.thread(&turn.thread_id).is_some_and(|thread| {
+                thread.active_turn_id.as_deref() == Some(turn.turn_id.as_str())
+            });
+            if !current {
+                continue;
+            }
+            if let Err(error) = self.restore_worktree(&turn.thread_id) {
+                let failure = TurnFailure::SpawnFailed {
+                    detail: error.to_string(),
+                };
+                self.receive(&turn.thread_id, &turn.turn_id, turn_failed(failure));
+                continue;
+            }
+            start_turn(
+                self,
+                &turn.thread_id,
+                &turn.turn_id,
+                turn.prompt,
+                turn.attachments,
+            );
+        }
+    }
+
+    /// Ends a parked turn the user stopped before git was done with its folder.
+    fn interrupt_parked(&mut self, thread_id: &str) {
+        let mut stopped = Vec::new();
+        for turns in self.parked.values_mut() {
+            turns.retain(|turn| {
+                let parked = turn.thread_id == thread_id;
+                if parked {
+                    stopped.push(turn.turn_id.clone());
+                }
+                !parked
+            });
+        }
+        for turn_id in stopped {
+            let outcome = TurnOutcome::Interrupted;
+            self.receive(
+                thread_id,
+                &turn_id,
+                ProviderOutput::TurnCompleted { outcome },
+            );
+        }
+    }
+
     /// Drops what the engine keeps for a thread that is gone.
     fn forget_thread(&mut self, thread_id: &str) {
+        if let Some(held) = self.thread_ops.get_mut(thread_id) {
+            held.clear();
+        }
+        for turns in self.parked.values_mut() {
+            turns.retain(|turn| turn.thread_id != thread_id);
+        }
         if let Some(mcp) = &self.mcp {
             mcp.forget(thread_id);
         }
@@ -2974,6 +3374,16 @@ fn start_turn(
         state.receive(thread_id, turn_id, turn_failed(failure));
         return;
     };
+    let folder = git::normalize(&cwd);
+    if state.folder_ops.contains(&folder) {
+        state.parked.entry(folder).or_default().push(ParkedTurn {
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+            prompt,
+            attachments,
+        });
+        return;
+    }
     let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
@@ -5146,7 +5556,7 @@ Blue"
                 thread_id: "w1234567-rest".into(),
             })
             .unwrap();
-        assert!(!Path::new(&worktree).exists());
+        wait_until(|| !Path::new(&worktree).exists());
     }
 
     #[test]
@@ -5620,6 +6030,67 @@ Blue"
             })
             .unwrap();
         harness.wait_for_turn_end();
+    }
+
+    #[test]
+    fn a_message_to_a_thread_git_works_on_waits_for_that_work() {
+        let harness = Harness::in_memory("op-held", completed_turn());
+        let cwd = lock(&harness.engine.state).cwd("t").unwrap();
+        let op = lock(&harness.engine.state).begin_op("t", &[&cwd]).unwrap();
+        assert_eq!(
+            lock(&harness.engine.state)
+                .begin_op("t", &[&cwd])
+                .err()
+                .unwrap(),
+            CommandError::ThreadBusy {
+                thread_id: "t".into()
+            }
+        );
+
+        harness.send("t", "m1", "go");
+        assert!(harness.adapter.requests.lock().unwrap().is_empty());
+        assert_eq!(harness.thread("t").status, ThreadStatus::Idle);
+
+        lock(&harness.engine.state).end_op(op, None).unwrap();
+        harness.wait_for_turn_end();
+        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_turn_in_a_folder_git_changes_starts_once_git_is_done() {
+        let harness = Harness::in_memory("op-parked", completed_turn());
+        harness.create_thread("o", ThreadWorkspace::Local).unwrap();
+        let cwd = lock(&harness.engine.state).cwd("t").unwrap();
+        let op = lock(&harness.engine.state).begin_op("o", &[&cwd]).unwrap();
+
+        harness.send("t", "m1", "go");
+        assert!(harness.adapter.requests.lock().unwrap().is_empty());
+        assert_eq!(harness.thread("t").status, ThreadStatus::Working);
+
+        lock(&harness.engine.state).end_op(op, None).unwrap();
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_turn_waiting_for_git_can_be_stopped() {
+        let harness = Harness::in_memory("op-parked-stop", completed_turn());
+        harness.create_thread("o", ThreadWorkspace::Local).unwrap();
+        let cwd = lock(&harness.engine.state).cwd("t").unwrap();
+        let op = lock(&harness.engine.state).begin_op("o", &[&cwd]).unwrap();
+        harness.send("t", "m1", "go");
+
+        harness
+            .engine
+            .dispatch(Command::TurnInterrupt {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Interrupted);
+        lock(&harness.engine.state).end_op(op, None).unwrap();
+
+        assert!(harness.adapter.requests.lock().unwrap().is_empty());
+        assert_eq!(harness.thread("t").status, ThreadStatus::Idle);
     }
 
     fn wait_until(mut done: impl FnMut() -> bool) {
