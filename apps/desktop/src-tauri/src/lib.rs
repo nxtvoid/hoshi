@@ -16,7 +16,8 @@ pub fn run() {
         .setup(setup)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(true) = event {
-                orchestration::engine(window.app_handle()).refresh_pull_requests();
+                let app = window.app_handle().clone();
+                std::thread::spawn(move || orchestration::engine(&app).refresh_pull_requests());
             }
         })
         .invoke_handler(tauri::generate_handler![

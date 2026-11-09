@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { cn, formatFileSize } from '@hoshi/utils'
 import { imageFiles } from '@/lib/images'
 import { CHAT_LANE } from '@/lib/chat-lane'
@@ -85,12 +85,27 @@ const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp,image/*'
 const DOCKED_BUTTON = 'flex h-8 shrink-0 items-center'
 /** Past one line, the docked editor takes the whole width and its buttons go below. */
 const ONE_LINE_PX = 40
+/** Room a line must have to spare before the editor goes back beside its buttons. */
+const FIT_SLACK_PX = 8
 
 const EMPTY: ComposerSnapshot = {
   text: '',
   empty: true,
   trigger: null,
   focused: true
+}
+
+/** Whether the editor's one line of text would fit in `width`. */
+function fitsWithin(box: HTMLElement, width: number) {
+  const editable = box.querySelector<HTMLElement>('[contenteditable]')
+  const line = editable?.firstElementChild
+  if (!editable || !line) return true
+  const range = document.createRange()
+  range.selectNodeContents(line)
+  const style = getComputedStyle(editable)
+  const padding =
+    Number.parseFloat(style.paddingLeft) + Number.parseFloat(style.paddingRight)
+  return range.getBoundingClientRect().width + padding + FIT_SLACK_PX <= width
 }
 
 const sameTrigger = (a: LocatedTrigger, b: LocatedTrigger | null) =>
@@ -113,9 +128,12 @@ export function Composer({
   const [recalled, setRecalled] = useState<{ position: number; text: string }>()
   const [dragging, setDragging] = useState(false)
   const [sending, setSending] = useState(false)
-  /** The docked editor outgrew one line; it stays wide until emptied. */
+  /** The docked editor outgrew one line; it stays wide until its text fits again. */
   const [tall, setTall] = useState(false)
   const editorBoxRef = useRef<HTMLDivElement>(null)
+  const stackedRef = useRef({ hero: false, tall: false })
+  /** The width the buttons beside the docked editor take. */
+  const reservedRef = useRef(0)
   const editorRef = useRef<ComposerEditorHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
@@ -153,6 +171,10 @@ export function Composer({
   const hero = variant === 'hero'
   const stacked = hero || tall
 
+  useLayoutEffect(() => {
+    stackedRef.current = { hero, tall }
+  }, [hero, tall])
+
   const detected = snapshot.focused ? snapshot.trigger : null
   const trigger =
     detected && !sameTrigger(detected, dismissed) ? detected : null
@@ -184,7 +206,20 @@ export function Composer({
     const box = editorBoxRef.current
     if (!box) return
     const observer = new ResizeObserver(() => {
-      if (box.offsetHeight > ONE_LINE_PX) setTall(true)
+      const row = box.parentElement
+      if (!row) return
+      const oneLine = box.offsetHeight <= ONE_LINE_PX
+      const { hero, tall } = stackedRef.current
+      if (!hero && !tall) {
+        reservedRef.current = row.clientWidth - box.clientWidth
+        if (!oneLine) setTall(true)
+      } else if (
+        tall &&
+        oneLine &&
+        fitsWithin(box, row.clientWidth - reservedRef.current)
+      ) {
+        setTall(false)
+      }
     })
     observer.observe(box)
     return () => observer.disconnect()
