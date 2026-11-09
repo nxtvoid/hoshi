@@ -28,6 +28,7 @@ import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
 import { useGitActionStore } from './git-action-store'
+import { COMPACT_COMMAND } from '@/lib/compaction'
 import { useBrowserStore } from './browser-store'
 import type { BrowserPage } from '@/bindings/BrowserPage'
 import type { BrowserFrame } from '@/bindings/BrowserFrame'
@@ -92,10 +93,14 @@ type AppState = {
   archiveThread: (threadId: string, archived: boolean) => Promise<void>
   pinThread: (threadId: string, pinned: boolean) => Promise<void>
   /** Sends to the selected thread, creating one first when none is selected. */
+  /** `compactFirst` compacts the thread's conversation, then sends the message. */
   sendMessage: (
     text: string,
-    attachments?: MessageAttachment[]
+    attachments?: MessageAttachment[],
+    compactFirst?: boolean
   ) => Promise<boolean>
+  /** Compacts the selected thread's conversation into a summary. */
+  compactContext: () => Promise<void>
   interruptTurn: () => Promise<void>
   /** Stops one subagent of the selected thread's turn; `toolUseId` is the call that started it. */
   stopSubagent: (toolUseId: string) => Promise<void>
@@ -287,17 +292,27 @@ export const useAppStore = create<AppState>()((set, get) => ({
   pinThread: async (threadId, pinned) => {
     await dispatch({ type: 'threadPin', threadId, pinned }).catch(reportError)
   },
-  sendMessage: async (text, attachments = []) => {
+  sendMessage: async (text, attachments = [], compactFirst = false) => {
     const threadId = get().selectedThreadId ?? (await get().createThread())
     if (!threadId) return false
+    const messageId = crypto.randomUUID()
     try {
-      await dispatch({
-        type: 'messageSend',
-        threadId,
-        messageId: crypto.randomUUID(),
-        text,
-        attachments
-      })
+      if (compactFirst) {
+        await invoke('compact_then_send', {
+          threadId,
+          messageId,
+          text,
+          attachments
+        })
+      } else {
+        await dispatch({
+          type: 'messageSend',
+          threadId,
+          messageId,
+          text,
+          attachments
+        })
+      }
       set({ composerError: null })
       return true
     } catch (error) {
@@ -321,6 +336,17 @@ export const useAppStore = create<AppState>()((set, get) => ({
     await dispatch({ type: 'threadAccessSet', threadId, ...choice }).catch(
       reportError
     )
+  },
+  compactContext: async () => {
+    const threadId = get().selectedThreadId
+    if (!threadId) return
+    await dispatch({
+      type: 'messageSend',
+      threadId,
+      messageId: crypto.randomUUID(),
+      text: COMPACT_COMMAND,
+      attachments: []
+    }).catch(reportError)
   },
   interruptTurn: async () => {
     const threadId = get().selectedThreadId

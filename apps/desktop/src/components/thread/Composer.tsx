@@ -12,6 +12,8 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { ModelPicker } from './ModelPicker'
 import { stepHistory } from '@/lib/prompt-history'
 import { ContextMeter } from './ContextMeter'
+import { isCompactCommand } from '@/lib/compaction'
+import { CompactionChip, useCompactionDue } from './Compaction'
 import {
   DelegatedRequestPanel,
   PlanningTasksNote,
@@ -125,6 +127,7 @@ export function Composer({
   }, [fill, threadId, restoreImages])
   const request = usePendingRequest()
   const requestActions = useRequestActions(request)
+  const compaction = useCompactionDue()
   const { text } = snapshot
   /** A secret is typed in its own card, so it never reaches the chat. */
   const answering =
@@ -275,7 +278,8 @@ export function Composer({
     const attachments = [...images.saved, ...editor.mentions()]
     setSending(true)
     const release = images.keep()
-    const sent = await sendMessage(text, attachments)
+    const compactFirst = compaction?.compact === true && !isCompactCommand(text)
+    const sent = await sendMessage(text, attachments, compactFirst)
     setSending(false)
     if (!sent) {
       release()
@@ -398,7 +402,10 @@ export function Composer({
       <Button
         type='submit'
         size='icon-sm'
-        aria-label={m.send_message()}
+        aria-label={
+          compaction?.compact ? m.compact_and_send() : m.send_message()
+        }
+        title={compaction?.compact ? m.compact_and_send() : undefined}
         className='shrink-0 rounded-full'
         disabled={!canSend}
       >
@@ -543,6 +550,7 @@ function ComposerFooter() {
         {hasThread || chat ? null : <WorkspaceMenu />}
         <PlanToggle />
         <AccessMenu />
+        <CompactionChip />
         <ContextMeter />
         <ModelPicker />
       </div>

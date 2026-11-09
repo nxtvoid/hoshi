@@ -384,6 +384,8 @@ pub struct ClaudeParser {
     /// The model of the agent's latest call, whose window the result reports.
     model: Option<String>,
     used_tokens: Option<u64>,
+    /// How long the provider caches the prompt, as its latest call wrote it.
+    cache_ttl_secs: Option<u64>,
     /// Calls of the tools that move the session, by id, to read where their results lead.
     moves: HashMap<String, WorktreeMove>,
     access: Access,
@@ -495,6 +497,34 @@ impl ClaudeParser {
                 Some("task_progress") => {
                     return self.subagent_progress(&value).into_iter().collect();
                 }
+                Some("status") if value["status"] == "compacting" => {
+                    return vec![ProviderOutput::CompactionStarted];
+                }
+                Some("status") if value["compact_result"] == "failed" => {
+                    let error = value["compact_error"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    return vec![ProviderOutput::CompactionFailed { error }];
+                }
+                Some("compact_boundary") => {
+                    let metadata = &value["compact_metadata"];
+                    let before_tokens = metadata["pre_tokens"].as_u64().unwrap_or_default();
+                    let after_tokens = metadata["post_tokens"].as_u64().unwrap_or_default();
+                    self.used_tokens = Some(after_tokens);
+                    return vec![
+                        ProviderOutput::CompactionFinished {
+                            before_tokens,
+                            after_tokens,
+                        },
+                        ProviderOutput::ContextUsage(ContextUsage {
+                            used_tokens: after_tokens,
+                            max_tokens: self.context_window,
+                            cache_ttl_secs: self.cache_ttl_secs,
+                            cache_expires_at: None,
+                        }),
+                    ];
+                }
                 _ => {}
             },
             _ => {}
@@ -601,6 +631,13 @@ impl ClaudeParser {
                 let message = &event["message"];
                 if let Some(model) = message["model"].as_str() {
                     self.model = Some(model.to_owned());
+                }
+                let creation = &message["usage"]["cache_creation"];
+                let written = |key: &str| creation[key].as_u64().is_some_and(|tokens| tokens > 0);
+                if written("ephemeral_1h_input_tokens") {
+                    self.cache_ttl_secs = Some(60 * 60);
+                } else if written("ephemeral_5m_input_tokens") {
+                    self.cache_ttl_secs = Some(5 * 60);
                 }
                 return self.context_usage(&message["usage"]).into_iter().collect();
             }
@@ -852,6 +889,8 @@ impl ClaudeParser {
         Some(ProviderOutput::ContextUsage(ContextUsage {
             used_tokens,
             max_tokens: self.context_window,
+            cache_ttl_secs: self.cache_ttl_secs,
+            cache_expires_at: None,
         }))
     }
 
@@ -867,6 +906,8 @@ impl ClaudeParser {
         Some(ProviderOutput::ContextUsage(ContextUsage {
             used_tokens: self.used_tokens?,
             max_tokens: Some(window),
+            cache_ttl_secs: self.cache_ttl_secs,
+            cache_expires_at: None,
         }))
     }
 }
@@ -973,6 +1014,55 @@ mod tests {
         assert_eq!(access.permission_mode(), "bypassPermissions");
         access.plan_mode = true;
         assert_eq!(access.permission_mode(), "plan");
+    }
+
+    #[test]
+    fn a_compaction_reports_its_start_its_sizes_and_its_failure() {
+        let mut parser = ClaudeParser::new(Some(200_000));
+        let started = json!({ "type": "system", "subtype": "status", "status": "compacting" });
+        let boundary = json!({ "type": "system", "subtype": "compact_boundary",
+            "compact_metadata": { "trigger": "manual", "pre_tokens": 45_831, "post_tokens": 6_534 } });
+        let failed = json!({ "type": "system", "subtype": "status", "status": null,
+            "compact_result": "failed", "compact_error": "Not enough messages to compact." });
+        let cached = json!({ "type": "stream_event", "event": { "type": "message_start", "message": {
+            "model": "claude-haiku-5-5",
+            "usage": { "input_tokens": 2, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 0,
+                       "cache_creation": { "ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 100 },
+                       "output_tokens": 1 } } } });
+
+        assert_eq!(
+            parser.parse_line(&started.to_string()),
+            [ProviderOutput::CompactionStarted]
+        );
+        let usage = parser.parse_line(&cached.to_string());
+        assert!(matches!(
+            usage.as_slice(),
+            [ProviderOutput::ContextUsage(ContextUsage {
+                cache_ttl_secs: Some(3600),
+                ..
+            })]
+        ));
+        assert_eq!(
+            parser.parse_line(&boundary.to_string()),
+            [
+                ProviderOutput::CompactionFinished {
+                    before_tokens: 45_831,
+                    after_tokens: 6_534
+                },
+                ProviderOutput::ContextUsage(ContextUsage {
+                    used_tokens: 6_534,
+                    max_tokens: Some(200_000),
+                    cache_ttl_secs: Some(3600),
+                    cache_expires_at: None,
+                }),
+            ]
+        );
+        assert_eq!(
+            parser.parse_line(&failed.to_string()),
+            [ProviderOutput::CompactionFailed {
+                error: "Not enough messages to compact.".into()
+            }]
+        );
     }
 
     #[test]

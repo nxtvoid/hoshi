@@ -126,6 +126,8 @@ const PAGE_TURNS: usize = 20;
 /// and no more items, however long a turn ran.
 const PAGE_MAX_ITEMS: usize = 600;
 const TITLE_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// What asks the agent to compact its conversation.
+const COMPACT_COMMAND: &str = "/compact";
 
 struct State {
     /// Wakes the pull request sync before its next tick.
@@ -176,6 +178,8 @@ struct State {
     mcp: Option<McpServer>,
     /// Tasks delegated to child threads, by child thread id, until their answer goes back.
     delegations: HashMap<String, Delegation>,
+    /// Messages waiting for their thread's `/compact` turn to end, sent once it does.
+    after_compaction: HashMap<String, QueuedMessage>,
     checkpoints: Arc<Checkpointer>,
     /// Secrets the user typed for agents, one file each.
     secrets_dir: PathBuf,
@@ -289,6 +293,7 @@ impl Engine {
             queued: HashMap::new(),
             mcp: None,
             delegations: HashMap::new(),
+            after_compaction: HashMap::new(),
             checkpoints: Arc::new(Checkpointer::new()),
             secrets_dir: data_dir.join("secrets"),
             secret_waits: HashMap::new(),
@@ -1254,6 +1259,51 @@ impl Engine {
         self.browsing().forget(thread_id);
     }
 
+    /// Compacts the thread's conversation with `/compact`, then sends the message, as when
+    /// the user comes back to a long thread whose prompt cache ran out. A thread whose turn
+    /// runs takes the message at once instead.
+    pub fn compact_then_send(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        text: String,
+        attachments: Vec<MessageAttachment>,
+    ) -> Result<(), CommandError> {
+        let mut state = lock(&self.state);
+        let busy = state
+            .model
+            .thread(thread_id)
+            .ok_or_else(|| CommandError::ThreadNotFound {
+                thread_id: thread_id.to_owned(),
+            })?
+            .active_turn_id
+            .is_some();
+        let send = Command::MessageSend {
+            thread_id: thread_id.to_owned(),
+            message_id: message_id.to_owned(),
+            text: text.clone(),
+            attachments: attachments.clone(),
+        };
+        if busy {
+            return state.run_command(send);
+        }
+        state.run_command(Command::MessageSend {
+            thread_id: thread_id.to_owned(),
+            message_id: delegation::new_id(),
+            text: COMPACT_COMMAND.to_owned(),
+            attachments: Vec::new(),
+        })?;
+        state.after_compaction.insert(
+            thread_id.to_owned(),
+            QueuedMessage {
+                id: message_id.to_owned(),
+                text,
+                attachments,
+            },
+        );
+        Ok(())
+    }
+
     /// Saves an image the user is about to send. `base64` holds its bytes.
     pub fn save_image(
         &self,
@@ -1774,6 +1824,7 @@ impl State {
                 self.deliver_task_result(thread_id, outcome);
             }
             self.start_next_queued(thread_id);
+            self.send_after_compaction(thread_id);
             self.deliver_pending_wakes(thread_id);
         }
     }
@@ -2023,6 +2074,29 @@ impl State {
 
     /// Starts the oldest message waiting for its own turn, such as one sent while the user
     /// stopped the running turn.
+    /// The message the user sent to go once the context was compacted.
+    fn send_after_compaction(&mut self, thread_id: &str) {
+        let idle = self
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| thread.active_turn_id.is_none());
+        if !idle {
+            return;
+        }
+        let Some(message) = self.after_compaction.remove(thread_id) else {
+            return;
+        };
+        let send = Command::MessageSend {
+            thread_id: thread_id.to_owned(),
+            message_id: message.id,
+            text: message.text,
+            attachments: message.attachments,
+        };
+        if let Err(error) = self.run_command(send) {
+            eprintln!("hoshi: failed to send a message after compacting: {error}");
+        }
+    }
+
     fn start_next_queued(&mut self, thread_id: &str) {
         let Some(message) = self.queued.get_mut(thread_id).and_then(VecDeque::pop_front) else {
             return;
@@ -2205,7 +2279,11 @@ impl State {
         if !active {
             return;
         }
-        let usage = usage.merged_into(self.context_usages.get(thread_id).copied());
+        let mut usage = usage.merged_into(self.context_usages.get(thread_id).copied());
+        if let Some(ttl) = usage.cache_ttl_secs {
+            let now = Utc::now().timestamp_millis().max(0) as u64;
+            usage.cache_expires_at = Some(now + ttl * 1000);
+        }
         self.context_usages.insert(thread_id.to_owned(), usage);
         let update = ThreadContextUsage {
             thread_id: thread_id.to_owned(),
@@ -4167,6 +4245,42 @@ Blue"
         for path in [worktree, pushed_path] {
             let _ = git::remove_worktree(&harness.root, &path);
         }
+    }
+
+    #[test]
+    fn a_message_sent_after_compacting_waits_for_the_compaction_turn() {
+        let mut script = completed_turn();
+        script.insert(
+            1,
+            ProviderOutput::ContextUsage(ContextUsage {
+                used_tokens: 250_000,
+                max_tokens: Some(1_000_000),
+                cache_ttl_secs: Some(3600),
+                cache_expires_at: None,
+            }),
+        );
+        let harness = Harness::in_memory("compact", script);
+
+        harness
+            .engine
+            .compact_then_send("t", "m1", "carry on".into(), Vec::new())
+            .unwrap();
+        harness.wait_for_turn_end();
+        harness.wait_for_turn_end();
+
+        let prompts: Vec<_> = harness
+            .adapter
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.prompt.clone())
+            .collect();
+        assert_eq!(prompts, ["/compact", "carry on"]);
+        let usage = lock(&harness.engine.state).context_usages["t"];
+        let now = Utc::now().timestamp_millis() as u64;
+        let expires = usage.cache_expires_at.unwrap();
+        assert!(expires > now + 3_500_000 && expires <= now + 3_600_000);
     }
 
     #[test]

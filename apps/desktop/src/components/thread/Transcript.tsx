@@ -13,6 +13,8 @@ import { DelegationRow, TaskResultRow } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
 import { TurnChangesCard } from './TurnChangesCard'
 import { RewindButton } from './RewindButton'
+import { CompactionRow } from './Compaction'
+import { isCompactCommand } from '@/lib/compaction'
 import { PullRequestUpdateRow } from './PullRequestUpdateRow'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { UserMessage } from './UserMessage'
@@ -405,6 +407,7 @@ const Item = memo(function Item({
   const { content } = item
   switch (content.kind) {
     case 'userMessage':
+      if (isCompactCommand(content.text)) return null
       if (content.pullRequestUpdate) {
         return (
           <PullRequestUpdateRow
@@ -484,6 +487,8 @@ const Item = memo(function Item({
       return <TaskListRow tasks={content.tasks} working={live} />
     case 'runEnded':
       return null
+    case 'compaction':
+      return <CompactionRow content={content} />
     case 'backgroundTaskEnded':
       return (
         <BackgroundTaskRow

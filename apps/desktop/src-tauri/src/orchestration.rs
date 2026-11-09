@@ -464,6 +464,18 @@ pub fn get_thread_file_diff(
     engine.thread_file_diff(&thread_id, scope, &file)
 }
 
+/// Compacts the thread's conversation first, then sends the message.
+#[tauri::command(async)]
+pub fn compact_then_send(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    message_id: String,
+    text: String,
+    attachments: Vec<MessageAttachment>,
+) -> Result<(), CommandError> {
+    engine.compact_then_send(&thread_id, &message_id, text, attachments)
+}
+
 #[tauri::command(async)]
 pub fn browser_view(
     engine: State<'_, Engine>,

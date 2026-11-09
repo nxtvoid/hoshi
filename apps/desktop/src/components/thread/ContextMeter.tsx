@@ -3,6 +3,9 @@ import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { useAppStore } from '@/state/app-store'
 import { contextPercent, formatTokens } from '@/lib/usage'
+import { HugeiconsIcon } from '@hugeicons/react'
+import { Button } from '@hoshi/ui/components/button'
+import { ArrowShrink01Icon } from '@hugeicons/core-free-icons'
 import {
   HoverCard,
   HoverCardContent,
@@ -19,6 +22,12 @@ export function ContextMeter() {
       ? state.contextUsages[state.selectedThreadId]
       : undefined
   )
+  const working = useAppStore(
+    (state) =>
+      state.threads.find((thread) => thread.id === state.selectedThreadId)
+        ?.activeTurnId != null
+  )
+  const compactContext = useAppStore((state) => state.compactContext)
   if (!usage) return null
 
   const locale = getLocale()
@@ -73,6 +82,16 @@ export function ContextMeter() {
             ? m.context_window_size_pending()
             : m.context_compacts_automatically()}
         </p>
+        <Button
+          size='xs'
+          variant='outline'
+          disabled={working}
+          onClick={() => void compactContext()}
+          className='self-start'
+        >
+          <HugeiconsIcon icon={ArrowShrink01Icon} strokeWidth={2} />
+          {m.compact_context()}
+        </Button>
       </HoverCardContent>
     </HoverCard>
   )

@@ -88,6 +88,18 @@ pub enum ProviderOutput {
     RunEnded {
         run: u32,
     },
+    /// The agent began compacting its conversation into a summary, as `/compact` asks.
+    CompactionStarted,
+    /// The conversation was compacted: its context went from `before_tokens` to
+    /// `after_tokens`.
+    CompactionFinished {
+        before_tokens: u64,
+        after_tokens: u64,
+    },
+    /// Compacting failed; `error` is the provider's own message.
+    CompactionFailed {
+        error: String,
+    },
     /// The provider's id for its latest message of the conversation, where a rewind can
     /// later resume it.
     ConversationCursor {

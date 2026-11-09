@@ -168,6 +168,15 @@ pub struct ThreadItem {
     pub content: ItemContent,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum CompactionStatus {
+    Running,
+    Done,
+    Failed,
+}
+
 /// The point of the conversation a user message started from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
@@ -250,6 +259,15 @@ pub enum ItemContent {
     /// ended; `None` while they are still being read.
     TurnChanges {
         files: Option<Vec<DiffFile>>,
+    },
+    /// The conversation compacted into a summary, to free its context window.
+    Compaction {
+        status: CompactionStatus,
+        /// The context's size before and after, once done.
+        before_tokens: Option<u64>,
+        after_tokens: Option<u64>,
+        /// Why it failed, in the provider's words.
+        error: Option<String>,
     },
     /// A tool call held back until the user approves it.
     Approval {

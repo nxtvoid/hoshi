@@ -1,8 +1,8 @@
 use crate::{
-    AccessMode, ApprovalDecision, DiffFile, Effort, ItemContent, MessageAttachment, OpenToolCall,
-    Project, ProviderOutput, PullRequestUpdate, RequestResponse, RequestStatus, Rewind, Thread,
-    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail,
-    TurnFailure, TurnOutcome,
+    AccessMode, ApprovalDecision, CompactionStatus, DiffFile, Effort, ItemContent,
+    MessageAttachment, OpenToolCall, Project, ProviderOutput, PullRequestUpdate, RequestResponse,
+    RequestStatus, Rewind, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus,
+    ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1502,6 +1502,36 @@ pub fn record_output(
                 ItemContent::TaskList { tasks },
             )]
         }
+        ProviderOutput::CompactionStarted => vec![item(
+            format!("{turn_id}:compaction"),
+            ItemContent::Compaction {
+                status: CompactionStatus::Running,
+                before_tokens: None,
+                after_tokens: None,
+                error: None,
+            },
+        )],
+        ProviderOutput::CompactionFinished {
+            before_tokens,
+            after_tokens,
+        } => vec![item(
+            format!("{turn_id}:compaction"),
+            ItemContent::Compaction {
+                status: CompactionStatus::Done,
+                before_tokens: Some(before_tokens),
+                after_tokens: Some(after_tokens),
+                error: None,
+            },
+        )],
+        ProviderOutput::CompactionFailed { error } => vec![item(
+            format!("{turn_id}:compaction"),
+            ItemContent::Compaction {
+                status: CompactionStatus::Failed,
+                before_tokens: None,
+                after_tokens: None,
+                error: Some(error),
+            },
+        )],
         ProviderOutput::RunEnded { run } => {
             vec![item(format!("{turn_id}:run{run}"), ItemContent::RunEnded)]
         }

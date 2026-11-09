@@ -58,6 +58,7 @@ pub fn run() {
             orchestration::get_turn_diff_files,
             orchestration::rewind_thread,
             orchestration::answer_secret_request,
+            orchestration::compact_then_send,
             orchestration::browser_view,
             orchestration::browser_open,
             orchestration::browser_go,

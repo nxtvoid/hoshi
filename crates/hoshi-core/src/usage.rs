@@ -2,23 +2,36 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// How full a thread's context window was after its last model call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ContextUsage {
     pub used_tokens: u64,
     /// `None` while the provider has not said how large the window is.
     pub max_tokens: Option<u64>,
+    /// How long the provider keeps the conversation's prompt cached after a model call.
+    #[serde(default)]
+    pub cache_ttl_secs: Option<u64>,
+    /// When that cache runs out, in Unix milliseconds: past it, the next message pays to
+    /// read the whole context again, which compacting first avoids.
+    #[serde(default)]
+    pub cache_expires_at: Option<u64>,
 }
 
 impl ContextUsage {
-    /// Keeps the known window size when an update does not carry one.
+    /// Keeps the known window size and cache lifetime when an update does not carry them.
     pub fn merged_into(self, previous: Option<ContextUsage>) -> Self {
         Self {
             used_tokens: self.used_tokens,
             max_tokens: self
                 .max_tokens
                 .or(previous.and_then(|usage| usage.max_tokens)),
+            cache_ttl_secs: self
+                .cache_ttl_secs
+                .or(previous.and_then(|usage| usage.cache_ttl_secs)),
+            cache_expires_at: self
+                .cache_expires_at
+                .or(previous.and_then(|usage| usage.cache_expires_at)),
         }
     }
 }
@@ -116,10 +129,12 @@ mod tests {
         let known = ContextUsage {
             used_tokens: 10,
             max_tokens: Some(200_000),
+            ..ContextUsage::default()
         };
         let update = ContextUsage {
             used_tokens: 12,
             max_tokens: None,
+            ..ContextUsage::default()
         };
 
         assert_eq!(update.merged_into(Some(known)).max_tokens, Some(200_000));

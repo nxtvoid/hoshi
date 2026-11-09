@@ -202,15 +202,18 @@ fn context_usage_counts_cached_input_and_output_of_the_agent_only() {
         [
             ContextUsage {
                 used_tokens: 9_071,
-                max_tokens: None
+                max_tokens: None,
+                ..ContextUsage::default()
             },
             ContextUsage {
                 used_tokens: 9_107,
-                max_tokens: None
+                max_tokens: None,
+                ..ContextUsage::default()
             },
             ContextUsage {
                 used_tokens: 9_107,
-                max_tokens: Some(1_000_000)
+                max_tokens: Some(1_000_000),
+                ..ContextUsage::default()
             },
         ]
     );

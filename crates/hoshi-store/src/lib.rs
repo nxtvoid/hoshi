@@ -173,6 +173,10 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE threads ADD COLUMN watching_pull_request INTEGER NOT NULL DEFAULT 0;
     ",
+    r"
+    ALTER TABLE context_usages ADD COLUMN cache_ttl_secs INTEGER;
+    ALTER TABLE context_usages ADD COLUMN cache_expires_at INTEGER;
+    ",
 ];
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
@@ -312,13 +316,22 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()?;
         let context_usages = self
             .conn
-            .prepare("SELECT thread_id, used_tokens, max_tokens FROM context_usages")?
+            .prepare(
+                "SELECT thread_id, used_tokens, max_tokens, cache_ttl_secs, cache_expires_at
+                 FROM context_usages",
+            )?
             .query_map([], |row| {
+                let number = |index: usize| {
+                    row.get::<_, Option<i64>>(index)
+                        .map(|value| value.map(|value| value as u64))
+                };
                 Ok(ThreadContextUsage {
                     thread_id: row.get(0)?,
                     usage: ContextUsage {
                         used_tokens: row.get::<_, i64>(1)? as u64,
-                        max_tokens: row.get::<_, Option<i64>>(2)?.map(|tokens| tokens as u64),
+                        max_tokens: number(2)?,
+                        cache_ttl_secs: number(3)?,
+                        cache_expires_at: number(4)?,
                     },
                 })
             })?
@@ -326,7 +339,8 @@ impl Store {
         let pending_requests = self.items(
             "SELECT id, thread_id, created_at, content_json FROM thread_items
              WHERE json_extract(content_json, '$.status') = 'pending'
-               AND json_extract(content_json, '$.kind') IN ('approval', 'questions', 'proposedPlan')
+               AND json_extract(content_json, '$.kind')
+                   IN ('approval', 'questions', 'proposedPlan', 'secretRequest')
              ORDER BY ordinal",
             [],
         )?;
@@ -362,12 +376,15 @@ impl Store {
     /// Caches a thread's context usage. Not an event: it changes on every model call.
     pub fn save_context_usage(&mut self, update: &ThreadContextUsage) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO context_usages (thread_id, used_tokens, max_tokens)
-             VALUES (?1, ?2, ?3)",
+            "INSERT OR REPLACE INTO context_usages
+             (thread_id, used_tokens, max_tokens, cache_ttl_secs, cache_expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 update.thread_id,
                 update.usage.used_tokens as i64,
-                update.usage.max_tokens.map(|tokens| tokens as i64)
+                update.usage.max_tokens.map(|tokens| tokens as i64),
+                update.usage.cache_ttl_secs.map(|secs| secs as i64),
+                update.usage.cache_expires_at.map(|at| at as i64)
             ],
         )?;
         Ok(())
@@ -1196,6 +1213,7 @@ mod tests {
             usage: ContextUsage {
                 used_tokens: 9_000,
                 max_tokens: None,
+                ..ContextUsage::default()
             },
         };
         let latest = ThreadContextUsage {
@@ -1203,6 +1221,7 @@ mod tests {
             usage: ContextUsage {
                 used_tokens: 12_000,
                 max_tokens: Some(1_000_000),
+                ..ContextUsage::default()
             },
         };
 
