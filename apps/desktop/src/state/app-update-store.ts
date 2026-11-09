@@ -1,8 +1,16 @@
 import { create } from 'zustand'
-import { relaunch } from '@tauri-apps/plugin-process'
+import { invoke } from '@tauri-apps/api/core'
 import { getVersion } from '@tauri-apps/api/app'
+import { relaunch } from '@tauri-apps/plugin-process'
+import type { AppRelease } from '@/bindings/AppRelease'
 import { check, type Update } from '@tauri-apps/plugin-updater'
-import { type AppUpdate, checkDue, downloadPercent } from '@/lib/updates'
+import {
+  type AppUpdate,
+  checkDue,
+  downloadPercent,
+  releaseNotesKey,
+  releaseNotesTarget
+} from '@/lib/updates'
 
 const CHECK_EVERY = 30 * 60 * 1000
 const UP_TO_DATE_FOR = 2000
@@ -14,11 +22,15 @@ type AppUpdateState = {
   update: AppUpdate
   /** The running build's version; `null` until read. */
   currentVersion: string | null
+  /** Releases between the running build and an update, by `releaseNotesKey`. */
+  releaseNotes: Record<string, AppRelease[]>
   /** Reads the release feed; `manual` shows the check and how it ended. */
   check: (manual?: boolean) => Promise<void>
   /** Downloads the update found last; `restart` installs it. */
   download: () => Promise<void>
   restart: () => Promise<void>
+  /** Fetches the notes of the update found last, once per session. */
+  loadReleaseNotes: () => Promise<void>
 }
 
 /** The plugin's handle on the release found last; it can't live in the store. */
@@ -26,6 +38,7 @@ let pending: Update | null = null
 let checking: Promise<void> | null = null
 let lastCheckedAt: number | null = null
 let upToDateTimer: ReturnType<typeof setTimeout> | undefined
+const loadingReleaseNotes = new Set<string>()
 
 function busy(update: AppUpdate) {
   return update.status === 'downloading' || update.status === 'ready'
@@ -34,6 +47,7 @@ function busy(update: AppUpdate) {
 export const useAppUpdateStore = create<AppUpdateState>()((set, get) => ({
   update: { status: 'idle' },
   currentVersion: null,
+  releaseNotes: {},
   check: async (manual = false) => {
     if (!APP_UPDATES_ENABLED || busy(get().update)) return
     if (checking) {
@@ -58,6 +72,7 @@ export const useAppUpdateStore = create<AppUpdateState>()((set, get) => ({
             currentVersion,
             update: { status: 'available', version: found.version }
           })
+          void get().loadReleaseNotes()
         } else if (get().update.status === 'checking') {
           set({
             currentVersion,
@@ -117,6 +132,25 @@ export const useAppUpdateStore = create<AppUpdateState>()((set, get) => ({
     } catch (error) {
       console.error('hoshi: failed to install the app update', error)
       set({ update: { status: 'failed', version: update.version } })
+    }
+  },
+  loadReleaseNotes: async () => {
+    const { currentVersion, update } = get()
+    const available = releaseNotesTarget(update)
+    if (!currentVersion || !available) return
+    const key = releaseNotesKey(currentVersion, available)
+    if (get().releaseNotes[key] || loadingReleaseNotes.has(key)) return
+    loadingReleaseNotes.add(key)
+    try {
+      const releases = await invoke<AppRelease[]>('app_release_notes', {
+        installed: currentVersion,
+        available
+      })
+      set({ releaseNotes: { ...get().releaseNotes, [key]: releases } })
+    } catch (error) {
+      console.warn('hoshi: failed to read the release notes', error)
+    } finally {
+      loadingReleaseNotes.delete(key)
     }
   }
 }))

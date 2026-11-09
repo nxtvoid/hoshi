@@ -1,7 +1,9 @@
 import type { ReactNode } from 'react'
-import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
+import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
+import { openUrl } from '@tauri-apps/plugin-opener'
+import { cn, formatRelativeTime } from '@hoshi/utils'
 import { useModelsStore } from '@/state/models-store'
 import { Button } from '@hoshi/ui/components/button'
 import { metaOf } from '@/components/brand/provider-meta'
@@ -15,6 +17,10 @@ import {
 import {
   type AppUpdate,
   providerBadge,
+  releaseChanges,
+  releaseCompareUrl,
+  releaseNotesKey,
+  releaseNotesTarget,
   type UpdateBadge,
   type UpdateButton,
   updateButton
@@ -33,6 +39,7 @@ import {
   Alert02Icon,
   CheckmarkCircle02Icon,
   Download04Icon,
+  LinkSquare02Icon,
   Loading03Icon,
   RefreshIcon,
   RotateClockwiseIcon
@@ -145,6 +152,7 @@ function UpdateDetailsButton({
   version: ProviderVersion | null
 }) {
   const markSeen = useProviderUpdateStore((state) => state.markSeen)
+  const loadReleaseNotes = useAppUpdateStore((state) => state.loadReleaseNotes)
   const downloading = appUpdate.status === 'downloading' ? appUpdate : null
   const label = downloading
     ? downloading.percent === null
@@ -159,7 +167,8 @@ function UpdateDetailsButton({
   return (
     <Popover
       onOpenChange={(open) => {
-        if (!open) markSeen()
+        if (open) void loadReleaseNotes()
+        else markSeen()
       }}
     >
       <Tooltip>
@@ -281,6 +290,83 @@ function AppUpdateDetails({ update }: { update: AppUpdate }) {
           {m.app_update_restarts()}
         </p>
       )}
+      {currentVersion ? (
+        <ReleaseNotes installed={currentVersion} update={update} />
+      ) : null}
+    </div>
+  )
+}
+
+function ReleaseNotes({
+  installed,
+  update
+}: {
+  installed: string
+  update: AppUpdate
+}) {
+  const available = releaseNotesTarget(update)
+  const releases = useAppUpdateStore((state) =>
+    available
+      ? state.releaseNotes[releaseNotesKey(installed, available)]
+      : undefined
+  )
+  if (!available || !releases) return null
+  const shown = releases.map((release) => ({
+    ...release,
+    changes: releaseChanges(release.body)
+  }))
+  const count = shown.reduce(
+    (total, release) => total + release.changes.length,
+    0
+  )
+  if (count === 0) return null
+  const now = new Date()
+
+  return (
+    <div className='flex flex-col gap-2 border-t pt-2.5'>
+      <div className='flex max-h-62 flex-col gap-3 overflow-y-auto'>
+        {shown.map((release) => (
+          <section key={release.version} className='flex flex-col gap-1'>
+            <header className='flex items-baseline justify-between gap-2 text-xs'>
+              <span className='font-semibold tabular-nums'>
+                {release.version}
+              </span>
+              <span className='text-muted-foreground shrink-0'>
+                {formatRelativeTime(release.publishedAt, now, getLocale())}
+              </span>
+            </header>
+            <ul className='flex flex-col gap-0.5'>
+              {release.changes.map((change) => (
+                <li
+                  key={change}
+                  className='text-muted-foreground flex gap-1.5 text-xs'
+                >
+                  <span
+                    aria-hidden
+                    className='bg-muted-foreground/50 mt-1.5 size-1 shrink-0 rounded-full'
+                  />
+                  <span className='min-w-0'>{change}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
+      <div className='text-muted-foreground flex items-center justify-between gap-2 text-xs'>
+        <span className='tabular-nums'>{m.app_update_changes({ count })}</span>
+        <button
+          type='button'
+          onClick={() => void openUrl(releaseCompareUrl(installed, available))}
+          className='hover:text-foreground focus-visible:ring-ring flex items-center gap-1 rounded outline-none focus-visible:ring-2'
+        >
+          {m.view_on_github()}
+          <HugeiconsIcon
+            icon={LinkSquare02Icon}
+            strokeWidth={2}
+            className='size-3 shrink-0'
+          />
+        </button>
+      </div>
     </div>
   )
 }

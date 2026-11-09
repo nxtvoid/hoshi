@@ -116,3 +116,29 @@ export function downloadPercent(received: number, total: number) {
   if (total <= 0) return null
   return Math.min(100, Math.floor((received / total) * 100))
 }
+
+/** Caches a release range's notes for the session. */
+export function releaseNotesKey(installed: string, available: string) {
+  return `${installed}...${available}`
+}
+
+/** A release body's bullet points, as plain text. */
+export function releaseChanges(body: string) {
+  return body
+    .split(/\r?\n/)
+    .map((line) => /^\s*[-*+]\s+(.+)$/.exec(line)?.[1]?.trim())
+    .filter((change): change is string => Boolean(change))
+}
+
+export function releaseCompareUrl(installed: string, available: string) {
+  return `https://github.com/nxtvoid/hoshi/compare/v${installed}...v${available}`
+}
+
+/** The version whose release notes the update details show; `null` when they show none. */
+export function releaseNotesTarget(update: AppUpdate) {
+  return update.status === 'available' ||
+    update.status === 'downloading' ||
+    update.status === 'ready'
+    ? update.version
+    : null
+}

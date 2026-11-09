@@ -1,3 +1,4 @@
+mod app_release;
 mod appearance;
 mod clipboard;
 mod fonts;
@@ -27,6 +28,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            app_release::app_release_notes,
             orchestration::get_snapshot,
             orchestration::dispatch,
             orchestration::get_thread_items,

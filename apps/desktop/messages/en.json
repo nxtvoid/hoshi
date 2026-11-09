@@ -787,6 +787,17 @@
   "app_update_downloading": "Downloading…",
   "app_update_downloading_percent": "Downloading {percent}%",
   "app_update_failed": "The update couldn't be installed. Try again later.",
+  "view_on_github": "View on GitHub",
+  "app_update_changes": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} change",
+        "countPlural=*": "{count} changes"
+      }
+    }
+  ],
   "edit_cut": "Cut",
   "edit_copy": "Copy",
   "edit_paste": "Paste",
