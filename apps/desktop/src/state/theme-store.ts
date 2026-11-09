@@ -133,6 +133,10 @@ function applyAppearance() {
   setData(root, 'codeFont', applied.codeFont)
   setData(root, 'composerFont', applied.composerFont)
   setData(root, 'terminalFont', applied.terminalFont)
+  setVariable(root, '--font-sans', applied.fontStack)
+  setVariable(root, '--font-mono', applied.codeFontStack)
+  setVariable(root, '--font-composer', applied.composerFontStack)
+  setVariable(root, '--font-terminal', applied.terminalFontStack)
   setData(root, 'fontSmoothing', applied.fontSmoothing)
   setData(root, 'textWeight', applied.textWeight)
   if (root.style.fontSize !== (applied.fontSize ?? '')) {

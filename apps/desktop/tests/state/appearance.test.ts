@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   CODE_SIZE,
   clampSize,
+  cssFontFamily,
   DEFAULT_APPEARANCE,
   INTERFACE_SIZE,
   normalizeAppearance,
@@ -30,8 +31,9 @@ describe('normalizeAppearance', () => {
         theme: 'neon',
         halves: { light: 'gone' },
         customThemes: [{ id: 'grove' }],
-        interfaceFont: 'comic',
+        interfaceFont: '   ',
         codeFont: 7,
+        terminalFont: 'x'.repeat(201),
         lighterText: 'no'
       })
     ).toEqual(DEFAULT_APPEARANCE)
@@ -57,6 +59,19 @@ describe('normalizeAppearance', () => {
       lighterText: false
     }
     expect(normalizeAppearance(saved)).toEqual(saved)
+  })
+
+  test('keeps the family name of an installed font', () => {
+    const appearance = normalizeAppearance({
+      interfaceFont: ' Segoe UI ',
+      codeFont: 'Fira Code',
+      composerFont: 'Iosevka',
+      terminalFont: 'Cascadia Code'
+    })
+    expect(appearance.interfaceFont).toBe('Segoe UI')
+    expect(appearance.codeFont).toBe('Fira Code')
+    expect(appearance.composerFont).toBe('Iosevka')
+    expect(appearance.terminalFont).toBe('Cascadia Code')
   })
 
   test('moves the palette an earlier version saved to the theme', () => {
@@ -117,6 +132,10 @@ describe('rootAppearance', () => {
       codeFont: undefined,
       composerFont: undefined,
       terminalFont: undefined,
+      fontStack: undefined,
+      codeFontStack: undefined,
+      composerFontStack: undefined,
+      terminalFontStack: undefined,
       fontSmoothing: undefined,
       textWeight: undefined,
       fontSize: undefined,
@@ -157,6 +176,10 @@ describe('rootAppearance', () => {
       codeFont: 'cascadia',
       composerFont: undefined,
       terminalFont: undefined,
+      fontStack: undefined,
+      codeFontStack: undefined,
+      composerFontStack: undefined,
+      terminalFontStack: undefined,
       fontSmoothing: 'off',
       textWeight: 'regular',
       fontSize: '14px',
@@ -169,9 +192,9 @@ describe('rootAppearance', () => {
   test('the prompt box and the terminal follow the others until fonts are separate', () => {
     const appearance = {
       ...DEFAULT_APPEARANCE,
-      composerFont: 'jetbrains' as const,
+      composerFont: 'jetbrains',
       composerSize: 15,
-      terminalFont: 'cascadia' as const,
+      terminalFont: 'cascadia',
       terminalSize: 10
     }
     expect(rootAppearance(appearance, false).composerFont).toBeUndefined()
@@ -183,6 +206,42 @@ describe('rootAppearance', () => {
     expect(separate.composerFontSize).toBe('15px')
     expect(separate.terminalFont).toBe('cascadia')
     expect(separate.terminalFontSize).toBe('10px')
+  })
+
+  test('an installed family leads the default stack of its slot', () => {
+    const applied = rootAppearance(
+      {
+        ...DEFAULT_APPEARANCE,
+        interfaceFont: 'Segoe UI',
+        codeFont: 'Fira Code',
+        separateFonts: true,
+        composerFont: 'Iosevka',
+        terminalFont: 'Cascadia Code'
+      },
+      false
+    )
+    expect(applied.font).toBeUndefined()
+    expect(applied.fontStack).toBe('"Segoe UI", var(--stack-geist)')
+    expect(applied.codeFont).toBeUndefined()
+    expect(applied.codeFontStack).toBe('"Fira Code", var(--stack-jetbrains)')
+    expect(applied.composerFontStack).toBe('"Iosevka", var(--font-sans)')
+    expect(applied.terminalFont).toBeUndefined()
+    expect(applied.terminalFontStack).toBe(
+      '"Cascadia Code", var(--stack-jetbrains)'
+    )
+  })
+
+  test('the prompt box and the terminal ignore their families until fonts are separate', () => {
+    const applied = rootAppearance(
+      {
+        ...DEFAULT_APPEARANCE,
+        composerFont: 'Iosevka',
+        terminalFont: 'Cascadia Code'
+      },
+      false
+    )
+    expect(applied.composerFontStack).toBeUndefined()
+    expect(applied.terminalFontStack).toBeUndefined()
   })
 
   test('paints each half with its own theme', () => {
@@ -199,5 +258,15 @@ describe('rootAppearance', () => {
     const dark = rootAppearance(appearance, true)
     expect(dark.palette).toBeUndefined()
     expect(dark.colors).toBe(colors)
+  })
+})
+
+describe('cssFontFamily', () => {
+  test('quotes the name', () => {
+    expect(cssFontFamily('Fira Code')).toBe('"Fira Code"')
+  })
+
+  test('escapes quotes and backslashes and drops line breaks', () => {
+    expect(cssFontFamily('a"b\\c\nd')).toBe('"a\\"b\\\\c d"')
   })
 })
