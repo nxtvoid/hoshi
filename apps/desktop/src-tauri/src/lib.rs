@@ -1,5 +1,6 @@
 mod appearance;
 mod clipboard;
+mod fonts;
 mod home;
 mod orchestration;
 mod settings;
@@ -97,6 +98,7 @@ pub fn run() {
             settings::get_settings,
             settings::update_settings,
             appearance::set_appearance,
+            fonts::list_system_fonts,
             theme_files::export_theme,
             theme_import::search_theme_extensions,
             theme_import::import_theme_extension

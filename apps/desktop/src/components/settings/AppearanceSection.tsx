@@ -1,10 +1,14 @@
-import type { ReactNode } from 'react'
 import { m } from '@/paraglide/messages'
+import { firstAvailableFamily } from '@/lib/fonts'
 import { HugeiconsIcon } from '@hugeicons/react'
+import { type ReactNode, useEffect } from 'react'
 import { Switch } from '@hoshi/ui/components/switch'
 import { Button } from '@hoshi/ui/components/button'
 import { useThemeStore } from '@/state/theme-store'
 import { RotateLeft01Icon } from '@hugeicons/core-free-icons'
+import { loadSystemFonts } from '@/state/system-fonts-store'
+import { isFontFamilyAvailable } from '@/lib/font-availability'
+import { FontFamilyPicker, isMonospaceSlot } from './FontFamilyPicker'
 import {
   AddThemeButton,
   ColorSchemeTiles,
@@ -29,11 +33,12 @@ import {
   SelectValue
 } from '@hoshi/ui/components/select'
 import {
-  type Appearance,
   CODE_SIZE,
   COMPOSER_SIZE,
   DEFAULT_APPEARANCE,
+  type FontSlot,
   INTERFACE_SIZE,
+  isFontPreset,
   type SizeRange,
   sizeOptions,
   TERMINAL_SIZE
@@ -45,27 +50,52 @@ import {
   SettingsSection
 } from './SettingsLayout'
 
-type FontOption<T extends string> = { value: T; label: () => string }
+const INTERFACE_PRESETS = ['geist', 'inter']
+const COMPOSER_PRESETS = ['interface', 'geist', 'inter']
+const CODE_PRESETS = ['jetbrains']
 
-const INTERFACE_FONT_OPTIONS: FontOption<Appearance['interfaceFont']>[] = [
-  { value: 'geist', label: m.font_geist },
-  { value: 'inter', label: m.font_inter },
-  { value: 'system', label: m.font_system }
-]
+const PRESETS: Record<FontSlot, readonly string[]> = {
+  interface: INTERFACE_PRESETS,
+  composer: COMPOSER_PRESETS,
+  code: CODE_PRESETS,
+  terminal: CODE_PRESETS
+}
 
-const CODE_FONT_OPTIONS: FontOption<Appearance['codeFont']>[] = [
-  { value: 'jetbrains', label: m.font_jetbrains_mono },
-  { value: 'cascadia', label: m.font_cascadia_mono },
-  { value: 'system', label: m.font_system_mono }
-]
+const PRESET_LABELS: Record<string, () => string> = {
+  geist: m.font_geist,
+  inter: m.font_inter,
+  cascadia: m.font_cascadia_mono,
+  'system-mono': m.font_system_mono
+}
 
-const COMPOSER_FONT_OPTIONS: FontOption<Appearance['composerFont']>[] = [
-  { value: 'interface', label: m.font_same_as_interface },
-  ...INTERFACE_FONT_OPTIONS,
-  { value: 'jetbrains', label: m.font_jetbrains_mono },
-  { value: 'cascadia', label: m.font_cascadia_mono },
-  { value: 'system-mono', label: m.font_system_mono }
-]
+let monospaceDefault: string | null | undefined
+
+/** The family the default monospace stack renders with, like the default entry shows it. */
+function monospaceDefaultLabel(): string {
+  if (monospaceDefault === undefined) {
+    const stack = getComputedStyle(document.documentElement).getPropertyValue(
+      '--stack-jetbrains'
+    )
+    monospaceDefault = firstAvailableFamily(stack, isFontFamilyAvailable)
+  }
+  return monospaceDefault ?? m.font_system_mono()
+}
+
+function fontLabel(
+  slot: FontSlot,
+  value: string,
+  interfaceFont: string
+): string {
+  if (!isFontPreset(slot, value)) return value
+  if (value === 'interface') {
+    return fontLabel('interface', interfaceFont, interfaceFont)
+  }
+  if (value === 'jetbrains') return monospaceDefaultLabel()
+  if (value === 'system') {
+    return isMonospaceSlot(slot) ? m.font_system_mono() : m.font_system()
+  }
+  return PRESET_LABELS[value]?.() ?? value
+}
 
 const PLATFORM = document.documentElement.dataset.platform
 
@@ -94,6 +124,20 @@ export function AppearanceSection() {
 type FontKey = 'interfaceFont' | 'codeFont' | 'composerFont' | 'terminalFont'
 type SizeKey = 'interfaceSize' | 'codeSize' | 'composerSize' | 'terminalSize'
 
+const FONT_KEYS: Record<FontSlot, FontKey> = {
+  interface: 'interfaceFont',
+  composer: 'composerFont',
+  code: 'codeFont',
+  terminal: 'terminalFont'
+}
+
+const SIZE_KEYS: Record<FontSlot, SizeKey> = {
+  interface: 'interfaceSize',
+  composer: 'composerSize',
+  code: 'codeSize',
+  terminal: 'terminalSize'
+}
+
 function TypographySection() {
   const separate = useThemeStore((state) => state.separateFonts)
   const wordWrap = useThemeStore((state) => state.wordWrap)
@@ -101,15 +145,15 @@ function TypographySection() {
   const lighterText = useThemeStore((state) => state.lighterText)
   const update = useThemeStore((state) => state.update)
 
+  useEffect(loadSystemFonts, [])
+
   return (
     <SettingsSection title={m.typography()}>
       <FontRow
         id='settings-interface-font'
         title={m.interface_font()}
         description={m.interface_font_description()}
-        fontKey='interfaceFont'
-        sizeKey='interfaceSize'
-        options={INTERFACE_FONT_OPTIONS}
+        slot='interface'
         range={INTERFACE_SIZE}
         sizeLabel={m.interface_font_size()}
         preview={separate ? undefined : <PromptFontPreview />}
@@ -119,9 +163,7 @@ function TypographySection() {
           id='settings-prompt-font'
           title={m.prompt_font()}
           description={m.prompt_font_description()}
-          fontKey='composerFont'
-          sizeKey='composerSize'
-          options={COMPOSER_FONT_OPTIONS}
+          slot='composer'
           range={COMPOSER_SIZE}
           sizeLabel={m.prompt_font_size()}
           preview={<PromptFontPreview />}
@@ -133,9 +175,7 @@ function TypographySection() {
         description={
           separate ? m.code_font_description() : m.monospace_font_description()
         }
-        fontKey='codeFont'
-        sizeKey='codeSize'
-        options={CODE_FONT_OPTIONS}
+        slot='code'
         range={CODE_SIZE}
         sizeLabel={m.code_font_size()}
         preview={
@@ -150,9 +190,7 @@ function TypographySection() {
           id='settings-terminal-font'
           title={m.terminal_font()}
           description={m.terminal_font_description()}
-          fontKey='terminalFont'
-          sizeKey='terminalSize'
-          options={CODE_FONT_OPTIONS}
+          slot='terminal'
           range={TERMINAL_SIZE}
           sizeLabel={m.terminal_font_size()}
           preview={<TerminalFontPreview />}
@@ -236,13 +274,11 @@ function TypographySection() {
   )
 }
 
-function FontRow<T extends string>({
+function FontRow({
   id,
   title,
   description,
-  fontKey,
-  sizeKey,
-  options,
+  slot,
   range,
   sizeLabel,
   preview
@@ -250,18 +286,24 @@ function FontRow<T extends string>({
   id: string
   title: string
   description: string
-  fontKey: FontKey
-  sizeKey: SizeKey
-  options: FontOption<T>[]
+  slot: FontSlot
   range: SizeRange
   sizeLabel: string
   preview?: ReactNode
 }) {
-  const font = useThemeStore((state) => state[fontKey]) as T
+  const fontKey = FONT_KEYS[slot]
+  const sizeKey = SIZE_KEYS[slot]
+  const font = useThemeStore((state) => state[fontKey])
   const size = useThemeStore((state) => state[sizeKey])
+  const interfaceFont = useThemeStore((state) => state.interfaceFont)
   const update = useThemeStore((state) => state.update)
   const changed =
     font !== DEFAULT_APPEARANCE[fontKey] || size !== DEFAULT_APPEARANCE[sizeKey]
+  const labelOf = (value: string) => fontLabel(slot, value, interfaceFont)
+  const presets = PRESETS[slot].map((value) => ({
+    value,
+    label: labelOf(value)
+  }))
 
   return (
     <SettingsRow
@@ -283,10 +325,12 @@ function FontRow<T extends string>({
       }
       control={
         <div className='flex flex-wrap items-center gap-2 @min-[32rem]/settings-row:flex-nowrap'>
-          <OptionSelect
+          <FontFamilyPicker
             id={id}
-            options={options}
+            slot={slot}
             value={font}
+            presets={presets}
+            labelOf={labelOf}
             onChange={(value) => update({ [fontKey]: value })}
           />
           <SizeSelect
@@ -327,43 +371,6 @@ function ResetButton({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
-  )
-}
-
-function OptionSelect<T extends string>({
-  id,
-  options,
-  value,
-  onChange
-}: {
-  id: string
-  options: readonly FontOption<T>[]
-  value: T
-  onChange: (value: T) => void
-}) {
-  const items = options.map((option) => ({
-    value: option.value,
-    label: option.label()
-  }))
-  return (
-    <Select
-      items={items}
-      value={value}
-      onValueChange={(next: T | null) => {
-        if (next) onChange(next)
-      }}
-    >
-      <SelectTrigger id={id} className='min-w-44'>
-        <SelectValue />
-      </SelectTrigger>
-      <SelectContent>
-        {items.map((item) => (
-          <SelectItem key={item.value} value={item.value}>
-            {item.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
   )
 }
 
