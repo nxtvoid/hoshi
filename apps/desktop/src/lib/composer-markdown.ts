@@ -1,7 +1,10 @@
 import type { JSONContent } from '@tiptap/core'
 
 /** The composer's chips: what they stand for, and how the prompt writes them. */
-export type MentionKind = 'file' | 'pullRequest' | 'skill'
+export type MentionKind = 'file' | 'pullRequest' | 'skill' | 'image'
+
+/** An image chip in the draft's text, until sending numbers it. Its value is the image's key. */
+const IMAGE_CHIP = /\[image:([0-9a-f-]+)\]/g
 
 export function mentionSource(kind: MentionKind, value: string) {
   switch (kind) {
@@ -11,6 +14,44 @@ export function mentionSource(kind: MentionKind, value: string) {
       return `#${value}`
     case 'skill':
       return `$${value}`
+    case 'image':
+      return `[image:${value}]`
+  }
+}
+
+/** The keys of the images the prompt's chips show, in order, each once. */
+export function imageChipKeys(text: string): string[] {
+  return [
+    ...new Set(Array.from(text.matchAll(IMAGE_CHIP), (match) => match[1] ?? ''))
+  ]
+}
+
+/**
+ * The prompt as sent: each image chip becomes `[Image #n]`, numbered as its image is among
+ * those sent, the way Claude Code names pasted images. A chip whose image is gone goes too.
+ */
+export function numberImageChips(
+  text: string,
+  numbers: ReadonlyMap<string, number>
+): string {
+  return text
+    .replace(IMAGE_CHIP, (_, key: string) => {
+      const number = numbers.get(key)
+      return number === undefined ? '' : `[Image #${number}]`
+    })
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim()
+}
+
+/** A saved draft without its image chips: the images don't outlive the composer. */
+export function withoutImageChips(doc: JSONContent): JSONContent {
+  const isImageChip = (node: JSONContent) =>
+    node.type === 'mention' && node.attrs?.kind === 'image'
+  return {
+    ...doc,
+    content: doc.content
+      ?.filter((node) => !isImageChip(node))
+      .map((node) => (node.content ? withoutImageChips(node) : node))
   }
 }
 

@@ -43,9 +43,10 @@ function withChips(node: HastChild, known: KnownMentions): HastChild[] {
                 'rounded-sm',
                 'px-0.5',
                 ...CHIP_CLASSES[segment.kind].split(' ')
-              ]
+              ],
+              title: segment.label ? segment.text : undefined
             },
-            children: [{ type: 'text', value: segment.text }]
+            children: [{ type: 'text', value: segment.label ?? segment.text }]
           }
   )
 }

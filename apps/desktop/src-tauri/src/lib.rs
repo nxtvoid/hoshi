@@ -1,3 +1,4 @@
+mod clipboard;
 mod home;
 mod orchestration;
 mod settings;
@@ -82,6 +83,8 @@ pub fn run() {
             orchestration::get_project_icon,
             orchestration::search_paths,
             orchestration::get_slash_commands,
+            clipboard::read_image_file,
+            clipboard::read_clipboard_image,
             orchestration::save_image,
             orchestration::discard_image,
             orchestration::get_image,

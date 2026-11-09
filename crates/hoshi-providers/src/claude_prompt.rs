@@ -66,13 +66,18 @@ fn with_slash_skills(prompt: &str, skills: &HashSet<&str>) -> (String, Option<us
     (text, last)
 }
 
-/// Adds a line per image and pull request, so the agent knows where the image
-/// is saved and what the `#123` mentions are.
+/// Adds a line per image and pull request, so the agent knows where each image is
+/// saved, which one an `[Image #n]` in the prompt is, and what the `#123` mentions are.
+/// Images are numbered in the order their blocks follow the text.
 fn with_context(mut text: String, attachments: &[TurnAttachment]) -> String {
+    let mut images = 0;
     for attachment in attachments {
+        if matches!(attachment.attachment, MessageAttachment::Image { .. }) {
+            images += 1;
+        }
         let line = match (&attachment.attachment, &attachment.path) {
             (MessageAttachment::Image { name, .. }, Some(path)) => format!(
-                "[Attached image \"{name}\" is saved at: {}]",
+                "[Image #{images} \"{name}\" is saved at: {}]",
                 path.display()
             ),
             (
@@ -208,7 +213,7 @@ mod tests {
         let content = message_content("review #12", &attachments);
 
         let text = format!(
-            "review #12\n\n[Pull request #12 \"Add login\" (open, login into main): https://github.com/o/r/pull/12]\n\n[Attached image \"shot.png\" is saved at: {}]\n\n[Attached image \"gone.png\" is saved at: {}]",
+            "review #12\n\n[Pull request #12 \"Add login\" (open, login into main): https://github.com/o/r/pull/12]\n\n[Image #1 \"shot.png\" is saved at: {}]\n\n[Image #2 \"gone.png\" is saved at: {}]",
             path.display(),
             PathBuf::from("/nowhere/gone.png").display()
         );

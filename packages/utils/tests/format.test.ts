@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   formatClockTime,
   formatDuration,
+  formatFileSize,
   relativeTimeParts
 } from '../src/format'
 
@@ -38,5 +39,13 @@ describe('formatClockTime', () => {
       '10:10 PM'
     )
     expect(formatClockTime('not a date', 'es')).toBe('')
+  })
+})
+
+describe('formatFileSize', () => {
+  test('picks the largest unit that fits', () => {
+    expect(formatFileSize(512, 'en')).toBe('512 byte')
+    expect(formatFileSize(8_200, 'en')).toBe('8 kB')
+    expect(formatFileSize(1_430_000, 'en')).toBe('1.4 MB')
   })
 })

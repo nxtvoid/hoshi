@@ -1,6 +1,12 @@
 import { expect, test } from 'bun:test'
 import type { JSONContent } from '@tiptap/core'
-import { fromText, toMarkdown } from '../../src/lib/composer-markdown'
+import {
+  fromText,
+  imageChipKeys,
+  numberImageChips,
+  toMarkdown,
+  withoutImageChips
+} from '../../src/lib/composer-markdown'
 
 const text = (value: string, ...marks: string[]): JSONContent => ({
   type: 'text',
@@ -115,4 +121,58 @@ test('chips are written the way the agent reads them', () => {
 test('a recalled prompt comes back as the same text', () => {
   const prompt = 'first line\n\n> not parsed, kept as typed'
   expect(toMarkdown(fromText(prompt))).toBe(prompt)
+})
+
+const A = '0b1e6a3c-1111-4aaa-8bbb-000000000001'
+const B = '0b1e6a3c-2222-4aaa-8bbb-000000000002'
+
+test('image chips are numbered as their images are sent', () => {
+  const doc: JSONContent = {
+    type: 'doc',
+    content: [
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'compare ' },
+          { type: 'mention', attrs: { kind: 'image', value: B } },
+          { type: 'text', text: ' with ' },
+          { type: 'mention', attrs: { kind: 'image', value: A } },
+          { type: 'text', text: ' and ' },
+          { type: 'mention', attrs: { kind: 'image', value: B } },
+          { type: 'text', text: ' ' },
+          { type: 'mention', attrs: { kind: 'image', value: 'c0ffee' } }
+        ]
+      }
+    ]
+  }
+  const text = toMarkdown(doc)
+
+  expect(imageChipKeys(text)).toEqual([B, A, 'c0ffee'])
+  expect(
+    numberImageChips(
+      text,
+      new Map([
+        [B, 1],
+        [A, 2]
+      ])
+    )
+  ).toBe('compare [Image #1] with [Image #2] and [Image #1]')
+})
+
+test('a saved draft drops its image chips', () => {
+  const draft: JSONContent = {
+    type: 'doc',
+    content: [
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'see ' },
+          { type: 'mention', attrs: { kind: 'image', value: A } },
+          { type: 'mention', attrs: { kind: 'file', value: 'src/a.ts' } }
+        ]
+      }
+    ]
+  }
+
+  expect(toMarkdown(withoutImageChips(draft))).toBe('see @src/a.ts')
 })

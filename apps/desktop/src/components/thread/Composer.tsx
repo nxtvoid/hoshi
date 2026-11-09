@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { cn } from '@hoshi/utils'
+import { cn, formatFileSize } from '@hoshi/utils'
 import { imageFiles } from '@/lib/images'
 import { CHAT_LANE } from '@/lib/chat-lane'
 import { m } from '@/paraglide/messages'
+import { getLocale } from '@/paraglide/runtime'
 import { useAppStore } from '@/state/app-store'
 import { useImageStore } from '@/state/image-store'
 import { flushDrafts, useDraftStore } from '@/state/draft-store'
@@ -33,6 +34,16 @@ import {
 } from './ComposerMenus'
 import { ComposerSuggestions, suggestionOptionId } from './ComposerSuggestions'
 import { usePendingRequest, useRequestActions } from './use-request-actions'
+import {
+  imageChipKeys,
+  numberImageChips,
+  withoutImageChips
+} from '@/lib/composer-markdown'
+import {
+  type PastedImages,
+  pastedImages,
+  readPastedImages
+} from '@/lib/pasted-images'
 import {
   ArrowUp02Icon,
   Attachment01Icon,
@@ -185,6 +196,32 @@ export function Composer({
     if (next.empty) setTall(false)
   }
 
+  /** Adds images to the draft and, when the prompt has text, chips for them at the caret. */
+  const attach = (files: File[]) => {
+    const added = images.add(files)
+    const locale = getLocale()
+    editorRef.current?.insertImages(
+      added.map((image) => ({
+        key: image.key,
+        name: image.name,
+        detail: formatFileSize(image.size, locale),
+        previewUrl: image.previewUrl
+      }))
+    )
+  }
+
+  /** A path that turns out to be no image file is pasted as the text it was. */
+  const addImages = async (pasted: PastedImages) => {
+    const files = await readPastedImages(pasted)
+    if (files) attach(files)
+    else if (pasted.kind === 'paths') editorRef.current?.paste(pasted.text)
+  }
+
+  const removeImage = (key: string) => {
+    images.remove(key)
+    editorRef.current?.removeImage(key)
+  }
+
   const runAction = (action: ComposerAction) => {
     if (action === 'model') openModelPicker(true)
     else updateAccess({ planMode: action === 'plan' })
@@ -252,8 +289,11 @@ export function Composer({
     setSending(true)
     const answered =
       request.content.kind === 'questions'
-        ? requestActions.advance(text)
-        : await requestActions.decide('decline', text)
+        ? requestActions.advance(numberImageChips(text, new Map()))
+        : await requestActions.decide(
+            'decline',
+            numberImageChips(text, new Map())
+          )
     setSending(false)
     if (!answered) return
     saveDraft(draftKey, null)
@@ -275,17 +315,34 @@ export function Composer({
       return
     }
     if (!canSend) return
-    const attachments = [...images.saved, ...editor.mentions()]
+    // Images go in the order their chips show them, then the rest, so `[Image #n]` names
+    // the image sent nth.
+    const saved = images.images.filter((image) => image.saved !== null)
+    const chipped = imageChipKeys(text).flatMap(
+      (key) => saved.find((image) => image.key === key) ?? []
+    )
+    const ordered = [
+      ...chipped,
+      ...saved.filter((image) => !chipped.includes(image))
+    ]
+    const prompt = numberImageChips(
+      text,
+      new Map(ordered.map((image, index) => [image.key, index + 1]))
+    )
+    const attachments = [
+      ...ordered.flatMap((image) => image.saved ?? []),
+      ...editor.mentions()
+    ]
     setSending(true)
     const release = images.keep()
     const compactFirst = compaction?.compact === true && !isCompactCommand(text)
-    const sent = await sendMessage(text, attachments, compactFirst)
+    const sent = await sendMessage(prompt, attachments, compactFirst)
     setSending(false)
     if (!sent) {
       release()
       return
     }
-    remember(text)
+    remember(prompt)
     saveDraft(draftKey, null)
     setRecalled(undefined)
     images.clear()
@@ -463,11 +520,14 @@ export function Composer({
           onDrop={(event) => {
             event.preventDefault()
             setDragging(false)
-            images.add(imageFiles(event.dataTransfer))
+            const dropped = pastedImages(event.dataTransfer, {
+              orClipboard: false
+            })
+            if (dropped) void addImages(dropped)
           }}
         >
           {images.images.length > 0 ? (
-            <ComposerImages images={images.images} onRemove={images.remove} />
+            <ComposerImages images={images.images} onRemove={removeImage} />
           ) : null}
           <div
             className={cn(
@@ -486,11 +546,11 @@ export function Composer({
                 className='max-h-60 overflow-y-auto'
                 contentClassName={hero ? 'min-h-16 py-2' : 'min-h-8 py-1.5'}
                 onChange={onChange}
-                initialContent={initialDraft}
+                initialContent={initialDraft && withoutImageChips(initialDraft)}
                 onDocument={(doc) => saveDraft(draftKey, doc)}
                 onBlur={flushDrafts}
                 onKeyDown={onKeyDown}
-                onFiles={images.add}
+                onImages={(pasted) => void addImages(pasted)}
               />
             </div>
             {stacked ? (
@@ -509,7 +569,7 @@ export function Composer({
             multiple
             hidden
             onChange={(event) => {
-              images.add(imageFiles(event.currentTarget))
+              attach(imageFiles(event.currentTarget))
               event.currentTarget.value = ''
             }}
           />

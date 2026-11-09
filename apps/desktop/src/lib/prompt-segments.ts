@@ -1,23 +1,34 @@
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
 
-export type SegmentKind = 'text' | 'file' | 'pullRequest' | 'skill' | 'command'
+export type SegmentKind =
+  | 'text'
+  | 'file'
+  | 'pullRequest'
+  | 'skill'
+  | 'command'
+  | 'image'
 
 export type PromptSegment = {
   kind: SegmentKind
   text: string
   start: number
   end: number
+  /** What an `[Image #n]` chip shows: the image's name. */
+  label?: string
 }
 
-/** The pull requests and skills the prompt's `#123` and `$name` stand for. */
+/** The pull requests, skills and images the prompt's `#123`, `$name` and `[Image #n]` stand for. */
 export type KnownMentions = {
   pullRequests: ReadonlySet<number>
   skills: ReadonlySet<string>
+  /** The names of the message's images, in the order `[Image #n]` counts them. */
+  images: readonly string[]
 }
 
 const MENTION =
   /(?<=^|\s)(?:(@"[^"\n]+"|@[^\s"]*[^\s".,;:!?)])|#(\d+)(?=$|[\s.,;:!?)])|\$([A-Za-z][\w:-]*)(?=$|\s))/g
 const LEADING_COMMAND = /^\s*(\/[\w:-]+)(?=$|\s)/
+const IMAGE = /\[Image #(\d+)\]/g
 
 /**
  * Splits a prompt into plain text and the mentions shown as chips: any `@path`,
@@ -55,6 +66,17 @@ export function promptSegments(
       end: match.index + whole.length
     })
   }
+  for (const match of text.matchAll(IMAGE)) {
+    const label = known.images[Number(match[1]) - 1]
+    if (label === undefined) continue
+    chips.push({
+      kind: 'image',
+      text: match[0],
+      start: match.index,
+      end: match.index + match[0].length,
+      label
+    })
+  }
   chips.sort((a, b) => a.start - b.start)
 
   const segments: PromptSegment[] = []
@@ -75,15 +97,17 @@ function plain(text: string, start: number, end: number): PromptSegment {
   return { kind: 'text', text: text.slice(start, end), start, end }
 }
 
-/** The `#123` and `$name` a message's attachments stand for. */
+/** The `#123`, `$name` and `[Image #n]` a message's attachments stand for. */
 export function knownMentions(
   attachments: readonly MessageAttachment[]
 ): KnownMentions {
   const pullRequests = new Set<number>()
   const skills = new Set<string>()
+  const images: string[] = []
   for (const attachment of attachments) {
     if (attachment.type === 'pullRequest') pullRequests.add(attachment.number)
     if (attachment.type === 'skill') skills.add(attachment.name)
+    if (attachment.type === 'image') images.push(attachment.name)
   }
-  return { pullRequests, skills }
+  return { pullRequests, skills, images }
 }

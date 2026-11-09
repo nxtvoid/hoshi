@@ -1,7 +1,7 @@
 import { useImperativeHandle, useRef } from 'react'
 import type { Ref } from 'react'
 import { cn } from '@hoshi/utils'
-import { imageFiles } from '@/lib/images'
+import { type PastedImages, pastedImages } from '@/lib/pasted-images'
 import { CHIP_CLASSES } from '@/lib/chips'
 import { fileIcon } from '@/lib/file-icons'
 import StarterKit from '@tiptap/starter-kit'
@@ -61,6 +61,21 @@ export type ComposerEditorHandle = {
   mentions: () => MessageAttachment[]
   /** Keeps the editor's combobox state in step with the menu. */
   setMenu: (menu: { listId: string | null; activeId: string | null }) => void
+  /** Pastes `text` at the caret as if the user had. */
+  paste: (text: string) => void
+  /** Shows images just added as chips at the caret, when the prompt has text to place them in. */
+  insertImages: (images: ImageChip[]) => void
+  /** Takes away the chips of an image removed from the draft. */
+  removeImage: (key: string) => void
+}
+
+/** An image of the draft, as its chip in the text shows it. */
+export type ImageChip = {
+  key: string
+  name: string
+  /** Its size, as shown after the name. */
+  detail: string
+  previewUrl: string
 }
 
 type ComposerEditorProps = {
@@ -79,7 +94,8 @@ type ComposerEditorProps = {
   onBlur?: () => void
   /** `true` when the composer handled the key. */
   onKeyDown: (event: KeyboardEvent, context: KeyContext) => boolean
-  onFiles: (files: File[]) => void
+  /** Images pasted; the editor leaves them to the composer. */
+  onImages: (pasted: PastedImages) => void
 }
 
 const leafText = (node: ProseMirrorNode) =>
@@ -125,7 +141,10 @@ const Mention = Node.create({
     return {
       kind: { default: 'file' },
       value: { default: '' },
-      attachment: { default: null, rendered: false }
+      attachment: { default: null, rendered: false },
+      label: { default: null, rendered: false },
+      detail: { default: null, rendered: false },
+      src: { default: null, rendered: false }
     }
   },
   parseHTML() {
@@ -142,6 +161,32 @@ const Mention = Node.create({
   renderHTML({ node }) {
     const kind = node.attrs.kind as MentionKind
     const value = String(node.attrs.value)
+    if (kind === 'image') {
+      const name = String(node.attrs.label ?? 'image')
+      return [
+        'span',
+        {
+          'data-mention': kind,
+          'data-value': value,
+          class: cn('rounded-sm px-0.5', CHIP_CLASSES.image)
+        },
+        [
+          'img',
+          {
+            src: node.attrs.src ?? '',
+            alt: '',
+            class:
+              'me-1 inline-block size-3.5 rounded-[3px] object-cover align-[-2px]'
+          }
+        ],
+        name,
+        [
+          'span',
+          { class: 'text-muted-foreground ms-1 text-[0.85em]' },
+          String(node.attrs.detail ?? '')
+        ]
+      ]
+    }
     const label =
       kind === 'file'
         ? `@${value.split('/').pop() || value}`
@@ -170,6 +215,7 @@ const Mention = Node.create({
     ]
   },
   renderText({ node }) {
+    if (node.attrs.kind === 'image') return `[${node.attrs.label ?? 'image'}]`
     return mentionSource(node.attrs.kind, String(node.attrs.value))
   }
 })
@@ -243,10 +289,10 @@ export function ComposerEditor({
   onDocument,
   onBlur,
   onKeyDown,
-  onFiles
+  onImages
 }: ComposerEditorProps) {
-  const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onFiles })
-  handlers.current = { onChange, onDocument, onBlur, onKeyDown, onFiles }
+  const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onImages })
+  handlers.current = { onChange, onDocument, onBlur, onKeyDown, onImages }
   /** The last document read, so a caret move doesn't convert it again. */
   const lastRead = useRef<{
     doc: ProseMirrorNode
@@ -314,14 +360,18 @@ export function ComposerEditor({
       handleKeyDown: (view, event) =>
         openFencedBlock(view, event) ||
         handlers.current.onKeyDown(event, keyContext(view)),
+      // Never left to WebKit, which pastes an image as an attachment element of its own.
       handlePaste: (_view, event) => {
-        const files = imageFiles(event.clipboardData)
-        if (files.length === 0) return false
-        handlers.current.onFiles(files)
+        const data = event.clipboardData
+        const pasted = data ? pastedImages(data, { orClipboard: true }) : null
+        if (!pasted) return false
+        handlers.current.onImages(pasted)
         return true
       },
       // The form around the editor takes dropped images; the editor only stays out of it.
-      handleDrop: (_view, event) => imageFiles(event.dataTransfer).length > 0
+      handleDrop: (_view, event) =>
+        event.dataTransfer !== null &&
+        pastedImages(event.dataTransfer, { orClipboard: false }) !== null
     },
     onCreate: ({ editor }) => {
       if (!editor.isEmpty) emit(editor)
@@ -343,6 +393,48 @@ export function ComposerEditor({
     () => ({
       focus: () => {
         editor?.commands.focus()
+      },
+      paste: (text) => {
+        editor?.view.pasteText(text)
+      },
+      insertImages: (images) => {
+        if (!editor || editor.isEmpty || images.length === 0) return
+        editor
+          .chain()
+          .focus()
+          .insertContent(
+            images.flatMap((image) => [
+              {
+                type: 'mention',
+                attrs: {
+                  kind: 'image',
+                  value: image.key,
+                  label: image.name,
+                  detail: image.detail,
+                  src: image.previewUrl
+                }
+              },
+              { type: 'text', text: ' ' }
+            ])
+          )
+          .run()
+      },
+      removeImage: (key) => {
+        if (!editor) return
+        const chips: number[] = []
+        editor.state.doc.descendants((node, position) => {
+          const chip =
+            node.type.name === 'mention' &&
+            node.attrs.kind === 'image' &&
+            node.attrs.value === key
+          if (chip) chips.push(position)
+        })
+        if (chips.length === 0) return
+        const transaction = editor.state.tr
+        for (const position of chips.reverse()) {
+          transaction.delete(position, position + 1)
+        }
+        editor.view.dispatch(transaction)
       },
       setText: (text) => {
         if (!editor) return
