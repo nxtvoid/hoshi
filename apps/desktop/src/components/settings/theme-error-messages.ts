@@ -43,5 +43,13 @@ export function themeErrorMessage(error: ThemeError): string {
         : m.theme_error_light_palette_taken({ name: subject })
     case 'palettes_taken':
       return m.theme_error_palettes_taken({ name: subject })
+    case 'collection_changed':
+      return m.theme_error_collection_changed()
+    case 'vscode_no_background':
+      return m.theme_error_vscode_no_background()
+    case 'invalid_json':
+      return m.theme_error_invalid_json()
+    case 'no_compatible_themes':
+      return m.open_vsx_no_themes()
   }
 }

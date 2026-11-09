@@ -356,6 +356,10 @@ export type ThemeErrorCode =
   | 'invalid_collection_themes'
   | 'palette_taken'
   | 'palettes_taken'
+  | 'collection_changed'
+  | 'vscode_no_background'
+  | 'invalid_json'
+  | 'no_compatible_themes'
 
 /** A theme that can't be read or saved; the UI words `code`, `subject` names what it's about. */
 export class ThemeError extends Error {
