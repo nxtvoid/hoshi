@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-core"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1806,7 +1806,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-desktop"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "arboard",
  "fontdb",
@@ -1831,7 +1831,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-engine"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-forge"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "base64 0.23.1",
  "hoshi-core",
@@ -1864,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-providers"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-store"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "hoshi-core",
  "rusqlite",
