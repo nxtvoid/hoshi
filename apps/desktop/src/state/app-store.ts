@@ -461,74 +461,58 @@ async function startSync() {
   let buffered: EventEnvelope[] | null = []
   let bufferedPullRequests: ThreadPullRequest[] | null = []
   let bufferedContextUsages: ThreadContextUsage[] | null = []
-  const unlisten = await listen<EventEnvelope>('hoshi://event', (message) => {
-    if (buffered) buffered.push(message.payload)
-    else receive(message.payload)
-  })
-  const unlistenPullRequests = await listen<ThreadPullRequest>(
-    'hoshi://pull-request',
-    (message) => {
+  const sequenced = Promise.all([
+    listen<EventEnvelope>('hoshi://event', (message) => {
+      if (buffered) buffered.push(message.payload)
+      else receive(message.payload)
+    }),
+    listen<ThreadPullRequest>('hoshi://pull-request', (message) => {
       if (bufferedPullRequests) bufferedPullRequests.push(message.payload)
       else receivePullRequest(message.payload)
-    }
-  )
-  const unlistenPullRequestDetails = await listen<ThreadPullRequestDetail>(
-    'hoshi://pull-request-detail',
-    (message) => usePullRequestStore.getState().receive(message.payload)
-  )
-  const unlistenContextUsages = await listen<ThreadContextUsage>(
-    'hoshi://context-usage',
-    (message) => {
+    }),
+    listen<ThreadContextUsage>('hoshi://context-usage', (message) => {
       if (bufferedContextUsages) bufferedContextUsages.push(message.payload)
       else receiveContextUsage(message.payload)
-    }
-  )
-  const unlistenUsageLimits = await listen<UsageLimits>(
-    'hoshi://usage-limits',
-    (message) => useUsageStore.getState().receive(message.payload)
-  )
-  const unlistenProviderVersion = await listen<ProviderVersion | null>(
-    'hoshi://provider-version',
-    (message) => useProviderUpdateStore.getState().receive(message.payload)
-  )
-  const unlistenBrowserFrames = await listen<BrowserFrame>(
-    'hoshi://browser-frame',
-    (message) => useBrowserStore.getState().receiveFrame(message.payload)
-  )
-  const unlistenBrowserPages = await listen<BrowserPage>(
-    'hoshi://browser-page',
-    (message) => useBrowserStore.getState().receivePage(message.payload)
-  )
-  const unlistenWorktreeSetups = await listen<WorktreeSetupRun>(
-    'hoshi://worktree-setup',
-    (message) => useWorktreeSetupStore.getState().receive(message.payload)
-  )
-  const unlistenGitActions = await listen<GitActionProgress>(
-    'hoshi://git-action',
-    (message) => useGitActionStore.getState().receive(message.payload)
-  )
+    })
+  ])
+  const live = Promise.all([
+    listen<ThreadPullRequestDetail>('hoshi://pull-request-detail', (message) =>
+      usePullRequestStore.getState().receive(message.payload)
+    ),
+    listen<UsageLimits>('hoshi://usage-limits', (message) =>
+      useUsageStore.getState().receive(message.payload)
+    ),
+    listen<ProviderVersion | null>('hoshi://provider-version', (message) =>
+      useProviderUpdateStore.getState().receive(message.payload)
+    ),
+    listen<BrowserFrame>('hoshi://browser-frame', (message) =>
+      useBrowserStore.getState().receiveFrame(message.payload)
+    ),
+    listen<BrowserPage>('hoshi://browser-page', (message) =>
+      useBrowserStore.getState().receivePage(message.payload)
+    ),
+    listen<WorktreeSetupRun>('hoshi://worktree-setup', (message) =>
+      useWorktreeSetupStore.getState().receive(message.payload)
+    ),
+    listen<GitActionProgress>('hoshi://git-action', (message) =>
+      useGitActionStore.getState().receive(message.payload)
+    ),
+    listen<StreamDelta>('hoshi://stream', (message) =>
+      useTranscriptStore.getState().applyDelta(message.payload)
+    )
+  ])
   const stopAppUpdates = watchAppUpdates()
-  const unlistenStream = await listen<StreamDelta>(
-    'hoshi://stream',
-    (message) => useTranscriptStore.getState().applyDelta(message.payload)
-  )
+  // Read after the sequenced listeners exist, or events in between would be lost.
+  const unlistenSequenced = await sequenced
+  const snapshotLoad = invoke<Snapshot>('get_snapshot')
+  const settingsLoad = loadedSettings()
+  const unlistenLive = await live
+  void useWorktreeSetupStore.getState().load()
   import.meta.hot?.dispose(() => {
-    unlisten()
-    unlistenStream()
-    unlistenPullRequests()
-    unlistenPullRequestDetails()
-    unlistenContextUsages()
-    unlistenUsageLimits()
-    unlistenProviderVersion()
-    unlistenGitActions()
-    unlistenBrowserFrames()
-    unlistenBrowserPages()
-    unlistenWorktreeSetups()
+    for (const unlisten of [...unlistenSequenced, ...unlistenLive]) unlisten()
     stopAppUpdates()
   })
-  void useWorktreeSetupStore.getState().load()
-  const snapshot = await invoke<Snapshot>('get_snapshot')
-  const settings = await loadedSettings()
+  const [snapshot, settings] = await Promise.all([snapshotLoad, settingsLoad])
   const start = startupSelection(
     settings?.general.startupView ?? 'inbox',
     useLastSelectionStore.getState(),

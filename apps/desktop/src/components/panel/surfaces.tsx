@@ -5,7 +5,7 @@ import { useAppStore } from '@/state/app-store'
 import type { ComponentType, ReactNode } from 'react'
 import { usePanelStore } from '@/state/panel-store'
 import { PullRequestSurface } from './pull-request/PullRequestSurface'
-import { TerminalView } from '@/components/terminal/TerminalView'
+import { LazyTerminalView } from '@/components/terminal/LazyTerminalView'
 import {
   ComputerTerminal01Icon,
   FileDiffIcon,
@@ -126,7 +126,7 @@ function TerminalSurface({
 }) {
   const openSurface = usePanelStore((state) => state.openSurface)
   return (
-    <TerminalView
+    <LazyTerminalView
       threadId={threadId}
       terminalId={terminalId}
       onOpenHere={() => openSurface(threadId, 'terminal')}

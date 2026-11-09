@@ -4,11 +4,10 @@ import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { Thread } from '@/bindings/Thread'
 import { usePaletteStore } from '@/state/palette-store'
-import { isMac } from '@/components/brand/EditorIcon'
 import { viewOf } from '@/state/scope'
 import { useSidebarStore } from '@/state/sidebar-store'
 import { useNavigate } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNewThread } from './use-new-thread'
 import { NewThreadPalette } from './NewThreadPalette'
 import { AddProjectPalette } from './AddProjectPalette'
@@ -35,8 +34,6 @@ import {
   Settings02Icon
 } from '@hugeicons/core-free-icons'
 
-export const PALETTE_SHORTCUT = () => (isMac() ? '⌘K' : 'Ctrl K')
-
 const ACTION_LABELS: Record<PaletteAction, () => string> = {
   newThread: m.new_thread,
   newThreadFromPullRequest: m.new_thread_from_pull_request,
@@ -62,23 +59,10 @@ const PROJECT_ACTIONS: PaletteAction[] = [
 ]
 
 /** Search over every thread, branch, pull request and project, plus a few app actions. */
-export function CommandPalette() {
+export function PaletteDialog() {
   const open = usePaletteStore((state) => state.open)
   const mode = usePaletteStore((state) => state.mode)
   const setOpen = usePaletteStore((state) => state.setOpen)
-  const toggle = usePaletteStore((state) => state.toggle)
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const modifier = isMac() ? event.metaKey : event.ctrlKey
-      if (!modifier || event.altKey || event.shiftKey) return
-      if (event.code !== 'KeyK') return
-      event.preventDefault()
-      toggle()
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [toggle])
 
   const close = () => setOpen(false)
   return (

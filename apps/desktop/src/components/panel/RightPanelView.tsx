@@ -38,7 +38,7 @@ import {
  * The thread's side panel: tabs of open surfaces (changes, pull request, and later
  * terminal, files, browser, side chat), each kept mounted while the thread is open.
  */
-export function RightPanel({ threadId }: { threadId: string }) {
+export function RightPanelView({ threadId }: { threadId: string }) {
   const width = usePanelStore((state) => state.width)
   const setWidth = usePanelStore((state) => state.setWidth)
   const maximized = usePanelStore((state) => state.maximized)
