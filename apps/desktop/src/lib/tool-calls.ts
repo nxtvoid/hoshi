@@ -244,6 +244,8 @@ function isAgent(row: TranscriptRow) {
  * answer, which stays in view, with the finished work after it. A steer cuts the run: what
  * came before folds whole, and what follows folds on its own. A stopped run folds whole.
  * The running turn, and a failed one, stay open, as do rows still `live`, after the fold.
+ * A run that a steer ended before any answer does not cut the turn, and while working
+ * neither does any run that ended since the latest response started.
  */
 export function foldTurns(
   rows: TranscriptRow[],
@@ -331,18 +333,29 @@ export function foldTurns(
   }
   /** Parts of the turn a steer cut, folded only once the turn is over. */
   let held: { open: TranscriptRow[]; settled: TranscriptRow[] }[] = []
+  let turnStart: number | null = null
+  const responseAt = working ? lastResponseStart(rows) : rows.length
   const close = (running: boolean) => {
+    const end = endOf(turn)
+    const wholeTurn = (row: TranscriptRow): TranscriptRow =>
+      row.kind === 'fold' &&
+      row.after === 'start' &&
+      turnStart !== null &&
+      end !== null
+        ? { ...row, durationMs: end - turnStart }
+        : row
     for (const part of held)
-      folded.push(...(running ? part.open : part.settled))
+      folded.push(...(running ? part.open : part.settled.map(wholeTurn)))
     held = []
     folded.push(...(running ? turn : settle(turn, null)))
     turn = []
   }
-  for (const row of rows) {
+  for (const [index, row] of rows.entries()) {
     const content = row.kind === 'item' ? row.item.content : null
     if (row.kind !== 'item' || !content) {
       turn.push(row)
     } else if (content.kind === 'userMessage' && content.steer) {
+      if (after === 'start') turnStart = started && timeOf(started)
       held.push({
         open: [...turn, row],
         settled: [...settle(turn, row.item), row]
@@ -350,15 +363,15 @@ export function foldTurns(
       turn = []
       started = row.item
       after = 'steer'
-    } else if (
-      content.kind === 'userMessage' ||
-      content.kind === 'backgroundTaskEnded'
-    ) {
+    } else if (startsResponse(row)) {
       close(false)
       folded.push(row)
       started = row.item
       after = 'start'
     } else if (content.kind === 'runEnded') {
+      if (index > responseAt || (after === 'steer' && !answered(turn))) {
+        continue
+      }
       close(false)
       started = row.item
       after = 'start'
@@ -368,6 +381,49 @@ export function foldTurns(
   }
   close(working)
   return folded
+}
+
+function startsResponse(row: TranscriptRow) {
+  if (row.kind !== 'item') return false
+  const { content } = row.item
+  return (
+    (content.kind === 'userMessage' && !content.steer) ||
+    content.kind === 'backgroundTaskEnded'
+  )
+}
+
+function timeOf(item: TranscriptItem) {
+  const time = Date.parse(item.createdAt)
+  return Number.isFinite(time) ? time : null
+}
+
+/** When the last row of a part happened, or `null` when unknown. */
+function endOf(part: TranscriptRow[]) {
+  for (let index = part.length - 1; index >= 0; index -= 1) {
+    const row = part[index] as TranscriptRow
+    const item =
+      row.kind === 'item'
+        ? row.item
+        : row.kind === 'work'
+          ? row.entries.at(-1)
+          : null
+    const time = item ? timeOf(item) : null
+    if (time !== null) return time
+  }
+  return null
+}
+
+function answered(part: TranscriptRow[]) {
+  return part.some(
+    (row) => row.kind === 'item' && row.item.content.kind === 'assistantMessage'
+  )
+}
+
+function lastResponseStart(rows: TranscriptRow[]) {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (startsResponse(rows[index] as TranscriptRow)) return index
+  }
+  return -1
 }
 
 /** The latest entry still going: a call without output, or reasoning still streaming. */

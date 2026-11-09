@@ -21,11 +21,12 @@ import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
 import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
-import { useTranscriptStore } from '@/state/transcript-store'
+import { itemById, useTranscriptStore } from '@/state/transcript-store'
 import { useAppStore } from '@/state/app-store'
 import { useStoppingStore } from '@/state/stopping-store'
 import { useRequestStore } from '@/state/request-store'
 import { isPlanningWithUser } from '@/lib/agents'
+import { rowKey, stableRows } from '@/lib/stable-rows'
 import {
   memo,
   useEffect,
@@ -78,11 +79,13 @@ const STICK_TO_BOTTOM_PX = 80
 
 /** Off-screen rows skip rendering but keep their last height, so scrolling never jumps. */
 const ROW = '[contain-intrinsic-size:auto_2.5rem] [content-visibility:auto]'
+const MESSAGE_ROW =
+  '[contain-intrinsic-size:auto_120px] [content-visibility:auto]'
 
 const ENTRY_SUMMARY =
   'text-muted-foreground hover:text-foreground flex min-h-6 cursor-default list-none items-center gap-2 text-sm select-none [&::-webkit-details-marker]:hidden'
 
-export function Transcript({
+export const Transcript = memo(function Transcript({
   working,
   cwd
 }: {
@@ -105,18 +108,28 @@ export function Transcript({
       .map((thread) => thread.id)
       .join(' ')
   )
+  const shownRows = useRef<TranscriptRow[]>([])
   const rows = useMemo(() => {
     const busy = new Set(busyTasks.split(' '))
-    return foldTurns(
-      groupTranscript(withStreaming(items, streaming)),
-      working,
-      (row) => isLiveAgent(row, busy)
+    const next = stableRows(
+      shownRows.current,
+      foldTurns(
+        groupTranscript(withStreaming(items, streaming)),
+        working,
+        (row) => isLiveAgent(row, busy)
+      )
     )
+    shownRows.current = next
+    return next
   }, [items, streaming, working, busyTasks])
   const approvals = useMemo(() => approvalsByCall(items), [items])
-  const liveTasks = working
-    ? items.filter((item) => item.content.kind === 'taskList').at(-1)?.id
-    : undefined
+  const liveTasks = useMemo(
+    () =>
+      working
+        ? items.filter((item) => item.content.kind === 'taskList').at(-1)?.id
+        : undefined,
+    [items, working]
+  )
   const scrollRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLOListElement>(null)
   const olderRef = useRef<HTMLLIElement>(null)
@@ -152,13 +165,7 @@ export function Transcript({
   }, [hasOlder, loadOlder, firstId])
   const [atEnd, setAtEnd] = useState(true)
 
-  // Scroll position is DOM state: follow new content only if the reader was at the bottom.
-  useLayoutEffect(() => {
-    const element = scrollRef.current
-    if (element && pinned.current) element.scrollTop = element.scrollHeight
-  })
-
-  // Rows settle to their real height only once on screen, after the scroll that revealed them.
+  // Called after layout and before paint, so the view follows new content in the same frame.
   useEffect(() => {
     const element = scrollRef.current
     const list = listRef.current
@@ -229,7 +236,7 @@ export function Transcript({
               variant='outline'
               onPointerDown={(event) => event.preventDefault()}
               onClick={scrollToEnd}
-              className='bg-background/70 dark:bg-background/70 pointer-events-auto rounded-full shadow-sm backdrop-blur-md'
+              className='bg-background dark:bg-background pointer-events-auto rounded-full shadow-sm'
             >
               <HugeiconsIcon icon={ArrowDown01Icon} strokeWidth={2} />
               {m.scroll_to_end()}
@@ -239,7 +246,7 @@ export function Transcript({
       )}
     </div>
   )
-}
+})
 
 type RowsProps = {
   rows: TranscriptRow[]
@@ -248,56 +255,64 @@ type RowsProps = {
   liveTasks: string | undefined
 }
 
-/** Subagents started one after another, from `index` on. */
-function subagentsFrom(rows: TranscriptRow[], index: number) {
-  const agents: ToolCallItem[] = []
-  for (const row of rows.slice(index)) {
-    if (row.kind !== 'item' || !isSubagentCall(row.item)) break
-    agents.push(row.item)
-  }
-  return agents
-}
-
 function Rows({ rows, cwd, liveTasks }: RowsProps) {
   const shown: React.ReactNode[] = []
-  for (let index = 0; index < rows.length; index += 1) {
-    const agents = subagentsFrom(rows, index)
+  let agents: TranscriptRow[] = []
+  const flushAgents = () => {
     const [first] = agents
-    if (first && agents.length > 1) {
+    if (first?.kind === 'item' && agents.length > 1) {
       shown.push(
-        <li
-          key={`agents:${first.id}`}
-          data-item-id={first.id}
-          className={cn(ROW, 'scroll-mt-6')}
-        >
-          <SubagentGroup
-            items={agents}
-            renderRows={(inner) => (
-              <Rows rows={inner} cwd={cwd} liveTasks={undefined} />
-            )}
-          />
-        </li>
+        <AgentsRow key={`agents:${first.item.id}`} rows={agents} cwd={cwd} />
       )
-      index += agents.length - 1
+    } else if (first) {
+      shown.push(
+        <Row key={rowKey(first)} row={first} cwd={cwd} liveTasks={liveTasks} />
+      )
+    }
+    agents = []
+  }
+  for (const row of rows) {
+    if (row.kind === 'item' && isSubagentCall(row.item)) {
+      agents.push(row)
       continue
     }
+    flushAgents()
     shown.push(
-      <Row
-        key={rowKey(rows[index] as TranscriptRow)}
-        row={rows[index] as TranscriptRow}
-        cwd={cwd}
-        liveTasks={liveTasks}
-      />
+      <Row key={rowKey(row)} row={row} cwd={cwd} liveTasks={liveTasks} />
     )
   }
+  flushAgents()
   return shown
 }
 
-function rowKey(row: TranscriptRow) {
-  return row.kind === 'item' ? row.item.id : row.id
+type AgentsRowProps = { rows: TranscriptRow[]; cwd: string | null }
+
+/** Subagents started one after another, shown as one group. */
+const AgentsRow = memo(function AgentsRow({ rows, cwd }: AgentsRowProps) {
+  const items = rows.flatMap((row) =>
+    row.kind === 'item' && isSubagentCall(row.item) ? [row.item] : []
+  )
+  return (
+    <li data-item-id={items[0]?.id} className={cn(ROW, 'scroll-mt-6')}>
+      <SubagentGroup
+        items={items}
+        renderRows={(inner) => (
+          <Rows rows={inner} cwd={cwd} liveTasks={undefined} />
+        )}
+      />
+    </li>
+  )
+}, sameAgents)
+
+function sameAgents(previous: AgentsRowProps, next: AgentsRowProps) {
+  return (
+    previous.cwd === next.cwd &&
+    previous.rows.length === next.rows.length &&
+    previous.rows.every((row, index) => row === next.rows[index])
+  )
 }
 
-function Row({
+const Row = memo(function Row({
   row,
   cwd,
   liveTasks
@@ -306,9 +321,8 @@ function Row({
     case 'item':
       return (
         <li
-          key={row.item.id}
           data-item-id={row.item.id}
-          className={cn(ROW, 'scroll-mt-6')}
+          className={cn(isMessage(row.item) ? MESSAGE_ROW : ROW, 'scroll-mt-6')}
         >
           <Item
             item={row.item}
@@ -320,13 +334,13 @@ function Row({
       )
     case 'work':
       return (
-        <li key={row.id} className={ROW}>
+        <li className={ROW}>
           <WorkGroup entries={row.entries} cwd={cwd} />
         </li>
       )
     default:
       return (
-        <li key={row.id} className={ROW}>
+        <li className={ROW}>
           <TurnFold
             rows={row.rows}
             durationMs={row.durationMs}
@@ -338,6 +352,13 @@ function Row({
         </li>
       )
   }
+})
+
+function isMessage(item: TranscriptItem) {
+  return (
+    item.content.kind === 'assistantMessage' ||
+    item.content.kind === 'userMessage'
+  )
 }
 
 /** A finished turn's work, folded behind one line until opened. */
@@ -438,7 +459,7 @@ const Item = memo(function Item({
     case 'assistantMessage':
       return (
         <>
-          <Markdown text={content.text} />
+          <Markdown text={content.text} streaming={item.streaming === true} />
           {changes ? <TurnChangesCard changes={changes} /> : null}
         </>
       )
@@ -642,7 +663,7 @@ function ReasoningRow({
       </summary>
       {open ? (
         <div className='bg-muted/40 text-muted-foreground ms-6 mt-1 mb-2 max-h-80 overflow-auto rounded-md px-3 py-2'>
-          <Markdown text={text} className='text-xs' />
+          <Markdown text={text} streaming={streaming} className='text-xs' />
         </div>
       ) : null}
     </details>
@@ -812,7 +833,7 @@ function TurnStatus() {
     threadId ? state.since[threadId] : undefined
   )
   const startedAt = useTranscriptStore((state) => {
-    const asked = state.items.find((item) => item.id === turnId)
+    const asked = turnId ? itemById(state.items, turnId) : undefined
     return asked ? Date.parse(asked.createdAt) : undefined
   })
   const [now, setNow] = useState(Date.now)

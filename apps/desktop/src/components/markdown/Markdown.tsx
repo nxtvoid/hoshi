@@ -1,9 +1,10 @@
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { cn } from '@hoshi/utils'
 import { CodeBlock } from './CodeBlock'
 import { MarkdownLink } from './MarkdownLink'
 import { rehypeMentions } from './rehype-mentions'
 import type { KnownMentions } from '@/lib/prompt-segments'
+import { splitMarkdownBlocks } from '@/lib/markdown-blocks'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import ReactMarkdown, {
   type Components,
@@ -160,14 +161,26 @@ export const Markdown = memo(function Markdown({
   text,
   source = 'agent',
   mentions,
+  streaming = false,
   className
 }: {
   text: string
   source?: MarkdownSource
   /** Shows these and any `@file` as chips, as the composer did. */
   mentions?: KnownMentions
+  /** The text still grows at its end, so only its last block parses again. */
+  streaming?: boolean
   className?: string
 }) {
+  const rehypePlugins = useMemo<PluggableList>(
+    () =>
+      mentions
+        ? [...REHYPE_PLUGINS, [rehypeMentions, mentions]]
+        : REHYPE_PLUGINS,
+    [mentions]
+  )
+  const blocks = (streaming && splitMarkdownBlocks(text)) || [text]
+  let offset = 0
   return (
     <div
       className={cn(
@@ -175,17 +188,38 @@ export const Markdown = memo(function Markdown({
         className
       )}
     >
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS[source]}
-        rehypePlugins={
-          mentions
-            ? [...REHYPE_PLUGINS, [rehypeMentions, mentions]]
-            : REHYPE_PLUGINS
-        }
-        components={COMPONENTS}
-      >
-        {text}
-      </ReactMarkdown>
+      {blocks.map((block) => {
+        const start = offset
+        offset += block.length
+        return (
+          <MarkdownBlock
+            key={start}
+            text={block}
+            remarkPlugins={REMARK_PLUGINS[source]}
+            rehypePlugins={rehypePlugins}
+          />
+        )
+      })}
     </div>
+  )
+})
+
+const MarkdownBlock = memo(function MarkdownBlock({
+  text,
+  remarkPlugins,
+  rehypePlugins
+}: {
+  text: string
+  remarkPlugins: PluggableList
+  rehypePlugins: PluggableList
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={COMPONENTS}
+    >
+      {text}
+    </ReactMarkdown>
   )
 })

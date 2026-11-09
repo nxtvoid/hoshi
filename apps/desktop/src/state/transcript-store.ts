@@ -150,6 +150,18 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   }
 }))
 
+const indexes = new WeakMap<ThreadItem[], Map<string, ThreadItem>>()
+
+/** The item with this id; the index is built once per list, so selectors stay cheap. */
+export function itemById(items: ThreadItem[], id: string) {
+  let index = indexes.get(items)
+  if (!index) {
+    index = new Map(items.map((item) => [item.id, item]))
+    indexes.set(items, index)
+  }
+  return index.get(id)
+}
+
 function omit<T>(record: Record<string, T>, keys: string[]) {
   if (!keys.some((key) => key in record)) return record
   const next = { ...record }
