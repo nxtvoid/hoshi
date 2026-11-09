@@ -26,6 +26,23 @@ export function cachedHighlight(code: string, language: string) {
   return cache.get(cacheKey(code, language))
 }
 
+/** Keeps a highlighted block, so it shows colored at once when it mounts again. */
+export function rememberHighlight(
+  code: string,
+  language: string,
+  html: string
+) {
+  cache.set(cacheKey(code, language), html)
+  if (cache.size > CACHE_LIMIT) {
+    const oldest = cache.keys().next().value
+    if (oldest !== undefined) cache.delete(oldest)
+  }
+}
+
+export function forgetHighlight(code: string, language: string) {
+  cache.delete(cacheKey(code, language))
+}
+
 /**
  * The code as HTML with both themes' colors in `--shiki-light` and `--shiki-dark`;
  * `null` for a language Shiki does not know.
@@ -38,17 +55,11 @@ export async function highlight(
   if (!Object.hasOwn(bundledLanguages, language)) return null
   const shiki = await load()
   await shiki.loadLanguage(language as BundledLanguage)
-  const html = shiki.codeToHtml(code, {
+  return shiki.codeToHtml(code, {
     lang: language,
     themes: THEMES,
     defaultColor: false
   })
-  cache.set(cacheKey(code, language), html)
-  if (cache.size > CACHE_LIMIT) {
-    const oldest = cache.keys().next().value
-    if (oldest !== undefined) cache.delete(oldest)
-  }
-  return html
 }
 
 /** A colored run of code: offsets into the code and its `--shiki-*` colors. */

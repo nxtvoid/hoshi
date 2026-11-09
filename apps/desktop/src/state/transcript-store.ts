@@ -5,7 +5,9 @@ import { applyItemEvent } from './orchestration'
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { StreamingText } from '@/lib/tool-calls'
+import { frameScheduler } from '@/lib/frame-scheduler'
 import type { TranscriptPage } from '@/bindings/TranscriptPage'
+import { applyDeltas, bufferDelta, type LiveText } from '@/lib/stream-deltas'
 
 type TranscriptState = {
   /** The thread whose transcript is loaded; only one is kept in memory. */
@@ -17,6 +19,8 @@ type TranscriptState = {
   loadingOlder: boolean
   /** Text still streaming, by item id, until its final item arrives. */
   streaming: Record<string, StreamingText>
+  /** Running tools' output so far, by tool call id, until the call completes. */
+  toolOutput: Record<string, string>
   load: (threadId: string | null) => Promise<void>
   loadOlder: () => Promise<void>
   applyEvent: (event: Event) => void
@@ -25,6 +29,23 @@ type TranscriptState = {
 
 /** Events that arrive while a transcript is loading, replayed on top of it. */
 let pending: Event[] = []
+
+/** Deltas not shown yet, applied together once a frame. */
+const deltas = new Map<string, StreamingText>()
+
+const flush = frameScheduler(() => {
+  const state = useTranscriptStore.getState()
+  const live = takeDeltas(state)
+  if (live !== state) useTranscriptStore.setState(live)
+})
+
+function takeDeltas(live: LiveText): LiveText {
+  flush.cancel()
+  if (deltas.size === 0) return live
+  const next = applyDeltas(live, deltas)
+  deltas.clear()
+  return next
+}
 
 const page = (threadId: string, before: string | null) =>
   invoke<TranscriptPage>('get_thread_items', { threadId, before })
@@ -36,15 +57,19 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   hasOlder: false,
   loadingOlder: false,
   streaming: {},
+  toolOutput: {},
   load: async (threadId) => {
     pending = []
+    flush.cancel()
+    deltas.clear()
     set({
       threadId,
       loading: threadId !== null,
       items: [],
       hasOlder: false,
       loadingOlder: false,
-      streaming: {}
+      streaming: {},
+      toolOutput: {}
     })
     if (!threadId) return
     try {
@@ -84,44 +109,44 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
     }
   },
   applyEvent: (event) => {
-    const { threadId, loading, items, streaming } = get()
+    const state = get()
+    const { threadId, loading, items } = state
     if (!threadId) return
     if (loading) {
       pending.push(event)
       return
     }
+    const { streaming, toolOutput } = takeDeltas(state)
+    const flushed =
+      streaming !== state.streaming || toolOutput !== state.toolOutput
     const next = applyItemEvent(threadId, items, event)
-    if (next === items && event.type !== 'turnCompleted') return
+    if (next === items && event.type !== 'turnCompleted') {
+      if (flushed) set({ streaming, toolOutput })
+      return
+    }
     // A steer cuts short whatever the agent was still writing.
     const steered =
       event.type === 'itemAdded' &&
       event.item.content.kind === 'userMessage' &&
       event.item.content.steer
-    const finished = steered
-      ? Object.keys(streaming)
-      : event.type === 'itemAdded'
+    const all =
+      steered || (event.type === 'turnCompleted' && event.threadId === threadId)
+    const finished =
+      event.type === 'itemAdded'
         ? [event.item.id]
         : event.type === 'toolCallCompleted'
           ? [event.itemId]
-          : event.type === 'turnCompleted' && event.threadId === threadId
-            ? Object.keys(streaming)
-            : []
-    set({ items: next, streaming: omit(streaming, finished) })
+          : []
+    set({
+      items: next,
+      streaming: all ? omitAll(streaming) : omit(streaming, finished),
+      toolOutput: all ? omitAll(toolOutput) : omit(toolOutput, finished)
+    })
   },
-  applyDelta: ({ threadId, itemId, kind, delta }) => {
-    if (threadId !== get().threadId) return
-    set((state) => ({
-      streaming: {
-        ...state.streaming,
-        [itemId]: {
-          kind,
-          text:
-            kind === 'toolOutput'
-              ? delta
-              : (state.streaming[itemId]?.text ?? '') + delta
-        }
-      }
-    }))
+  applyDelta: (delta) => {
+    if (delta.threadId !== get().threadId) return
+    bufferDelta(deltas, delta)
+    flush.schedule()
   }
 }))
 
@@ -130,4 +155,8 @@ function omit<T>(record: Record<string, T>, keys: string[]) {
   const next = { ...record }
   for (const key of keys) delete next[key]
   return next
+}
+
+function omitAll<T>(record: Record<string, T>): Record<string, T> {
+  return Object.keys(record).length === 0 ? record : {}
 }

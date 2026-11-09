@@ -683,7 +683,7 @@ function ToolCallRow({
   const diff = whole.detail?.kind === 'fileChange' ? whole.detail.diff : null
   const running = output === null && !interrupted
   const live = useTranscriptStore((state) =>
-    running && open ? state.streaming[item.id]?.text : undefined
+    running && open ? state.toolOutput[item.id] : undefined
   )
   const target = toolTarget(name, input, cwd)
   const shown = toolName(name)

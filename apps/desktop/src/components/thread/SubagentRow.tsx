@@ -114,7 +114,7 @@ export function SubagentRow({
   const running = output === null && !interrupted
   const { description, kind, prompt } = subagentInput(input)
   const progress = useTranscriptStore((state) =>
-    running ? state.streaming[item.id]?.text : undefined
+    running ? state.toolOutput[item.id] : undefined
   )
   const whole = useWholeToolCall(item, open)
   const stopSubagent = useAppStore((state) => state.stopSubagent)

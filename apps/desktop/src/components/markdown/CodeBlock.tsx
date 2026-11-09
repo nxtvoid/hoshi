@@ -1,11 +1,16 @@
 import { m } from '@/paraglide/messages'
 import { languageFileName } from '@/lib/file-icons'
+import { useEffect, useRef, useState } from 'react'
 import { codeLanguageLabel } from '@/lib/code-languages'
 import { FileIcon } from '@/components/files/FileIcon'
 import { Copy01Icon } from '@hugeicons/core-free-icons'
-import { cachedHighlight, highlight } from '@/lib/highlight'
 import { CopyButton } from '@hoshi/ui/components/copy-button'
-import { useDeferredValue, useEffect, useState } from 'react'
+import {
+  cachedHighlight,
+  forgetHighlight,
+  highlight,
+  rememberHighlight
+} from '@/lib/highlight'
 
 const PRE = 'overflow-x-auto px-3 pb-3 font-mono text-xs leading-relaxed'
 
@@ -56,23 +61,73 @@ export function CodeBlock({
   )
 }
 
-/** While the code streams in, the last coloring stays up until the next one is ready. */
+/** Code that changes this soon after its last change is still being written. */
+const STREAMING_MS = 150
+
+/**
+ * While the code streams in, it is colored at most once every `STREAMING_MS` and the last
+ * coloring stays up until the next one is ready. A block keeps only its latest coloring in
+ * the cache, so the versions it went through while being written don't fill it.
+ */
 function useHighlighted(code: string, language: string | null) {
-  const deferred = useDeferredValue(code)
   const [html, setHtml] = useState(() =>
     language ? cachedHighlight(code, language) : undefined
   )
+  const mounted = useRef(true)
+  const changedAt = useRef<number | null>(null)
+  const startedAt = useRef(Number.NEGATIVE_INFINITY)
+  const started = useRef(0)
+  const shown = useRef(0)
+  const kept = useRef<{ code: string; language: string } | null>(null)
+
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   useEffect(() => {
     if (!language) return
-    let live = true
-    void highlight(deferred, language).then((result) => {
-      if (live) setHtml(result ?? undefined)
-    })
-    return () => {
-      live = false
+    const show = (run: number, result: string | null) => {
+      const previous = kept.current
+      if (
+        previous &&
+        (previous.code !== code || previous.language !== language)
+      ) {
+        forgetHighlight(previous.code, previous.language)
+      }
+      kept.current = result === null ? null : { code, language }
+      if (result !== null) rememberHighlight(code, language, result)
+      shown.current = run
+      setHtml(result ?? undefined)
     }
-  }, [deferred, language])
+    const now = performance.now()
+    const streaming =
+      changedAt.current !== null && now - changedAt.current < STREAMING_MS
+    changedAt.current = now
+    const cached = cachedHighlight(code, language)
+    if (cached) {
+      show(++started.current, cached)
+      return
+    }
+    const start = () => {
+      startedAt.current = performance.now()
+      const run = ++started.current
+      void highlight(code, language).then((result) => {
+        if (mounted.current && run > shown.current) show(run, result)
+      })
+    }
+    const wait = streaming
+      ? Math.max(0, startedAt.current + STREAMING_MS - now)
+      : 0
+    if (wait === 0) {
+      start()
+      return
+    }
+    const timer = setTimeout(start, wait)
+    return () => clearTimeout(timer)
+  }, [code, language])
 
   return language ? html : undefined
 }
