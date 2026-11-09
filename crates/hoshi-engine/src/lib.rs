@@ -1205,18 +1205,22 @@ impl Engine {
     }
 
     pub fn dispatch(&self, command: Command) -> Result<(), CommandError> {
-        let deleted = match &command {
-            Command::ThreadDelete { thread_id } => Some(thread_id.clone()),
-            _ => None,
-        };
         let mut state = lock(&self.state);
+        let deleted: Vec<String> = state
+            .threads_deleted_by(&command)
+            .into_iter()
+            .map(|thread| thread.id.clone())
+            .collect();
         state.run_command(command)?;
         let model = &state.model;
         self.terminals
             .retain_threads(|thread_id| model.thread(thread_id).is_some());
         drop(state);
-        if let Some(thread_id) = deleted {
-            self.browsing().forget(&thread_id);
+        if !deleted.is_empty() {
+            let mut browsing = self.browsing();
+            for thread_id in &deleted {
+                browsing.forget(thread_id);
+            }
         }
         Ok(())
     }
@@ -2050,10 +2054,21 @@ impl State {
             .into_iter()
             .filter_map(|thread| Some((self.project_root(thread).ok()?, thread.id.clone())))
             .collect();
+        let removed_with_project: Vec<String> = match &command {
+            Command::ProjectRemove { .. } => self
+                .threads_deleted_by(&command)
+                .into_iter()
+                .map(|thread| thread.id.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
         let now = now();
         let events = decide(&self.model, command, &now)?;
         self.commit(&events, &now)?;
         self.react(&events);
+        for thread_id in &removed_with_project {
+            self.forget_thread(thread_id);
+        }
         if let Some(thread_id) = interrupt
             && let Some(turn) = self.turns.get(&thread_id)
         {
@@ -2182,22 +2197,32 @@ impl State {
                     }
                     self.repositories.remove(project_id);
                 }
-                Event::ThreadDeleted { thread_id } => {
-                    if let Some(mcp) = &self.mcp {
-                        mcp.forget(thread_id);
-                    }
-                    self.delegations.remove(thread_id);
-                    self.pull_requests.forget(thread_id);
-                    self.pull_request_cache.forget(thread_id);
-                    if let Some(folder) = self.chat_folder(thread_id) {
-                        let _ = std::fs::remove_dir_all(folder);
-                    }
-                }
+                Event::ThreadDeleted { thread_id } => self.forget_thread(thread_id),
                 _ => {}
             }
         }
         if let (Some(message), Some(thread_id)) = (message, joining) {
             self.join_turn(&thread_id, message);
+        }
+    }
+
+    /// Drops what the engine keeps for a thread that is gone.
+    fn forget_thread(&mut self, thread_id: &str) {
+        if let Some(mcp) = &self.mcp {
+            mcp.forget(thread_id);
+        }
+        self.delegations.remove(thread_id);
+        self.pull_requests.forget(thread_id);
+        self.pull_request_cache.forget(thread_id);
+        self.queued.remove(thread_id);
+        self.after_compaction.remove(thread_id);
+        self.watches.remove(thread_id);
+        self.watch_reads.remove(thread_id);
+        self.pending_wakes.remove(thread_id);
+        self.titles_to_refine.remove(thread_id);
+        self.session_moves.remove(thread_id);
+        if let Some(folder) = self.chat_folder(thread_id) {
+            let _ = std::fs::remove_dir_all(folder);
         }
     }
 
@@ -3645,6 +3670,43 @@ mod tests {
             })
             .unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn removing_a_project_forgets_what_the_engine_kept_for_its_threads() {
+        let harness = Harness::in_memory("project-removed", completed_turn());
+        {
+            let mut state = lock(&harness.engine.state);
+            let message = || QueuedMessage {
+                id: "m1".into(),
+                text: "later".into(),
+                attachments: Vec::new(),
+            };
+            state.queued.entry("t".into()).or_default().push_back(message());
+            state.after_compaction.insert("t".into(), message());
+            state.watches.insert("t".into(), WatchState::default());
+            state.pending_wakes.insert(
+                "t".into(),
+                vec![Wake {
+                    update: hoshi_core::PullRequestUpdate::default(),
+                    text: "news".into(),
+                }],
+            );
+        }
+
+        harness
+            .engine
+            .dispatch(Command::ProjectRemove {
+                project_id: "p".into(),
+            })
+            .unwrap();
+
+        let state = lock(&harness.engine.state);
+        assert!(state.model.thread("t").is_none());
+        assert!(state.queued.is_empty());
+        assert!(state.after_compaction.is_empty());
+        assert!(state.watches.is_empty());
+        assert!(state.pending_wakes.is_empty());
     }
 
     fn titled_harness(name: &str) -> Harness {
