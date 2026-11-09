@@ -7,7 +7,6 @@ import { useUnseenStore } from '@/state/unseen-store'
 import { useSidebarStore } from '@/state/sidebar-store'
 import { projectSignal } from '@/state/thread-signals'
 import { BubbleChatIcon } from '@hugeicons/core-free-icons'
-import { IconButton } from '@hoshi/ui/components/icon-button'
 import {
   Tooltip,
   TooltipContent,
@@ -24,8 +23,7 @@ function useChats() {
   return {
     open,
     signal,
-    toggle: () => setView(open ? 'project' : 'chats'),
-    show: () => setView('chats')
+    toggle: () => setView(open ? 'project' : 'chats')
   }
 }
 
@@ -64,21 +62,5 @@ export function RailChatsButton() {
         {m.chats()}
       </TooltipContent>
     </Tooltip>
-  )
-}
-
-/** The chats in the sidebar footer, while there is no rail to hold them. */
-export function FooterChatsButton() {
-  const chats = useChats()
-
-  return (
-    <IconButton
-      label={m.chats()}
-      side='top'
-      active={chats.open}
-      onClick={chats.show}
-    >
-      <HugeiconsIcon icon={BubbleChatIcon} strokeWidth={2} />
-    </IconButton>
   )
 }

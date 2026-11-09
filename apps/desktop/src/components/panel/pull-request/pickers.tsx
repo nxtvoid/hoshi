@@ -7,6 +7,7 @@ import { Input } from '@hoshi/ui/components/input'
 import type { PullRequestLabel } from '@/bindings/PullRequestLabel'
 import type { PullRequestActions } from './use-pull-request-actions'
 import {
+  Loading03Icon,
   Tag01Icon,
   Tick02Icon,
   UserAdd01Icon
@@ -18,6 +19,25 @@ import {
 } from '@hoshi/ui/components/popover'
 
 const SEARCH_DELAY_MS = 250
+
+const LIST =
+  'flex max-h-60 flex-col overflow-y-auto overscroll-contain [scrollbar-gutter:stable]'
+
+/** What a picker's list says when it has nothing to show. */
+function ListNote({ loading, text }: { loading?: boolean; text: string }) {
+  return (
+    <li className='text-muted-foreground flex items-center gap-2 px-2 py-1.5 text-xs'>
+      {loading ? (
+        <HugeiconsIcon
+          icon={Loading03Icon}
+          strokeWidth={2}
+          className='size-3.5 animate-spin'
+        />
+      ) : null}
+      {text}
+    </li>
+  )
+}
 
 function EditButton({
   label,
@@ -58,14 +78,20 @@ export function ReviewerPicker({
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [candidates, setCandidates] = useState<string[] | null>(null)
+  /** The query `candidates` answered; another one is being searched while they differ. */
+  const [answered, setAnswered] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) return
     let current = true
     const timer = setTimeout(() => {
       invoke<string[]>('get_reviewer_candidates', { threadId, query })
-        .then((value) => current && setCandidates(value))
-        .catch(() => current && setCandidates([]))
+        .catch(() => [])
+        .then((value) => {
+          if (!current) return
+          setCandidates(value)
+          setAnswered(query)
+        })
     }, SEARCH_DELAY_MS)
     return () => {
       current = false
@@ -73,13 +99,14 @@ export function ReviewerPicker({
     }
   }, [open, threadId, query])
 
+  const searching = answered !== query
   const shown =
     candidates?.filter(
       (login) => login !== author && !current.includes(login)
     ) ?? []
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover modal open={open} onOpenChange={setOpen}>
       <EditButton label={m.request_review()} icon={UserAdd01Icon} />
       <PopoverContent align='start' className='w-64 gap-1 p-1.5'>
         <Input
@@ -90,11 +117,14 @@ export function ReviewerPicker({
           onChange={(event) => setQuery(event.currentTarget.value)}
           className='h-7 text-xs md:text-xs'
         />
-        <ul className='flex max-h-60 flex-col overflow-y-auto'>
-          {candidates !== null && shown.length === 0 ? (
-            <li className='text-muted-foreground px-2 py-1.5 text-xs'>
-              {m.no_matches()}
-            </li>
+        <ul className={LIST}>
+          {searching && shown.length === 0 ? (
+            <ListNote loading text={m.searching_people()} />
+          ) : null}
+          {!searching && shown.length === 0 ? (
+            <ListNote
+              text={query.trim() ? m.no_matches() : m.no_reviewers_available()}
+            />
           ) : null}
           {shown.map((login) => (
             <li key={login}>
@@ -150,7 +180,7 @@ export function LabelPicker({
     labels?.filter((label) => label.name.toLowerCase().includes(needle)) ?? []
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover modal open={open} onOpenChange={setOpen}>
       <EditButton label={m.edit_labels()} icon={Tag01Icon} />
       <PopoverContent align='start' className='w-64 gap-1 p-1.5'>
         <Input
@@ -161,11 +191,16 @@ export function LabelPicker({
           onChange={(event) => setQuery(event.currentTarget.value)}
           className='h-7 text-xs md:text-xs'
         />
-        <ul className='flex max-h-60 flex-col overflow-y-auto'>
+        <ul className={LIST}>
+          {labels === null ? (
+            <ListNote loading text={m.loading_labels()} />
+          ) : null}
           {labels !== null && shown.length === 0 ? (
-            <li className='text-muted-foreground px-2 py-1.5 text-xs'>
-              {m.no_matches()}
-            </li>
+            <ListNote
+              text={
+                labels.length === 0 ? m.no_labels_available() : m.no_matches()
+              }
+            />
           ) : null}
           {shown.map((label) => {
             const applied = current.includes(label.name)

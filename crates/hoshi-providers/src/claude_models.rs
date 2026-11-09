@@ -382,6 +382,27 @@ mod tests {
     }
 
     #[test]
+    fn fable_means_fable_5_2_which_has_fast_mode_and_needs_a_newer_cli() {
+        assert_eq!(
+            manifest().resolve(Some("fable"), None, false, false).slug,
+            "claude-fable-5-2"
+        );
+        let today = days_since_epoch("2026-11-09").unwrap();
+        let find = |catalog: &ProviderModels, slug: &str| {
+            catalog
+                .models
+                .iter()
+                .find(|model| model.slug == slug)
+                .cloned()
+        };
+        let current = manifest().catalog(Some((2, 1, 321)), today);
+        let fable = find(&current, "claude-fable-5-2").unwrap();
+        assert!(fable.fast_mode && !fable.update_required);
+        let older = manifest().catalog(Some((2, 1, 319)), today);
+        assert!(find(&older, "claude-fable-5-2").unwrap().update_required);
+    }
+
+    #[test]
     fn unknown_models_pass_through() {
         let turn = manifest().resolve(Some("claude-custom"), Some(Effort::Low), true, false);
         assert_eq!(turn.slug, "claude-custom");

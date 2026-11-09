@@ -160,7 +160,9 @@ impl PullRequestSync {
             Err(
                 error @ (ForgeError::Network(_)
                 | ForgeError::Unexpected(_)
-                | ForgeError::Rejected(_)),
+                | ForgeError::Rejected(_)
+                | ForgeError::Forbidden { .. }
+                | ForgeError::Conflict(_)),
             ) => {
                 eprintln!("hoshi: couldn't read a pull request: {error}");
                 AFTER_NETWORK_ERROR

@@ -89,6 +89,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
@@ -119,6 +120,11 @@ jobs:
       - name: Write latest.json
         run: bun scripts/updater-manifest.ts installers "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY" > latest.json
 
+      - name: Write the release notes
+        run: |
+          bun scripts/release-notes.ts "$GITHUB_REF_NAME" > notes.md
+          cat notes.md
+
       - name: Draft the release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -127,5 +133,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
             --repo "$GITHUB_REPOSITORY" \
             --title "hoshi $GITHUB_REF_NAME" \
-            --notes "Download the installer for your system from the assets below." \
+            --notes-file notes.md \
             installers/!(*.sig) latest.json

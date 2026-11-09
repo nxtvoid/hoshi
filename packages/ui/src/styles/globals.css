@@ -370,6 +370,14 @@ html[data-terminal-font="system"] {
   body {
     @apply bg-background text-foreground;
   }
+  /* The app is a window, not a page: only its own panes scroll, and a pane that reaches its
+     end must not drag the whole window with it. */
+  html,
+  body {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
   html {
     @apply font-sans;
     -webkit-font-smoothing: antialiased;

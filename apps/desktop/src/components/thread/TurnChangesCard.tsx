@@ -11,6 +11,10 @@ import { IconButton } from '@hoshi/ui/components/icon-button'
 import { totalChanges } from '@/components/panel/ChangedFiles'
 import { buildFileTree, hasFolders, type FileTreeNode } from '@/lib/file-tree'
 import {
+  isChangesCardOpen,
+  useTurnChangesStore
+} from '@/state/turn-changes-store'
+import {
   ArrowRight01Icon,
   FileDiffIcon,
   Folder01Icon,
@@ -31,6 +35,9 @@ export function TurnChangesCard({ changes }: { changes: TurnChanges }) {
   const tree = useMemo(() => buildFileTree(changes.files), [changes.files])
   const totals = useMemo(() => totalChanges(changes.files), [changes.files])
   const [allOpen, setAllOpen] = useState(false)
+  const chosen = useTurnChangesStore((state) => state.open[changes.turnId])
+  const setOpen = useTurnChangesStore((state) => state.setOpen)
+  const open = isChangesCardOpen(chosen, changes.files.length)
   const openFile: OpenFile = (path) => {
     if (threadId) openTurnDiff(threadId, changes.turnId, path)
   }
@@ -38,13 +45,33 @@ export function TurnChangesCard({ changes }: { changes: TurnChanges }) {
 
   return (
     <section className='bg-secondary dark:bg-card @container/changes mt-4 rounded-lg'>
-      <header className='bg-secondary dark:bg-card sticky top-2 z-10 flex items-center justify-between gap-2 rounded-t-lg px-3 py-2'>
-        <span className='text-foreground flex items-center gap-x-3 text-xs font-medium'>
-          {m.turn_changed_files({ count: changes.files.length })}
-          <Stat additions={totals.additions} deletions={totals.deletions} />
-        </span>
+      <header
+        className={cn(
+          'bg-secondary dark:bg-card sticky top-2 z-10 flex items-center justify-between gap-2 py-2 pr-3 pl-1.5',
+          open ? 'rounded-t-lg' : 'rounded-lg'
+        )}
+      >
+        <button
+          type='button'
+          aria-expanded={open}
+          onClick={() => setOpen(changes.turnId, !open)}
+          className='text-foreground focus-visible:ring-ring group flex min-w-0 items-center gap-x-1.5 rounded-md px-1.5 text-xs font-medium outline-none focus-visible:ring-2'
+        >
+          <HugeiconsIcon
+            icon={ArrowRight01Icon}
+            strokeWidth={2}
+            className={cn(
+              'text-muted-foreground group-hover:text-foreground size-3.5 shrink-0 transition-transform',
+              open && 'rotate-90'
+            )}
+          />
+          <span className='flex items-center gap-x-3'>
+            {m.turn_changed_files({ count: changes.files.length })}
+            <Stat additions={totals.additions} deletions={totals.deletions} />
+          </span>
+        </button>
         <span className='flex items-center gap-1'>
-          {folders ? (
+          {open && folders ? (
             <IconButton
               label={
                 allOpen ? m.collapse_all_folders() : m.expand_all_folders()
@@ -78,15 +105,20 @@ export function TurnChangesCard({ changes }: { changes: TurnChanges }) {
           </Button>
         </span>
       </header>
-      <ul key={String(allOpen)} className='p-2'>
-        <TreeRows
-          nodes={tree}
-          depth={0}
-          allOpen={allOpen}
-          indentFiles={folders}
-          openFile={openFile}
-        />
-      </ul>
+      {open ? (
+        <ul
+          key={String(allOpen)}
+          className='max-h-80 overflow-y-auto overscroll-contain p-2'
+        >
+          <TreeRows
+            nodes={tree}
+            depth={0}
+            allOpen={allOpen}
+            indentFiles={folders}
+            openFile={openFile}
+          />
+        </ul>
+      ) : null}
     </section>
   )
 }

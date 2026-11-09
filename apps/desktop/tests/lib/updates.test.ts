@@ -7,6 +7,10 @@ import {
   downloadPercent,
   providerBadge,
   RECHECK_ON_FOCUS_AFTER,
+  releaseChanges,
+  releaseCompareUrl,
+  releaseNotesKey,
+  releaseNotesTarget,
   strongestBadge,
   updateButton,
   updateEnded
@@ -154,4 +158,61 @@ describe('downloadPercent', () => {
     expect(downloadPercent(1023, 1024)).toBe(99)
     expect(downloadPercent(2048, 1024)).toBe(100)
   })
+})
+
+describe('releaseChanges', () => {
+  test('reads the bullet points of a release body', () => {
+    const body = [
+      '- Appearance settings with themes and any installed font (#9)',
+      '* Faster startup',
+      '',
+      'Download the installer for your system from the assets below.'
+    ].join('\r\n')
+    expect(releaseChanges(body)).toEqual([
+      'Appearance settings with themes and any installed font (#9)',
+      'Faster startup'
+    ])
+  })
+
+  test('gives nothing for a body without bullets', () => {
+    expect(releaseChanges('Download the installer.')).toEqual([])
+    expect(releaseChanges('')).toEqual([])
+  })
+})
+
+describe('releaseNotesTarget', () => {
+  test('shows notes while an update is available, downloading or ready', () => {
+    expect(releaseNotesTarget({ status: 'available', version: '0.0.5' })).toBe(
+      '0.0.5'
+    )
+    expect(
+      releaseNotesTarget({
+        status: 'downloading',
+        version: '0.0.5',
+        percent: 4
+      })
+    ).toBe('0.0.5')
+    expect(releaseNotesTarget({ status: 'ready', version: '0.0.5' })).toBe(
+      '0.0.5'
+    )
+  })
+
+  test('shows none otherwise', () => {
+    expect(releaseNotesTarget({ status: 'idle' })).toBeNull()
+    expect(
+      releaseNotesTarget({ status: 'upToDate', version: '0.0.4' })
+    ).toBeNull()
+    expect(
+      releaseNotesTarget({ status: 'failed', version: '0.0.5' })
+    ).toBeNull()
+  })
+})
+
+test('a range of releases has its own key and compare page', () => {
+  expect(releaseNotesKey('0.0.3', '0.0.5')).not.toBe(
+    releaseNotesKey('0.0.3', '0.0.4')
+  )
+  expect(releaseCompareUrl('0.0.3', '0.0.5')).toBe(
+    'https://github.com/nxtvoid/hoshi/compare/v0.0.3...v0.0.5'
+  )
 })

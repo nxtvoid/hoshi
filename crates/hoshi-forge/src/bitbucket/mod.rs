@@ -5,6 +5,7 @@
 mod actions;
 mod model;
 mod patch;
+mod scopes;
 
 use crate::{Forge, ForgeError, NewPullRequest, PullRequestFile, RepositoryRef};
 use actions::Plan;
@@ -22,6 +23,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use ureq::config::RedirectAuthHeaders;
+
+pub use scopes::REQUIRED_SCOPES;
 
 const API_URL: &str = "https://api.bitbucket.org/2.0";
 /// Bitbucket answers an empty page, without an error, to anything larger.
@@ -85,6 +88,51 @@ impl BitbucketCredentials {
 }
 
 type CredentialSource = Box<dyn Fn() -> Option<BitbucketCredentials> + Send + Sync>;
+
+/// The account a token signs in as, and the scopes hoshi needs that it lacks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BitbucketAccess {
+    pub login: String,
+    /// In [`REQUIRED_SCOPES`]'s form. When Bitbucket doesn't list the token's scopes, only
+    /// the read scopes can be checked, by reading; `write:pullrequest` is then assumed.
+    pub missing_scopes: Vec<String>,
+}
+
+/// What Bitbucket answered, before it is read as a result.
+struct Reply {
+    status: u16,
+    text: String,
+    retry_after: Option<u64>,
+    /// `x-oauth-scopes`: what the token may do.
+    granted: Option<String>,
+    /// `x-accepted-oauth-scopes`: what the endpoint asks for.
+    accepted: Option<String>,
+}
+
+impl Reply {
+    fn into_result(self) -> Result<String, ForgeError> {
+        let message = || rejection_message(&self.text, self.status);
+        match self.status {
+            200..=299 => Ok(self.text),
+            401 => Err(ForgeError::Unauthorized),
+            403 => Err(ForgeError::Forbidden {
+                message: message(),
+                scopes: scopes::lacking(
+                    &self.text,
+                    self.accepted.as_deref(),
+                    self.granted.as_deref(),
+                ),
+            }),
+            404 => Err(ForgeError::NotFound),
+            409 => Err(ForgeError::Conflict(message())),
+            429 => Err(ForgeError::RateLimited {
+                retry_after_secs: self.retry_after.unwrap_or(DEFAULT_RETRY_SECS),
+            }),
+            400..=499 => Err(ForgeError::Rejected(message())),
+            status => Err(ForgeError::Unexpected(format!("HTTP {status}"))),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -156,6 +204,14 @@ impl Bitbucket {
         path: &str,
         body: Option<&Value>,
     ) -> Result<String, ForgeError> {
+        let reply = self.send(method, path, body)?;
+        if reply.status == 401 {
+            self.forget_credentials();
+        }
+        reply.into_result()
+    }
+
+    fn send(&self, method: Method, path: &str, body: Option<&Value>) -> Result<Reply, ForgeError> {
         let url = if path.starts_with("https://") {
             if !path.starts_with(&format!("{API_URL}/")) {
                 return Err(ForgeError::Unexpected(
@@ -194,31 +250,86 @@ impl Bitbucket {
                 .send(payload.as_str()),
         };
         let mut response = sent.map_err(|error| ForgeError::Network(error.to_string()))?;
+        let header = |name: &str| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let retry_after = header("retry-after").and_then(|value| value.trim().parse().ok());
+        let granted = header("x-oauth-scopes");
+        let accepted = header("x-accepted-oauth-scopes");
         let status = response.status().as_u16();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.trim().parse::<u64>().ok());
         let text = response
             .body_mut()
             .with_config()
             .limit(MAX_DIFF_BYTES)
             .read_to_string()
             .map_err(|error| ForgeError::Network(error.to_string()))?;
-        match status {
-            200..=299 => Ok(text),
-            401 => {
-                self.forget_credentials();
-                Err(ForgeError::Unauthorized)
-            }
-            404 => Err(ForgeError::NotFound),
-            429 => Err(ForgeError::RateLimited {
-                retry_after_secs: retry_after.unwrap_or(DEFAULT_RETRY_SECS),
-            }),
-            400..=499 => Err(ForgeError::Rejected(rejection_message(&text, status))),
-            _ => Err(ForgeError::Unexpected(format!("HTTP {status}"))),
+        Ok(Reply {
+            status,
+            text,
+            retry_after,
+            granted,
+            accepted,
+        })
+    }
+
+    /// The account the token signs in as, and which of [`REQUIRED_SCOPES`] it lacks. Only
+    /// reads: the token's scopes come from the header Bitbucket answers with, or, without
+    /// it, from one read per read scope.
+    pub fn check_access(&self) -> Result<BitbucketAccess, ForgeError> {
+        let reply = self.send(Method::Get, "/user", None)?;
+        if reply.status == 401 {
+            self.forget_credentials();
         }
+        let granted = reply.granted.as_deref().and_then(scopes::from_header);
+        let user: User = serde_json::from_str(&reply.into_result()?)
+            .map_err(|error| ForgeError::Unexpected(error.to_string()))?;
+        let login = user
+            .login()
+            .ok_or_else(|| ForgeError::Unexpected("the account has no name".into()))?;
+        let missing_scopes = match granted {
+            Some(granted) => scopes::missing(&granted, &REQUIRED_SCOPES),
+            None => self.probe_read_scopes(&user)?,
+        };
+        Ok(BitbucketAccess {
+            login,
+            missing_scopes,
+        })
+    }
+
+    /// The read scopes whose read was refused.
+    fn probe_read_scopes(&self, user: &User) -> Result<Vec<String>, ForgeError> {
+        let mut probes = vec![
+            (
+                "read:workspace:bitbucket",
+                "/user/workspaces?pagelen=1".to_owned(),
+            ),
+            (
+                "read:repository:bitbucket",
+                "/repositories?role=member&pagelen=1".to_owned(),
+            ),
+        ];
+        if let Some(uuid) = &user.uuid {
+            probes.push((
+                "read:pullrequest:bitbucket",
+                format!("/pullrequests/{}?pagelen=1", encode(uuid)),
+            ));
+        }
+        let mut missing = Vec::new();
+        for (scope, path) in probes {
+            match self.request(Method::Get, &path, None) {
+                Ok(_) => {}
+                Err(ForgeError::Forbidden { .. }) => missing.push(scope.to_owned()),
+                Err(error @ (ForgeError::Unauthorized | ForgeError::RateLimited { .. })) => {
+                    return Err(error);
+                }
+                Err(error) => eprintln!("hoshi: couldn't check a Bitbucket scope: {error}"),
+            }
+        }
+        Ok(missing)
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ForgeError> {
@@ -759,6 +870,59 @@ mod tests {
             encode("source.branch.name = \"a b\""),
             "source.branch.name%20%3D%20%22a%20b%22"
         );
+    }
+
+    fn reply(status: u16, text: &str, granted: &str) -> Reply {
+        Reply {
+            status,
+            text: text.into(),
+            retry_after: None,
+            granted: Some(granted.into()),
+            accepted: Some("write:pullrequest:bitbucket".into()),
+        }
+    }
+
+    #[test]
+    fn reads_each_kind_of_refusal() {
+        let reads = "read:user:bitbucket, read:pullrequest:bitbucket";
+        let scopes = r#"{"type":"error","error":{"message":"Your credentials lack one or more required privilege scopes.","detail":{"granted":["read:user:bitbucket"],"required":["write:pullrequest:bitbucket"]}}}"#;
+        assert_eq!(
+            reply(403, scopes, reads).into_result(),
+            Err(ForgeError::Forbidden {
+                message: "Your credentials lack one or more required privilege scopes.".into(),
+                scopes: vec!["write:pullrequest:bitbucket".into()],
+            })
+        );
+        let access =
+            r#"{"type":"error","error":{"message":"You do not have access to this repository."}}"#;
+        assert_eq!(
+            reply(403, access, reads).into_result(),
+            Err(ForgeError::Forbidden {
+                message: "You do not have access to this repository.".into(),
+                scopes: vec!["write:pullrequest:bitbucket".into()],
+            })
+        );
+        assert_eq!(
+            reply(403, access, "write:pullrequest:bitbucket").into_result(),
+            Err(ForgeError::Forbidden {
+                message: "You do not have access to this repository.".into(),
+                scopes: Vec::new(),
+            })
+        );
+        let conflict = r#"{"type":"error","error":{"message":"Conflict"}}"#;
+        assert_eq!(
+            reply(409, conflict, reads).into_result(),
+            Err(ForgeError::Conflict("Conflict".into()))
+        );
+        assert_eq!(
+            reply(401, "", reads).into_result(),
+            Err(ForgeError::Unauthorized)
+        );
+        assert_eq!(
+            reply(404, "", reads).into_result(),
+            Err(ForgeError::NotFound)
+        );
+        assert_eq!(reply(201, "{}", reads).into_result(), Ok("{}".into()));
     }
 
     #[test]

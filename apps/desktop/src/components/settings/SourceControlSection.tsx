@@ -66,6 +66,17 @@ export function SourceControlSection() {
   )
 }
 
+function connectErrorMessage(error: CommandError): string {
+  switch (error.code) {
+    case 'forgeUnauthorized':
+      return m.bitbucket_error_credentials()
+    case 'forgeScopesMissing':
+      return m.bitbucket_error_scopes({ scopes: error.scopes.join(', ') })
+    default:
+      return forgeErrorMessage(error)
+  }
+}
+
 function BitbucketRow({
   checking,
   login,
@@ -98,12 +109,7 @@ function BitbucketRow({
       )
       close()
     } catch (failure) {
-      const commandError = failure as CommandError
-      setError(
-        commandError.code === 'forgeUnauthorized'
-          ? m.bitbucket_error_credentials()
-          : forgeErrorMessage(commandError)
-      )
+      setError(connectErrorMessage(failure as CommandError))
     } finally {
       setPending(false)
     }

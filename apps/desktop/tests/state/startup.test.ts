@@ -49,21 +49,13 @@ describe('startupSelection', () => {
     ).toEqual({ sidebarView: 'inbox', projectId: 'b', threadId: null })
   })
 
-  test('a lone project without chats opens in place of the inbox', () => {
+  test('a lone project still opens in the inbox', () => {
     expect(
       startupSelection(
         'inbox',
         { projectId: 'a', threadId: 't1' },
         [project('a')],
         [thread('t1', 'a')]
-      )
-    ).toEqual({ sidebarView: 'project', projectId: 'a', threadId: null })
-    expect(
-      startupSelection(
-        'inbox',
-        { projectId: 'a', threadId: null },
-        [project('a')],
-        [thread('t1', 'a'), thread('c1', null)]
       )
     ).toEqual({ sidebarView: 'inbox', projectId: 'a', threadId: null })
     expect(

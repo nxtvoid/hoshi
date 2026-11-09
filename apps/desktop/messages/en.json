@@ -132,6 +132,10 @@
   "request_review": "Request a review",
   "search_people": "Search people",
   "no_matches": "No matches",
+  "searching_people": "Searching…",
+  "no_reviewers_available": "No one else can review",
+  "loading_labels": "Loading labels…",
+  "no_labels_available": "This repository has no labels",
   "edit_labels": "Edit labels",
   "filter_labels": "Filter labels",
   "remove_reviewer": "Remove {name}",
@@ -783,6 +787,17 @@
   "app_update_downloading": "Downloading…",
   "app_update_downloading_percent": "Downloading {percent}%",
   "app_update_failed": "The update couldn't be installed. Try again later.",
+  "view_on_github": "View on GitHub",
+  "app_update_changes": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} change",
+        "countPlural=*": "{count} changes"
+      }
+    }
+  ],
   "edit_cut": "Cut",
   "edit_copy": "Copy",
   "edit_paste": "Paste",
@@ -809,11 +824,12 @@
   "palette_close": "Close",
   "bitbucket": "Bitbucket Cloud",
   "bitbucket_description": "Pull requests of your threads' branches on bitbucket.org, read with an Atlassian API token kept in the system's credential store",
-  "bitbucket_token_help": "Create an API token with scopes for Bitbucket and give it these scopes.",
+  "bitbucket_token_help": "Create an API token with scopes for Bitbucket and give it these scopes. hoshi checks them when you connect.",
   "bitbucket_create_token": "Create an API token",
   "bitbucket_email": "Atlassian account email",
   "bitbucket_api_token": "API token",
   "bitbucket_error_credentials": "Bitbucket didn't accept that email and token. Check them and the token's scopes.",
+  "bitbucket_error_scopes": "This token is missing {scopes}. Create a token with every scope above and connect it instead.",
   "forge_connect": "Connect",
   "forge_disconnect": "Disconnect",
   "status_completed": "Completed",

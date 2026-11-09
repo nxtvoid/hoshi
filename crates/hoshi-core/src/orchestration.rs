@@ -348,6 +348,9 @@ pub enum CommandError {
     ForgeRejected { detail: String },
     #[error("could not reach the forge: {detail}")]
     ForgeUnreachable { detail: String },
+    /// The token lacks these scopes, named as the forge names them.
+    #[error("the forge token lacks the scopes {scopes:?}")]
+    ForgeScopesMissing { scopes: Vec<String> },
     /// A git command failed; `detail` is git's own message, shown as is.
     #[error("git failed: {detail}")]
     GitFailed { detail: String },

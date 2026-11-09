@@ -4,7 +4,6 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { InboxIcon } from '@hugeicons/core-free-icons'
 import { useSidebarStore } from '@/state/sidebar-store'
 import { useInboxBadge } from './use-sidebar-sections'
-import { IconButton } from '@hoshi/ui/components/icon-button'
 import {
   Tooltip,
   TooltipContent,
@@ -20,8 +19,7 @@ function useInbox() {
     count,
     waiting,
     label: count > 0 ? m.inbox_waiting({ count }) : m.inbox(),
-    toggle: () => setView(open ? 'project' : 'inbox'),
-    show: () => setView('inbox')
+    toggle: () => setView(open ? 'project' : 'inbox')
   }
 }
 
@@ -73,23 +71,5 @@ export function RailInboxButton() {
         {inbox.label}
       </TooltipContent>
     </Tooltip>
-  )
-}
-
-/** The inbox in the sidebar footer, while there is no rail to hold it. */
-export function FooterInboxButton() {
-  const inbox = useInbox()
-
-  return (
-    <IconButton
-      label={inbox.label}
-      side='top'
-      active={inbox.open}
-      onClick={inbox.show}
-      className='relative'
-    >
-      <HugeiconsIcon icon={InboxIcon} strokeWidth={2} />
-      <Count count={inbox.count} className='absolute -top-0.5 -right-0.5' />
-    </IconButton>
   )
 }

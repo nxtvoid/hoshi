@@ -46,7 +46,9 @@ export function ProjectRail() {
     <nav className='border-sidebar-border flex w-12 shrink-0 flex-col items-center gap-1.5 overflow-y-auto border-r py-2'>
       <RailInboxButton />
       <RailChatsButton />
-      <div className='bg-sidebar-border my-0.5 h-px w-6 shrink-0' />
+      {projects.length > 0 ? (
+        <div className='bg-sidebar-border my-0.5 h-px w-6 shrink-0' />
+      ) : null}
       {projects.map((project) => (
         <ProjectButton
           key={project.id}
@@ -59,13 +61,12 @@ export function ProjectRail() {
   )
 }
 
-/** The rail shows once there is more than one place to go: two projects, or a project and chats. */
-export function useHasRail() {
+/** The rail shows once there is a project or a chat to go to. */
+function useHasRail() {
   return useAppStore(
     (state) =>
-      state.projects.length >= 2 ||
-      (state.projects.length === 1 &&
-        state.threads.some((thread) => thread.projectId === null))
+      state.projects.length > 0 ||
+      state.threads.some((thread) => thread.projectId === null)
   )
 }
 

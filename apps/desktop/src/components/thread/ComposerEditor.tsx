@@ -56,6 +56,10 @@ export type KeyContext = {
 export type ComposerEditorHandle = {
   focus: () => void
   setText: (text: string) => void
+  /** The document as it is, chips included; `null` when empty. */
+  document: () => JSONContent | null
+  /** Shows `doc` as it was read, chips included. */
+  setDocument: (doc: JSONContent) => void
   replace: (trigger: LocatedTrigger, insert: ComposerInsert) => void
   /** What the pull request and skill chips stand for. */
   mentions: () => MessageAttachment[]
@@ -439,6 +443,13 @@ export function ComposerEditor({
       setText: (text) => {
         if (!editor) return
         editor.commands.setContent(fromText(text))
+        editor.commands.focus('end')
+        emit(editor)
+      },
+      document: () => (!editor || editor.isEmpty ? null : editor.getJSON()),
+      setDocument: (doc) => {
+        if (!editor) return
+        editor.commands.setContent(doc)
         editor.commands.focus('end')
         emit(editor)
       },

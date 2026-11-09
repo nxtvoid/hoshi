@@ -22,36 +22,59 @@ impl TurnWorkspace {
     }
 }
 
-/// The worktree a turn moved to: one that appeared since the turn started and no
-/// other thread owns. A worktree its tool calls named wins; without one, a single new
-/// worktree counts only if no other turn of the project was running.
+/// The worktree a turn moved to: one that appeared since the turn started, that no other
+/// thread owns, and that the turn's tool calls worked in, not only created.
 pub fn created_by_turn(
     workspace: &TurnWorkspace,
     worktrees_after: &[String],
     claimed: &[String],
-    alone: bool,
 ) -> Option<String> {
-    let new: Vec<&String> = worktrees_after
+    let used: Vec<&String> = worktrees_after
         .iter()
         .filter(|path| !workspace.worktrees_before.contains(path) && !claimed.contains(path))
-        .collect();
-    let named: Vec<&String> = new
-        .iter()
-        .copied()
         .filter(|path| {
             let folder = folder_name(path);
             !folder.is_empty()
                 && workspace
                     .tool_inputs
                     .iter()
-                    .any(|input| input.contains(&folder))
+                    .any(|input| works_in(input, &folder))
         })
         .collect();
-    match (named.as_slice(), new.as_slice()) {
-        ([path], _) => Some((*path).clone()),
-        ([], [path]) if alone => Some((*path).clone()),
+    match used.as_slice() {
+        [path] => Some((*path).clone()),
         _ => None,
     }
+}
+
+/// A tool call works in `folder` when it names it for anything but creating it, as a
+/// `cd` into it does even in the command that created it.
+fn works_in(input: &str, folder: &str) -> bool {
+    if !names(input, folder) {
+        return false;
+    }
+    if !input.contains("worktree add") {
+        return true;
+    }
+    input
+        .replace("\\\"", "")
+        .replace("\\n", "\n")
+        .split(['&', ';', '|', '"', '\n', '(', ')'])
+        .filter_map(|command| {
+            let mut words = command.split_whitespace();
+            matches!(words.next()?, "cd" | "pushd").then(|| words.next())?
+        })
+        .any(|target| names(target, folder))
+}
+
+/// Whether `text` names `folder` as a whole path component, not as part of a longer name.
+fn names(text: &str, folder: &str) -> bool {
+    let part_of_name = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '.');
+    text.match_indices(folder).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + folder.len()..].chars().next();
+        !before.is_some_and(part_of_name) && !after.is_some_and(part_of_name)
+    })
 }
 
 const BRANCH_NAME_MAX_CHARS: usize = 40;
@@ -189,47 +212,73 @@ mod tests {
     }
 
     #[test]
-    fn a_single_new_worktree_belongs_to_a_turn_that_ran_alone() {
-        let workspace = workspace(&["/repo"], &[]);
-        let after = paths(&["/repo", "/wt/csv-export"]);
+    fn a_new_worktree_the_turn_works_in_belongs_to_it() {
+        let workspace = workspace(
+            &["/repo"],
+            &[
+                r#"{"command":"git worktree add ../Repo-1234 -b fix/1234 origin/master"}"#,
+                r#"{"command":"cd ../repo-1234 && cargo test"}"#,
+            ],
+        );
+        let after = paths(&["/repo", "/work/repo-1234", "/wt/other"]);
 
         assert_eq!(
-            created_by_turn(&workspace, &after, &[], true).as_deref(),
-            Some("/wt/csv-export")
+            created_by_turn(&workspace, &after, &[]).as_deref(),
+            Some("/work/repo-1234")
         );
-        assert_eq!(created_by_turn(&workspace, &after, &[], false), None);
     }
 
     #[test]
-    fn the_worktree_named_in_a_tool_call_wins_over_others() {
+    fn a_cd_in_the_command_that_creates_the_worktree_counts_as_working_in_it() {
         let workspace = workspace(
             &["/repo"],
-            &[r#"{"command":"git worktree add ../CSV-Export -b feat/csv"}"#],
+            &[r#"{"command":"git worktree add ../csv -b feat/csv && cd ../csv && bun i"}"#],
         );
-        let after = paths(&["/repo", "/wt/csv-export", "/wt/other"]);
+        let after = paths(&["/repo", "/work/csv"]);
 
         assert_eq!(
-            created_by_turn(&workspace, &after, &[], false).as_deref(),
-            Some("/wt/csv-export")
+            created_by_turn(&workspace, &after, &[]).as_deref(),
+            Some("/work/csv")
         );
+    }
+
+    #[test]
+    fn a_folder_only_named_inside_a_longer_name_is_not_worked_in() {
+        let workspace = workspace(&["/repo"], &[r#"{"command":"cd ../repo-12345 && ls"}"#]);
+        let after = paths(&["/repo", "/work/repo-1234"]);
+
+        assert_eq!(created_by_turn(&workspace, &after, &[]), None);
+    }
+
+    #[test]
+    fn a_worktree_only_created_or_never_named_stays_unassigned() {
+        let created = workspace(
+            &["/repo"],
+            &[r#"{"command":"git worktree add ../csv -b feat/csv"}"#],
+        );
+        let unnamed = workspace(&["/repo"], &[]);
+        let after = paths(&["/repo", "/work/csv"]);
+
+        assert_eq!(created_by_turn(&created, &after, &[]), None);
+        assert_eq!(created_by_turn(&unnamed, &after, &[]), None);
     }
 
     #[test]
     fn worktrees_owned_by_other_threads_are_ignored() {
-        let workspace = workspace(&["/repo"], &[]);
-        let after = paths(&["/repo", "/wt/a", "/wt/b"]);
+        let workspace = workspace(&["/repo"], &[r#"{"file_path":"/work/a/x.rs"}"#]);
+        let after = paths(&["/repo", "/work/a"]);
 
         assert_eq!(
-            created_by_turn(&workspace, &after, &paths(&["/wt/a"]), true).as_deref(),
-            Some("/wt/b")
+            created_by_turn(&workspace, &after, &paths(&["/work/a"])),
+            None
         );
     }
 
     #[test]
-    fn several_unnamed_worktrees_stay_unassigned() {
-        let workspace = workspace(&["/repo"], &[]);
-        let after = paths(&["/repo", "/wt/a", "/wt/b"]);
+    fn two_worktrees_the_turn_worked_in_stay_unassigned() {
+        let workspace = workspace(&["/repo"], &[r#"{"command":"diff -r ../a ../b"}"#]);
+        let after = paths(&["/repo", "/work/a", "/work/b"]);
 
-        assert_eq!(created_by_turn(&workspace, &after, &[], true), None);
+        assert_eq!(created_by_turn(&workspace, &after, &[]), None);
     }
 }

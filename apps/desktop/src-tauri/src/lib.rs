@@ -1,7 +1,10 @@
+mod app_release;
 mod appearance;
 mod clipboard;
 mod fonts;
 mod home;
+#[cfg(target_os = "linux")]
+mod linux;
 mod orchestration;
 mod settings;
 mod theme_files;
@@ -25,6 +28,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            app_release::app_release_notes,
             orchestration::get_snapshot,
             orchestration::dispatch,
             orchestration::get_thread_items,
@@ -149,6 +153,8 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         .background_color(appearance::background(dark.unwrap_or(false)))
         .visible(false)
         .build()?;
+    #[cfg(target_os = "linux")]
+    linux::reload_after_crash(&window);
     if dark.is_none() {
         appearance::follow_system(&window);
     }

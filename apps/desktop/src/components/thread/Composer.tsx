@@ -36,6 +36,7 @@ import { ComposerSuggestions, suggestionOptionId } from './ComposerSuggestions'
 import { usePendingRequest, useRequestActions } from './use-request-actions'
 import {
   imageChipKeys,
+  joinDocuments,
   numberImageChips,
   withoutImageChips
 } from '@/lib/composer-markdown'
@@ -368,20 +369,24 @@ export function Composer({
       ...ordered.flatMap((image) => image.saved ?? []),
       ...editor.mentions()
     ]
-    setSending(true)
-    const release = images.keep()
     const compactFirst = compaction?.compact === true && !isCompactCommand(text)
+    const doc = editor.document()
+    const taken = images.take()
+    setSending(true)
+    setRecalled(undefined)
+    saveDraft(draftKey, null)
+    editor.setText('')
     const sent = await sendMessage(prompt, attachments, compactFirst)
     setSending(false)
-    if (!sent) {
-      release()
+    if (sent) {
+      remember(prompt)
+      images.release(taken)
       return
     }
-    remember(prompt)
-    saveDraft(draftKey, null)
-    setRecalled(undefined)
-    images.clear()
-    editorRef.current?.setText('')
+    const restored = joinDocuments(doc, editorRef.current?.document() ?? null)
+    saveDraft(draftKey, restored)
+    images.putBack(taken)
+    if (restored) editorRef.current?.setDocument(restored)
   }
 
   const recall = (direction: 'back' | 'forward') => {
