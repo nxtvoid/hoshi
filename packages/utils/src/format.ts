@@ -81,6 +81,17 @@ export function formatFileSize(bytes: number, locale: string) {
 }
 
 /** The time of day of `iso`, as "22:10" or "10:10 PM" in `locale`. */
+/** A running time as a clock reads it: "0:07", "12:30", "1:02:05". */
+export function formatElapsed(milliseconds: number) {
+  const total = Math.max(0, Math.floor(milliseconds / 1000))
+  const hours = Math.floor(total / 3_600)
+  const minutes = Math.floor((total % 3_600) / 60)
+  const seconds = String(total % 60).padStart(2, '0')
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}`
+    : `${minutes}:${seconds}`
+}
+
 export function formatClockTime(
   iso: string,
   locale: string,

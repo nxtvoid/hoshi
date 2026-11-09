@@ -21,6 +21,7 @@ import { useLastSelectionStore } from './last-selection-store'
 import { useTranscriptStore } from './transcript-store'
 import { useSubagentStore } from './subagent-store'
 import { useStoppingStore } from './stopping-store'
+import { useBackgroundTaskStore } from './background-task-store'
 import { usePullRequestStore } from './pull-request-store'
 import { draftKey, useDraftStore } from './draft-store'
 import { usePanelStore } from './panel-store'
@@ -49,6 +50,7 @@ import type { MessageAttachment } from '@/bindings/MessageAttachment'
 import type { EventEnvelope } from '@/bindings/EventEnvelope'
 import type { ThreadPullRequest } from '@/bindings/ThreadPullRequest'
 import type { ThreadContextUsage } from '@/bindings/ThreadContextUsage'
+import type { ThreadBackgroundTasks } from '@/bindings/ThreadBackgroundTasks'
 import type { ThreadPullRequestDetail } from '@/bindings/ThreadPullRequestDetail'
 import { inChat, scopeProjectId } from './scope'
 import {
@@ -115,6 +117,8 @@ type AppState = {
   interruptTurn: () => Promise<void>
   /** Stops one subagent of the selected thread's turn; `toolUseId` is the call that started it. */
   stopSubagent: (toolUseId: string) => Promise<void>
+  /** Stops one command the selected thread's turn left running in the background. */
+  stopBackgroundTask: (taskId: string) => Promise<void>
   /** Answers what a thread's agent asked; `false` when it was refused. */
   respondToRequest: (
     threadId: string,
@@ -375,6 +379,14 @@ export const useAppStore = create<AppState>()((set, get) => ({
       reportError
     )
   },
+  stopBackgroundTask: async (taskId) => {
+    const threadId = get().selectedThreadId
+    if (!threadId) return
+    useBackgroundTaskStore.getState().markStopping(taskId)
+    await dispatch({ type: 'backgroundTaskStop', threadId, taskId }).catch(
+      reportError
+    )
+  },
   respondToRequest: async (threadId, requestId, response) => {
     try {
       await dispatch({ type: 'requestRespond', threadId, requestId, response })
@@ -395,6 +407,7 @@ function receive({ sequence, event }: EventEnvelope) {
   useRequestStore.getState().applyEvent(event)
   if (event.type === 'turnCompleted' || event.type === 'threadDeleted') {
     useStoppingStore.getState().end(event.threadId)
+    useBackgroundTaskStore.getState().forget(event.threadId)
   }
   if (event.type === 'threadDeleted') {
     useDraftStore.getState().save(event.threadId, null)
@@ -461,6 +474,7 @@ async function startSync() {
   let buffered: EventEnvelope[] | null = []
   let bufferedPullRequests: ThreadPullRequest[] | null = []
   let bufferedContextUsages: ThreadContextUsage[] | null = []
+  let bufferedBackgroundTasks: ThreadBackgroundTasks[] | null = []
   const unlisten = await listen<EventEnvelope>('hoshi://event', (message) => {
     if (buffered) buffered.push(message.payload)
     else receive(message.payload)
@@ -481,6 +495,13 @@ async function startSync() {
     (message) => {
       if (bufferedContextUsages) bufferedContextUsages.push(message.payload)
       else receiveContextUsage(message.payload)
+    }
+  )
+  const unlistenBackgroundTasks = await listen<ThreadBackgroundTasks>(
+    'hoshi://background-tasks',
+    (message) => {
+      if (bufferedBackgroundTasks) bufferedBackgroundTasks.push(message.payload)
+      else useBackgroundTaskStore.getState().receive(message.payload)
     }
   )
   const unlistenUsageLimits = await listen<UsageLimits>(
@@ -518,6 +539,7 @@ async function startSync() {
     unlistenPullRequests()
     unlistenPullRequestDetails()
     unlistenContextUsages()
+    unlistenBackgroundTasks()
     unlistenUsageLimits()
     unlistenProviderVersion()
     unlistenGitActions()
@@ -539,6 +561,7 @@ async function startSync() {
   useRequestStore
     .getState()
     .seed(snapshot.pendingRequests, snapshot.pendingTasks)
+  useBackgroundTaskStore.getState().seed(snapshot.backgroundTasks)
   useAppStore.setState({
     ready: true,
     sequence: snapshot.sequence,
@@ -564,6 +587,10 @@ async function startSync() {
   bufferedPullRequests = null
   for (const update of bufferedContextUsages) receiveContextUsage(update)
   bufferedContextUsages = null
+  for (const update of bufferedBackgroundTasks) {
+    useBackgroundTaskStore.getState().receive(update)
+  }
+  bufferedBackgroundTasks = null
 }
 
 useAppStore.subscribe((state, previous) => {
