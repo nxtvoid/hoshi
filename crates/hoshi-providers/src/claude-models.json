@@ -193,9 +193,7 @@
                 "label": "Ultrathink"
               }
             ],
-            "promptInjectedValues": [
-              "ultrathink"
-            ]
+            "promptInjectedValues": ["ultrathink"]
           },
           {
             "id": "fastMode",
