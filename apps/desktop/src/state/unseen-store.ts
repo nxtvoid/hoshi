@@ -1,8 +1,10 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
+import { withoutKeys } from '@/lib/records'
 import { persist } from 'zustand/middleware'
 import { useAppStore } from './app-store'
 import { finishedTurns } from './thread-signals'
+import { removedThreadIds } from './orchestration'
 
 type UnseenState = {
   /** Threads whose last turn finished while the user looked elsewhere. */
@@ -14,6 +16,7 @@ type UnseenState = {
   held: string | null
   mark: (threadIds: string[]) => void
   see: (threadId: string) => void
+  forget: (threadIds: string[]) => void
 }
 
 export const useUnseenStore = create<UnseenState>()(
@@ -35,6 +38,11 @@ export const useUnseenStore = create<UnseenState>()(
           if (!state.unseen[threadId]) return { held }
           const { [threadId]: _, ...unseen } = state.unseen
           return { unseen, held }
+        }),
+      forget: (threadIds) =>
+        set((state) => {
+          const unseen = withoutKeys(state.unseen, threadIds)
+          return unseen === state.unseen ? state : { unseen }
         })
     }),
     {
@@ -54,7 +62,7 @@ function onScreen() {
  * user opens it, or comes back to the window with it open. Returns how to stop.
  */
 export function trackUnseen(): () => void {
-  const { mark, see } = useUnseenStore.getState()
+  const { mark, see, forget } = useUnseenStore.getState()
   const seeSelected = () => {
     const { selectedThreadId } = useAppStore.getState()
     if (selectedThreadId && onScreen()) see(selectedThreadId)
@@ -66,6 +74,8 @@ export function trackUnseen(): () => void {
         (id) => id !== watched
       )
       if (finished.length > 0) mark(finished)
+      const removed = removedThreadIds(previous.threads, state.threads)
+      if (removed.length > 0) forget(removed)
     }
     if (state.selectedThreadId !== previous.selectedThreadId) seeSelected()
   })

@@ -22,7 +22,11 @@ import { useTranscriptStore } from './transcript-store'
 import { useSubagentStore } from './subagent-store'
 import { useStoppingStore } from './stopping-store'
 import { usePullRequestStore } from './pull-request-store'
-import { useDraftStore } from './draft-store'
+import { draftKey, useDraftStore } from './draft-store'
+import { usePanelStore } from './panel-store'
+import { useCleanupStore } from './cleanup-store'
+import { useDetailsStore } from './details-store'
+import { useTerminalStore } from './terminal-store'
 import { useRequestStore } from './request-store'
 import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
@@ -47,7 +51,12 @@ import type { ThreadPullRequest } from '@/bindings/ThreadPullRequest'
 import type { ThreadContextUsage } from '@/bindings/ThreadContextUsage'
 import type { ThreadPullRequestDetail } from '@/bindings/ThreadPullRequestDetail'
 import { inChat, scopeProjectId } from './scope'
-import { applyEvent, folderName, samePath } from './orchestration'
+import {
+  applyEvent,
+  folderName,
+  removedThreadIds,
+  samePath
+} from './orchestration'
 
 type AppState = {
   ready: boolean
@@ -390,6 +399,7 @@ function receive({ sequence, event }: EventEnvelope) {
   if (event.type === 'threadDeleted') {
     useDraftStore.getState().save(event.threadId, null)
   }
+  const threadsBefore = useAppStore.getState().threads
   useAppStore.setState((state) => {
     const next = applyEvent(state, event)
     const selectedProjectId = next.projects.some(
@@ -404,10 +414,32 @@ function receive({ sequence, event }: EventEnvelope) {
       : null
     return { ...next, sequence, selectedProjectId, selectedThreadId }
   })
+  if (event.type === 'threadDeleted' || event.type === 'projectRemoved') {
+    const removed = removedThreadIds(
+      threadsBefore,
+      useAppStore.getState().threads
+    )
+    forgetThreads(
+      removed,
+      event.type === 'projectRemoved'
+        ? [...removed, draftKey(null, event.projectId, false)]
+        : removed
+    )
+  }
   const { selectedThreadId } = useAppStore.getState()
   if (selectedThreadId !== useTranscriptStore.getState().threadId) {
     void useTranscriptStore.getState().load(selectedThreadId)
   }
+}
+
+/** Drops what the app kept on this machine for threads that are gone. */
+function forgetThreads(threadIds: string[], drafts: string[]) {
+  useDraftStore.getState().forget(drafts)
+  if (threadIds.length === 0) return
+  usePanelStore.getState().forget(threadIds)
+  useTerminalStore.getState().forget(threadIds)
+  useDetailsStore.getState().forget(threadIds)
+  useCleanupStore.getState().forget(threadIds)
 }
 
 function receivePullRequest({ threadId, pullRequest }: ThreadPullRequest) {

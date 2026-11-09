@@ -185,6 +185,13 @@ export function applyItemEvent(
   return items
 }
 
+/** Threads that were there before and are gone now, as with a deleted thread or project. */
+export function removedThreadIds(before: Thread[], after: Thread[]): string[] {
+  if (after.length >= before.length) return []
+  const kept = new Set(after.map((thread) => thread.id))
+  return before.filter((thread) => !kept.has(thread.id)).map(({ id }) => id)
+}
+
 /** A quick client-side duplicate check; the engine canonicalizes and decides. */
 export function samePath(a: string, b: string) {
   const normalize = (path: string) =>

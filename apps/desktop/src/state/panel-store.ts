@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { withoutKeys } from '@/lib/records'
 import { invoke } from '@tauri-apps/api/core'
 import { useTerminalStore } from './terminal-store'
 import {
@@ -42,6 +43,7 @@ type PanelState = {
     surfaceId: string,
     change: (surface: S) => S
   ) => void
+  forget: (threadIds: string[]) => void
 }
 
 const makeId = () => crypto.randomUUID()
@@ -109,7 +111,12 @@ export const usePanelStore = create<PanelState>()(
         updateSurface: (threadId, surfaceId, change) =>
           changeThread(threadId, (panel) =>
             updateSurface(panel, surfaceId, change)
-          )
+          ),
+        forget: (threadIds) =>
+          set((state) => {
+            const threads = withoutKeys(state.threads, threadIds)
+            return threads === state.threads ? state : { threads }
+          })
       }
     },
     {

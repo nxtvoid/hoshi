@@ -6,6 +6,7 @@ import {
   applyEvent,
   applyItemEvent,
   folderName,
+  removedThreadIds,
   samePath
 } from '../../src/state/orchestration'
 
@@ -287,5 +288,22 @@ describe('paths', () => {
     ['/home/me/notes/', 'notes']
   ])('folderName(%s) is %s', (path, expected) => {
     expect(folderName(path)).toBe(expected)
+  })
+})
+
+describe('removedThreadIds', () => {
+  test('names the threads a removed project took with it', () => {
+    const before = [thread('t1', 'p'), thread('t2', 'q'), thread('t3', 'p')]
+    const after = applyEvent(
+      { projects: [project('p'), project('q')], threads: before },
+      { type: 'projectRemoved', projectId: 'p' }
+    ).threads
+    expect(removedThreadIds(before, after)).toEqual(['t1', 't3'])
+  })
+
+  test('is empty when nothing went away', () => {
+    const before = [thread('t1', 'p')]
+    expect(removedThreadIds(before, before)).toEqual([])
+    expect(removedThreadIds(before, [...before, thread('t2', 'p')])).toEqual([])
   })
 })
