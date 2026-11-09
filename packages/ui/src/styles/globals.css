@@ -112,6 +112,9 @@
   --color-scrollbar-hover: var(--scrollbar-hover);
   --font-heading: var(--font-sans);
   --font-sans: "Geist Variable", sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas,
+    "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", monospace;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -234,6 +237,13 @@
   }
   html {
     @apply font-sans;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  /* WebKitGTK draws Geist heavier than Chromium and WebKit on macOS do. */
+  html[data-platform="linux"] {
+    --font-weight-medium: 450;
+    --font-weight-semibold: 550;
   }
   button:not(:disabled),
   [role="button"]:not(:disabled) {

@@ -16,7 +16,7 @@ import type { TerminalAttach } from '@/bindings/TerminalAttach'
 import { GitForkIcon } from '@hugeicons/core-free-icons'
 
 const FONT_FAMILY =
-  "'Cascadia Mono', 'JetBrains Mono', Consolas, 'SF Mono', Menlo, monospace"
+  "'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Menlo, Consolas, 'Ubuntu Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace"
 
 /** Keys the app handles even while a terminal has the keyboard. */
 function isAppShortcut(event: KeyboardEvent) {

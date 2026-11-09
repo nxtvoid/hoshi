@@ -1,7 +1,7 @@
 import { cn } from '@hoshi/utils'
-import { TerminalView } from './TerminalView'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
+import { LazyTerminalView } from './LazyTerminalView'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import { ResizeHandle } from '@hoshi/ui/components/resize-handle'
 import {
@@ -75,7 +75,7 @@ export function TerminalDrawer({ threadId }: { threadId: string }) {
           hidden={terminalId !== activeId}
           className='flex min-h-0 flex-1 flex-col'
         >
-          <TerminalView
+          <LazyTerminalView
             threadId={threadId}
             terminalId={terminalId}
             onOpenHere={() => addTerminal(threadId)}

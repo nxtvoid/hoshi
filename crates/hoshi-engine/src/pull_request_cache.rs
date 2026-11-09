@@ -125,20 +125,19 @@ pub struct PullRequestCache {
 }
 
 impl PullRequestCache {
-    /// Starts with details saved by an earlier run; they show at once and are read again.
-    pub fn with_details(
+    /// Adds details saved by an earlier run; they show at once and are read again. A
+    /// detail read in this run already is kept.
+    pub fn restore_details(
+        &mut self,
         saved: impl IntoIterator<Item = (String, Version, PullRequestDetail)>,
-    ) -> Self {
-        let mut cache = Self::default();
+    ) {
         for (thread_id, version, detail) in saved {
-            let entry = Entry {
+            self.details.entries.entry(thread_id).or_insert(Entry {
                 version,
                 read_at: None,
                 value: detail,
-            };
-            cache.details.entries.insert(thread_id, entry);
+            });
         }
-        cache
     }
 
     /// The detail to show now, and whether to start reading it again.
@@ -299,11 +298,25 @@ mod tests {
     #[test]
     fn saved_details_show_at_once_but_are_read_again() {
         let saved = [("t".to_owned(), version(3, "a"), detail(false))];
-        let mut cache = PullRequestCache::with_details(saved);
+        let mut cache = PullRequestCache::default();
+        cache.restore_details(saved);
 
         assert_eq!(
             cache.detail("t", &version(3, "a"), Instant::now()),
             (Some(detail(false)), true)
+        );
+    }
+
+    #[test]
+    fn saved_details_never_replace_a_fresh_read() {
+        let mut cache = PullRequestCache::default();
+        let now = Instant::now();
+        cache.finish_detail("t", Some((version(3, "b"), detail(true))), now);
+        cache.restore_details([("t".to_owned(), version(3, "a"), detail(false))]);
+
+        assert_eq!(
+            cache.detail("t", &version(3, "b"), now),
+            (Some(detail(true)), false)
         );
     }
 

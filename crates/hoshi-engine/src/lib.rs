@@ -395,14 +395,6 @@ impl Engine {
             Some((update.thread_id.clone(), pull_request))
         });
         let pull_requests = PullRequestSync::new(known);
-        let saved_details = store.pull_request_details()?.into_iter().map(|cached| {
-            let version = Version {
-                number: cached.number,
-                updated_at: cached.version,
-            };
-            (cached.thread_id, version, cached.detail)
-        });
-        let pull_request_cache = PullRequestCache::with_details(saved_details);
         let watches = store.pull_request_watches()?.into_iter().collect();
         let context_usages = snapshot
             .context_usages
@@ -432,7 +424,7 @@ impl Engine {
             forges: HashMap::new(),
             repositories: HashMap::new(),
             pull_requests,
-            pull_request_cache,
+            pull_request_cache: PullRequestCache::default(),
             linked_pull_requests: HashMap::new(),
             context_usages,
             usage_limits,
@@ -480,6 +472,7 @@ impl Engine {
             state.this = this.clone();
             Mutex::new(state)
         });
+        restore_pull_request_details(Arc::downgrade(&shared));
         refresh_branches(Arc::downgrade(&shared), thread_ids);
         let weak = Arc::downgrade(&shared);
         let browsing = Arc::new(Mutex::new(Browsing::new(
@@ -3104,6 +3097,31 @@ fn watch_projects(state: Weak<Mutex<State>>, projects: Vec<(String, String)>) {
 }
 
 /// Reads each thread's branch with git, off the lock, and records changes.
+fn restore_pull_request_details(state: Weak<Mutex<State>>) {
+    thread::spawn(move || {
+        let Some(shared) = state.upgrade() else {
+            return;
+        };
+        let mut state = lock(&shared);
+        let saved = match state.store.pull_request_details() {
+            Ok(saved) => saved,
+            Err(error) => {
+                eprintln!("hoshi: failed to read the saved pull request details: {error}");
+                return;
+            }
+        };
+        state
+            .pull_request_cache
+            .restore_details(saved.into_iter().map(|cached| {
+                let version = Version {
+                    number: cached.number,
+                    updated_at: cached.version,
+                };
+                (cached.thread_id, version, cached.detail)
+            }));
+    });
+}
+
 fn refresh_branches(state: Weak<Mutex<State>>, thread_ids: Vec<String>) {
     if thread_ids.is_empty() {
         return;

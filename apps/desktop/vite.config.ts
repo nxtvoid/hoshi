@@ -12,7 +12,7 @@ const host = process.env.TAURI_DEV_HOST
 export default defineConfig({
   plugins: [
     paraglideVitePlugin({ project: './project.inlang' }),
-    tanstackRouter({ target: 'react' }),
+    tanstackRouter({ target: 'react', autoCodeSplitting: true }),
     react(),
     tailwindcss()
   ],

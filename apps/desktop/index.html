@@ -4,10 +4,70 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>hoshi</title>
+    <style>
+      html {
+        background: #ffffff;
+        color: #737373;
+      }
+      html.dark {
+        background: #0a0a0a;
+        color: #a1a1a1;
+      }
+      #boot-shell {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      #boot-shell svg {
+        width: 48px;
+        height: 48px;
+      }
+    </style>
+    <script>
+      ;(() => {
+        const root = document.documentElement
+        let preference = 'system'
+        try {
+          const saved = JSON.parse(localStorage.getItem('hoshi-theme'))
+          preference = saved?.state?.preference ?? preference
+        } catch (_) {}
+        const dark =
+          preference === 'dark' ||
+          (preference === 'system' &&
+            window.matchMedia('(prefers-color-scheme: dark)').matches)
+        root.classList.toggle('dark', dark)
+        const agent = navigator.userAgent
+        root.dataset.platform = /Windows/.test(agent)
+          ? 'windows'
+          : /Mac/.test(agent)
+            ? 'mac'
+            : 'linux'
+      })()
+    </script>
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="boot-shell">
+        <svg viewBox="0 -0.5 19 19" aria-hidden="true">
+          <path
+            fill="currentColor"
+            fill-rule="evenodd"
+            shape-rendering="crispEdges"
+            d="M9 0h1v1h-1zM8 1h3v1h-3zM8 2h3v1h-3zM7 3h5v1h-5zM7 4h5v1h-5zM0 5h19v1h-19zM1 6h17v1h-17zM2 7h15v1h-15zM3 8h13v1h-13zM4 9h11v1h-11zM4 10h11v1h-11zM4 11h11v1h-11zM4 12h11v1h-11zM3 13h13v1h-13zM3 14h6v1h-6zM10 14h6v1h-6zM2 15h5v1h-5zM12 15h5v1h-5zM2 16h4v1h-4zM13 16h4v1h-4zM1 17h3v1h-3zM15 17h3v1h-3zM4 7h11v1h-11zM5 8h4v1h-4zM10 8h4v1h-4zM6 11h1v1h-1zM12 11h1v1h-1zM7 12h5v1h-5z"
+          />
+        </svg>
+      </div>
+    </div>
+    <script>
+      try {
+        window.__TAURI_INTERNALS__
+          .invoke('plugin:window|show', { label: 'main' })
+          .catch(() => {})
+      } catch (_) {}
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

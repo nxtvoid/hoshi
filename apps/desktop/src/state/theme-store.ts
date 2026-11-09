@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { invoke } from '@tauri-apps/api/core'
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 
@@ -20,11 +21,16 @@ export const useThemeStore = create<ThemeState>()(
 
 const systemDark = window.matchMedia('(prefers-color-scheme: dark)')
 
+let mirrored: boolean | undefined
+
 function applyTheme() {
   const { preference } = useThemeStore.getState()
   const dark =
     preference === 'dark' || (preference === 'system' && systemDark.matches)
   document.documentElement.classList.toggle('dark', dark)
+  if (dark === mirrored) return
+  mirrored = dark
+  invoke('set_appearance', { dark }).catch(() => {})
 }
 
 export function startThemeSync() {
