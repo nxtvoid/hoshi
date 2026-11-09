@@ -124,7 +124,8 @@ const LINKED_PULL_REQUEST_FRESH_FOR: Duration = Duration::from_secs(60);
 const PATHS_FRESH_FOR: Duration = Duration::from_secs(10);
 const SLASH_COMMANDS_FRESH_FOR: Duration = Duration::from_secs(5 * 60);
 const USAGE_LIMITS_FRESH_FOR: Duration = Duration::from_secs(60);
-const PROVIDER_VERSION_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+const PROVIDER_VERSION_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+const PROVIDER_VERSION_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 const UPDATE_PROGRESS_EVERY: Duration = Duration::from_millis(250);
 const PATH_SEARCH_LIMIT: usize = 50;
 /// A first title is tried this many times, waiting longer before each retry.
@@ -181,6 +182,7 @@ struct State {
     usage_checked_at: Option<Instant>,
     /// `None` until the enabled provider's CLI was checked.
     provider_version: Option<ProviderVersion>,
+    provider_version_checked_at: Option<Instant>,
     /// Where each thread's agent last moved its session, until git confirmed it.
     session_moves: HashMap<String, String>,
     /// Messages sent while a thread's turn was ending, too late to join it, oldest first.
@@ -437,6 +439,7 @@ impl Engine {
             usage_limits,
             usage_checked_at: None,
             provider_version: None,
+            provider_version_checked_at: None,
             session_moves: HashMap::new(),
             queued: HashMap::new(),
             mcp: None,
@@ -558,6 +561,17 @@ impl Engine {
         let mut state = lock(&self.state);
         state.pull_requests.check_stale(Instant::now());
         state.wake_sync();
+    }
+
+    /// Checks the provider's CLI again when the last check is a few minutes old, as when
+    /// the window gets focus.
+    pub fn refresh_provider_version(&self) {
+        let stale = lock(&self.state)
+            .provider_version_checked_at
+            .is_none_or(|at| at.elapsed() >= PROVIDER_VERSION_FRESH_FOR);
+        if stale {
+            self.check_provider_version();
+        }
     }
 
     /// The detail of a thread's pull request as last read, answered at once. When it is
@@ -3668,8 +3682,10 @@ fn check_provider_version(
         Err(TryLockError::WouldBlock) => return lock(state).provider_version.clone(),
     };
     let adapter = lock(state).adapter.clone()?;
+    adapter.forget_version();
     let installation = adapter.installation()?;
     let mut state = lock(state);
+    state.provider_version_checked_at = Some(Instant::now());
     let update = state
         .provider_version
         .as_ref()
@@ -3986,8 +4002,9 @@ mod tests {
     }
 
     /// Reports 1.0.0 against a 1.1.0 release until its updater ran.
+    /// Its update writes `marker`, which the installed version reads.
     struct OutdatedAdapter {
-        updated: Mutex<bool>,
+        marker: PathBuf,
     }
 
     impl ProviderAdapter for OutdatedAdapter {
@@ -3996,11 +4013,18 @@ mod tests {
         }
 
         fn installation(&self) -> Option<Installation> {
-            let updated = *self.updated.lock().unwrap();
+            let updated = self.marker.is_file();
+            let marker = self.marker.display();
             let (program, args) = if cfg!(windows) {
-                ("cmd", vec!["/C".to_owned(), "echo updated".to_owned()])
+                (
+                    "cmd",
+                    vec!["/C".to_owned(), format!("echo updated> {marker}")],
+                )
             } else {
-                ("sh", vec!["-c".to_owned(), "echo updated".to_owned()])
+                (
+                    "sh",
+                    vec!["-c".to_owned(), format!("echo updated > '{marker}'")],
+                )
             };
             Some(Installation {
                 installed: Some(if updated { "1.1.0" } else { "1.0.0" }.into()),
@@ -4010,10 +4034,6 @@ mod tests {
                     args,
                 }),
             })
-        }
-
-        fn forget_version(&self) {
-            *self.updated.lock().unwrap() = true;
         }
 
         fn start_turn(
@@ -4033,14 +4053,10 @@ mod tests {
                 let _ = sender.send(version);
             }
         });
-        let engine = Engine::from_store(
-            Store::open_in_memory().unwrap(),
-            &scratch_dir("provider-update"),
-            notify,
-        )
-        .unwrap();
+        let dir = scratch_dir("provider-update");
+        let engine = Engine::from_store(Store::open_in_memory().unwrap(), &dir, notify).unwrap();
         engine.set_adapter(Some(Arc::new(OutdatedAdapter {
-            updated: Mutex::new(false),
+            marker: dir.join("updated"),
         })));
 
         let checked = engine.check_provider_version().unwrap();

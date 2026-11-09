@@ -24,7 +24,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(true) = event {
                 let app = window.app_handle().clone();
-                std::thread::spawn(move || orchestration::engine(&app).refresh_pull_requests());
+                std::thread::spawn(move || {
+                    let engine = orchestration::engine(&app);
+                    engine.refresh_pull_requests();
+                    engine.refresh_provider_version();
+                });
             }
         })
         .invoke_handler(tauri::generate_handler![

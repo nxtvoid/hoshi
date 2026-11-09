@@ -50,7 +50,7 @@ export function updateButton(
 }
 
 /** A check is due on focus once the last one is this old. */
-export const RECHECK_ON_FOCUS_AFTER = 10 * 60 * 1000
+export const RECHECK_ON_FOCUS_AFTER = 2 * 60 * 1000
 
 export function checkDue(lastCheckedAt: number | null, now: number) {
   return lastCheckedAt === null || now - lastCheckedAt >= RECHECK_ON_FOCUS_AFTER

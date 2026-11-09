@@ -12,7 +12,7 @@ import {
   releaseNotesTarget
 } from '@/lib/updates'
 
-const CHECK_EVERY = 30 * 60 * 1000
+const CHECK_EVERY = 5 * 60 * 1000
 const UP_TO_DATE_FOR = 2000
 
 /** Dev builds never update. */
@@ -155,7 +155,7 @@ export const useAppUpdateStore = create<AppUpdateState>()((set, get) => ({
   }
 }))
 
-/** Checks now, every half hour, and when the window comes back after a while. */
+/** Checks now, every few minutes, and when the window comes back after a while. */
 export function watchAppUpdates() {
   const run = () => void useAppUpdateStore.getState().check()
   const onFocus = () => {
