@@ -2,6 +2,9 @@ use crate::git;
 use hoshi_core::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Longer diffs are cut so a huge file can't flood the UI.
 const MAX_DIFF_LINES: usize = 3000;
@@ -11,26 +14,31 @@ const MAX_COUNTED_BYTES: u64 = 1_000_000;
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const DEFAULT_BRANCHES: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
 
+/// How long the default branch of a repository is trusted before it is looked up again.
+const DEFAULT_BRANCH_TTL: Duration = Duration::from_secs(300);
+
+static DEFAULT_BRANCHES_SEEN: Mutex<Option<HashMap<String, (String, Instant)>>> = Mutex::new(None);
+
 /// Every changed file of the working tree at `dir`, sorted by path.
+///
+/// Plumbing (`diff-index`) rather than `git diff`, which rewrites the index to refresh it
+/// and so races the agent's own `git add` for `index.lock`.
 pub fn files(dir: &str, scope: DiffScope) -> Result<Vec<DiffFile>, String> {
     let base = base(dir, scope)?;
-    let statuses = git::stdout(dir, &["diff", "--name-status", "-z", "-M", &base])?;
-    let numstats = git::stdout(dir, &["diff", "--numstat", "-z", "-M", &base])?;
-    let untracked = git::stdout(dir, &["ls-files", "--others", "--exclude-standard", "-z"])?;
-    let counts = parse_numstat(&numstats);
-    let mut files: Vec<DiffFile> = parse_name_status(&statuses)
-        .into_iter()
-        .map(|(status, path, old_path)| {
-            let (additions, deletions) = counts.get(&path).copied().unwrap_or((None, None));
-            DiffFile {
-                path,
-                old_path,
-                status,
-                additions,
-                deletions,
-            }
-        })
-        .collect();
+    let (changes, untracked) = thread::scope(|threads| {
+        let untracked = threads
+            .spawn(|| git::stdout(dir, &["ls-files", "--others", "--exclude-standard", "-z"]));
+        let changes = git::stdout(
+            dir,
+            &["diff-index", "-M", "--raw", "--numstat", "-z", &base, "--"],
+        );
+        let untracked = untracked
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+        (changes, untracked)
+    });
+    let mut files = parse_changes(&changes?);
+    let untracked = untracked?;
     files.extend(
         untracked
             .split('\0')
@@ -63,7 +71,15 @@ pub fn file(dir: &str, scope: DiffScope, file: &DiffFile) -> Result<FileDiff, St
         )?
     } else {
         let base = base(dir, scope)?;
-        let mut args = vec!["diff", "--no-color", "-M", base.as_str(), "--"];
+        let mut args = vec![
+            "diff-index",
+            "--patch",
+            "--no-color",
+            "--no-ext-diff",
+            "-M",
+            base.as_str(),
+            "--",
+        ];
         if let Some(old_path) = &file.old_path {
             args.push(old_path);
         }
@@ -81,55 +97,78 @@ fn base(dir: &str, scope: DiffScope) -> Result<String, String> {
     match scope {
         DiffScope::Uncommitted => Ok(head.trim().to_owned()),
         DiffScope::Branch => {
-            let remote_default = git::stdout(dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
-                .ok()
-                .map(|name| name.trim().to_owned());
-            let default = remote_default
-                .into_iter()
-                .chain(DEFAULT_BRANCHES.map(str::to_owned))
-                .find(|name| git::stdout(dir, &["rev-parse", "--verify", "--quiet", name]).is_ok())
-                .ok_or_else(|| "no default branch to compare with".to_owned())?;
+            let default = default_branch(dir)?;
             let merge_base = git::stdout(dir, &["merge-base", "HEAD", &default])?;
             Ok(merge_base.trim().to_owned())
         }
     }
 }
 
-/// `git diff --name-status -z`: a status, then one path, or two for renames and copies.
-fn parse_name_status(output: &str) -> Vec<(DiffFileStatus, String, Option<String>)> {
-    let mut tokens = output.split('\0').filter(|token| !token.is_empty());
-    let mut files = Vec::new();
-    while let Some(status) = tokens.next() {
-        let kind = status.chars().next().unwrap_or('M');
-        if matches!(kind, 'R' | 'C') {
-            let (Some(old_path), Some(path)) = (tokens.next(), tokens.next()) else {
-                break;
-            };
-            let status = if kind == 'R' {
-                DiffFileStatus::Renamed
-            } else {
-                DiffFileStatus::Added
-            };
-            files.push((status, path.to_owned(), Some(old_path.to_owned())));
-            continue;
-        }
-        let Some(path) = tokens.next() else { break };
-        let status = match kind {
-            'A' => DiffFileStatus::Added,
-            'D' => DiffFileStatus::Deleted,
-            _ => DiffFileStatus::Modified,
-        };
-        files.push((status, path.to_owned(), None));
+/// The branch a feature branch is compared with: origin's default, else the first that
+/// exists of the usual names. Remembered for a while, since it almost never changes.
+fn default_branch(dir: &str) -> Result<String, String> {
+    let mut seen = DEFAULT_BRANCHES_SEEN
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    let seen = seen.get_or_insert_with(HashMap::new);
+    if let Some((branch, at)) = seen.get(dir)
+        && at.elapsed() < DEFAULT_BRANCH_TTL
+    {
+        return Ok(branch.clone());
     }
-    files
+    let remote_default = git::stdout(dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .ok()
+        .map(|name| name.trim().to_owned());
+    let branch = remote_default
+        .into_iter()
+        .chain(DEFAULT_BRANCHES.map(str::to_owned))
+        .find(|name| git::stdout(dir, &["rev-parse", "--verify", "--quiet", name]).is_ok())
+        .ok_or_else(|| "no default branch to compare with".to_owned())?;
+    seen.insert(dir.to_owned(), (branch.clone(), Instant::now()));
+    Ok(branch)
 }
 
-/// `git diff --numstat -z`: `added\tdeleted\tpath`, or `added\tdeleted\t` then the old and
-/// new paths for a rename. `-` counts mean a binary file.
-fn parse_numstat(output: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
-    let mut tokens = output.split('\0');
+/// One `diff-index --raw` entry: its status letter, paths, and whether the mode changed.
+struct RawChange {
+    kind: char,
+    path: String,
+    old_path: Option<String>,
+    mode_changed: bool,
+}
+
+/// `git diff-index --raw --numstat -z`: the raw entries, then the counts.
+///
+/// Without a refreshed index, a file only touched is listed as modified in the raw
+/// entries but has no count; those are dropped.
+fn parse_changes(output: &str) -> Vec<DiffFile> {
+    let mut tokens = output.split('\0').filter(|token| !token.is_empty());
+    let mut changes = Vec::new();
     let mut counts = HashMap::new();
     while let Some(token) = tokens.next() {
+        if let Some(meta) = token.strip_prefix(':') {
+            let fields: Vec<&str> = meta.split_whitespace().collect();
+            let kind = fields
+                .get(4)
+                .and_then(|status| status.chars().next())
+                .unwrap_or('M');
+            let mode_changed = fields.first() != fields.get(1);
+            let (old_path, path) = if matches!(kind, 'R' | 'C') {
+                let (Some(old_path), Some(path)) = (tokens.next(), tokens.next()) else {
+                    break;
+                };
+                (Some(old_path.to_owned()), path)
+            } else {
+                let Some(path) = tokens.next() else { break };
+                (None, path)
+            };
+            changes.push(RawChange {
+                kind,
+                path: path.to_owned(),
+                old_path,
+                mode_changed,
+            });
+            continue;
+        }
         let mut fields = token.splitn(3, '\t');
         let (Some(added), Some(deleted), Some(path)) =
             (fields.next(), fields.next(), fields.next())
@@ -145,9 +184,33 @@ fn parse_numstat(output: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
         } else {
             path
         };
-        counts.insert(path.to_owned(), (added.parse().ok(), deleted.parse().ok()));
+        counts.insert(
+            path.to_owned(),
+            (added.parse::<u32>().ok(), deleted.parse::<u32>().ok()),
+        );
     }
-    counts
+    changes
+        .into_iter()
+        .filter(|change| {
+            change.kind != 'M' || change.mode_changed || counts.contains_key(&change.path)
+        })
+        .map(|change| {
+            let (additions, deletions) = counts.get(&change.path).copied().unwrap_or((None, None));
+            let status = match change.kind {
+                'R' => DiffFileStatus::Renamed,
+                'A' | 'C' => DiffFileStatus::Added,
+                'D' => DiffFileStatus::Deleted,
+                _ => DiffFileStatus::Modified,
+            };
+            DiffFile {
+                path: change.path,
+                old_path: change.old_path,
+                status,
+                additions,
+                deletions,
+            }
+        })
+        .collect()
 }
 
 fn count_lines(path: &Path) -> Option<u32> {
@@ -181,33 +244,89 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_statuses_with_renames() {
-        let output = "M\0src/a.rs\0R087\0old/b.rs\0new/b.rs\0A\0c.txt\0D\0gone.rs\0";
+    fn reads_raw_entries_with_their_counts() {
+        let raw = |modes: &str, status: &str| format!(":{modes} 1111111 0000000 {status}");
+        let output = [
+            raw("100644 100644", "M"),
+            "src/a.rs".into(),
+            raw("100644 100644", "R087"),
+            "old/b.rs".into(),
+            "new/b.rs".into(),
+            raw("000000 100644", "A"),
+            "c.txt".into(),
+            raw("100644 000000", "D"),
+            "gone.rs".into(),
+            raw("100644 100644", "M"),
+            "image.png".into(),
+            raw("100644 100644", "M"),
+            "touched.rs".into(),
+            raw("100644 100755", "M"),
+            "run.sh".into(),
+            "3\t1\tsrc/a.rs".into(),
+            "4\t0\t".into(),
+            "old/b.rs".into(),
+            "new/b.rs".into(),
+            "1\t0\tc.txt".into(),
+            "0\t2\tgone.rs".into(),
+            "-\t-\timage.png".into(),
+            String::new(),
+        ]
+        .join("\0");
+
+        let files: Vec<_> = parse_changes(&output)
+            .into_iter()
+            .map(|file| {
+                (
+                    file.path,
+                    file.old_path,
+                    file.status,
+                    file.additions,
+                    file.deletions,
+                )
+            })
+            .collect();
 
         assert_eq!(
-            parse_name_status(output),
+            files,
             [
-                (DiffFileStatus::Modified, "src/a.rs".into(), None),
                 (
-                    DiffFileStatus::Renamed,
-                    "new/b.rs".into(),
-                    Some("old/b.rs".into())
+                    "src/a.rs".into(),
+                    None,
+                    DiffFileStatus::Modified,
+                    Some(3),
+                    Some(1)
                 ),
-                (DiffFileStatus::Added, "c.txt".into(), None),
-                (DiffFileStatus::Deleted, "gone.rs".into(), None),
+                (
+                    "new/b.rs".into(),
+                    Some("old/b.rs".into()),
+                    DiffFileStatus::Renamed,
+                    Some(4),
+                    Some(0)
+                ),
+                (
+                    "c.txt".into(),
+                    None,
+                    DiffFileStatus::Added,
+                    Some(1),
+                    Some(0)
+                ),
+                (
+                    "gone.rs".into(),
+                    None,
+                    DiffFileStatus::Deleted,
+                    Some(0),
+                    Some(2)
+                ),
+                (
+                    "image.png".into(),
+                    None,
+                    DiffFileStatus::Modified,
+                    None,
+                    None
+                ),
+                ("run.sh".into(), None, DiffFileStatus::Modified, None, None),
             ]
         );
-    }
-
-    #[test]
-    fn reads_counts_with_renames_and_binaries() {
-        let output = "3\t1\tsrc/a.rs\x004\t0\t\0old/b.rs\0new/b.rs\0-\t-\timage.png\0";
-
-        let counts = parse_numstat(output);
-
-        assert_eq!(counts["src/a.rs"], (Some(3), Some(1)));
-        assert_eq!(counts["new/b.rs"], (Some(4), Some(0)));
-        assert_eq!(counts["image.png"], (None, None));
     }
 
     #[test]
@@ -226,9 +345,12 @@ mod tests {
         let repo = git::tests::temp_repository("diff");
         let dir = repo.to_string_lossy().into_owned();
         std::fs::write(repo.join("tracked.txt"), "one\n").unwrap();
-        git::stdout(&dir, &["add", "tracked.txt"]).unwrap();
+        std::fs::write(repo.join("touched.txt"), "same\n").unwrap();
+        git::stdout(&dir, &["add", "tracked.txt", "touched.txt"]).unwrap();
         git::stdout(&dir, &["commit", "-m", "add"]).unwrap();
         std::fs::write(repo.join("tracked.txt"), "one\ntwo\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(repo.join("touched.txt"), "same\n").unwrap();
         std::fs::write(repo.join("new.txt"), "a\nb\nc").unwrap();
 
         let files = files(&dir, DiffScope::Uncommitted).unwrap();
