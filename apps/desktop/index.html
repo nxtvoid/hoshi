@@ -91,11 +91,6 @@
           half(wanted) || colorsFor(base, wanted) ? wanted : base.appearance
         const theme = half(appearance) ?? base
         root.classList.toggle('dark', appearance === 'dark')
-        const set = (key, value, fallback) => {
-          if (typeof value === 'string' && value !== fallback) {
-            root.dataset[key] = value
-          }
-        }
         if (palettes.includes(theme.id)) root.dataset.palette = theme.id
         if (!theme.builtIn) {
           const colors = colorsFor(theme, appearance) || theme.colors
@@ -109,8 +104,44 @@
             root.style.backgroundColor = colors.background
           }
         }
-        set('font', saved.interfaceFont, 'geist')
-        set('codeFont', saved.codeFont, 'jetbrains')
+        const interfacePresets = ['geist', 'inter', 'system']
+        const codePresets = ['jetbrains', 'cascadia', 'system']
+        const composerPresets = [
+          'interface',
+          ...interfacePresets,
+          'jetbrains',
+          'cascadia',
+          'system-mono'
+        ]
+        const font = (key, variable, value, presets, fallback, unchanged) => {
+          if (typeof value !== 'string') return
+          const family = value.trim()
+          if (!family || family.length > 200 || family === unchanged) return
+          if (presets.includes(family)) {
+            root.dataset[key] = family
+            return
+          }
+          const name = family
+            .replace(/[\n\r\f]/g, ' ')
+            .replace(/["\\]/g, '\\$&')
+          root.style.setProperty(variable, `"${name}", ${fallback}`)
+        }
+        font(
+          'font',
+          '--font-sans',
+          saved.interfaceFont,
+          interfacePresets,
+          'var(--stack-geist)',
+          'geist'
+        )
+        font(
+          'codeFont',
+          '--font-mono',
+          saved.codeFont,
+          codePresets,
+          'var(--stack-jetbrains)',
+          'jetbrains'
+        )
         if (saved.lighterText === false) root.dataset.textWeight = 'regular'
         if (saved.fontSmoothing === false) root.dataset.fontSmoothing = 'off'
         const size = (value, min, max) =>
@@ -126,8 +157,21 @@
           root.style.setProperty('--code-font-size', codeSize)
         }
         if (saved.separateFonts === true) {
-          set('composerFont', saved.composerFont, 'interface')
-          set('terminalFont', saved.terminalFont)
+          font(
+            'composerFont',
+            '--font-composer',
+            saved.composerFont,
+            composerPresets,
+            'var(--font-sans)',
+            'interface'
+          )
+          font(
+            'terminalFont',
+            '--font-terminal',
+            saved.terminalFont,
+            codePresets,
+            'var(--stack-jetbrains)'
+          )
           root.style.setProperty(
             '--composer-font-size',
             size(saved.composerSize, 12, 20) ?? '14px'

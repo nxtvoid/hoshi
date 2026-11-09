@@ -3,6 +3,7 @@
 mod browser;
 mod composer;
 mod diff;
+mod fonts;
 mod model;
 mod orchestration;
 mod project;
@@ -22,6 +23,7 @@ mod workspace;
 pub use browser::{BrowserFrame, BrowserInput, BrowserPage, BrowserPoint};
 pub use composer::{EntryKind, MessageAttachment, SlashCommand, WorkspaceEntry};
 pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
+pub use fonts::{SystemFont, group_font_families};
 pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
