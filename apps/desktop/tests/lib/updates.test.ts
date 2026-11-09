@@ -3,9 +3,12 @@ import type { ProviderUpdate } from '@/bindings/ProviderUpdate'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
 import {
   appBadge,
+  checkDue,
   downloadPercent,
   providerBadge,
+  RECHECK_ON_FOCUS_AFTER,
   strongestBadge,
+  updateButton,
   updateEnded
 } from '@/lib/updates'
 
@@ -62,7 +65,64 @@ describe('appBadge', () => {
     expect(
       appBadge({ status: 'downloading', version: '0.2.0', percent: 40 })
     ).toBe('running')
+    expect(appBadge({ status: 'ready', version: '0.2.0' })).toBe('ready')
     expect(appBadge({ status: 'failed', version: '0.2.0' })).toBe('failed')
+  })
+
+  test('a check alone points at nothing', () => {
+    expect(appBadge({ status: 'checking' })).toBeNull()
+    expect(appBadge({ status: 'upToDate', version: '0.1.0' })).toBeNull()
+    expect(appBadge({ status: 'checkFailed', message: 'offline' })).toBeNull()
+  })
+})
+
+describe('updateButton', () => {
+  test('checks the feed while no update is around', () => {
+    expect(updateButton({ status: 'idle' }, null, true)).toEqual({
+      kind: 'check',
+      checking: false
+    })
+    expect(updateButton({ status: 'checking' }, null, true)).toEqual({
+      kind: 'check',
+      checking: true
+    })
+    expect(
+      updateButton({ status: 'upToDate', version: '0.1.0' }, null, true)
+    ).toEqual({ kind: 'upToDate', version: '0.1.0' })
+    expect(
+      updateButton({ status: 'checkFailed', message: 'offline' }, null, true)
+    ).toEqual({ kind: 'checkFailed', message: 'offline' })
+  })
+
+  test('opens the details once an update is found or running', () => {
+    expect(
+      updateButton({ status: 'available', version: '0.2.0' }, null, true)
+    ).toEqual({ kind: 'details', badge: 'available' })
+    expect(
+      updateButton({ status: 'ready', version: '0.2.0' }, 'available', true)
+    ).toEqual({ kind: 'details', badge: 'ready' })
+    expect(updateButton({ status: 'checking' }, 'done', true)).toEqual({
+      kind: 'details',
+      badge: 'done'
+    })
+  })
+
+  test('is off in dev builds unless the CLI has an update', () => {
+    expect(updateButton({ status: 'idle' }, null, false)).toEqual({
+      kind: 'off'
+    })
+    expect(updateButton({ status: 'idle' }, 'available', false)).toEqual({
+      kind: 'details',
+      badge: 'available'
+    })
+  })
+})
+
+describe('checkDue', () => {
+  test('on focus only after a while', () => {
+    expect(checkDue(null, 0)).toBe(true)
+    expect(checkDue(1000, 1000 + RECHECK_ON_FOCUS_AFTER - 1)).toBe(false)
+    expect(checkDue(1000, 1000 + RECHECK_ON_FOCUS_AFTER)).toBe(true)
   })
 })
 
@@ -72,6 +132,7 @@ describe('strongestBadge', () => {
     expect(strongestBadge('available', null)).toBe('available')
     expect(strongestBadge('available', 'running', 'failed')).toBe('running')
     expect(strongestBadge('done', 'failed')).toBe('failed')
+    expect(strongestBadge('ready', 'failed', 'available')).toBe('ready')
   })
 })
 

@@ -1,15 +1,60 @@
 import type { ProviderUpdate } from '@/bindings/ProviderUpdate'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
 
-/** What the sidebar's update button shows; `null` hides it. */
-export type UpdateBadge = 'available' | 'running' | 'failed' | 'done' | null
+/** An update the sidebar's button points at; `null` when there is none. */
+export type UpdateBadge =
+  | 'available'
+  | 'running'
+  | 'ready'
+  | 'failed'
+  | 'done'
+  | null
 
 /** hoshi's own update, from its release feed. */
 export type AppUpdate =
   | { status: 'idle' }
+  | { status: 'checking' }
+  | { status: 'upToDate'; version: string }
+  | { status: 'checkFailed'; message: string }
   | { status: 'available'; version: string }
   | { status: 'downloading'; version: string; percent: number | null }
+  | { status: 'ready'; version: string }
   | { status: 'failed'; version: string }
+
+/** What the sidebar's update button does: check the feed, or open the update details. */
+export type UpdateButton =
+  | { kind: 'off' }
+  | { kind: 'check'; checking: boolean }
+  | { kind: 'upToDate'; version: string }
+  | { kind: 'checkFailed'; message: string }
+  | { kind: 'details'; badge: NonNullable<UpdateBadge> }
+
+export function updateButton(
+  app: AppUpdate,
+  provider: UpdateBadge,
+  enabled: boolean
+): UpdateButton {
+  const badge = strongestBadge(appBadge(app), provider)
+  if (badge) return { kind: 'details', badge }
+  if (!enabled) return { kind: 'off' }
+  switch (app.status) {
+    case 'checking':
+      return { kind: 'check', checking: true }
+    case 'upToDate':
+      return { kind: 'upToDate', version: app.version }
+    case 'checkFailed':
+      return { kind: 'checkFailed', message: app.message }
+    default:
+      return { kind: 'check', checking: false }
+  }
+}
+
+/** A check is due on focus once the last one is this old. */
+export const RECHECK_ON_FOCUS_AFTER = 10 * 60 * 1000
+
+export function checkDue(lastCheckedAt: number | null, now: number) {
+  return lastCheckedAt === null || now - lastCheckedAt >= RECHECK_ON_FOCUS_AFTER
+}
 
 /** `seen`: the user already looked at how the last provider update ended. */
 export function providerBadge(
@@ -26,19 +71,22 @@ export function providerBadge(
 
 export function appBadge(update: AppUpdate): UpdateBadge {
   switch (update.status) {
-    case 'idle':
-      return null
     case 'available':
       return 'available'
     case 'downloading':
       return 'running'
+    case 'ready':
+      return 'ready'
     case 'failed':
       return 'failed'
+    default:
+      return null
   }
 }
 
 const BADGE_WEIGHT: Record<NonNullable<UpdateBadge>, number> = {
-  running: 4,
+  running: 5,
+  ready: 4,
   failed: 3,
   done: 2,
   available: 1
