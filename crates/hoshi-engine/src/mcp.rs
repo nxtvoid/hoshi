@@ -208,6 +208,55 @@ fn tools() -> Value {
             },
             "_meta": { "anthropic/alwaysLoad": true },
         },
+        {
+            "name": "thread_list",
+            "description": "List the user's hoshi threads, newest first: in this thread's project, or every project with allProjects. Each has its threadId, title, status, project and branch.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Only threads whose title or branch contains this." },
+                    "allProjects": { "type": "boolean", "description": "Every project, not only this thread's." },
+                    "limit": { "type": "integer", "description": "At most this many, 1 to 100; 20 by default." },
+                },
+            },
+        },
+        {
+            "name": "thread_read",
+            "description": "Read another hoshi thread: its status and latest messages from the user and its agent, oldest first. Read a thread before you answer about it. Keep reads small with limit and maxCharsPerItem.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": { "type": "string" },
+                    "limit": { "type": "integer", "description": "The latest messages to read, 1 to 100; 20 by default." },
+                    "maxCharsPerItem": { "type": "integer", "description": "Longer messages are cut, 1 to 50000; 2000 by default." },
+                },
+                "required": ["threadId"],
+            },
+        },
+        {
+            "name": "thread_send",
+            "description": "Send a message to another hoshi thread, as if the user wrote it there: it starts the thread's turn, or joins the turn that runs. Its answer stays in that thread; read it with thread_read, or thread_wait first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": { "type": "string" },
+                    "message": { "type": "string", "description": "Everything that thread's agent needs: it doesn't see this conversation." },
+                },
+                "required": ["threadId", "message"],
+            },
+        },
+        {
+            "name": "thread_wait",
+            "description": "Wait until another hoshi thread's turn ends, then get its status and latest answer. Returns at once when it is idle; on timedOut, call again only if still needed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": { "type": "string" },
+                    "timeoutMs": { "type": "integer", "description": "How long to wait; 5 minutes by default, at most an hour." },
+                },
+                "required": ["threadId"],
+            },
+        },
     ])
 }
 
@@ -266,7 +315,11 @@ mod tests {
                 "delegate_task",
                 "task_status",
                 "task_cancel",
-                "request_secret"
+                "request_secret",
+                "thread_list",
+                "thread_read",
+                "thread_send",
+                "thread_wait"
             ]
         );
 

@@ -22,6 +22,7 @@ mod secret_requests;
 mod secrets;
 mod source_control;
 mod terminal;
+mod thread_tools;
 mod titles;
 mod watch;
 mod worktree;
@@ -301,8 +302,12 @@ impl Engine {
         refresh_branches(Arc::downgrade(&shared), thread_ids);
         let weak = Arc::downgrade(&shared);
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
-            if tool == "request_secret" {
-                return secret_requests::request_secret(&weak, caller, arguments);
+            match tool {
+                "request_secret" => {
+                    return secret_requests::request_secret(&weak, caller, arguments);
+                }
+                "thread_wait" => return thread_tools::wait_for_thread(&weak, caller, arguments),
+                _ => {}
             }
             let shared = weak.upgrade().ok_or("hoshi is closing")?;
             lock(&shared).call_tool(caller, tool, arguments)
@@ -4038,6 +4043,60 @@ Blue"
         for path in [worktree, pushed_path] {
             let _ = git::remove_worktree(&harness.root, &path);
         }
+    }
+
+    #[test]
+    fn an_agent_finds_messages_waits_for_and_reads_another_thread() {
+        let harness = Harness::in_memory("thread-tools", completed_turn());
+        harness.create_thread("o", ThreadWorkspace::Local).unwrap();
+        let call = |tool: &str, arguments: serde_json::Value| {
+            lock(&harness.engine.state).call_tool("t", tool, &arguments)
+        };
+
+        let listed = call("thread_list", serde_json::json!({})).unwrap();
+        let ids: Vec<_> = listed["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|thread| thread["threadId"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(ids.contains(&"o".to_owned()));
+        assert!(
+            call(
+                "thread_send",
+                serde_json::json!({ "threadId": "t", "message": "hi" })
+            )
+            .is_err()
+        );
+        let sent = call(
+            "thread_send",
+            serde_json::json!({ "threadId": "o", "message": "check the tests" }),
+        )
+        .unwrap();
+        assert_eq!(sent["delivery"], "started");
+        let state = Arc::downgrade(&harness.engine.state);
+        let waited = thread_tools::wait_for_thread(
+            &state,
+            "t",
+            &serde_json::json!({ "threadId": "o", "timeoutMs": 10_000 }),
+        )
+        .unwrap();
+        let read = call("thread_read", serde_json::json!({ "threadId": "o" })).unwrap();
+
+        assert_eq!(waited["timedOut"], false);
+        assert_eq!(waited["lastAnswer"], "done");
+        let roles: Vec<_> = read["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| {
+                (
+                    message["role"].as_str().unwrap(),
+                    message["text"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(roles, [("user", "check the tests"), ("assistant", "done")]);
     }
 
     #[test]
