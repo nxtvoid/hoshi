@@ -197,6 +197,9 @@ struct State {
     secret_waits: HashMap<String, mpsc::Sender<Option<PathBuf>>>,
     /// What each thread watching its pull request was told so far.
     watches: HashMap<String, WatchState>,
+    /// Threads that watched their pull request when the app last closed, with when each
+    /// last moved, until their first read.
+    resumed_watches: HashMap<String, String>,
     /// When each watched pull request was last read in detail, and as what.
     watch_reads: HashMap<String, (Instant, hoshi_core::PullRequest)>,
     /// Updates for watching threads whose turn ran, held until it ends.
@@ -310,12 +313,19 @@ impl Engine {
             secrets_dir: data_dir.join("secrets"),
             secret_waits: HashMap::new(),
             watches: HashMap::new(),
+            resumed_watches: HashMap::new(),
             watch_reads: HashMap::new(),
             pending_wakes: HashMap::new(),
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
+        state.resumed_watches = state
+            .model
+            .threads()
+            .filter(|thread| thread.watching_pull_request)
+            .map(|thread| (thread.id.clone(), thread.updated_at.clone()))
+            .collect();
         let stale: Vec<_> = state
             .model
             .threads()
@@ -2225,6 +2235,7 @@ impl State {
         self.queued.remove(thread_id);
         self.after_compaction.remove(thread_id);
         self.watches.remove(thread_id);
+        self.resumed_watches.remove(thread_id);
         self.watch_reads.remove(thread_id);
         self.pending_wakes.remove(thread_id);
         self.titles_to_refine.remove(thread_id);
@@ -4752,6 +4763,104 @@ Blue"
         let unwatched = call("unwatch_pull_request").unwrap();
         assert_eq!(unwatched["wasWatching"], true);
         assert!(!harness.thread("t").watching_pull_request);
+    }
+
+    #[test]
+    fn a_comment_left_while_the_app_was_closed_wakes_the_watching_thread() {
+        let dir = scratch_dir("pr-watch-restart");
+        let database = dir.join("state.sqlite");
+        let harness = Harness::new(
+            "pr-watch-restart",
+            dir,
+            Store::open(&database).unwrap(),
+            completed_turn(),
+        );
+        let pull_request = hoshi_core::PullRequest {
+            forge: ForgeKind::Github,
+            number: 7,
+            title: "Work".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+            author: Some("me".into()),
+            head_branch: "hoshi/work".into(),
+            head_sha: Some("abc1234".into()),
+            base_branch: "main".into(),
+            state: hoshi_core::PullRequestState::Open,
+            checks: None,
+            unresolved_comments: 0,
+            additions: 0,
+            deletions: 0,
+            updated_at: "2026-11-07T12:00:00Z".into(),
+        };
+        lock(&harness.engine.state).pull_requests.record(
+            "t",
+            ForgeKind::Github,
+            Ok(Some(pull_request.clone())),
+            false,
+            Instant::now(),
+            chrono::Utc::now(),
+        );
+        lock(&harness.engine.state)
+            .call_tool("t", "watch_pull_request", &serde_json::json!({}))
+            .unwrap();
+        drop(harness);
+
+        let (sender, events) = mpsc::channel();
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::Event(envelope) = notification {
+                let _ = sender.send(envelope.event);
+            }
+        });
+        let engine = Engine::from_store(
+            Store::open(&database).unwrap(),
+            &scratch_dir("pr-watch-restarted"),
+            notify,
+        )
+        .unwrap();
+        let commented_at =
+            (Utc::now() + chrono::Duration::minutes(1)).to_rfc3339_opts(SecondsFormat::Secs, true);
+        let detail = hoshi_core::PullRequestDetail {
+            supports: hoshi_core::PullRequestSupport::all(),
+            forge_id: "id".into(),
+            repository: "o/r".into(),
+            mergeability: hoshi_core::Mergeability::Mergeable,
+            merge_methods: Vec::new(),
+            can_edit: true,
+            body: String::new(),
+            changed_files: 1,
+            reviewers: Vec::new(),
+            labels: Vec::new(),
+            checks: Vec::new(),
+            review_threads: Vec::new(),
+            timeline: vec![hoshi_core::TimelineItem::Comment {
+                author: Some("reviewer".into()),
+                body: "Please rename this.".into(),
+                created_at: commented_at,
+                url: "https://github.com/o/r/pull/7#c1".into(),
+            }],
+        };
+
+        lock(&engine.state).observe_watch(
+            "t",
+            ForgeKind::Github,
+            &pull_request,
+            &detail,
+            Some("me".into()),
+        );
+
+        let update = events
+            .try_iter()
+            .find_map(|event| match event {
+                Event::ItemAdded { item } => match item.content {
+                    ItemContent::UserMessage {
+                        pull_request_update: Some(update),
+                        ..
+                    } => Some(update),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a wake for the comment");
+        assert_eq!(update.comments, 1);
     }
 
     #[test]

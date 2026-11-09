@@ -367,16 +367,23 @@ impl State {
         {
             return;
         }
-        let Some(state) = self.watches.get(thread_id) else {
-            if pull_request.state.is_finished() {
+        let state = match self.watches.get(thread_id) {
+            Some(state) => state.clone(),
+            None if pull_request.state.is_finished() => {
                 self.stop_watching(thread_id);
-            } else {
-                let started = WatchState::start(pull_request, detail, &now());
-                self.watches.insert(thread_id.to_owned(), started);
+                return;
             }
-            return;
+            None => {
+                // Comments since the thread last moved came while hoshi was closed.
+                let Some(since) = self.resumed_watches.remove(thread_id) else {
+                    let started = WatchState::start(pull_request, detail, &now());
+                    self.watches.insert(thread_id.to_owned(), started);
+                    return;
+                };
+                WatchState::start(pull_request, detail, &since)
+            }
         };
-        let outcome = evaluate(state, pull_request, detail, viewer.as_deref());
+        let outcome = evaluate(&state, pull_request, detail, viewer.as_deref());
         self.watches.insert(thread_id.to_owned(), outcome.state);
         if let Some(wake) = outcome.wake {
             self.deliver_wake(thread_id, wake);
@@ -389,6 +396,7 @@ impl State {
     pub(crate) fn stop_watching(&mut self, thread_id: &str) {
         self.watches.remove(thread_id);
         self.watch_reads.remove(thread_id);
+        self.resumed_watches.remove(thread_id);
         let events = record_pull_request_watch(&self.model, thread_id, false);
         if let Err(error) = self.commit(&events, &now()) {
             eprintln!("hoshi: failed to stop watching a pull request: {error}");
