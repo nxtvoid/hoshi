@@ -1,4 +1,6 @@
-use crate::{ContextUsage, ItemContent, Task, ToolDetail, TurnOutcome, UsageLimits};
+use crate::{
+    BackgroundTask, ContextUsage, ItemContent, Task, ToolDetail, TurnOutcome, UsageLimits,
+};
 
 /// What a provider adapter reports while it runs a turn, in provider-neutral terms.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +84,13 @@ pub enum ProviderOutput {
         task_id: String,
         tool_use_id: Option<String>,
         failed: bool,
+    },
+    /// The commands the agent left running in the background, whenever they change or a run
+    /// starts or ends beside them. The turn waits for them, and the agent answers each one
+    /// that ends. `waiting` when no run goes on: the turn only waits for them.
+    BackgroundTasks {
+        tasks: Vec<BackgroundTask>,
+        waiting: bool,
     },
     /// The agent answered, but its turn goes on: a background task that ended or a message
     /// it took in starts another run. `run` counts the turn's runs from 1.

@@ -17,6 +17,7 @@ import { CompactionRow } from './Compaction'
 import { isCompactCommand } from '@/lib/compaction'
 import { PullRequestUpdateRow } from './PullRequestUpdateRow'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
+import { BackgroundWork } from './BackgroundWork'
 import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
 import { DiffView } from '@/components/panel/DiffView'
@@ -217,7 +218,7 @@ export const Transcript = memo(function Transcript({
           </ApprovalsContext.Provider>
           {working ? (
             <li>
-              <TurnStatus />
+              <BackgroundWork status={<TurnStatus />} />
             </li>
           ) : null}
         </ol>

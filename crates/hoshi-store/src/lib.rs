@@ -496,6 +496,7 @@ impl Store {
             open_tool_calls,
             // The engine knows which tasks still owe an answer.
             pending_tasks: Vec::new(),
+            background_tasks: Vec::new(),
         })
     }
 
