@@ -36,9 +36,9 @@ function readTheme(element: HTMLElement) {
 function readFont(element: HTMLElement) {
   const style = getComputedStyle(element)
   return {
-    fontFamily: style.getPropertyValue('--font-mono').trim() || 'monospace',
+    fontFamily: style.getPropertyValue('--font-terminal').trim() || 'monospace',
     fontSize:
-      Number.parseFloat(style.getPropertyValue('--code-font-size')) ||
+      Number.parseFloat(style.getPropertyValue('--terminal-font-size')) ||
       CODE_SIZE.default
   }
 }
@@ -193,7 +193,13 @@ export function TerminalView({
     })
     themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['class', 'style', 'data-palette', 'data-code-font']
+      attributeFilter: [
+        'class',
+        'style',
+        'data-palette',
+        'data-code-font',
+        'data-terminal-font'
+      ]
     })
 
     return () => {

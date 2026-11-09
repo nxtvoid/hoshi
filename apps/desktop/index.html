@@ -112,14 +112,31 @@
         set('font', saved.interfaceFont, 'geist')
         set('codeFont', saved.codeFont, 'jetbrains')
         if (saved.lighterText === false) root.dataset.textWeight = 'regular'
+        if (saved.fontSmoothing === false) root.dataset.fontSmoothing = 'off'
         const size = (value, min, max) =>
           typeof value === 'number' && Number.isFinite(value)
             ? `${Math.min(max, Math.max(min, Math.round(value)))}px`
             : null
-        const interfaceSize = size(saved.interfaceSize, 12, 18)
-        if (interfaceSize) root.style.fontSize = interfaceSize
+        const interfaceSize = size(saved.interfaceSize, 12, 20)
+        if (interfaceSize && interfaceSize !== '16px') {
+          root.style.fontSize = interfaceSize
+        }
         const codeSize = size(saved.codeSize, 10, 18)
-        if (codeSize) root.style.setProperty('--code-font-size', codeSize)
+        if (codeSize && codeSize !== '13px') {
+          root.style.setProperty('--code-font-size', codeSize)
+        }
+        if (saved.separateFonts === true) {
+          set('composerFont', saved.composerFont, 'interface')
+          set('terminalFont', saved.terminalFont)
+          root.style.setProperty(
+            '--composer-font-size',
+            size(saved.composerSize, 12, 20) ?? '14px'
+          )
+          root.style.setProperty(
+            '--terminal-font-size',
+            size(saved.terminalSize, 8, 20) ?? '12px'
+          )
+        }
         const agent = navigator.userAgent
         root.dataset.platform = /Windows/.test(agent)
           ? 'windows'

@@ -47,6 +47,13 @@ describe('normalizeAppearance', () => {
       interfaceSize: 14,
       codeFont: 'cascadia',
       codeSize: 15,
+      separateFonts: true,
+      composerFont: 'jetbrains',
+      composerSize: 15,
+      terminalFont: 'system',
+      terminalSize: 11,
+      wordWrap: false,
+      fontSmoothing: false,
       lighterText: false
     }
     expect(normalizeAppearance(saved)).toEqual(saved)
@@ -79,6 +86,14 @@ describe('normalizeAppearance', () => {
     expect(appearance.interfaceSize).toBe(INTERFACE_SIZE.max)
     expect(appearance.codeSize).toBe(CODE_SIZE.min)
   })
+
+  test('the sizes the old sliders saved still apply', () => {
+    const appearance = normalizeAppearance({ interfaceSize: 17, codeSize: 12 })
+    expect(appearance.interfaceSize).toBe(17)
+    expect(appearance.codeSize).toBe(12)
+    expect(appearance.separateFonts).toBe(false)
+    expect(appearance.wordWrap).toBe(true)
+  })
 })
 
 describe('clampSize', () => {
@@ -100,9 +115,14 @@ describe('rootAppearance', () => {
       colors: undefined,
       font: undefined,
       codeFont: undefined,
+      composerFont: undefined,
+      terminalFont: undefined,
+      fontSmoothing: undefined,
       textWeight: undefined,
       fontSize: undefined,
-      codeFontSize: undefined
+      codeFontSize: undefined,
+      composerFontSize: undefined,
+      terminalFontSize: undefined
     })
   })
 
@@ -124,6 +144,7 @@ describe('rootAppearance', () => {
           interfaceSize: 14,
           codeFont: 'cascadia',
           codeSize: 15,
+          fontSmoothing: false,
           lighterText: false
         },
         false
@@ -134,10 +155,34 @@ describe('rootAppearance', () => {
       colors: undefined,
       font: 'system',
       codeFont: 'cascadia',
+      composerFont: undefined,
+      terminalFont: undefined,
+      fontSmoothing: 'off',
       textWeight: 'regular',
       fontSize: '14px',
-      codeFontSize: '15px'
+      codeFontSize: '15px',
+      composerFontSize: undefined,
+      terminalFontSize: undefined
     })
+  })
+
+  test('the prompt box and the terminal follow the others until fonts are separate', () => {
+    const appearance = {
+      ...DEFAULT_APPEARANCE,
+      composerFont: 'jetbrains' as const,
+      composerSize: 15,
+      terminalFont: 'cascadia' as const,
+      terminalSize: 10
+    }
+    expect(rootAppearance(appearance, false).composerFont).toBeUndefined()
+    const separate = rootAppearance(
+      { ...appearance, separateFonts: true },
+      false
+    )
+    expect(separate.composerFont).toBe('jetbrains')
+    expect(separate.composerFontSize).toBe('15px')
+    expect(separate.terminalFont).toBe('cascadia')
+    expect(separate.terminalFontSize).toBe('10px')
   })
 
   test('paints each half with its own theme', () => {
