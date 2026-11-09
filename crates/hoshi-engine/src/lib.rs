@@ -895,7 +895,8 @@ impl Engine {
         Ok(cwd)
     }
 
-    /// Checks the token against Bitbucket, then keeps it in the system's credential store.
+    /// Checks the token and its scopes against Bitbucket, then keeps it in the system's
+    /// credential store.
     pub fn connect_bitbucket(
         &self,
         email: &str,
@@ -905,15 +906,20 @@ impl Engine {
             email: email.trim().to_owned(),
             token: token.trim().to_owned(),
         };
-        let login = Bitbucket::with_credentials(credentials.clone())
-            .viewer()
+        let access = Bitbucket::with_credentials(credentials.clone())
+            .check_access()
             .map_err(forge_error)?;
+        if !access.missing_scopes.is_empty() {
+            return Err(CommandError::ForgeScopesMissing {
+                scopes: access.missing_scopes,
+            });
+        }
         secrets::write(SecretKey::Bitbucket, &credentials.encode())
             .map_err(|detail| CommandError::Internal { detail })?;
         self.credentials_changed(ForgeKind::Bitbucket);
         Ok(ForgeAccount {
             forge: ForgeKind::Bitbucket,
-            login: Some(login),
+            login: Some(access.login),
         })
     }
 
@@ -3688,7 +3694,11 @@ fn forge_error(error: ForgeError) -> CommandError {
         ForgeError::Unauthorized => CommandError::ForgeUnauthorized,
         ForgeError::RateLimited { .. } => CommandError::ForgeRateLimited,
         ForgeError::NotFound => CommandError::ForgeUnavailable,
-        ForgeError::Rejected(detail) => CommandError::ForgeRejected { detail },
+        ForgeError::Rejected(detail)
+        | ForgeError::Conflict(detail)
+        | ForgeError::Forbidden {
+            message: detail, ..
+        } => CommandError::ForgeRejected { detail },
         ForgeError::Network(detail) | ForgeError::Unexpected(detail) => {
             CommandError::ForgeUnreachable { detail }
         }

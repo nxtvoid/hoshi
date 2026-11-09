@@ -6,7 +6,7 @@ mod bitbucket;
 mod github;
 mod remote;
 
-pub use bitbucket::{Bitbucket, BitbucketCredentials};
+pub use bitbucket::{Bitbucket, BitbucketAccess, BitbucketCredentials, REQUIRED_SCOPES};
 pub use github::GitHub;
 use hoshi_core::{
     DiffFile, ForgeKind, PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel,
@@ -30,6 +30,16 @@ pub enum ForgeError {
     RateLimited { retry_after_secs: u64 },
     #[error("repository not found or not visible")]
     NotFound,
+    /// The account or its token may not do this. `scopes` names the token scopes the forge
+    /// asked for, when it said; none means the account itself lacks access.
+    #[error("forbidden: {message}")]
+    Forbidden {
+        message: String,
+        scopes: Vec<String>,
+    },
+    /// The change clashes with the repository's state, with the forge's reason.
+    #[error("conflict: {0}")]
+    Conflict(String),
     /// The forge understood the request and refused it, with its reason.
     #[error("refused: {0}")]
     Rejected(String),
