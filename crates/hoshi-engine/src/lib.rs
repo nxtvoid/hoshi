@@ -364,8 +364,11 @@ struct Turn {
     running: Box<dyn RunningTurn>,
     /// `None` outside a git repository.
     workspace: Option<TurnWorkspace>,
-    /// The folder whose working tree was checkpointed before the turn started.
+    /// The folder the turn's changes are read in: where it started, or where its thread
+    /// went since.
     checkpointed: Option<String>,
+    /// How many times the thread changed folder during the turn.
+    arrivals: usize,
     /// The provider's latest message of the conversation so far.
     cursor: Option<String>,
     /// The commands the turn waits for in the background, once it reported any.
@@ -374,11 +377,10 @@ struct Turn {
 
 /// What a background check for a worktree the turn created needs from the state.
 struct WorktreeCheck {
+    turn_id: String,
     workspace: TurnWorkspace,
     /// Worktrees of other threads.
     claimed: Vec<String>,
-    /// No other turn of the project was running at the time of the check.
-    alone: bool,
 }
 
 impl Engine {
@@ -746,7 +748,7 @@ impl Engine {
         };
         let rewind_files = |cwd: &str| {
             let before = checkpoint::reference(thread_id, message_id, Moment::Before);
-            if !checkpoint::exists(cwd, &before) {
+            if !checkpoint::exists(cwd, &before) || !checkpoint::taken_in(cwd, &before) {
                 return Err(CommandError::NoCheckpoint {
                     thread_id: thread_id.to_owned(),
                     message_id: message_id.to_owned(),
@@ -2200,7 +2202,8 @@ impl State {
             .turns
             .get(thread_id)
             .filter(|turn| completed && turn.id == turn_id);
-        let checkpointed = ending.and_then(|turn| turn.checkpointed.clone());
+        let checkpointed =
+            ending.and_then(|turn| Some((turn.checkpointed.clone()?, turn.arrivals)));
         if let Some(cursor) = ending.and_then(|turn| turn.cursor.clone()) {
             let events = record_conversation_cursor(&self.model, thread_id, cursor);
             if let Err(error) = self.commit(&events, &now) {
@@ -2217,9 +2220,6 @@ impl State {
         let events = record_output(&self.model, thread_id, turn_id, output, &now);
         if let Err(error) = self.commit(&events, &now) {
             eprintln!("hoshi: failed to record provider output: {error}");
-        }
-        if let Some(dir) = checkpointed {
-            self.read_turn_changes(thread_id, turn_id, dir);
         }
         if completed {
             let ended_turn = match self.turns.get(thread_id) {
@@ -2238,12 +2238,19 @@ impl State {
                 }));
             }
             let workspace = ended_turn.and_then(|turn| turn.workspace);
+            // The agent may have created a worktree or switched branches.
+            let check = workspace
+                .filter(|workspace| !workspace.moved)
+                .map(|workspace| self.worktree_check(thread_id, turn_id, workspace));
+            match checkpointed {
+                Some((dir, arrivals)) => {
+                    self.read_turn_changes(thread_id, turn_id, dir, arrivals, check);
+                }
+                None => refresh_after_turn(self.this.clone(), thread_id.to_owned(), check),
+            }
             if self.titles_to_refine.remove(thread_id) {
                 self.rename_from_conversation(thread_id, false);
             }
-            // The agent may have created a worktree or switched branches.
-            let check = workspace.map(|workspace| self.worktree_check(thread_id, workspace));
-            refresh_after_turn(self.this.clone(), thread_id.to_owned(), check);
             if let Some(outcome) = &ended {
                 self.deliver_task_result(thread_id, outcome);
             }
@@ -2253,29 +2260,89 @@ impl State {
         }
     }
 
-    /// Checkpoints the tree a finished turn left, then records what changed since it began.
-    fn read_turn_changes(&self, thread_id: &str, turn_id: &str, dir: String) {
+    /// Checkpoints the tree a finished turn left, then records what changed since it began
+    /// in the folder it ended in. A worktree the turn created and worked in becomes the
+    /// thread's folder first, its changes counted from how it was checked out.
+    fn read_turn_changes(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        dir: String,
+        arrivals: usize,
+        check: Option<WorktreeCheck>,
+    ) {
         let weak = self.this.clone();
-        let before = checkpoint::reference(thread_id, turn_id, Moment::Before);
-        let after = checkpoint::reference(thread_id, turn_id, Moment::After);
         let (thread_id, turn_id) = (thread_id.to_owned(), turn_id.to_owned());
         self.checkpoints.queue(&dir.clone(), move || {
-            let files = checkpoint::capture(&dir, &after)
-                .and_then(|()| checkpoint::changes(&dir, &before, &after))
+            let created = check
+                .as_ref()
+                .and_then(created_worktree)
+                .filter(|(path, _)| *path != git::normalize(&dir));
+            let (folder, arrivals) = match &created {
+                Some((path, _)) => {
+                    let reference =
+                        checkpoint::reference(&thread_id, &turn_id, Moment::Arrived(arrivals + 1));
+                    if let Err(error) = checkpoint::capture_created(path, &reference) {
+                        eprintln!("hoshi: no checkpoint of the worktree {path}: {error}");
+                    }
+                    (path.clone(), arrivals + 1)
+                }
+                None => (dir, arrivals),
+            };
+            let files = changes_since_arrival(&folder, &thread_id, &turn_id, arrivals)
                 .unwrap_or_else(|error| {
-                    eprintln!("hoshi: no checkpoint after the turn in {dir}: {error}");
+                    eprintln!("hoshi: no checkpoint after the turn in {folder}: {error}");
                     Vec::new()
                 });
             thread::spawn(move || {
                 let Some(shared) = weak.upgrade() else { return };
                 let mut state = lock(&shared);
                 let now = now();
+                if let Some((path, branch)) = created {
+                    let events = record_worktree(&state.model, &thread_id, path, branch, true);
+                    if let Err(error) = state.commit(&events, &now) {
+                        eprintln!("hoshi: failed to record a worktree: {error}");
+                    }
+                }
                 let events =
                     record_turn_changes(&state.model, &thread_id, &turn_id, Some(files), &now);
                 if let Err(error) = state.commit(&events, &now) {
                     eprintln!("hoshi: failed to record a turn's changes: {error}");
                 }
+                drop(state);
+                refresh_after_turn(weak, thread_id, None);
             });
+        });
+    }
+
+    /// Reads a running turn's changes in the folder its thread moved to from now on,
+    /// counted from how that folder is now, or from how a worktree the turn created was
+    /// checked out.
+    fn follow_turn(&mut self, thread_id: &str, turn_id: &str, folder: &str, created: bool) {
+        let Some(turn) = self
+            .turns
+            .get_mut(thread_id)
+            .filter(|turn| turn.id == turn_id)
+        else {
+            return;
+        };
+        let same = |dir: &String| git::normalize(dir) == git::normalize(folder);
+        if turn.checkpointed.as_ref().is_none_or(same) {
+            return;
+        }
+        turn.arrivals += 1;
+        turn.checkpointed = Some(folder.to_owned());
+        let reference = checkpoint::reference(thread_id, turn_id, Moment::Arrived(turn.arrivals));
+        let dir = folder.to_owned();
+        self.checkpoints.queue(&dir.clone(), move || {
+            let captured = if created {
+                checkpoint::capture_created(&dir, &reference)
+            } else {
+                checkpoint::capture(&dir, &reference)
+            };
+            if let Err(error) = captured {
+                eprintln!("hoshi: no checkpoint where the turn went in {dir}: {error}");
+            }
         });
     }
 
@@ -2955,37 +3022,48 @@ impl State {
         };
         workspace.moved = true;
         let workspace = workspace.clone();
-        let check = self.worktree_check(thread_id, workspace);
+        let check = self.worktree_check(thread_id, turn_id, workspace);
         self.session_moves
             .insert(thread_id.to_owned(), path.clone());
         follow_session_move(self.this.clone(), thread_id.to_owned(), path, check);
     }
 
-    fn worktree_check(&self, thread_id: &str, workspace: TurnWorkspace) -> WorktreeCheck {
-        let project_id = self
-            .model
-            .thread(thread_id)
-            .and_then(|thread| thread.project_id.as_deref());
+    fn worktree_check(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        workspace: TurnWorkspace,
+    ) -> WorktreeCheck {
         let claimed = self
             .model
             .threads()
             .filter(|thread| thread.id != thread_id)
             .filter_map(|thread| thread.worktree_path.clone())
             .collect();
-        let alone = !self.turns.keys().any(|other| {
-            other != thread_id
-                && self
-                    .model
-                    .thread(other)
-                    .and_then(|thread| thread.project_id.as_deref())
-                    == project_id
-        });
         WorktreeCheck {
+            turn_id: turn_id.to_owned(),
             workspace,
             claimed,
-            alone,
         }
     }
+}
+
+/// What changed in `folder` since the turn arrived there, which becomes the checkpoint a
+/// rewind of the turn restores.
+fn changes_since_arrival(
+    folder: &str,
+    thread_id: &str,
+    turn_id: &str,
+    arrivals: usize,
+) -> Result<Vec<DiffFile>, String> {
+    let before = checkpoint::reference(thread_id, turn_id, Moment::Before);
+    let after = checkpoint::reference(thread_id, turn_id, Moment::After);
+    checkpoint::capture(folder, &after)?;
+    if arrivals > 0 {
+        let arrived = checkpoint::reference(thread_id, turn_id, Moment::Arrived(arrivals));
+        checkpoint::rename(folder, &arrived, &before)?;
+    }
+    checkpoint::changes(folder, &before, &after)
 }
 
 /// Attaches a worktree the turn created, then reads the thread's branch.
@@ -3002,34 +3080,43 @@ fn refresh_after_turn(state: Weak<Mutex<State>>, thread_id: String, check: Optio
     });
 }
 
-/// Moves a thread to the worktree its turn created, if git shows one.
-fn attach_created_worktree(state: &Weak<Mutex<State>>, thread_id: &str, check: &WorktreeCheck) {
-    if check.workspace.moved {
-        return;
-    }
-    let Some(after) = git::worktrees(&check.workspace.repository) else {
-        return;
-    };
+/// The worktree the turn created and worked in, with its branch, if git shows one.
+fn created_worktree(check: &WorktreeCheck) -> Option<(String, Option<String>)> {
+    let after = git::worktrees(&check.workspace.repository)?;
     let claimed: Vec<String> = check
         .claimed
         .iter()
         .map(|path| git::normalize(path))
         .collect();
-    let created = worktree::created_by_turn(&check.workspace, &after, &claimed, check.alone);
-    let (Some(path), Some(shared)) = (created, state.upgrade()) else {
+    let path = worktree::created_by_turn(&check.workspace, &after, &claimed)?;
+    let branch = git::current_branch(&path);
+    Some((path, branch))
+}
+
+/// Moves a thread to the worktree its turn created and worked in. The agent made it, so
+/// hoshi never removes it.
+fn attach_created_worktree(state: &Weak<Mutex<State>>, thread_id: &str, check: &WorktreeCheck) {
+    if check.workspace.moved {
+        return;
+    }
+    let (Some((path, branch)), Some(shared)) = (created_worktree(check), state.upgrade()) else {
         return;
     };
-    let branch = git::current_branch(&path);
     let mut state = lock(&shared);
-    let events = record_worktree(&state.model, thread_id, path, branch, false);
+    let events = record_worktree(&state.model, thread_id, path.clone(), branch, true);
+    if events.is_empty() {
+        return;
+    }
     if let Err(error) = state.commit(&events, &now()) {
         eprintln!("hoshi: failed to record a worktree: {error}");
+        return;
     }
+    state.follow_turn(thread_id, &check.turn_id, &path, true);
 }
 
 /// Moves the thread where its agent's session went, once git shows it is the project root
-/// or one of its worktrees; anywhere else stays the agent's own business. A worktree that
-/// existed before the turn, or that another thread owns, is adopted: hoshi never removes it.
+/// or one of its worktrees; anywhere else stays the agent's own business. hoshi never
+/// removes a worktree it did not create, so the thread adopts it.
 fn follow_session_move(
     state: Weak<Mutex<State>>,
     thread_id: String,
@@ -3048,11 +3135,8 @@ fn follow_session_move(
         } else {
             None
         };
-        let adopted = check.workspace.worktrees_before.contains(&path)
-            || check
-                .claimed
-                .iter()
-                .any(|claimed| git::normalize(claimed) == path);
+        let created = !in_root && !check.workspace.worktrees_before.contains(&path);
+        let folder = if in_root { root.clone() } else { path.clone() };
         let Some(shared) = state.upgrade() else {
             return;
         };
@@ -3067,7 +3151,7 @@ fn follow_session_move(
         let events = if in_root {
             record_worktree_left(&state.model, &thread_id, branch)
         } else {
-            record_worktree(&state.model, &thread_id, path, branch, adopted)
+            record_worktree(&state.model, &thread_id, path, branch, true)
         };
         if events.is_empty() {
             return;
@@ -3075,7 +3159,9 @@ fn follow_session_move(
         state.pull_requests.check_soon(&thread_id);
         if let Err(error) = state.commit(&events, &now()) {
             eprintln!("hoshi: failed to follow the agent's session: {error}");
+            return;
         }
+        state.follow_turn(&thread_id, &check.turn_id, &folder, created);
     });
 }
 
@@ -3114,7 +3200,7 @@ fn refresh_projects(state: &Weak<Mutex<State>>, project_ids: &[String]) {
                 let workspace = turn.workspace.clone()?;
                 Some((
                     thread_id.clone(),
-                    state.worktree_check(thread_id, workspace),
+                    state.worktree_check(thread_id, &turn.id, workspace),
                 ))
             })
             .collect();
@@ -3562,6 +3648,7 @@ fn start_turn(
                 running,
                 workspace,
                 checkpointed,
+                arrivals: 0,
                 cursor: None,
                 background: None,
             };
@@ -3748,8 +3835,8 @@ mod tests {
         instructions: Option<String>,
     }
 
-    /// Records each request and replays a script; a turn whose script is
-    /// empty waits for an interrupt.
+    /// Records each request and replays a script; a turn whose script does not
+    /// end it waits for an interrupt.
     struct FakeAdapter {
         requests: Mutex<Vec<Request>>,
         script: Vec<ProviderOutput>,
@@ -3840,11 +3927,14 @@ mod tests {
             let (stop, stopped) = mpsc::channel();
             self.finishers.lock().unwrap().push(stop.clone());
             thread::spawn(move || {
-                if script.is_empty() {
+                let ends = script
+                    .iter()
+                    .any(|output| matches!(output, ProviderOutput::TurnCompleted { .. }));
+                script.into_iter().for_each(&mut sink);
+                if !ends {
                     let outcome = stopped.recv().unwrap_or(TurnOutcome::Interrupted);
                     sink(ProviderOutput::TurnCompleted { outcome });
                 }
-                script.into_iter().for_each(&mut sink);
             });
             Ok(Box::new(FakeTurn {
                 stop,
@@ -6207,23 +6297,68 @@ Blue"
         assert_eq!(thread.session_id, None);
     }
 
-    #[test]
-    fn a_worktree_the_agent_creates_becomes_the_thread_workspace() {
-        let repo = git::tests::temp_repository("engine-agent-worktree");
-        let worktree = repo.with_extension("agent-wt");
-        let _ = std::fs::remove_dir_all(&worktree);
-        let store = Store::open_in_memory().unwrap();
-        let harness = Harness::new("agent-worktree", repo, store, Vec::new());
-        harness.send("t", "m1", "make a worktree");
+    fn bash(command: &str) -> ProviderOutput {
+        ProviderOutput::ToolCallStarted {
+            item_id: command.into(),
+            name: "Bash".into(),
+            input: serde_json::json!({ "command": command }).to_string(),
+        }
+    }
 
-        git::add_worktree(&harness.root, &worktree, "feat/csv").unwrap();
+    fn interrupt(harness: &Harness) {
         harness
             .engine
             .dispatch(Command::TurnInterrupt {
                 thread_id: "t".into(),
             })
             .unwrap();
+    }
 
+    fn turn_changes(harness: &Harness) -> Vec<DiffFile> {
+        harness.wait_for(|event| match event {
+            Event::ItemAdded { item } => match item.content {
+                ItemContent::TurnChanges { files: Some(files) } => Some(files),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    fn paths_of(files: &[DiffFile]) -> Vec<&str> {
+        files.iter().map(|file| file.path.as_str()).collect()
+    }
+
+    /// A folder beside the project's, named after it as agents name the worktrees they add.
+    fn sibling(repo: &Path, suffix: &str) -> PathBuf {
+        let name = repo.file_name().unwrap().to_string_lossy();
+        let path = repo.with_file_name(format!("{name}-{suffix}"));
+        let _ = std::fs::remove_dir_all(&path);
+        path
+    }
+
+    #[test]
+    fn a_worktree_the_agent_adds_beside_the_project_and_works_in_becomes_the_thread_folder() {
+        let repo = git::tests::temp_repository("engine-agent-worktree");
+        commit_in(&repo.to_string_lossy(), "README.md");
+        let worktree = sibling(&repo, "1234");
+        let name = worktree.file_name().unwrap().to_string_lossy().into_owned();
+        let script = vec![
+            bash(&format!("git worktree add ../{name} -b fix/1234 main")),
+            bash(&format!("cd ../{name} && echo fixed > fix.txt")),
+        ];
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("agent-worktree", repo.clone(), store, script);
+        std::fs::write(repo.join("draft.txt"), "mine\n").unwrap();
+        harness.send("t", "m1", "add a worktree for ticket 1234 and fix it there");
+        let before = checkpoint::reference("t", "m1", Moment::Before);
+        wait_until(|| checkpoint::exists(&harness.root, &before));
+
+        git::add_worktree(&harness.root, &worktree, "fix/1234").unwrap();
+        std::fs::write(worktree.join("fix.txt"), "fixed\n").unwrap();
+        std::fs::write(repo.join("draft.txt"), "mine, edited by hand\n").unwrap();
+        interrupt(&harness);
+
+        let expected = git::normalize(&worktree.to_string_lossy());
         let attached = harness.wait_for(|event| match event {
             Event::ThreadWorktreeAttached {
                 worktree_path,
@@ -6232,11 +6367,118 @@ Blue"
             } => Some((worktree_path, branch)),
             _ => None,
         });
-        let expected = git::normalize(&worktree.to_string_lossy());
-        assert_eq!(attached, (expected.clone(), Some("feat/csv".into())));
+        assert_eq!(attached, (expected.clone(), Some("fix/1234".into())));
+        let files = turn_changes(&harness);
+        assert_eq!(paths_of(&files), ["fix.txt"]);
+        assert_eq!(harness.engine.turn_diff_files("t", "m1").unwrap(), files);
+        assert!(harness.thread("t").worktree_adopted);
+
+        harness.engine.rewind_thread("t", "m1", true).unwrap();
+        assert!(!worktree.join("fix.txt").exists());
+        assert!(repo.join("draft.txt").exists());
+
         harness.send("t", "m2", "continue");
         assert_eq!(harness.adapter.requests.lock().unwrap()[1].cwd, expected);
+        interrupt(&harness);
+        harness.wait_for_turn_end();
+        harness
+            .engine
+            .dispatch(Command::ThreadDelete {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert!(worktree.is_dir());
         let _ = git::remove_worktree(&harness.root, &expected);
+    }
+
+    #[test]
+    fn a_worktree_the_agent_only_adds_leaves_the_thread_where_it_was() {
+        let repo = git::tests::temp_repository("engine-unused-worktree");
+        let worktree = sibling(&repo, "later");
+        let name = worktree.file_name().unwrap().to_string_lossy().into_owned();
+        let script = vec![bash(&format!("git worktree add ../{name} -b chore/later"))];
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("unused-worktree", repo.clone(), store, script);
+        harness.send("t", "m1", "prepare a worktree for later");
+        let before = checkpoint::reference("t", "m1", Moment::Before);
+        wait_until(|| checkpoint::exists(&harness.root, &before));
+
+        git::add_worktree(&harness.root, &worktree, "chore/later").unwrap();
+        std::fs::write(repo.join("notes.txt"), "plan\n").unwrap();
+        interrupt(&harness);
+
+        assert_eq!(paths_of(&turn_changes(&harness)), ["notes.txt"]);
+        assert_eq!(harness.thread("t").worktree_path, None);
+        assert!(worktree.is_dir());
+        let _ = git::remove_worktree(&harness.root, &worktree.to_string_lossy());
+    }
+
+    #[test]
+    fn a_turn_that_moves_to_a_worktree_lists_what_it_changed_there() {
+        let repo = git::tests::temp_repository("engine-moved-changes");
+        commit_in(&repo.to_string_lossy(), "README.md");
+        let worktree = sibling(&repo, "moved");
+        git::add_worktree(&repo.to_string_lossy(), &worktree, "feat/moved").unwrap();
+        let path = git::normalize(&worktree.to_string_lossy());
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("moved-changes", repo.clone(), store, Vec::new());
+        harness.send("t", "m1", "work in the other worktree");
+        let before = checkpoint::reference("t", "m1", Moment::Before);
+        wait_until(|| checkpoint::exists(&harness.root, &before));
+        std::fs::write(repo.join("stray.txt"), "root\n").unwrap();
+
+        let entered = ProviderOutput::WorkingDirectory { path: path.clone() };
+        lock(&harness.engine.state).receive("t", "m1", entered);
+        let arrived = checkpoint::reference("t", "m1", Moment::Arrived(1));
+        wait_until(|| checkpoint::exists(&path, &arrived));
+        std::fs::write(worktree.join("work.txt"), "done\n").unwrap();
+        interrupt(&harness);
+
+        let files = turn_changes(&harness);
+        assert_eq!(paths_of(&files), ["work.txt"]);
+        assert_eq!(
+            harness.thread("t").worktree_path.as_deref(),
+            Some(path.as_str())
+        );
+        harness.engine.rewind_thread("t", "m1", true).unwrap();
+        assert!(!worktree.join("work.txt").exists());
+        assert!(repo.join("stray.txt").exists());
+        let _ = git::remove_worktree(&harness.root, &path);
+    }
+
+    #[test]
+    fn files_are_never_reverted_in_another_folder_than_the_turn_s() {
+        let repo = git::tests::temp_repository("engine-rewind-elsewhere");
+        let worktree = sibling(&repo, "elsewhere");
+        git::add_worktree(&repo.to_string_lossy(), &worktree, "feat/elsewhere").unwrap();
+        let path = git::normalize(&worktree.to_string_lossy());
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("rewind-elsewhere", repo.clone(), store, Vec::new());
+        harness.send("t", "m1", "change the root");
+        let before = checkpoint::reference("t", "m1", Moment::Before);
+        wait_until(|| checkpoint::exists(&harness.root, &before));
+        std::fs::write(repo.join("root.txt"), "root\n").unwrap();
+        interrupt(&harness);
+        assert_eq!(paths_of(&turn_changes(&harness)), ["root.txt"]);
+
+        harness.send("t", "m2", "now go to the worktree");
+        let entered = ProviderOutput::WorkingDirectory { path: path.clone() };
+        lock(&harness.engine.state).receive("t", "m2", entered);
+        wait_until(|| harness.thread("t").worktree_path.is_some());
+        std::fs::write(worktree.join("kept.txt"), "kept\n").unwrap();
+        interrupt(&harness);
+        harness.wait_for_turn_end();
+
+        assert_eq!(
+            harness.engine.rewind_thread("t", "m1", true).unwrap_err(),
+            CommandError::NoCheckpoint {
+                thread_id: "t".into(),
+                message_id: "m1".into()
+            }
+        );
+        assert!(worktree.join("kept.txt").exists());
+        assert!(repo.join("root.txt").exists());
+        let _ = git::remove_worktree(&harness.root, &path);
     }
 
     #[test]
@@ -6691,8 +6933,13 @@ Blue"
         let repo = git::tests::temp_repository("engine-live-worktree");
         let worktree = repo.with_extension("live-wt");
         let _ = std::fs::remove_dir_all(&worktree);
+        let folder = worktree.to_string_lossy().into_owned();
+        let script = vec![
+            bash(&format!("git worktree add {folder} -b chore/deps")),
+            bash(&format!("cd {folder} && cargo update")),
+        ];
         let store = Store::open_in_memory().unwrap();
-        let harness = Harness::new("live-worktree", repo, store, Vec::new());
+        let harness = Harness::new("live-worktree", repo, store, script);
         harness.send("t", "m1", "make a worktree and keep going");
         // Lets the watcher register the new project's `.git` folder.
         thread::sleep(std::time::Duration::from_millis(500));

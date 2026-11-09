@@ -15,17 +15,22 @@ const REFS: &str = "refs/hoshi/checkpoints";
 const WORKERS: usize = 4;
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(60);
 
+const FOLDER_LINE: &str = "folder: ";
+
 #[derive(Clone, Copy)]
 pub enum Moment {
     Before,
     After,
+    /// The turn's `n`th arrival in another folder, where its changes are read from then on.
+    Arrived(usize),
 }
 
 /// The commit holding a turn's working tree as it was before it started or after it ended.
 pub fn reference(thread_id: &str, turn_id: &str, moment: Moment) -> String {
     let moment = match moment {
-        Moment::Before => "before",
-        Moment::After => "after",
+        Moment::Before => "before".to_owned(),
+        Moment::After => "after".to_owned(),
+        Moment::Arrived(count) => format!("arrived-{count}"),
     };
     format!("{REFS}/{thread_id}/{turn_id}/{moment}")
 }
@@ -62,11 +67,35 @@ pub fn capture(dir: &str, reference: &str) -> Result<(), String> {
         }
     };
     let head = git::stdout(dir, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).ok();
-    let mut args = vec!["commit-tree", "--no-gpg-sign", "-m", "hoshi checkpoint"];
-    if let Some(head) = head.as_deref() {
-        args.extend(["-p", head.trim()]);
+    commit(dir, &tree, head.as_deref().map(str::trim), reference)
+}
+
+/// Records the clean tree a worktree was checked out with, before anything worked in it.
+/// Without a reflog to tell that commit, the tree as it is now stands in.
+pub fn capture_created(dir: &str, reference: &str) -> Result<(), String> {
+    let first = git::stdout(dir, &["reflog", "show", "--format=%H", "HEAD"])
+        .ok()
+        .and_then(|log| {
+            log.lines()
+                .map(str::trim)
+                .rfind(|line| !line.is_empty())
+                .map(str::to_owned)
+        });
+    let Some(first) = first else {
+        return capture(dir, reference);
+    };
+    let tree = git::stdout(dir, &["rev-parse", &format!("{first}^{{tree}}")])?;
+    commit(dir, tree.trim(), Some(&first), reference)
+}
+
+/// Commits `tree` on `reference`, naming the folder it was read in.
+fn commit(dir: &str, tree: &str, parent: Option<&str>, reference: &str) -> Result<(), String> {
+    let message = format!("hoshi checkpoint\n\n{FOLDER_LINE}{dir}");
+    let mut args = vec!["commit-tree", "--no-gpg-sign", "-m", &message];
+    if let Some(parent) = parent {
+        args.extend(["-p", parent]);
     }
-    args.push(&tree);
+    args.push(tree);
     let author = [
         ("GIT_AUTHOR_NAME", OsStr::new("hoshi")),
         ("GIT_AUTHOR_EMAIL", OsStr::new("hoshi@localhost")),
@@ -163,6 +192,28 @@ pub fn file_diff(dir: &str, from: &str, to: &str, file: &DiffFile) -> Result<Fil
     }
     args.push(&file.path);
     git::stdout(dir, &args).map(|text| diff::truncate(&text))
+}
+
+/// Points `to` at the checkpoint `from` holds, which then goes.
+pub fn rename(dir: &str, from: &str, to: &str) -> Result<(), String> {
+    let commit = git::stdout(
+        dir,
+        &["rev-parse", "--verify", &format!("{from}^{{commit}}")],
+    )?;
+    git::stdout(dir, &["update-ref", to, commit.trim()])?;
+    git::stdout(dir, &["update-ref", "-d", from]).map(|_| ())
+}
+
+/// Whether the checkpoint was read in `dir`; one older than the folder it names is
+/// trusted to be.
+pub fn taken_in(dir: &str, reference: &str) -> bool {
+    let Ok(message) = git::stdout(dir, &["log", "-1", "--format=%B", reference, "--"]) else {
+        return false;
+    };
+    message
+        .lines()
+        .find_map(|line| line.strip_prefix(FOLDER_LINE))
+        .is_none_or(|folder| git::normalize(folder.trim()) == git::normalize(dir))
 }
 
 pub fn exists(dir: &str, reference: &str) -> bool {
