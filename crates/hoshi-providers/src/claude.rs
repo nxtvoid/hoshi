@@ -16,8 +16,8 @@ use crate::{
     TitleRequest, TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
-    AccessMode, ContextUsage, ProviderAccountStatus, ProviderModels, ProviderOutput,
-    RequestResponse, SlashCommand, TurnFailure, TurnOutcome, UsageLimits,
+    AccessMode, BackgroundTask, ContextUsage, ProviderAccountStatus, ProviderModels,
+    ProviderOutput, RequestResponse, SlashCommand, TurnFailure, TurnOutcome, UsageLimits,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -220,6 +220,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     }
 }
 
+const INTERRUPT_REQUEST_ID: &str = "hoshi-interrupt";
+
 /// How long a turn asked to stop may take to wind down before its process is killed.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 
@@ -232,9 +234,6 @@ struct QueueState {
     closing: bool,
     /// The user asked the turn to stop.
     interrupted: bool,
-    /// Commands a message moved to the background, by task id: the turn waits for them, as
-    /// it would have had they stayed in the foreground.
-    moved: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -263,7 +262,7 @@ impl RunningTurn for ClaudeTurn {
     fn interrupt(&self) {
         let request = json!({
             "type": "control_request",
-            "request_id": "hoshi-interrupt",
+            "request_id": INTERRUPT_REQUEST_ID,
             "request": { "subtype": "interrupt" },
         });
         self.queue.state().interrupted = true;
@@ -295,9 +294,7 @@ impl RunningTurn for ClaudeTurn {
                 "request_id": format!("hoshi-background:{message_id}"),
                 "request": { "subtype": "background_tasks" },
             });
-            if stdin.write_line(&move_aside.to_string()) {
-                queue.moved.extend(self.live_output.commands());
-            }
+            stdin.write_line(&move_aside.to_string());
         }
         let message = json!({
             "type": "user",
@@ -329,9 +326,18 @@ impl RunningTurn for ClaudeTurn {
     }
 
     fn stop_subagent(&self, tool_use_id: &str) {
-        let Some(task_id) = self.live_output.agent_task(tool_use_id) else {
-            return;
-        };
+        if let Some(task_id) = self.live_output.agent_task(tool_use_id) {
+            self.stop_task(&task_id);
+        }
+    }
+
+    fn stop_background_task(&self, task_id: &str) {
+        self.stop_task(task_id);
+    }
+}
+
+impl ClaudeTurn {
+    fn stop_task(&self, task_id: &str) {
         let request = json!({
             "type": "control_request",
             "request_id": format!("hoshi-stop:{task_id}"),
@@ -404,9 +410,17 @@ pub struct ClaudeParser {
     task_calls: HashSet<String>,
     live_output: LiveOutput,
     queue: Queue,
-    /// Subagents running in the background, by task id. A turn that ends while they run
-    /// is not over: Claude Code goes on once they finish, in a turn of its own.
+    /// Subagents and commands running in the background, by task id. A turn that ends while
+    /// they run is not over: Claude Code goes on once they finish, in a turn of its own.
     background_agents: HashSet<String>,
+    /// The commands among them, as the user sees them.
+    background_commands: Vec<BackgroundTask>,
+    /// The call that started each task, by task id.
+    task_calls_by_task: HashMap<String, String>,
+    /// A run ended and the turn only waits on its background work: no run goes on.
+    idle: bool,
+    /// How the latest run ended, which a turn that ends on its own between runs reports.
+    last_outcome: Option<TurnOutcome>,
     /// Every task that ran in the background, by task id.
     ever_background: HashSet<String>,
     /// Background tasks that ended, by run id, until Claude Code's turn about each ends:
@@ -459,14 +473,22 @@ impl ClaudeParser {
                 return claude_requests::withdraw(&value, &self.requests);
             }
             Some("control_response") => {
+                if value["response"]["request_id"] == INTERRUPT_REQUEST_ID {
+                    return self.end_between_runs().into_iter().collect();
+                }
                 return self.live_output.answer(&value).into_iter().collect();
             }
             Some("system") => match value["subtype"].as_str() {
-                Some("task_started") => self.live_output.started(&value),
+                Some("task_started") => {
+                    self.live_output.started(&value);
+                    return self.background_task_started(&value).into_iter().collect();
+                }
                 Some("task_notification") => {
                     self.live_output.ended(&value);
                     let task = value["task_id"].as_str().unwrap_or_default();
                     let mut outputs = self.background_agent_ended(&value);
+                    self.background_agents.remove(task);
+                    outputs.extend(self.background_command_ended(task));
                     if self.ever_background.contains(task)
                         && value["status"] != "stopped"
                         && let Some(run) = value["run_id"].as_str()
@@ -483,23 +505,14 @@ impl ClaudeParser {
                             self.ended_tasks.push_back(ended);
                         }
                     }
+                    outputs.extend(self.end_between_runs());
                     return outputs;
                 }
                 Some("background_tasks_changed") => {
-                    let moved = self.queue.state().moved.clone();
-                    self.background_agents = value["tasks"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|task| {
-                            let id = task["task_id"].as_str()?;
-                            (task["task_type"] == "local_agent" || moved.contains(id))
-                                .then(|| id.to_owned())
-                        })
-                        .collect();
-                    self.ever_background
-                        .extend(self.background_agents.iter().cloned());
-                    return Vec::new();
+                    let mut outputs: Vec<_> =
+                        self.background_tasks_changed(&value).into_iter().collect();
+                    outputs.extend(self.end_between_runs());
+                    return outputs;
                 }
                 Some("task_progress") => {
                     return self.subagent_progress(&value).into_iter().collect();
@@ -539,6 +552,22 @@ impl ClaudeParser {
         if let Some(parent) = value["parent_tool_use_id"].as_str() {
             return self.parse_subagent(parent, &value);
         }
+        let run_going = match value["type"].as_str() {
+            Some("stream_event" | "assistant" | "user") => true,
+            Some("system") => value["subtype"] == "init",
+            Some("command_lifecycle") => value["state"] == "started",
+            _ => false,
+        };
+        let mut outputs = Vec::new();
+        if run_going && std::mem::take(&mut self.idle) {
+            outputs.extend(self.waiting_changed());
+        }
+        outputs.extend(self.parse_own_line(&value));
+        outputs
+    }
+
+    /// A line of the thread's own agent, not of one of its subagents.
+    fn parse_own_line(&mut self, value: &Value) -> Vec<ProviderOutput> {
         match value["type"].as_str() {
             Some("system") if value["subtype"] == "init" => {
                 if let Some(session_id) = value["session_id"].as_str() {
@@ -559,7 +588,7 @@ impl ClaudeParser {
                     });
                 session.into_iter().chain(cwd).collect()
             }
-            Some("stream_event") => self.parse_stream_event(&value),
+            Some("stream_event") => self.parse_stream_event(value),
             Some("assistant") => {
                 let mut outputs = self.parse_assistant(&value["message"]);
                 if let Some(uuid) = value["uuid"].as_str() {
@@ -571,9 +600,9 @@ impl ClaudeParser {
             }
             Some("user") => {
                 let interrupted = self.queue.state().interrupted;
-                let results = parse_tool_results(&value, interrupted);
-                let mut outputs = self.hold_async_agents(&value, results);
-                outputs.extend(self.worktree_move(&value));
+                let results = parse_tool_results(value, interrupted);
+                let mut outputs = self.hold_async_agents(value, results);
+                outputs.extend(self.worktree_move(value));
                 outputs.extend(self.changed_task_list(&value["message"]));
                 outputs
             }
@@ -582,7 +611,7 @@ impl ClaudeParser {
                 .into_iter()
                 .collect(),
             Some("result") => {
-                let mut outputs: Vec<_> = self.reported_window(&value).into_iter().collect();
+                let mut outputs: Vec<_> = self.reported_window(value).into_iter().collect();
                 if value["origin"]["kind"] == "task-notification"
                     && let Some(run) = value["origin"]["runId"].as_str()
                 {
@@ -595,12 +624,15 @@ impl ClaudeParser {
                         && self.background_agents.is_empty()
                         && self.pending_wakes.is_empty());
                 self.runs += 1;
+                self.last_outcome = Some(parse_result(value));
+                self.idle = !over;
                 if !over {
                     outputs.push(ProviderOutput::RunEnded { run: self.runs });
                     match self.ended_tasks.pop_front() {
                         Some(ended) => outputs.push(ended),
                         None => self.between_runs = true,
                     }
+                    outputs.extend(self.waiting_changed());
                 }
                 if over {
                     queue.closing = true;
@@ -608,7 +640,7 @@ impl ClaudeParser {
                         outcome: if queue.interrupted {
                             TurnOutcome::Interrupted
                         } else {
-                            parse_result(&value)
+                            parse_result(value)
                         },
                     });
                 }
@@ -791,6 +823,102 @@ impl ClaudeParser {
             });
         }
         outputs
+    }
+
+    fn background_task_started(&mut self, value: &Value) -> Option<ProviderOutput> {
+        let task_id = value["task_id"].as_str()?;
+        let tool_use_id = value["tool_use_id"].as_str()?;
+        self.task_calls_by_task
+            .insert(task_id.to_owned(), tool_use_id.to_owned());
+        let command = self
+            .background_commands
+            .iter_mut()
+            .find(|command| command.task_id == task_id && command.tool_call_id.is_none())?;
+        command.tool_call_id = Some(tool_use_id.to_owned());
+        Some(self.background_roster())
+    }
+
+    /// Claude Code lists what runs in the background whenever that changes. Shell commands
+    /// (`Bash` sent to the background, `Monitor`) and subagents hold the turn.
+    fn background_tasks_changed(&mut self, value: &Value) -> Option<ProviderOutput> {
+        let tasks: Vec<&Value> = value["tasks"].as_array().into_iter().flatten().collect();
+        self.background_agents = tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task["task_type"].as_str(),
+                    Some("local_agent" | "local_bash")
+                )
+            })
+            .filter_map(|task| task["task_id"].as_str().map(str::to_owned))
+            .collect();
+        self.ever_background
+            .extend(self.background_agents.iter().cloned());
+        let now = unix_millis();
+        let commands: Vec<BackgroundTask> = tasks
+            .iter()
+            .filter(|task| task["task_type"] == "local_bash")
+            .filter_map(|task| {
+                let task_id = task["task_id"].as_str()?;
+                let known = self
+                    .background_commands
+                    .iter()
+                    .find(|command| command.task_id == task_id);
+                Some(known.cloned().unwrap_or_else(|| BackgroundTask {
+                    task_id: task_id.to_owned(),
+                    tool_call_id: self.task_calls_by_task.get(task_id).cloned(),
+                    description: task["description"].as_str().unwrap_or_default().to_owned(),
+                    started_at: now,
+                }))
+            })
+            .collect();
+        if commands == self.background_commands {
+            return None;
+        }
+        self.background_commands = commands;
+        Some(self.background_roster())
+    }
+
+    fn background_command_ended(&mut self, task_id: &str) -> Option<ProviderOutput> {
+        let before = self.background_commands.len();
+        self.background_commands
+            .retain(|command| command.task_id != task_id);
+        (self.background_commands.len() != before).then(|| self.background_roster())
+    }
+
+    fn background_roster(&self) -> ProviderOutput {
+        ProviderOutput::BackgroundTasks {
+            tasks: self.background_commands.clone(),
+            waiting: self.idle,
+        }
+    }
+
+    /// A run started or ended while commands run in the background.
+    fn waiting_changed(&self) -> Option<ProviderOutput> {
+        (!self.background_commands.is_empty()).then(|| self.background_roster())
+    }
+
+    /// A turn that waits between runs ends on its own once nothing is left to wait for, or
+    /// once the user asked it to stop: Claude Code answers no stopped task, and an interrupt
+    /// with no run going ends none.
+    fn end_between_runs(&mut self) -> Option<ProviderOutput> {
+        if !self.idle {
+            return None;
+        }
+        let mut queue = self.queue.state();
+        let waits = !self.background_agents.is_empty()
+            || !self.pending_wakes.is_empty()
+            || !queue.waiting.is_empty();
+        if queue.closing || (waits && !queue.interrupted) {
+            return None;
+        }
+        queue.closing = true;
+        let outcome = if queue.interrupted {
+            TurnOutcome::Interrupted
+        } else {
+            self.last_outcome.clone().unwrap_or(TurnOutcome::Completed)
+        };
+        Some(ProviderOutput::TurnCompleted { outcome })
     }
 
     /// A subagent's own messages and tool calls, which go to its transcript. Its prompt, sent
@@ -979,6 +1107,13 @@ fn parse_tool_results(frame: &Value, interrupted: bool) -> Vec<ProviderOutput> {
             outputs
         })
         .collect()
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn parse_result(value: &Value) -> TurnOutcome {
@@ -1224,32 +1359,231 @@ mod tests {
         assert!(parser.queue.state().closing);
     }
 
-    #[test]
-    fn a_command_moved_aside_by_a_message_keeps_the_turn_going() {
-        let mut parser = ClaudeParser::new(None);
-        parser.queue.state().moved.insert("b1".into());
-        parser.parse_line(
-            &json!({ "type": "system", "subtype": "background_tasks_changed",
-                "tasks": [{ "task_id": "b1", "task_type": "local_bash" },
-                          { "task_id": "b2", "task_type": "local_bash" }] })
-            .to_string(),
-        );
-        let result =
-            json!({ "type": "result", "subtype": "success", "is_error": false }).to_string();
-        assert!(matches!(
-            parser.parse_line(&result).as_slice(),
-            [ProviderOutput::RunEnded { .. }]
-        ));
+    fn feed(parser: &mut ClaudeParser, lines: &[Value]) -> Vec<ProviderOutput> {
+        lines
+            .iter()
+            .flat_map(|line| parser.parse_line(&line.to_string()))
+            .collect()
+    }
 
-        parser.parse_line(
-            &json!({ "type": "system", "subtype": "background_tasks_changed",
-                "tasks": [{ "task_id": "b2", "task_type": "local_bash" }] })
-            .to_string(),
+    fn roster(tasks: Value) -> Value {
+        json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks })
+    }
+
+    fn sleep_in_background() -> Vec<Value> {
+        vec![
+            json!({ "type": "assistant", "parent_tool_use_id": null, "message": { "id": "msg_1",
+                "content": [{ "type": "tool_use", "id": "toolu_bg", "name": "Bash", "input": {
+                    "command": "sleep 3 && echo done", "description": "Sleep then echo done",
+                    "run_in_background": true } }] } }),
+            roster(
+                json!([{ "task_id": "b1", "run_id": "run-b1", "task_type": "local_bash",
+                "description": "Sleep then echo done" }]),
+            ),
+            json!({ "type": "system", "subtype": "task_started", "task_id": "b1",
+                "run_id": "run-b1", "tool_use_id": "toolu_bg",
+                "description": "Sleep then echo done", "is_backgrounded": true,
+                "task_type": "local_bash" }),
+            json!({ "type": "user", "parent_tool_use_id": null,
+                "tool_use_result": { "stdout": "", "stderr": "", "backgroundTaskId": "b1" },
+                "message": { "role": "user", "content": [{ "type": "tool_result",
+                    "tool_use_id": "toolu_bg",
+                    "content": "Command running in background with ID: b1." }] } }),
+            json!({ "type": "result", "subtype": "success", "is_error": false,
+                "result": "started" }),
+        ]
+    }
+
+    type Roster = (Vec<(String, Option<String>)>, bool);
+
+    fn rosters(outputs: &[ProviderOutput]) -> Vec<Roster> {
+        outputs
+            .iter()
+            .filter_map(|output| match output {
+                ProviderOutput::BackgroundTasks { tasks, waiting } => Some((
+                    tasks
+                        .iter()
+                        .map(|task| (task.description.clone(), task.tool_call_id.clone()))
+                        .collect(),
+                    *waiting,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn completions(outputs: &[ProviderOutput]) -> Vec<TurnOutcome> {
+        outputs
+            .iter()
+            .filter_map(|output| match output {
+                ProviderOutput::TurnCompleted { outcome } => Some(outcome.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_background_command_holds_the_turn_until_claude_answers_it() {
+        let mut parser = ClaudeParser::new(None);
+        let started = feed(&mut parser, &sleep_in_background());
+
+        let description = "Sleep then echo done".to_owned();
+        let called = (description.clone(), Some("toolu_bg".to_owned()));
+        assert_eq!(
+            rosters(&started),
+            [
+                (vec![(description, None)], false),
+                (vec![called.clone()], false),
+                (vec![called], true),
+            ]
         );
-        assert!(matches!(
-            parser.parse_line(&result).as_slice(),
-            [ProviderOutput::TurnCompleted { .. }]
-        ));
+        assert!(started.contains(&ProviderOutput::RunEnded { run: 1 }));
+        assert!(completions(&started).is_empty(), "{started:#?}");
+
+        let ended = feed(
+            &mut parser,
+            &[
+                json!({ "type": "system", "subtype": "task_updated", "task_id": "b1",
+                    "patch": { "status": "completed" } }),
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
+                    "run_id": "run-b1", "tool_use_id": "toolu_bg", "status": "completed",
+                    "summary": "Background command \"Sleep then echo done\" completed (exit code 0)" }),
+                roster(json!([])),
+            ],
+        );
+        assert_eq!(
+            ended,
+            [
+                ProviderOutput::BackgroundTasks {
+                    tasks: Vec::new(),
+                    waiting: true
+                },
+                ProviderOutput::BackgroundTaskEnded {
+                    task_id: "b1".into(),
+                    tool_use_id: Some("toolu_bg".into()),
+                    failed: false,
+                },
+            ]
+        );
+
+        let answered = feed(
+            &mut parser,
+            &[
+                json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+                json!({ "type": "assistant", "parent_tool_use_id": null, "message": {
+                    "id": "msg_2", "content": [{ "type": "text", "text": "It printed done." }] } }),
+                json!({ "type": "result", "subtype": "success", "is_error": false,
+                    "origin": { "kind": "task-notification", "runId": "run-b1" } }),
+            ],
+        );
+        assert!(rosters(&answered).is_empty(), "{answered:#?}");
+        assert_eq!(completions(&answered), [TurnOutcome::Completed]);
+    }
+
+    #[test]
+    fn a_run_beside_a_background_command_is_not_waiting() {
+        let mut parser = ClaudeParser::new(None);
+        feed(&mut parser, &sleep_in_background());
+        parser.queue.state().waiting.insert("m2".into());
+
+        let steered = feed(
+            &mut parser,
+            &[
+                json!({ "type": "command_lifecycle", "command_uuid": "m2", "state": "started" }),
+                json!({ "type": "result", "subtype": "success", "is_error": false }),
+            ],
+        );
+
+        let waiting: Vec<bool> = rosters(&steered).into_iter().map(|(_, w)| w).collect();
+        assert_eq!(waiting, [false, true]);
+    }
+
+    #[test]
+    fn a_stopped_background_command_ends_a_turn_with_nothing_left_to_wait_for() {
+        let mut parser = ClaudeParser::new(None);
+        feed(&mut parser, &sleep_in_background());
+
+        let stopped = feed(
+            &mut parser,
+            &[
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
+                    "run_id": "run-b1", "tool_use_id": "toolu_bg", "status": "stopped",
+                    "summary": "Sleep then echo done" }),
+                roster(json!([])),
+            ],
+        );
+
+        assert_eq!(
+            stopped,
+            [
+                ProviderOutput::BackgroundTasks {
+                    tasks: Vec::new(),
+                    waiting: true
+                },
+                ProviderOutput::TurnCompleted {
+                    outcome: TurnOutcome::Completed
+                },
+            ]
+        );
+        assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn a_turn_asked_to_stop_while_it_waits_ends_once_the_agent_agrees() {
+        let mut parser = ClaudeParser::new(None);
+        feed(&mut parser, &sleep_in_background());
+        parser.queue.state().interrupted = true;
+
+        let answer = json!({ "type": "control_response", "response": {
+            "subtype": "success", "request_id": "hoshi-interrupt" } });
+
+        assert_eq!(
+            completions(&feed(&mut parser, &[answer])),
+            [TurnOutcome::Interrupted]
+        );
+    }
+
+    #[test]
+    fn a_stop_while_a_message_runs_waits_for_that_run_to_end() {
+        let mut parser = ClaudeParser::new(None);
+        feed(&mut parser, &sleep_in_background());
+        parser.queue.state().waiting.insert("m2".into());
+
+        let during = feed(
+            &mut parser,
+            &[
+                json!({ "type": "command_lifecycle", "command_uuid": "m2", "state": "started" }),
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
+                    "run_id": "run-b1", "tool_use_id": "toolu_bg", "status": "stopped" }),
+                roster(json!([])),
+            ],
+        );
+        assert!(completions(&during).is_empty(), "{during:#?}");
+
+        let result = json!({ "type": "result", "subtype": "success", "is_error": false });
+        assert_eq!(
+            completions(&feed(&mut parser, &[result])),
+            [TurnOutcome::Completed]
+        );
+    }
+
+    #[test]
+    fn foreground_commands_never_hold_the_turn() {
+        let mut parser = ClaudeParser::new(None);
+        let outputs = feed(
+            &mut parser,
+            &[
+                json!({ "type": "system", "subtype": "task_started", "task_id": "f1",
+                    "tool_use_id": "toolu_fg", "is_backgrounded": false,
+                    "task_type": "local_bash" }),
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "f1",
+                    "tool_use_id": "toolu_fg", "status": "completed" }),
+                json!({ "type": "result", "subtype": "success", "is_error": false }),
+            ],
+        );
+
+        assert!(rosters(&outputs).is_empty());
+        assert_eq!(completions(&outputs), [TurnOutcome::Completed]);
     }
 
     #[test]

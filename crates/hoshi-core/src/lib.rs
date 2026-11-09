@@ -52,9 +52,9 @@ pub use source_control::{
 };
 pub use terminal::{TerminalAttach, TerminalEvent, TerminalExit};
 pub use thread::{
-    AccessMode, CompactionStatus, Effort, ItemContent, OpenToolCall, Rewind, Task, TaskStatus,
-    Thread, ThreadItem, ThreadStatus, ThreadWorkspace, ToolDetail, TranscriptPage, TurnFailure,
-    TurnOutcome,
+    AccessMode, BackgroundTask, CompactionStatus, Effort, ItemContent, OpenToolCall, Rewind, Task,
+    TaskStatus, Thread, ThreadBackgroundTasks, ThreadItem, ThreadStatus, ThreadWorkspace,
+    ToolDetail, TranscriptPage, TurnFailure, TurnOutcome,
 };
 pub use usage::{ContextUsage, ThreadContextUsage, UsageLimits, UsageWindow, UsageWindowKind};
 pub use workspace::{ChangesSummary, Editor};
