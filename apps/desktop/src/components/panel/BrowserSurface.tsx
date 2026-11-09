@@ -49,6 +49,11 @@ const KEYS = new Set([
   'PageDown'
 ])
 
+/** Each thread's last input to its page; the next one waits for it. */
+const inputs = new Map<string, Promise<unknown>>()
+
+type Wheel = { x: number; y: number; deltaX: number; deltaY: number }
+
 /**
  * The thread's headless browser page, live as it paints: the agent's, which the user
  * can take over by clicking and typing, or one the user opens from the address bar.
@@ -63,6 +68,17 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
   const fill = page?.fitted ?? true
   const image = useRef<HTMLImageElement>(null)
   const viewport = useRef<HTMLDivElement>(null)
+  const wheel = useRef<Wheel | null>(null)
+  const wheelFrame = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (wheelFrame.current !== null) cancelAnimationFrame(wheelFrame.current)
+      wheelFrame.current = null
+      wheel.current = null
+    },
+    []
+  )
 
   useEffect(() => {
     const box = viewport.current
@@ -112,7 +128,34 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
 
   const run = (command: string, args: Record<string, unknown>) =>
     invoke(command, { threadId, ...args }).catch(() => setFailed(true))
-  const send = (input: BrowserInput) => void run('browser_input', { input })
+  const send = (input: BrowserInput) => {
+    const sent = (inputs.get(threadId) ?? Promise.resolve()).then(() =>
+      run('browser_input', { input })
+    )
+    inputs.set(threadId, sent)
+    void sent.then(() => {
+      if (inputs.get(threadId) === sent) inputs.delete(threadId)
+    })
+  }
+  const scroll = (
+    point: { x: number; y: number },
+    deltaX: number,
+    deltaY: number
+  ) => {
+    const waiting = wheel.current
+    wheel.current = {
+      ...point,
+      deltaX: (waiting?.deltaX ?? 0) + deltaX,
+      deltaY: (waiting?.deltaY ?? 0) + deltaY
+    }
+    if (wheelFrame.current !== null) return
+    wheelFrame.current = requestAnimationFrame(() => {
+      wheelFrame.current = null
+      const pending = wheel.current
+      wheel.current = null
+      if (pending) send({ kind: 'scroll', ...pending })
+    })
+  }
   const open = () => {
     if (!address.trim()) return
     setFailed(false)
@@ -264,14 +307,7 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
             }}
             onWheel={(event) => {
               const point = pagePoint(event.clientX, event.clientY)
-              if (point) {
-                send({
-                  kind: 'scroll',
-                  ...point,
-                  deltaX: event.deltaX,
-                  deltaY: event.deltaY
-                })
-              }
+              if (point) scroll(point, event.deltaX, event.deltaY)
             }}
             onPaste={(event) => {
               const text = event.clipboardData.getData('text')
