@@ -401,6 +401,8 @@ pub struct ClaudeParser {
     cache_ttl_secs: Option<u64>,
     /// Calls of the tools that move the session, by id, to read where their results lead.
     moves: HashMap<String, WorktreeMove>,
+    /// Where the session works, as last reported.
+    session_cwd: Option<String>,
     access: Access,
     requests: Requests,
     /// Lines to write back to the agent, such as answers it does not need the user for.
@@ -581,10 +583,15 @@ impl ClaudeParser {
                             session_id: session_id.to_owned(),
                         });
                 // A resumed session reopens the worktree it was in, wherever it was started.
+                // Every later run of the process repeats the folder it already reported.
                 let cwd = value["cwd"]
                     .as_str()
-                    .map(|path| ProviderOutput::WorkingDirectory {
-                        path: path.to_owned(),
+                    .filter(|path| self.session_cwd.as_deref() != Some(*path))
+                    .map(|path| {
+                        self.session_cwd = Some(path.to_owned());
+                        ProviderOutput::WorkingDirectory {
+                            path: path.to_owned(),
+                        }
                     });
                 session.into_iter().chain(cwd).collect()
             }
@@ -1005,6 +1012,7 @@ impl ClaudeParser {
             WorktreeMove::Enter => result["worktreePath"].as_str(),
             WorktreeMove::Exit => result["restoredCwd"].as_str(),
         }?;
+        self.session_cwd = Some(path.to_owned());
         Some(ProviderOutput::WorkingDirectory {
             path: path.to_owned(),
         })

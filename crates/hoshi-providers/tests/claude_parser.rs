@@ -284,6 +284,40 @@ fn entering_and_leaving_a_worktree_report_where_the_session_works() {
     );
 }
 
+/// Claude Code starts every run of a process with an `init` naming the folder it works in,
+/// as when a background command's end wakes the agent within the same turn.
+fn init(cwd: &str) -> String {
+    serde_json::json!({
+        "type": "system",
+        "subtype": "init",
+        "session_id": "s1",
+        "cwd": cwd,
+    })
+    .to_string()
+}
+
+#[test]
+fn later_runs_of_a_process_do_not_report_its_folder_again() {
+    let first = init(r"C:\repo");
+    let again = init(r"C:\repo");
+    let resumed_elsewhere = init(r"C:\repo-feature");
+
+    assert_eq!(working_directories(&[&first, &again]), [r"C:\repo"]);
+    assert_eq!(
+        working_directories(&[
+            &first,
+            ENTER_WORKTREE[0],
+            ENTER_WORKTREE[1],
+            &resumed_elsewhere
+        ]),
+        [r"C:\repo", r"C:\repo-feature"]
+    );
+    assert_eq!(
+        working_directories(&[&first, &resumed_elsewhere]),
+        [r"C:\repo", r"C:\repo-feature"]
+    );
+}
+
 #[test]
 fn a_refused_move_or_another_tool_with_a_similar_result_moves_nothing() {
     let refused = ENTER_WORKTREE[1].replace(
