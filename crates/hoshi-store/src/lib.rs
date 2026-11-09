@@ -193,6 +193,14 @@ const MIGRATIONS: &[&str] = &[
     CREATE INDEX thread_items_task_results ON thread_items (ordinal)
         WHERE json_extract(content_json, '$.taskResult') IS NOT NULL;
     ",
+    r"
+    ALTER TABLE events ADD COLUMN thread_id TEXT GENERATED ALWAYS AS (coalesce(
+        json_extract(payload_json, '$.threadId'),
+        json_extract(payload_json, '$.item.threadId'),
+        json_extract(payload_json, '$.thread.id')
+    )) VIRTUAL;
+    CREATE INDEX events_thread_id ON events (thread_id);
+    ",
 ];
 
 const JOURNAL_SIZE_LIMIT: i64 = 8 * 1024 * 1024;
@@ -280,6 +288,11 @@ const DELETE_THREAD_ITEMS: &str = "
     DELETE FROM thread_items
     WHERE thread_id = ?1 OR (thread_id >= ?1 || ':' AND thread_id < ?1 || ';')";
 
+const DELETE_THREAD_EVENTS: &str = "
+    DELETE FROM events
+    WHERE (thread_id = ?1 OR (thread_id >= ?1 || ':' AND thread_id < ?1 || ';'))
+      AND sequence < ?2";
+
 const REWIND_ITEMS: &str = "
     DELETE FROM thread_items
     WHERE (thread_id = ?1 OR (thread_id >= ?1 || ':' AND thread_id < ?1 || ';'))
@@ -344,8 +357,9 @@ impl Store {
                  VALUES (json_extract(?1, '$.type'), ?1, ?2)",
                 params![serde_json::to_string(event)?, occurred_at],
             )?;
-            sequences.push(tx.last_insert_rowid() as u64);
-            project(&tx, event)?;
+            let sequence = tx.last_insert_rowid();
+            sequences.push(sequence as u64);
+            project(&tx, event, sequence)?;
         }
         tx.commit()?;
         Ok(sequences)
@@ -735,9 +749,11 @@ fn execute(tx: &Transaction, sql: &str, params: impl rusqlite::Params) -> Result
     Ok(())
 }
 
-/// Drops a thread's rows and its subagents' transcripts.
-fn forget_thread(tx: &Transaction, thread_id: &str) -> Result<(), StoreError> {
+/// Drops a thread's rows, its subagents' transcripts, and the events before `sequence`
+/// that carried them.
+fn forget_thread(tx: &Transaction, thread_id: &str, sequence: i64) -> Result<(), StoreError> {
     execute(tx, DELETE_THREAD_ITEMS, [thread_id])?;
+    execute(tx, DELETE_THREAD_EVENTS, params![thread_id, sequence])?;
     execute(
         tx,
         "DELETE FROM pull_requests WHERE thread_id = ?1",
@@ -756,7 +772,7 @@ fn forget_thread(tx: &Transaction, thread_id: &str) -> Result<(), StoreError> {
     execute(tx, "DELETE FROM threads WHERE id = ?1", [thread_id])
 }
 
-fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
+fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreError> {
     match event {
         Event::ProjectCreated { project } => {
             execute(
@@ -787,7 +803,7 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 .query_map([project_id], |row| row.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             for thread_id in thread_ids {
-                forget_thread(tx, &thread_id)?;
+                forget_thread(tx, &thread_id, sequence)?;
             }
             execute(tx, "DELETE FROM projects WHERE id = ?1", [project_id])?;
         }
@@ -832,7 +848,7 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 ],
             )?;
         }
-        Event::ThreadDeleted { thread_id } => forget_thread(tx, thread_id)?,
+        Event::ThreadDeleted { thread_id } => forget_thread(tx, thread_id, sequence)?,
         Event::ThreadTitleSet { thread_id, title } => {
             execute(
                 tx,
@@ -1725,6 +1741,7 @@ mod tests {
             LATEST_MESSAGES,
             MESSAGE_COUNT,
             DELETE_THREAD_ITEMS,
+            DELETE_THREAD_EVENTS,
             REWIND_ITEMS,
         ] {
             let plan = query_plan(&store, sql);
@@ -1747,6 +1764,7 @@ mod tests {
             (THREAD_ITEMS, "INDEX thread_items_thread_ordinal"),
             (LATEST_MESSAGES, "COVERING INDEX thread_items_thread_kind"),
             (MESSAGE_COUNT, "COVERING INDEX thread_items_thread_kind"),
+            (DELETE_THREAD_EVENTS, "INDEX events_thread_id"),
         ] {
             let plan = query_plan(&store, sql);
             assert!(
@@ -1788,6 +1806,17 @@ mod tests {
         )
     }
 
+    fn event_threads(store: &Store) -> Vec<String> {
+        store
+            .conn
+            .prepare("SELECT thread_id FROM events WHERE thread_id IS NOT NULL ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     #[test]
     fn deleting_a_thread_deletes_exactly_it_and_its_subagents() {
         let mut store = Store::open_in_memory().unwrap();
@@ -1810,6 +1839,7 @@ mod tests {
             .copied()
             .collect();
         assert_eq!(remaining, ["tx", "t0", "t;", "s:t", "s"]);
+        assert_eq!(event_threads(&store), ["tx", "t0", "t;", "s:t", "s", "t"]);
     }
 
     #[test]
@@ -1835,6 +1865,95 @@ mod tests {
         assert!(store.thread_items("t").unwrap().is_empty());
         assert!(store.thread_items("t:agent").unwrap().is_empty());
         assert_eq!(store.thread_items("tx").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn deleting_a_thread_forgets_its_events_and_the_sequence_keeps_growing() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .append(
+                &[
+                    project_created("p"),
+                    thread_created("t", "p"),
+                    thread_created("u", "p"),
+                    answer("u", "a"),
+                    answer("t", "a"),
+                    answer("t:agent", "b"),
+                ],
+                NOW,
+            )
+            .unwrap();
+        let before = store.snapshot().unwrap().sequence;
+
+        let deleted = store
+            .append(
+                &[Event::ThreadDeleted {
+                    thread_id: "t".into(),
+                }],
+                NOW,
+            )
+            .unwrap();
+
+        assert_eq!(deleted, [before + 1]);
+        assert_eq!(store.snapshot().unwrap().sequence, before + 1);
+        assert_eq!(event_threads(&store), ["u", "u", "t"]);
+        let next = store.append(&[answer("u", "c")], NOW).unwrap();
+        assert_eq!(next, [before + 2]);
+
+        store
+            .append(
+                &[Event::ThreadDeleted {
+                    thread_id: "u".into(),
+                }],
+                NOW,
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("DELETE FROM events WHERE event_type = 'threadDeleted'", [])
+            .unwrap();
+        assert_eq!(
+            store.append(&[answer("v", "a")], NOW).unwrap(),
+            [before + 4]
+        );
+    }
+
+    #[test]
+    fn removing_a_project_forgets_the_events_of_its_threads_only() {
+        let mut store = Store::open_in_memory().unwrap();
+        let Event::ThreadCreated { thread: mut chat } = thread_created("chat", "p") else {
+            unreachable!()
+        };
+        chat.project_id = None;
+        store
+            .append(
+                &[
+                    project_created("p"),
+                    project_created("q"),
+                    thread_created("t", "p"),
+                    thread_created("other", "q"),
+                    Event::ThreadCreated { thread: chat },
+                    answer("t", "a"),
+                    answer("t:agent", "b"),
+                    answer("other", "a"),
+                    answer("chat", "a"),
+                ],
+                NOW,
+            )
+            .unwrap();
+
+        store
+            .append(
+                &[Event::ProjectRemoved {
+                    project_id: "p".into(),
+                }],
+                NOW,
+            )
+            .unwrap();
+
+        assert_eq!(event_threads(&store), ["other", "chat", "other", "chat"]);
+        assert!(store.thread_items("t:agent").unwrap().is_empty());
+        assert_eq!(store.thread_items("other").unwrap().len(), 1);
     }
 
     #[test]
@@ -1887,7 +2006,7 @@ mod tests {
     #[test]
     fn a_database_from_before_the_indexes_keeps_its_items_and_events() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let before = MIGRATIONS.len() - 1;
+        let before = MIGRATIONS.len() - 2;
         let tx = conn.transaction().unwrap();
         for migration in &MIGRATIONS[..before] {
             tx.execute_batch(migration).unwrap();
@@ -1911,6 +2030,7 @@ mod tests {
         let mut store = Store::init(conn).unwrap();
 
         assert_eq!(store.last_answer("t").unwrap().as_deref(), Some("done"));
+        assert_eq!(event_threads(&store), ["t"]);
         store
             .append(
                 &[Event::ThreadDeleted {
@@ -1920,6 +2040,7 @@ mod tests {
             )
             .unwrap();
         assert!(store.thread_items("t").unwrap().is_empty());
+        assert_eq!(event_threads(&store), ["t"]);
         assert_eq!(store.snapshot().unwrap().sequence, 2);
     }
 
