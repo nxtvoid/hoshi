@@ -12,6 +12,7 @@ import { SubagentGroup, SubagentRow } from './SubagentRow'
 import { DelegationRow, TaskResultRow } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
 import { TurnChangesCard } from './TurnChangesCard'
+import { RewindButton } from './RewindButton'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
@@ -410,6 +411,15 @@ const Item = memo(function Item({
           text={content.text}
           attachments={content.attachments}
           steer={content.steer}
+          action={
+            content.rewind ? (
+              <RewindButton
+                messageId={item.id}
+                text={content.text}
+                attachments={content.attachments}
+              />
+            ) : null
+          }
         />
       )
     case 'assistantMessage':

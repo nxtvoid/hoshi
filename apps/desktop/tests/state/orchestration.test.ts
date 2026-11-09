@@ -160,6 +160,59 @@ describe('applyEvent', () => {
   })
 })
 
+describe('rewinds', () => {
+  test('a rewind to the start drops the session; one to a message pins it', () => {
+    const state = {
+      projects: [project('p')],
+      threads: [
+        { ...thread('t', 'p'), sessionId: 's', conversationCursor: 'u2' }
+      ]
+    }
+
+    const pinned = applyEvent(state, {
+      type: 'threadRewound',
+      threadId: 't',
+      messageId: 'm2',
+      resumeAt: 'u1'
+    })
+    const restarted = applyEvent(state, {
+      type: 'threadRewound',
+      threadId: 't',
+      messageId: 'm1',
+      resumeAt: null
+    })
+
+    expect(pinned.threads[0]).toMatchObject({
+      sessionId: 's',
+      conversationCursor: 'u1',
+      resumeAt: 'u1'
+    })
+    expect(restarted.threads[0]).toMatchObject({
+      sessionId: null,
+      resumeAt: null
+    })
+  })
+
+  test('the transcript loses the message and what followed', () => {
+    const message = (id: string): ThreadItem => ({
+      id,
+      threadId: 't',
+      createdAt: NOW,
+      content: { kind: 'assistantMessage', text: id }
+    })
+    const items = [message('m1'), message('a1'), message('m2'), message('a2')]
+
+    const kept = applyItemEvent('t', items, {
+      type: 'threadRewound',
+      threadId: 't',
+      messageId: 'm2',
+      resumeAt: 'u1'
+    })
+
+    expect(kept.map((item) => item.id)).toEqual(['m1', 'a1'])
+  })
+})
+
 describe('applyItemEvent', () => {
   const tool: ThreadItem = {
     id: 'tool',

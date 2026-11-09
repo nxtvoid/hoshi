@@ -150,6 +150,9 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         }
         if let Some(session_id) = &request.resume_session_id {
             command.args(["--resume", session_id]);
+            if let Some(message) = &request.resume_session_at {
+                command.args(["--resume-session-at", message]);
+            }
             let (rules, directories) = self.grants.arguments(session_id);
             for rule in rules {
                 command.args(["--allowedTools", &rule]);
@@ -505,7 +508,15 @@ impl ClaudeParser {
                 session.into_iter().chain(cwd).collect()
             }
             Some("stream_event") => self.parse_stream_event(&value),
-            Some("assistant") => self.parse_assistant(&value["message"]),
+            Some("assistant") => {
+                let mut outputs = self.parse_assistant(&value["message"]);
+                if let Some(uuid) = value["uuid"].as_str() {
+                    outputs.push(ProviderOutput::ConversationCursor {
+                        cursor: uuid.to_owned(),
+                    });
+                }
+                outputs
+            }
             Some("user") => {
                 let interrupted = self.queue.state().interrupted;
                 let results = parse_tool_results(&value, interrupted);
@@ -947,6 +958,28 @@ mod tests {
         assert_eq!(access.permission_mode(), "bypassPermissions");
         access.plan_mode = true;
         assert_eq!(access.permission_mode(), "plan");
+    }
+
+    #[test]
+    fn the_conversation_s_own_messages_are_where_a_rewind_can_resume() {
+        let mut parser = ClaudeParser::new(None);
+        let own = json!({ "type": "assistant", "parent_tool_use_id": null, "uuid": "u1",
+            "message": { "id": "msg_1", "content": [{ "type": "text", "text": "Done." }] } });
+        let subagent = json!({ "type": "assistant", "parent_tool_use_id": "toolu_agent",
+            "uuid": "u2", "message": { "id": "msg_2", "content": [{ "type": "text", "text": "x" }] } });
+
+        let outputs = parser.parse_line(&own.to_string());
+        let inside = parser.parse_line(&subagent.to_string());
+
+        assert!(matches!(
+            outputs.last(),
+            Some(ProviderOutput::ConversationCursor { cursor }) if cursor == "u1"
+        ));
+        assert!(
+            !inside
+                .iter()
+                .any(|output| matches!(output, ProviderOutput::ConversationCursor { .. }))
+        );
     }
 
     #[test]

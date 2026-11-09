@@ -88,6 +88,11 @@ pub enum ProviderOutput {
     RunEnded {
         run: u32,
     },
+    /// The provider's id for its latest message of the conversation, where a rewind can
+    /// later resume it.
+    ConversationCursor {
+        cursor: String,
+    },
     TurnCompleted {
         outcome: TurnOutcome,
     },

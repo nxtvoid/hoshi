@@ -165,6 +165,43 @@ pub fn file_diff(dir: &str, from: &str, to: &str, file: &DiffFile) -> Result<Fil
     git::stdout(dir, &args).map(|text| diff::truncate(&text))
 }
 
+pub fn exists(dir: &str, reference: &str) -> bool {
+    git::stdout(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{reference}^{{commit}}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// Puts the working tree at `dir` back as the checkpoint `reference` holds it: changed and
+/// deleted files come back and files added since go, ignored ones aside. The index is left
+/// matching `HEAD`.
+pub fn restore(dir: &str, reference: &str) -> Result<(), String> {
+    let source = format!("--source={reference}");
+    git::stdout(
+        dir,
+        &["restore", &source, "--staged", "--worktree", "--", "."],
+    )?;
+    // Removing a file can show others it ignored, such as a deleted `.gitignore`'s.
+    for _ in 0..4 {
+        if git::stdout(dir, &["clean", "-fd", "--", "."])?
+            .trim()
+            .is_empty()
+        {
+            break;
+        }
+    }
+    if git::stdout(dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
+        git::stdout(dir, &["reset", "--quiet", "--", "."])?;
+    }
+    Ok(())
+}
+
 /// Deletes every checkpoint of a thread, so git can collect what only they held.
 pub fn forget(dir: &str, thread_id: &str) -> Result<(), String> {
     let prefix = format!("{REFS}/{thread_id}/");
@@ -284,6 +321,49 @@ mod tests {
         forget(&dir, "t").unwrap();
         let left = git::stdout(&dir, &["for-each-ref", REFS]).unwrap();
         assert!(left.trim().is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn restoring_puts_the_tree_back_as_the_checkpoint_holds_it() {
+        let repo = git::tests::temp_repository("restore");
+        let dir = repo.to_string_lossy().into_owned();
+        let write = |name: &str, text: &str| {
+            let path = repo.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(".gitignore", "build/\n");
+        write("kept.txt", "one\n");
+        write("gone.txt", "bye\n");
+        git::stdout(&dir, &["add", "."]).unwrap();
+        git::stdout(&dir, &["commit", "-m", "files"]).unwrap();
+        write("draft.txt", "mine\n");
+        let before = reference("t", "m1", Moment::Before);
+        capture(&dir, &before).unwrap();
+
+        write("kept.txt", "changed\n");
+        std::fs::remove_file(repo.join("gone.txt")).unwrap();
+        std::fs::remove_file(repo.join("draft.txt")).unwrap();
+        write("src/new/added.rs", "fn x() {}\n");
+        write("build/out.bin", "out");
+        git::stdout(&dir, &["add", "kept.txt"]).unwrap();
+        assert!(exists(&dir, &before));
+        restore(&dir, &before).unwrap();
+
+        let read = |name: &str| {
+            std::fs::read_to_string(repo.join(name))
+                .unwrap()
+                .replace("\r\n", "\n")
+        };
+        assert_eq!(read("kept.txt"), "one\n");
+        assert_eq!(read("gone.txt"), "bye\n");
+        assert_eq!(read("draft.txt"), "mine\n");
+        assert!(!repo.join("src").exists());
+        assert!(repo.join("build/out.bin").exists());
+        let staged = git::stdout(&dir, &["diff", "--cached", "--name-only"]).unwrap();
+        assert!(staged.is_empty());
+        assert!(!exists(&dir, &reference("t", "m9", Moment::Before)));
         let _ = std::fs::remove_dir_all(&repo);
     }
 

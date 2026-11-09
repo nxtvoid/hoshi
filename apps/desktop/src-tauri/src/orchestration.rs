@@ -456,6 +456,16 @@ pub fn get_thread_file_diff(
 }
 
 #[tauri::command(async)]
+pub fn rewind_thread(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    message_id: String,
+    revert_files: bool,
+) -> Result<(), CommandError> {
+    engine.rewind_thread(&thread_id, &message_id, revert_files)
+}
+
+#[tauri::command(async)]
 pub fn get_turn_diff_files(
     engine: State<'_, Engine>,
     thread_id: String,

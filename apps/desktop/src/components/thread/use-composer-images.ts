@@ -13,6 +13,8 @@ export type ComposerImage = {
   failed: boolean
 }
 
+type SavedImage = Extract<MessageAttachment, { type: 'image' }>
+
 /** Images added to the draft, saved by the engine as soon as they are added. */
 export function useComposerImages() {
   const [images, setImages] = useState<ComposerImage[]>([])
@@ -61,6 +63,25 @@ export function useComposerImages() {
     }
   }
 
+  /** Puts back images a message was sent with, already saved; `urls` shows them. */
+  const restore = (
+    attachments: MessageAttachment[],
+    urls: Record<string, string | null>
+  ) => {
+    const restored = attachments
+      .filter(
+        (attachment): attachment is SavedImage => attachment.type === 'image'
+      )
+      .map((attachment) => ({
+        key: crypto.randomUUID(),
+        name: attachment.name,
+        previewUrl: urls[attachment.id] ?? '',
+        saved: attachment,
+        failed: false
+      }))
+    setImages((current) => [...current, ...restored])
+  }
+
   const remove = (key: string) => {
     const image = imagesRef.current.find((candidate) => candidate.key === key)
     if (!image) return
@@ -99,6 +120,7 @@ export function useComposerImages() {
   return {
     images,
     add,
+    restore,
     remove,
     keep,
     clear,

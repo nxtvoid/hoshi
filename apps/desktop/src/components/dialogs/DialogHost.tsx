@@ -59,7 +59,7 @@ export function DialogHost() {
     <AlertDialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) settle(false)
+        if (!next) settle(null)
       }}
     >
       <AlertDialogContent className='flex flex-col gap-0 rounded-2xl p-5 shadow-2xl data-[size=default]:max-w-[calc(100%-2rem)] data-[size=default]:sm:max-w-100'>
@@ -91,10 +91,19 @@ export function DialogHost() {
                   {current.cancelLabel ?? m.cancel()}
                 </AlertDialogCancel>
               )}
+              {current.alternativeLabel ? (
+                <AlertDialogAction
+                  variant='outline'
+                  className={BUTTON}
+                  onClick={() => settle('alternative')}
+                >
+                  {current.alternativeLabel}
+                </AlertDialogAction>
+              ) : null}
               <AlertDialogAction
                 autoFocus
                 className={cn(BUTTON, tone.action)}
-                onClick={() => settle(true)}
+                onClick={() => settle('confirm')}
               >
                 {current.confirmLabel}
               </AlertDialogAction>

@@ -5,6 +5,8 @@ import { CHAT_LANE } from '@/lib/chat-lane'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
 import { useDraftStore } from '@/state/draft-store'
+import { useImageStore } from '@/state/image-store'
+import { useComposerFillStore } from '@/state/composer-fill-store'
 import { useInChat, useScopeProjectId } from '@/state/use-scope'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ModelPicker } from './ModelPicker'
@@ -112,6 +114,15 @@ export function Composer({
   const openModelPicker = useModelPickerStore((state) => state.setOpen)
   const [, updateAccess] = useAccess()
   const threadId = useAppStore((state) => state.selectedThreadId)
+  const fill = useComposerFillStore((state) => state.fill)
+  const restoreImages = images.restore
+
+  useEffect(() => {
+    if (!fill || fill.threadId !== threadId) return
+    editorRef.current?.setText(fill.text)
+    restoreImages(fill.attachments, useImageStore.getState().urls)
+    useComposerFillStore.getState().done()
+  }, [fill, threadId, restoreImages])
   const request = usePendingRequest()
   const requestActions = useRequestActions(request)
   const { text } = snapshot

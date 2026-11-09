@@ -34,8 +34,8 @@ use hoshi_core::{
     StreamDelta, StreamKind, TerminalAttach, ThreadContextUsage, ThreadItem, ThreadPullRequest,
     ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace, TurnFailure,
     TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn, decide,
-    record_branch, record_output, record_title, record_turn_changes, record_worktree,
-    record_worktree_left, start_queued_turn, turn_failed,
+    record_branch, record_conversation_cursor, record_output, record_title, record_turn_changes,
+    record_worktree, record_worktree_left, start_queued_turn, turn_failed,
 };
 use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage};
 use hoshi_forge::{
@@ -182,6 +182,8 @@ struct Turn {
     workspace: Option<TurnWorkspace>,
     /// The folder whose working tree was checkpointed before the turn started.
     checkpointed: Option<String>,
+    /// The provider's latest message of the conversation so far.
+    cursor: Option<String>,
 }
 
 /// What a background check for a worktree the turn created needs from the state.
@@ -503,6 +505,67 @@ impl Engine {
     ) -> Result<FileDiff, CommandError> {
         let cwd = self.repository_cwd(thread_id)?;
         diff::file(&cwd, scope, file).map_err(|detail| CommandError::Internal { detail })
+    }
+
+    /// Takes the thread back to before `message_id`: the transcript from there on goes,
+    /// and the next turn resumes the conversation as it was. With `revert_files`, the
+    /// working tree goes back to how it was before that message's turn too.
+    pub fn rewind_thread(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+        revert_files: bool,
+    ) -> Result<(), CommandError> {
+        let mut state = lock(&self.state);
+        let cannot = || CommandError::CannotRewind {
+            thread_id: thread_id.to_owned(),
+            message_id: message_id.to_owned(),
+        };
+        let thread = state
+            .model
+            .thread(thread_id)
+            .ok_or_else(|| CommandError::ThreadNotFound {
+                thread_id: thread_id.to_owned(),
+            })?;
+        if thread.active_turn_id.is_some() {
+            return Err(CommandError::ThreadBusy {
+                thread_id: thread_id.to_owned(),
+            });
+        }
+        let item = state
+            .store
+            .thread_item(thread_id, message_id)
+            .map_err(internal)?
+            .ok_or_else(cannot)?;
+        let ItemContent::UserMessage {
+            rewind: Some(rewind),
+            ..
+        } = item.content
+        else {
+            return Err(cannot());
+        };
+        if revert_files {
+            let cwd = state
+                .cwd(thread_id)
+                .ok_or_else(|| CommandError::ThreadNotFound {
+                    thread_id: thread_id.to_owned(),
+                })?;
+            state.checkpoints.settle(&cwd);
+            let before = checkpoint::reference(thread_id, message_id, Moment::Before);
+            if !checkpoint::exists(&cwd, &before) {
+                return Err(CommandError::NoCheckpoint {
+                    thread_id: thread_id.to_owned(),
+                    message_id: message_id.to_owned(),
+                });
+            }
+            checkpoint::restore(&cwd, &before)
+                .map_err(|detail| CommandError::GitFailed { detail })?;
+        }
+        state.decide_and_commit(Command::ThreadRewind {
+            thread_id: thread_id.to_owned(),
+            message_id: message_id.to_owned(),
+            rewind,
+        })
     }
 
     /// The files a finished turn changed, read from its checkpoints.
@@ -1513,6 +1576,14 @@ impl State {
                 self.follow_session(thread_id, turn_id, &path);
                 return;
             }
+            ProviderOutput::ConversationCursor { cursor } => {
+                if let Some(turn) = self.turns.get_mut(thread_id)
+                    && turn.id == turn_id
+                {
+                    turn.cursor = Some(cursor);
+                }
+                return;
+            }
             _ => {}
         }
         if let ProviderOutput::ToolCallStarted { input, .. } = &output
@@ -1528,11 +1599,17 @@ impl State {
         };
         let completed = ended.is_some();
         let now = now();
-        let checkpointed = self
+        let ending = self
             .turns
             .get(thread_id)
-            .filter(|turn| completed && turn.id == turn_id)
-            .and_then(|turn| turn.checkpointed.clone());
+            .filter(|turn| completed && turn.id == turn_id);
+        let checkpointed = ending.and_then(|turn| turn.checkpointed.clone());
+        if let Some(cursor) = ending.and_then(|turn| turn.cursor.clone()) {
+            let events = record_conversation_cursor(&self.model, thread_id, cursor);
+            if let Err(error) = self.commit(&events, &now) {
+                eprintln!("hoshi: failed to record where the conversation is: {error}");
+            }
+        }
         if checkpointed.is_some() {
             // Holds the turn's place in the transcript while its changes are read.
             let pending = record_turn_changes(&self.model, thread_id, turn_id, None, &now);
@@ -2464,6 +2541,7 @@ fn start_turn(
         prompt,
         attachments,
         resume_session_id: thread.session_id.clone(),
+        resume_session_at: thread.resume_at.clone(),
         model: thread.model.clone(),
         effort: thread.effort,
         fast_mode: thread.fast_mode,
@@ -2499,6 +2577,7 @@ fn start_turn(
                 running,
                 workspace,
                 checkpointed,
+                cursor: None,
             };
             state.turns.insert(thread_id.to_owned(), turn);
         }
@@ -2673,6 +2752,7 @@ mod tests {
         cwd: String,
         prompt: String,
         resume: Option<String>,
+        resume_at: Option<String>,
         model: Option<String>,
         attachments: Vec<TurnAttachment>,
         instructions: Option<String>,
@@ -2746,6 +2826,7 @@ mod tests {
                 cwd: request.cwd,
                 prompt: request.prompt,
                 resume: request.resume_session_id,
+                resume_at: request.resume_session_at,
                 model: request.model,
                 attachments: request.attachments,
                 instructions: request.instructions,
@@ -3062,6 +3143,7 @@ mod tests {
             cwd: harness.root.clone(),
             prompt: prompt.into(),
             resume: resume.map(Into::into),
+            resume_at: None,
             model: Some("haiku".into()),
             attachments: Vec::new(),
             instructions: Some(delegation::INSTRUCTIONS.into()),
@@ -4241,6 +4323,57 @@ Blue"
         assert_eq!(harness.engine.turn_diff_files("t", "m1").unwrap(), files);
         let diff = harness.engine.turn_file_diff("t", "m1", &files[0]).unwrap();
         assert!(diff.text.contains("+two"));
+    }
+
+    #[test]
+    fn rewinding_drops_the_message_and_resumes_the_conversation_before_it() {
+        let mut script = completed_turn();
+        script.insert(
+            2,
+            ProviderOutput::ConversationCursor {
+                cursor: "u-answer".into(),
+            },
+        );
+        let harness = Harness::in_memory("rewind", script);
+        harness.send("t", "m1", "one");
+        harness.wait_for_turn_end();
+        harness.send("t", "m2", "two");
+        harness.wait_for_turn_end();
+
+        assert_eq!(
+            harness.engine.rewind_thread("t", "m2", true).unwrap_err(),
+            CommandError::NoCheckpoint {
+                thread_id: "t".into(),
+                message_id: "m2".into()
+            }
+        );
+        harness.engine.rewind_thread("t", "m2", false).unwrap();
+
+        let ids: Vec<_> = harness
+            .engine
+            .transcript("t", None)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(ids.contains(&"m1".to_owned()));
+        assert!(!ids.contains(&"m2".to_owned()));
+        harness.send("t", "m3", "two again");
+        harness.wait_for_turn_end();
+        let requests = harness.adapter.requests.lock().unwrap();
+        assert_eq!(requests[1].resume_at, None);
+        assert_eq!(requests[2].resume.as_deref(), Some("s1"));
+        assert_eq!(requests[2].resume_at.as_deref(), Some("u-answer"));
+        drop(requests);
+        assert_eq!(harness.thread("t").resume_at, None);
+        assert_eq!(
+            harness.engine.rewind_thread("t", "m1b", false).unwrap_err(),
+            CommandError::CannotRewind {
+                thread_id: "t".into(),
+                message_id: "m1b".into()
+            }
+        );
     }
 
     fn wait_until(mut done: impl FnMut() -> bool) {

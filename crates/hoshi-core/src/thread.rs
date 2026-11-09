@@ -16,6 +16,12 @@ pub struct Thread {
     pub worktree_path: Option<String>,
     /// The provider's own session, resumed on the next turn.
     pub session_id: Option<String>,
+    /// The provider's id for the last message of the conversation, a point a rewind can
+    /// come back to.
+    pub conversation_cursor: Option<String>,
+    /// Set by a rewind: the next turn resumes the session from this message, leaving out
+    /// what came after it.
+    pub resume_at: Option<String>,
     /// Provider model alias; `None` uses the provider's default.
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -158,6 +164,21 @@ pub struct ThreadItem {
     pub content: ItemContent,
 }
 
+/// The point of the conversation a user message started from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export)]
+pub enum Rewind {
+    /// The first message: going back starts a new session.
+    Start,
+    /// After the provider's message `cursor`.
+    After { cursor: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
     tag = "kind",
@@ -177,6 +198,10 @@ pub enum ItemContent {
         /// not the user.
         #[serde(default)]
         task_result: Option<String>,
+        /// Where the conversation goes back to when the user edits from this message; `None`
+        /// for a message that can't be edited from, such as a steer.
+        #[serde(default)]
+        rewind: Option<Rewind>,
     },
     AssistantMessage {
         text: String,

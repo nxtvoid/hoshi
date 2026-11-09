@@ -106,6 +106,7 @@ mod tests {
             attachments: Vec::new(),
             steer: false,
             task_result: None,
+            rewind: None,
         })
     }
 
@@ -119,6 +120,7 @@ mod tests {
             item(ItemContent::UserMessage {
                 steer: false,
                 task_result: None,
+                rewind: None,
                 text: "why is this red?".into(),
                 attachments: vec![MessageAttachment::Image {
                     id: "1".into(),

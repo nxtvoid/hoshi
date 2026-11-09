@@ -166,6 +166,10 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE threads ADD COLUMN task_answered INTEGER NOT NULL DEFAULT 0;
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN conversation_cursor TEXT;
+    ALTER TABLE threads ADD COLUMN resume_at TEXT;
+    ",
 ];
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
@@ -258,7 +262,8 @@ impl Store {
                 "SELECT id, project_id, title, status, branch, worktree_path, session_id,
                         active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                         fast_mode, ultracode, access_mode, plan_mode, worktree_released,
-                        worktree_adopted, parent_thread_id, task_cancelled, task_answered
+                        worktree_adopted, parent_thread_id, task_cancelled, task_answered,
+                        conversation_cursor, resume_at
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -286,6 +291,8 @@ impl Store {
                     parent_thread_id: row.get(20)?,
                     task_cancelled: row.get(21)?,
                     task_answered: row.get(22)?,
+                    conversation_cursor: row.get(23)?,
+                    resume_at: row.get(24)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -678,9 +685,10 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                  (id, project_id, title, status, branch, worktree_path, session_id,
                   active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                   fast_mode, ultracode, access_mode, plan_mode, worktree_released,
-                  worktree_adopted, parent_thread_id, task_cancelled, task_answered)
+                  worktree_adopted, parent_thread_id, task_cancelled, task_answered,
+                  conversation_cursor, resume_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -704,7 +712,9 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     thread.worktree_adopted,
                     thread.parent_thread_id,
                     thread.task_cancelled,
-                    thread.task_answered
+                    thread.task_answered,
+                    thread.conversation_cursor,
+                    thread.resume_at
                 ],
             )?;
         }
@@ -926,6 +936,31 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 params![thread_id, enum_text(*status)?],
             )?;
         }
+        Event::ConversationCursorSet { thread_id, cursor } => {
+            tx.execute(
+                "UPDATE threads SET conversation_cursor = ?2, resume_at = NULL WHERE id = ?1",
+                params![thread_id, cursor],
+            )?;
+        }
+        Event::ThreadRewound {
+            thread_id,
+            message_id,
+            resume_at,
+        } => {
+            tx.execute(
+                "DELETE FROM thread_items
+                 WHERE (thread_id = ?1 OR substr(thread_id, 1, length(?1) + 1) = ?1 || ':')
+                   AND ordinal >= (SELECT ordinal FROM thread_items
+                                   WHERE thread_id = ?1 AND id = ?2)",
+                params![thread_id, message_id],
+            )?;
+            tx.execute(
+                "UPDATE threads SET conversation_cursor = ?2, resume_at = ?2,
+                 session_id = CASE WHEN ?2 IS NULL THEN NULL ELSE session_id END
+                 WHERE id = ?1",
+                params![thread_id, resume_at],
+            )?;
+        }
     }
     Ok(())
 }
@@ -963,6 +998,8 @@ mod tests {
                 branch: Some("feat/x".into()),
                 worktree_path: Some("/worktrees/x".into()),
                 session_id: None,
+                conversation_cursor: None,
+                resume_at: None,
                 model: Some("sonnet".into()),
                 effort: Some(Effort::High),
                 fast_mode: true,
@@ -1334,6 +1371,64 @@ mod tests {
                 interrupted: false,
             }
         );
+    }
+
+    #[test]
+    fn a_rewind_drops_the_message_and_what_followed_and_survives_a_restart() {
+        let (mut store, mut model) = store_with_thread();
+        let turn = |model: &ReadModel, message_id: &str| {
+            let mut events = decide(model, send_text(message_id), NOW).unwrap();
+            events.push(Event::ConversationCursorSet {
+                thread_id: "t".into(),
+                cursor: format!("u-{message_id}"),
+            });
+            events
+        };
+        let events = turn(&model, "m1");
+        commit(&mut store, &mut model, events);
+        let finished = |model: &ReadModel, turn_id: &str| {
+            let done = ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            };
+            record_output(model, "t", turn_id, done, NOW)
+        };
+        let events = finished(&model, "m1");
+        commit(&mut store, &mut model, events);
+        let events = turn(&model, "m2");
+        commit(&mut store, &mut model, events);
+        let inside = ProviderOutput::Subagent {
+            tool_use_id: "toolu_agent".into(),
+            output: Box::new(ProviderOutput::AssistantMessage {
+                item_id: "a".into(),
+                text: "later".into(),
+            }),
+        };
+        let events = record_output(&model, "t", "m2", inside, NOW);
+        commit(&mut store, &mut model, events);
+        let events = finished(&model, "m2");
+        commit(&mut store, &mut model, events);
+
+        let rewind = Command::ThreadRewind {
+            thread_id: "t".into(),
+            message_id: "m2".into(),
+            rewind: hoshi_core::Rewind::After {
+                cursor: "u-m1".into(),
+            },
+        };
+        let events = decide(&model, rewind, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+
+        let ids: Vec<_> = store
+            .thread_items("t")
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert_eq!(ids, ["m1"]);
+        assert!(store.thread_items("t:toolu_agent").unwrap().is_empty());
+        let thread = store.snapshot().unwrap().threads.remove(0);
+        assert_eq!(&thread, model.thread("t").unwrap());
+        assert_eq!(thread.resume_at.as_deref(), Some("u-m1"));
     }
 
     #[test]

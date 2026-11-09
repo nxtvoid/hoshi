@@ -17,6 +17,16 @@ worktreePath: string | null,
  */
 sessionId: string | null, 
 /**
+ * The provider's id for the last message of the conversation, a point a rewind can
+ * come back to.
+ */
+conversationCursor: string | null, 
+/**
+ * Set by a rewind: the next turn resumes the session from this message, leaving out
+ * what came after it.
+ */
+resumeAt: string | null, 
+/**
  * Provider model alias; `None` uses the provider's default.
  */
 model: string | null, effort: Effort | null, 

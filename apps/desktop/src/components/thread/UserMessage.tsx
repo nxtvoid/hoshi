@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ArrowTurnForwardIcon } from '@hugeicons/core-free-icons'
@@ -15,9 +15,16 @@ type UserMessageProps = {
   attachments: MessageAttachment[]
   /** Sent while the agent worked, to steer it. */
   steer?: boolean
+  /** Shown beside the message while it is hovered. */
+  action?: ReactNode
 }
 
-export function UserMessage({ text, attachments, steer }: UserMessageProps) {
+export function UserMessage({
+  text,
+  attachments,
+  steer,
+  action
+}: UserMessageProps) {
   const images = attachments.filter(
     (attachment): attachment is Image => attachment.type === 'image'
   )
@@ -44,12 +51,19 @@ export function UserMessage({ text, attachments, steer }: UserMessageProps) {
         </ul>
       ) : null}
       {text ? (
-        <div className='bg-muted max-w-[85%] rounded-xl px-3 py-2'>
-          <Markdown
-            text={text}
-            source='forge'
-            mentions={knownMentions(attachments)}
-          />
+        <div className='group/message flex max-w-[85%] items-start justify-end gap-1'>
+          {action ? (
+            <span className='opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100'>
+              {action}
+            </span>
+          ) : null}
+          <div className='bg-muted min-w-0 rounded-xl px-3 py-2'>
+            <Markdown
+              text={text}
+              source='forge'
+              mentions={knownMentions(attachments)}
+            />
+          </div>
         </div>
       ) : null}
     </div>

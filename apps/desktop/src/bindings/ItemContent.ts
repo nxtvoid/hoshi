@@ -4,6 +4,7 @@ import type { DiffFile } from "./DiffFile";
 import type { MessageAttachment } from "./MessageAttachment";
 import type { Question } from "./Question";
 import type { RequestStatus } from "./RequestStatus";
+import type { Rewind } from "./Rewind";
 import type { Task } from "./Task";
 import type { ToolDetail } from "./ToolDetail";
 import type { TurnFailure } from "./TurnFailure";
@@ -17,7 +18,12 @@ steer: boolean,
  * The answer of a task this thread delegated, from that child thread; sent by hoshi,
  * not the user.
  */
-taskResult: string | null, } | { "kind": "assistantMessage", text: string, } | { "kind": "reasoning", text: string, } | { "kind": "toolCall", name: string, 
+taskResult: string | null, 
+/**
+ * Where the conversation goes back to when the user edits from this message; `None`
+ * for a message that can't be edited from, such as a steer.
+ */
+rewind: Rewind | null, } | { "kind": "assistantMessage", text: string, } | { "kind": "reasoning", text: string, } | { "kind": "toolCall", name: string, 
 /**
  * The tool input as JSON, truncated for display.
  */

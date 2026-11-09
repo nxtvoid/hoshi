@@ -1,6 +1,6 @@
 use crate::{
     AccessMode, ApprovalDecision, DiffFile, Effort, ItemContent, MessageAttachment, OpenToolCall,
-    Project, ProviderOutput, RequestResponse, RequestStatus, Thread, ThreadContextUsage,
+    Project, ProviderOutput, RequestResponse, RequestStatus, Rewind, Thread, ThreadContextUsage,
     ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure,
     TurnOutcome,
 };
@@ -97,6 +97,14 @@ pub enum Command {
         thread_id: String,
         request_id: String,
         response: RequestResponse,
+    },
+    /// Takes the conversation back to before `message_id`, which goes with all that came
+    /// after it. The engine reads where to go back to from the message, and puts the files
+    /// back first when asked.
+    ThreadRewind {
+        thread_id: String,
+        message_id: String,
+        rewind: Rewind,
     },
 }
 
@@ -225,6 +233,18 @@ pub enum Event {
         thread_id: String,
         status: ThreadStatus,
     },
+    /// A turn ended with `cursor` as the provider's last message of the conversation.
+    ConversationCursorSet {
+        thread_id: String,
+        cursor: String,
+    },
+    /// The transcript lost `message_id` and everything after it. The next turn resumes
+    /// the session after `resume_at`, or starts a new one when it is `None`.
+    ThreadRewound {
+        thread_id: String,
+        message_id: String,
+        resume_at: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, thiserror::Error)]
@@ -249,6 +269,18 @@ pub enum CommandError {
     ThreadBusy { thread_id: String },
     #[error("thread {thread_id} is not running a turn")]
     ThreadNotWorking { thread_id: String },
+    /// The message is a steer, a task's answer, or older than rewinds.
+    #[error("thread {thread_id} can't go back to before message {message_id}")]
+    CannotRewind {
+        thread_id: String,
+        message_id: String,
+    },
+    /// Nothing recorded the files before that message's turn, as outside a git repository.
+    #[error("thread {thread_id} kept no files from before message {message_id}")]
+    NoCheckpoint {
+        thread_id: String,
+        message_id: String,
+    },
     #[error("message is empty")]
     EmptyMessage,
     /// Answered already, withdrawn, or its turn is over.
@@ -666,6 +698,25 @@ impl ReadModel {
                     thread.task_answered = true;
                 }
             }
+            Event::ConversationCursorSet { thread_id, cursor } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.conversation_cursor = Some(cursor.clone());
+                    thread.resume_at = None;
+                }
+            }
+            Event::ThreadRewound {
+                thread_id,
+                resume_at,
+                ..
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    if resume_at.is_none() {
+                        thread.session_id = None;
+                    }
+                    thread.conversation_cursor.clone_from(resume_at);
+                    thread.resume_at.clone_from(resume_at);
+                }
+            }
         }
     }
 }
@@ -749,6 +800,8 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     branch,
                     worktree_path,
                     session_id: None,
+                    conversation_cursor: None,
+                    resume_at: None,
                     model: thread_model,
                     effort,
                     fast_mode,
@@ -773,6 +826,27 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 return Err(CommandError::ThreadNotFound { thread_id });
             }
             Ok(vec![Event::ThreadDeleted { thread_id }])
+        }
+        Command::ThreadRewind {
+            thread_id,
+            message_id,
+            rewind,
+        } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            if thread.active_turn_id.is_some() {
+                return Err(CommandError::ThreadBusy { thread_id });
+            }
+            let resume_at = match rewind {
+                Rewind::Start => None,
+                Rewind::After { cursor } => Some(cursor),
+            };
+            Ok(vec![Event::ThreadRewound {
+                thread_id,
+                message_id,
+                resume_at,
+            }])
         }
         Command::ThreadWorktreeRelease { thread_id } => {
             let Some(thread) = model.threads.get(&thread_id) else {
@@ -1088,6 +1162,7 @@ fn message_events(
             thread_id: thread_id.clone(),
             created_at: now.to_owned(),
             content: ItemContent::UserMessage {
+                rewind: rewind_point(thread, task_result.is_some()),
                 text,
                 attachments,
                 steer: thread.active_turn_id.is_some(),
@@ -1104,6 +1179,35 @@ fn message_events(
         });
     }
     Ok(events)
+}
+
+/// Where a message that starts a turn lets the conversation come back to.
+fn rewind_point(thread: &Thread, task_result: bool) -> Option<Rewind> {
+    if thread.active_turn_id.is_some() || task_result {
+        return None;
+    }
+    match (&thread.session_id, &thread.conversation_cursor) {
+        (None, _) => Some(Rewind::Start),
+        (Some(_), Some(cursor)) => Some(Rewind::After {
+            cursor: cursor.clone(),
+        }),
+        (Some(_), None) => None,
+    }
+}
+
+/// Records the provider's last message of a turn, which later rewinds come back to.
+pub fn record_conversation_cursor(
+    model: &ReadModel,
+    thread_id: &str,
+    cursor: String,
+) -> Vec<Event> {
+    if model.thread(thread_id).is_none() {
+        return Vec::new();
+    }
+    vec![Event::ConversationCursorSet {
+        thread_id: thread_id.to_owned(),
+        cursor,
+    }]
 }
 
 /// Hands the answer of a task this thread delegated back to it, as a message from hoshi.
@@ -1274,7 +1378,8 @@ pub fn record_output(
         | ProviderOutput::ToolOutput { .. }
         | ProviderOutput::ContextUsage(_)
         | ProviderOutput::UsageLimits(_)
-        | ProviderOutput::WorkingDirectory { .. } => Vec::new(),
+        | ProviderOutput::WorkingDirectory { .. }
+        | ProviderOutput::ConversationCursor { .. } => Vec::new(),
         ProviderOutput::Subagent {
             tool_use_id,
             output,
@@ -1887,8 +1992,104 @@ const a = 1
                 attachments: vec![image("screenshot.png")],
                 steer: false,
                 task_result: None,
+                rewind: Some(Rewind::Start),
             }
         )));
+    }
+
+    fn rewind_of(events: &[Event]) -> Option<Rewind> {
+        events.iter().find_map(|event| match event {
+            Event::ItemAdded { item } => match &item.content {
+                ItemContent::UserMessage { rewind, .. } => Some(rewind.clone()),
+                _ => None,
+            },
+            _ => None,
+        })?
+    }
+
+    fn finish_turn(model: &mut ReadModel, turn_id: &str) {
+        record(
+            model,
+            turn_id,
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+    }
+
+    #[test]
+    fn each_turn_s_message_knows_where_the_conversation_goes_back_to() {
+        let mut model = model_with_thread();
+
+        let first = run(&mut model, send("m1", "one")).unwrap();
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s".into(),
+            },
+        );
+        let steer = run(&mut model, send("m1b", "also")).unwrap();
+        finish_turn(&mut model, "m1");
+        let unknown = run(&mut model, send("m2", "two")).unwrap();
+        finish_turn(&mut model, "m2");
+        let cursor = record_conversation_cursor(&model, "t", "u2".into());
+        model.apply(&cursor[0]);
+        let second = run(&mut model, send("m3", "three")).unwrap();
+
+        assert_eq!(rewind_of(&first), Some(Rewind::Start));
+        assert_eq!(rewind_of(&steer), None);
+        assert_eq!(rewind_of(&unknown), None);
+        assert_eq!(
+            rewind_of(&second),
+            Some(Rewind::After {
+                cursor: "u2".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_rewind_pins_the_session_or_drops_it_and_a_new_cursor_unpins_it() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "one")).unwrap();
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s".into(),
+            },
+        );
+        let rewind = |rewind: Rewind| Command::ThreadRewind {
+            thread_id: "t".into(),
+            message_id: "m1".into(),
+            rewind,
+        };
+
+        assert_eq!(
+            run(&mut model, rewind(Rewind::Start)).unwrap_err(),
+            CommandError::ThreadBusy {
+                thread_id: "t".into()
+            }
+        );
+        finish_turn(&mut model, "m1");
+        run(
+            &mut model,
+            rewind(Rewind::After {
+                cursor: "u1".into(),
+            }),
+        )
+        .unwrap();
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.session_id.as_deref(), Some("s"));
+        assert_eq!(thread.resume_at.as_deref(), Some("u1"));
+        let cursor = record_conversation_cursor(&model, "t", "u9".into());
+        model.apply(&cursor[0]);
+        assert_eq!(model.thread("t").unwrap().resume_at, None);
+
+        run(&mut model, rewind(Rewind::Start)).unwrap();
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.session_id, None);
+        assert_eq!(thread.conversation_cursor, None);
     }
 
     #[test]

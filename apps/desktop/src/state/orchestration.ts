@@ -116,6 +116,17 @@ export function applyEvent(
       return updateThread(event.threadId, { taskCancelled: true })
     case 'taskAnswered':
       return updateThread(event.threadId, { taskAnswered: true })
+    case 'conversationCursorSet':
+      return updateThread(event.threadId, {
+        conversationCursor: event.cursor,
+        resumeAt: null
+      })
+    case 'threadRewound':
+      return updateThread(event.threadId, {
+        conversationCursor: event.resumeAt,
+        resumeAt: event.resumeAt,
+        ...(event.resumeAt === null ? { sessionId: null } : {})
+      })
   }
 }
 
@@ -146,6 +157,10 @@ export function applyItemEvent(
           }
         : item
     )
+  }
+  if (event.type === 'threadRewound' && event.threadId === threadId) {
+    const index = items.findIndex((item) => item.id === event.messageId)
+    return index === -1 ? items : items.slice(0, index)
   }
   if (event.type === 'toolCallInterrupted' && event.threadId === threadId) {
     return items.map((item) =>

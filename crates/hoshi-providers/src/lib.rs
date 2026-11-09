@@ -29,6 +29,8 @@ pub struct TurnRequest {
     pub prompt: String,
     pub attachments: Vec<TurnAttachment>,
     pub resume_session_id: Option<String>,
+    /// Resumes the session after this message of it, leaving out the rest, as a rewind asks.
+    pub resume_session_at: Option<String>,
     /// Overrides the adapter's default model.
     pub model: Option<String>,
     pub effort: Option<Effort>,
