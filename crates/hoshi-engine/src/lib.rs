@@ -3478,9 +3478,12 @@ mod tests {
             .unwrap();
         drop(file);
 
-        let _engine =
-            Engine::from_store(Store::open_in_memory().unwrap(), &data_dir, Arc::new(|_| {}))
-                .unwrap();
+        let _engine = Engine::from_store(
+            Store::open_in_memory().unwrap(),
+            &data_dir,
+            Arc::new(|_| {}),
+        )
+        .unwrap();
 
         assert!(!old.exists());
         assert!(fresh.exists());
@@ -3717,7 +3720,11 @@ mod tests {
                 text: "later".into(),
                 attachments: Vec::new(),
             };
-            state.queued.entry("t".into()).or_default().push_back(message());
+            state
+                .queued
+                .entry("t".into())
+                .or_default()
+                .push_back(message());
             state.after_compaction.insert("t".into(), message());
             state.watches.insert("t".into(), WatchState::default());
             state.pending_wakes.insert(

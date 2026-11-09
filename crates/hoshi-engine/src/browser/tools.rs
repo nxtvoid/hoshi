@@ -636,9 +636,12 @@ mod tests {
         let page = json!({ "url": "about:blank" });
         browsing.call("t", "preview_open", &page).unwrap();
         let browser = browsing.browser.as_ref().unwrap();
-        let _ = browser
-            .connection
-            .call_within("Browser.close", json!({}), None, Duration::from_secs(5));
+        let _ = browser.connection.call_within(
+            "Browser.close",
+            json!({}),
+            None,
+            Duration::from_secs(5),
+        );
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while browser.is_connected() {
             assert!(std::time::Instant::now() < deadline, "the browser stayed");

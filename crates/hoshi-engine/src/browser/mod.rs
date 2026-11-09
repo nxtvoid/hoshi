@@ -705,7 +705,12 @@ mod tests {
     fn a_page_s_listener_stops_once_the_page_is_gone() {
         let connection = Arc::new(Connection::offline());
         let console = Arc::new(Mutex::new(VecDeque::new()));
-        listen(&connection, "page", Arc::downgrade(&console), Arc::new(|_| {}));
+        listen(
+            &connection,
+            "page",
+            Arc::downgrade(&console),
+            Arc::new(|_| {}),
+        );
         let elsewhere = cdp::CdpEvent {
             method: "Page.screencastFrame".into(),
             params: json!({}),
