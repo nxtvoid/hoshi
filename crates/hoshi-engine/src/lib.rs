@@ -499,6 +499,7 @@ impl Engine {
                     return secret_requests::request_secret(&weak, caller, arguments);
                 }
                 "thread_wait" => return thread_tools::wait_for_thread(&weak, caller, arguments),
+                "delegate_task" => return delegation::delegate_task(&weak, caller, arguments),
                 _ => {}
             }
             let shared = weak.upgrade().ok_or("hoshi is closing")?;
@@ -863,17 +864,24 @@ impl Engine {
     /// Checks out another local branch in the thread's folder. Refused while a turn runs,
     /// so the agent never finds its branch changed under it.
     pub fn switch_branch(&self, thread_id: &str, branch: &str) -> Result<(), CommandError> {
-        let working = lock(&self.state)
-            .model
-            .thread(thread_id)
-            .is_some_and(|thread| thread.status == ThreadStatus::Working);
-        if working {
-            return Err(CommandError::ThreadBusy {
-                thread_id: thread_id.to_owned(),
-            });
-        }
         let cwd = self.repository_cwd(thread_id)?;
-        git::switch(&cwd, branch).map_err(|detail| CommandError::GitFailed { detail })?;
+        let op = {
+            let mut state = lock(&self.state);
+            let working = state
+                .model
+                .thread(thread_id)
+                .is_some_and(|thread| thread.status == ThreadStatus::Working);
+            if working {
+                return Err(CommandError::ThreadBusy {
+                    thread_id: thread_id.to_owned(),
+                });
+            }
+            state.begin_op(thread_id, &[&cwd])?
+        };
+        let switched =
+            git::switch(&cwd, branch).map_err(|detail| CommandError::GitFailed { detail });
+        lock(&self.state).end_op(op, None)?;
+        switched?;
         read_branches(&Arc::downgrade(&self.state), &[thread_id.to_owned()]);
         Ok(())
     }
@@ -6149,6 +6157,53 @@ Blue"
         assert!(created_in >= Duration::from_millis(1500), "{created_in:?}");
         assert!(snapshot_in < Duration::from_millis(500), "{snapshot_in:?}");
         assert!(harness.thread("s1234567-rest").worktree_path.is_some());
+    }
+
+    #[test]
+    fn a_task_in_its_own_worktree_is_created_off_the_lock() {
+        let repo = git::tests::temp_repository("engine-slow-task");
+        let hooks = repo.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("post-checkout"), "#!/bin/sh\nsleep 2\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = hooks.join("post-checkout");
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let harness = Harness::new(
+            "slow-task",
+            repo,
+            Store::open_in_memory().unwrap(),
+            Vec::new(),
+        );
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let state = Arc::downgrade(&harness.engine.state);
+        let engine = &harness.engine;
+
+        let (task, snapshot_in) = thread::scope(|scope| {
+            let delegating = scope.spawn(|| {
+                let arguments =
+                    serde_json::json!({ "task": "count the files", "isolation": "worktree" });
+                delegation::delegate_task(&state, "t", &arguments).unwrap()
+            });
+            thread::sleep(Duration::from_millis(500));
+            let started = Instant::now();
+            engine.snapshot();
+            let snapshot_in = started.elapsed();
+            (delegating.join().unwrap(), snapshot_in)
+        });
+
+        assert!(snapshot_in < Duration::from_millis(500), "{snapshot_in:?}");
+        let child = harness.thread(task["taskId"].as_str().unwrap());
+        assert_eq!(child.parent_thread_id.as_deref(), Some("t"));
+        let worktree = child.worktree_path.unwrap();
+        assert!(Path::new(&worktree).is_dir());
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests[1].cwd, worktree);
+        assert_eq!(requests[1].prompt, "count the files");
     }
 
     #[test]

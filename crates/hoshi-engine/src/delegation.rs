@@ -1,13 +1,15 @@
 //! Tasks a thread's agent hands to child threads through hoshi's MCP server, and their
 //! answers, which come back to the parent as messages.
 
-use crate::{State, now};
+use crate::{State, WorkspaceOp, WorktreePlan, lock, now};
 use hoshi_core::{
-    Command, Effort, ModelInfo, ThreadStatus, ThreadWorkspace, TurnOutcome, record_delegation,
-    send_task_result,
+    Command, CommandError, Effort, ModelInfo, ThreadStatus, ThreadWorkspace, TurnOutcome,
+    record_delegation, send_task_result,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, Weak};
+use std::thread;
 
 /// What the agent reads with every running task: its answer comes on its own.
 /// Kept short: a page of the transcript keeps only the start of a tool's output, which must
@@ -19,6 +21,31 @@ const PLANNING: &str =
 /// An answer longer than this is cut; `task_status` still has it all.
 const ANSWER_MAX_CHARS: usize = 16_000;
 const TITLE_MAX_CHARS: usize = 60;
+
+/// A `delegate_task` call checked under the lock, waiting for its worktree if it has one.
+pub(crate) struct Delegating {
+    child: String,
+    title: String,
+    task: String,
+    create: Option<Command>,
+    /// Works in its parent's worktree.
+    shared: bool,
+    /// Its own worktree, to create outside the lock.
+    worktree: Option<(WorktreePlan, WorkspaceOp)>,
+}
+
+/// `delegate_task` from the MCP server: the task's own worktree is created outside the lock,
+/// so other threads go on meanwhile.
+pub(crate) fn delegate_task(
+    state: &Weak<Mutex<State>>,
+    caller: &str,
+    arguments: &Value,
+) -> Result<Value, String> {
+    let shared = state.upgrade().ok_or("hoshi is closing")?;
+    let mut delegating = lock(&shared).plan_delegation(caller, arguments)?;
+    let created = delegating.worktree.as_ref().map(|(plan, _)| plan.create());
+    lock(&shared).finish_delegation(caller, &mut delegating, created)
+}
 
 /// How many threads deep tasks can go: a thread delegates, and its tasks can delegate once
 /// more.
@@ -164,7 +191,17 @@ impl State {
         }
     }
 
+    /// `delegate_task` under the lock throughout; [`delegate_task`] creates a task's own
+    /// worktree outside it.
     fn delegate_task(&mut self, caller: &str, arguments: &Value) -> Result<Value, String> {
+        let mut delegating = self.plan_delegation(caller, arguments)?;
+        let created = delegating.worktree.as_ref().map(|(plan, _)| plan.create());
+        self.finish_delegation(caller, &mut delegating, created)
+    }
+
+    /// Checks a `delegate_task` call and settles what its task is; a task in a worktree of
+    /// its own also gets where that goes, reserved.
+    fn plan_delegation(&mut self, caller: &str, arguments: &Value) -> Result<Delegating, String> {
         let parent = self
             .model
             .thread(caller)
@@ -216,6 +253,19 @@ impl State {
         };
         let shared = matches!(workspace, ThreadWorkspace::Worktree { .. });
         let child = new_id();
+        let worktree = match (&workspace, parent.project_id.as_deref()) {
+            (ThreadWorkspace::NewWorktree, Some(project)) => {
+                let plan = self
+                    .plan_worktree(&child, project, None)
+                    .map_err(|error| error.to_string())?;
+                let path = plan.path.to_string_lossy().into_owned();
+                let op = self
+                    .begin_op(&child, &[&path])
+                    .map_err(|error| error.to_string())?;
+                Some((plan, op))
+            }
+            _ => None,
+        };
         let create = Command::ThreadCreate {
             thread_id: child.clone(),
             project_id: parent.project_id.clone(),
@@ -228,13 +278,69 @@ impl State {
             access_mode: parent.access_mode,
             plan_mode: arguments["plan"].as_bool().unwrap_or(false),
         };
-        // The parent's worktree is already there; only a new one goes through `prepare`.
-        let created = if shared {
+        Ok(Delegating {
+            child,
+            title,
+            task: task.to_owned(),
+            create: Some(create),
+            shared,
+            worktree,
+        })
+    }
+
+    /// Creates the task's thread, in the worktree `created` made if it has its own, and
+    /// sends it its task.
+    fn finish_delegation(
+        &mut self,
+        caller: &str,
+        delegating: &mut Delegating,
+        created: Option<Result<ThreadWorkspace, CommandError>>,
+    ) -> Result<Value, String> {
+        let Delegating {
+            child,
+            title,
+            task,
+            shared,
+            ..
+        } = delegating;
+        let (child, title, task) = (child.clone(), title.clone(), task.clone());
+        let Some(mut create) = delegating.create.take() else {
+            return Err("this task was already delegated".into());
+        };
+        let worktree = delegating.worktree.take();
+        let op = match (worktree, created) {
+            (Some((plan, op)), Some(Ok(made))) => {
+                if let Command::ThreadCreate { workspace, .. } = &mut create {
+                    *workspace = made;
+                }
+                Some((plan, op))
+            }
+            (Some((_, op)), Some(Err(error))) => {
+                self.end_op(op, None).map_err(|error| error.to_string())?;
+                return Err(error.to_string());
+            }
+            _ => None,
+        };
+        // The parent's worktree, or the one made above, is already there.
+        let created = if *shared || op.is_some() {
             self.run_prepared(create)
         } else {
             self.run_command(create)
         };
-        created.map_err(|error| error.to_string())?;
+        let op = match (created, op) {
+            (Ok(()), Some((_, op))) => {
+                self.start_worktree_setup(&child);
+                Some(op)
+            }
+            (Ok(()), None) => None,
+            (Err(error), op) => {
+                if let Some((plan, op)) = op {
+                    thread::spawn(move || plan.discard());
+                    self.end_op(op, None).map_err(|error| error.to_string())?;
+                }
+                return Err(error.to_string());
+            }
+        };
         let now = now();
         let linked = record_delegation(&self.model, &child, caller);
         self.commit(&linked, &now)
@@ -246,12 +352,16 @@ impl State {
                 title: title.clone(),
             },
         );
-        self.run_command(Command::MessageSend {
+        let send = Command::MessageSend {
             thread_id: child.clone(),
             message_id: new_id(),
-            text: task.to_owned(),
+            text: task,
             attachments: Vec::new(),
-        })
+        };
+        match op {
+            Some(op) => self.end_op(op, Some(send)),
+            None => self.run_command(send),
+        }
         .map_err(|error| error.to_string())?;
         Ok(json!({ "taskId": child, "status": "running", "next": NEXT }))
     }
