@@ -2963,7 +2963,17 @@ fn start_turn(
         );
         return;
     };
-    let (Some(cwd), Some(thread)) = (state.cwd(thread_id), state.model.thread(thread_id)) else {
+    if state.model.thread(thread_id).is_none() {
+        return;
+    }
+    let Some(cwd) = state.cwd(thread_id) else {
+        let failure = TurnFailure::SpawnFailed {
+            detail: format!("thread {thread_id} has no folder to run in"),
+        };
+        state.receive(thread_id, turn_id, turn_failed(failure));
+        return;
+    };
+    let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
     let project = thread
@@ -3827,6 +3837,26 @@ mod tests {
             }
         );
         assert_eq!(harness.thread("t").status, ThreadStatus::Error);
+    }
+
+    #[test]
+    fn a_chat_whose_folder_cannot_be_made_fails_its_turn() {
+        let harness = Harness::in_memory("chat-no-folder", completed_turn());
+        std::fs::write(harness.data_dir.join("chats"), "not a folder").unwrap();
+        harness
+            .create_thread_in("chat-1", None, ThreadWorkspace::Local)
+            .unwrap();
+
+        harness.send("chat-1", "m1", "hello");
+
+        assert!(matches!(
+            harness.wait_for_turn_end(),
+            TurnOutcome::Failed {
+                reason: TurnFailure::SpawnFailed { .. }
+            }
+        ));
+        assert_eq!(harness.thread("chat-1").status, ThreadStatus::Error);
+        assert!(harness.adapter.requests.lock().unwrap().is_empty());
     }
 
     #[test]
