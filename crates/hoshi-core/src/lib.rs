@@ -14,6 +14,7 @@ mod request;
 mod settings;
 mod source_control;
 mod terminal;
+mod theme_import;
 mod thread;
 mod usage;
 mod workspace;
@@ -51,6 +52,7 @@ pub use source_control::{
     GitActionResult, GitStatus,
 };
 pub use terminal::{TerminalAttach, TerminalEvent, TerminalExit};
+pub use theme_import::{ExtensionTheme, ThemeExtension, ThemeExtensionSort};
 pub use thread::{
     AccessMode, BackgroundTask, CompactionStatus, Effort, ItemContent, OpenToolCall, Rewind, Task,
     TaskStatus, Thread, ThreadBackgroundTasks, ThreadItem, ThreadStatus, ThreadWorkspace,

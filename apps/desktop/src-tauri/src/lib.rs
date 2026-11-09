@@ -3,6 +3,8 @@ mod clipboard;
 mod home;
 mod orchestration;
 mod settings;
+mod theme_files;
+mod theme_import;
 
 use tauri::{App, Manager, WebviewWindowBuilder};
 
@@ -95,7 +97,10 @@ pub fn run() {
             orchestration::regenerate_thread_title,
             settings::get_settings,
             settings::update_settings,
-            appearance::set_appearance
+            appearance::set_appearance,
+            theme_files::export_theme,
+            theme_import::search_theme_extensions,
+            theme_import::import_theme_extension
         ])
         .build(tauri::generate_context!())
         .expect("error while building hoshi")

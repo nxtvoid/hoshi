@@ -1,18 +1,26 @@
-import { cn } from '@hoshi/utils'
+import type { ReactNode } from 'react'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { Slider } from '@hoshi/ui/components/slider'
 import { Switch } from '@hoshi/ui/components/switch'
-import { SettingsPage, SettingsRow, SettingsSection } from './SettingsLayout'
-import { ComputerIcon, Moon02Icon, Sun03Icon } from '@hugeicons/core-free-icons'
+import { Button } from '@hoshi/ui/components/button'
+import { useThemeStore } from '@/state/theme-store'
+import { RotateLeft01Icon } from '@hugeicons/core-free-icons'
 import {
-  type Appearance,
-  CODE_SIZE,
-  type ColorPalette,
-  INTERFACE_SIZE,
-  type SizeRange,
-  type ThemePreference
-} from '@/state/appearance'
+  AddThemeButton,
+  ColorSchemeTiles,
+  CreateThemeButton,
+  ThemeGrid
+} from './ThemeLibrary'
+import {
+  CodeFontPreview,
+  PromptFontPreview,
+  TerminalFontPreview
+} from './TypographyPreviews'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger
+} from '@hoshi/ui/components/tooltip'
 import {
   Select,
   SelectContent,
@@ -20,279 +28,316 @@ import {
   SelectTrigger,
   SelectValue
 } from '@hoshi/ui/components/select'
-import { useResolvedDark, useThemeStore } from '@/state/theme-store'
+import {
+  type Appearance,
+  CODE_SIZE,
+  COMPOSER_SIZE,
+  DEFAULT_APPEARANCE,
+  INTERFACE_SIZE,
+  type SizeRange,
+  sizeOptions,
+  TERMINAL_SIZE
+} from '@/state/appearance'
+import {
+  SettingsAdvanced,
+  SettingsPage,
+  SettingsRow,
+  SettingsSection
+} from './SettingsLayout'
 
-export const THEME_OPTIONS = [
-  { value: 'system', label: m.theme_system, icon: ComputerIcon },
-  { value: 'light', label: m.theme_light, icon: Sun03Icon },
-  { value: 'dark', label: m.theme_dark, icon: Moon02Icon }
-] as const
+type FontOption<T extends string> = { value: T; label: () => string }
 
-const PALETTE_OPTIONS = [
-  { value: 'hoshi', label: m.palette_hoshi },
-  { value: 'grove', label: m.palette_grove },
-  { value: 'ocean', label: m.palette_ocean },
-  { value: 'ember', label: m.palette_ember },
-  { value: 'iris', label: m.palette_iris }
-] as const
-
-const INTERFACE_FONT_OPTIONS = [
+const INTERFACE_FONT_OPTIONS: FontOption<Appearance['interfaceFont']>[] = [
   { value: 'geist', label: m.font_geist },
   { value: 'inter', label: m.font_inter },
   { value: 'system', label: m.font_system }
-] as const
+]
 
-const CODE_FONT_OPTIONS = [
+const CODE_FONT_OPTIONS: FontOption<Appearance['codeFont']>[] = [
   { value: 'jetbrains', label: m.font_jetbrains_mono },
   { value: 'cascadia', label: m.font_cascadia_mono },
   { value: 'system', label: m.font_system_mono }
-] as const
+]
 
-const IS_LINUX = document.documentElement.dataset.platform === 'linux'
+const COMPOSER_FONT_OPTIONS: FontOption<Appearance['composerFont']>[] = [
+  { value: 'interface', label: m.font_same_as_interface },
+  ...INTERFACE_FONT_OPTIONS,
+  { value: 'jetbrains', label: m.font_jetbrains_mono },
+  { value: 'cascadia', label: m.font_cascadia_mono },
+  { value: 'system-mono', label: m.font_system_mono }
+]
 
-const paletteAttribute = (palette: ColorPalette) =>
-  palette === 'hoshi' ? undefined : palette
+const PLATFORM = document.documentElement.dataset.platform
 
 export function AppearanceSection() {
   return (
     <SettingsPage>
-      <SettingsSection title={m.settings_appearance()} hideTitle>
-        <SettingsRow title={m.theme()} description={m.theme_description()}>
-          <ThemeCards />
-        </SettingsRow>
-        <SettingsRow
-          title={m.color_palette()}
-          description={m.color_palette_description()}
-        >
-          <PaletteSwatches />
-        </SettingsRow>
-      </SettingsSection>
+      <section className='flex flex-col gap-2.5'>
+        <h2 className='px-4 text-base font-semibold'>{m.color_scheme()}</h2>
+        <ColorSchemeTiles />
+      </section>
+      <section className='flex flex-col gap-2.5'>
+        <div className='flex min-h-7 flex-wrap items-center justify-between gap-3 px-4'>
+          <h2 className='text-base font-semibold'>{m.themes()}</h2>
+          <div className='flex flex-wrap items-center justify-end gap-2'>
+            <CreateThemeButton />
+            <AddThemeButton />
+          </div>
+        </div>
+        <ThemeGrid />
+      </section>
       <TypographySection />
     </SettingsPage>
   )
 }
 
-function ThemeCards() {
-  const preference = useThemeStore((state) => state.preference)
-  const palette = useThemeStore((state) => state.palette)
-  const setPreference = useThemeStore((state) => state.setPreference)
-
-  return (
-    <fieldset className='mt-3 grid grid-cols-3 gap-3'>
-      <legend className='sr-only'>{m.theme()}</legend>
-      {THEME_OPTIONS.map(({ value, label, icon }) => {
-        const selected = preference === value
-        return (
-          <button
-            key={value}
-            type='button'
-            aria-pressed={selected}
-            onClick={() => setPreference(value)}
-            className={cn(
-              'focus-visible:ring-ring flex flex-col gap-2 rounded-xl border p-2 text-sm font-medium transition-colors outline-none focus-visible:ring-2',
-              selected
-                ? 'border-primary ring-primary text-foreground ring-1'
-                : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
-            )}
-          >
-            <ThemePreview preference={value} palette={palette} />
-            <span className='flex items-center gap-1.5 px-1'>
-              <HugeiconsIcon icon={icon} strokeWidth={2} className='size-4' />
-              {label()}
-            </span>
-          </button>
-        )
-      })}
-    </fieldset>
-  )
-}
-
-function ThemePreview({
-  preference,
-  palette
-}: {
-  preference: ThemePreference
-  palette: ColorPalette
-}) {
-  if (preference !== 'system') {
-    return <PreviewSurface mode={preference} palette={palette} />
-  }
-  return (
-    <div className='relative'>
-      <PreviewSurface mode='light' palette={palette} />
-      <PreviewSurface
-        mode='dark'
-        palette={palette}
-        className='absolute inset-0 [clip-path:inset(0_0_0_50%)]'
-      />
-    </div>
-  )
-}
-
-function PreviewSurface({
-  mode,
-  palette,
-  className
-}: {
-  mode: 'light' | 'dark'
-  palette: ColorPalette
-  className?: string
-}) {
-  return (
-    <div
-      aria-hidden
-      data-palette={paletteAttribute(palette)}
-      className={cn(
-        mode,
-        'bg-background border-border flex h-16 overflow-hidden rounded-md border',
-        className
-      )}
-    >
-      <div className='bg-sidebar border-sidebar-border flex w-1/4 flex-col gap-1 border-e p-1.5'>
-        <span className='bg-sidebar-foreground/25 h-1 rounded-full' />
-        <span className='bg-sidebar-foreground/15 h-1 w-2/3 rounded-full' />
-      </div>
-      <div className='flex flex-1 flex-col justify-end gap-1.5 p-2'>
-        <span className='bg-foreground/15 h-1.5 w-3/4 rounded-full' />
-        <span className='bg-primary h-1.5 w-1/2 rounded-full' />
-      </div>
-    </div>
-  )
-}
-
-function PaletteSwatches() {
-  const palette = useThemeStore((state) => state.palette)
-  const update = useThemeStore((state) => state.update)
-  const dark = useResolvedDark()
-
-  return (
-    <fieldset className='mt-3 flex flex-wrap gap-1'>
-      <legend className='sr-only'>{m.color_palette()}</legend>
-      {PALETTE_OPTIONS.map(({ value, label }) => {
-        const selected = palette === value
-        return (
-          <button
-            key={value}
-            type='button'
-            aria-pressed={selected}
-            onClick={() => update({ palette: value })}
-            className={cn(
-              'group focus-visible:ring-ring flex w-16 flex-col items-center gap-1.5 rounded-lg py-1.5 text-xs transition-colors outline-none focus-visible:ring-2',
-              selected
-                ? 'text-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            )}
-          >
-            <span
-              className={cn(
-                'ring-offset-background flex size-8 items-center justify-center rounded-full ring-offset-2 transition-shadow',
-                selected
-                  ? 'ring-primary ring-2'
-                  : 'ring-border group-hover:ring-foreground/30 ring-1'
-              )}
-            >
-              <span
-                data-palette={paletteAttribute(value)}
-                className={cn(
-                  dark ? 'dark' : 'light',
-                  'bg-primary size-7 rounded-full'
-                )}
-              />
-            </span>
-            {label()}
-          </button>
-        )
-      })}
-    </fieldset>
-  )
-}
+type FontKey = 'interfaceFont' | 'codeFont' | 'composerFont' | 'terminalFont'
+type SizeKey = 'interfaceSize' | 'codeSize' | 'composerSize' | 'terminalSize'
 
 function TypographySection() {
-  const interfaceFont = useThemeStore((state) => state.interfaceFont)
-  const interfaceSize = useThemeStore((state) => state.interfaceSize)
-  const codeFont = useThemeStore((state) => state.codeFont)
-  const codeSize = useThemeStore((state) => state.codeSize)
+  const separate = useThemeStore((state) => state.separateFonts)
+  const wordWrap = useThemeStore((state) => state.wordWrap)
+  const fontSmoothing = useThemeStore((state) => state.fontSmoothing)
   const lighterText = useThemeStore((state) => state.lighterText)
   const update = useThemeStore((state) => state.update)
 
   return (
     <SettingsSection title={m.typography()}>
-      <SettingsRow
+      <FontRow
+        id='settings-interface-font'
         title={m.interface_font()}
         description={m.interface_font_description()}
-        htmlFor='settings-interface-font'
-        control={
-          <OptionSelect
-            id='settings-interface-font'
-            options={INTERFACE_FONT_OPTIONS}
-            value={interfaceFont}
-            onChange={(value) => update({ interfaceFont: value })}
-          />
+        fontKey='interfaceFont'
+        sizeKey='interfaceSize'
+        options={INTERFACE_FONT_OPTIONS}
+        range={INTERFACE_SIZE}
+        sizeLabel={m.interface_font_size()}
+        preview={separate ? undefined : <PromptFontPreview />}
+      />
+      {separate ? (
+        <FontRow
+          id='settings-prompt-font'
+          title={m.prompt_font()}
+          description={m.prompt_font_description()}
+          fontKey='composerFont'
+          sizeKey='composerSize'
+          options={COMPOSER_FONT_OPTIONS}
+          range={COMPOSER_SIZE}
+          sizeLabel={m.prompt_font_size()}
+          preview={<PromptFontPreview />}
+        />
+      ) : null}
+      <FontRow
+        id='settings-code-font'
+        title={separate ? m.code_font() : m.monospace_font()}
+        description={
+          separate ? m.code_font_description() : m.monospace_font_description()
+        }
+        fontKey='codeFont'
+        sizeKey='codeSize'
+        options={CODE_FONT_OPTIONS}
+        range={CODE_SIZE}
+        sizeLabel={m.code_font_size()}
+        preview={
+          <>
+            <CodeFontPreview />
+            {separate ? null : <TerminalFontPreview />}
+          </>
         }
       />
+      {separate ? (
+        <FontRow
+          id='settings-terminal-font'
+          title={m.terminal_font()}
+          description={m.terminal_font_description()}
+          fontKey='terminalFont'
+          sizeKey='terminalSize'
+          options={CODE_FONT_OPTIONS}
+          range={TERMINAL_SIZE}
+          sizeLabel={m.terminal_font_size()}
+          preview={<TerminalFontPreview />}
+        />
+      ) : null}
       <SettingsRow
-        title={m.interface_size()}
-        description={m.interface_size_description()}
+        title={m.word_wrap()}
+        description={m.word_wrap_description()}
+        htmlFor='settings-word-wrap'
+        action={
+          wordWrap === DEFAULT_APPEARANCE.wordWrap ? null : (
+            <ResetButton
+              label={m.reset_setting({ name: m.word_wrap() })}
+              onClick={() => update({ wordWrap: DEFAULT_APPEARANCE.wordWrap })}
+            />
+          )
+        }
         control={
-          <SizeSlider
-            label={m.interface_size()}
-            range={INTERFACE_SIZE}
-            value={interfaceSize}
-            onChange={(value) => update({ interfaceSize: value })}
+          <Switch
+            id='settings-word-wrap'
+            checked={wordWrap}
+            onCheckedChange={(checked) => update({ wordWrap: checked })}
           />
         }
       />
-      <SettingsRow
-        title={m.code_font()}
-        description={m.code_font_description()}
-        htmlFor='settings-code-font'
-        control={
-          <OptionSelect
-            id='settings-code-font'
-            options={CODE_FONT_OPTIONS}
-            value={codeFont}
-            onChange={(value) => update({ codeFont: value })}
-          />
-        }
-      />
-      <SettingsRow
-        title={m.code_size()}
-        description={m.code_size_description()}
-        control={
-          <SizeSlider
-            label={m.code_size()}
-            range={CODE_SIZE}
-            value={codeSize}
-            onChange={(value) => update({ codeSize: value })}
-          />
-        }
-      />
-      {IS_LINUX ? (
+      <SettingsAdvanced label={m.advanced()}>
         <SettingsRow
-          title={m.lighter_text()}
-          description={m.lighter_text_description()}
-          htmlFor='settings-lighter-text'
+          title={m.separate_fonts()}
+          description={m.separate_fonts_description()}
+          htmlFor='settings-separate-fonts'
           control={
             <Switch
-              id='settings-lighter-text'
-              checked={lighterText}
-              onCheckedChange={(checked) => update({ lighterText: checked })}
+              id='settings-separate-fonts'
+              checked={separate}
+              onCheckedChange={(checked) => update({ separateFonts: checked })}
             />
           }
         />
-      ) : null}
+        {PLATFORM === 'mac' ? (
+          <SettingsRow
+            title={m.font_smoothing()}
+            description={m.font_smoothing_description()}
+            htmlFor='settings-font-smoothing'
+            action={
+              fontSmoothing === DEFAULT_APPEARANCE.fontSmoothing ? null : (
+                <ResetButton
+                  label={m.reset_setting({ name: m.font_smoothing() })}
+                  onClick={() =>
+                    update({ fontSmoothing: DEFAULT_APPEARANCE.fontSmoothing })
+                  }
+                />
+              )
+            }
+            control={
+              <Switch
+                id='settings-font-smoothing'
+                checked={fontSmoothing}
+                onCheckedChange={(checked) =>
+                  update({ fontSmoothing: checked })
+                }
+              />
+            }
+          />
+        ) : null}
+        {PLATFORM === 'linux' ? (
+          <SettingsRow
+            title={m.lighter_text()}
+            description={m.lighter_text_description()}
+            htmlFor='settings-lighter-text'
+            control={
+              <Switch
+                id='settings-lighter-text'
+                checked={lighterText}
+                onCheckedChange={(checked) => update({ lighterText: checked })}
+              />
+            }
+          />
+        ) : null}
+      </SettingsAdvanced>
     </SettingsSection>
   )
 }
 
-function OptionSelect<T extends Appearance['interfaceFont' | 'codeFont']>({
+function FontRow<T extends string>({
+  id,
+  title,
+  description,
+  fontKey,
+  sizeKey,
+  options,
+  range,
+  sizeLabel,
+  preview
+}: {
+  id: string
+  title: string
+  description: string
+  fontKey: FontKey
+  sizeKey: SizeKey
+  options: FontOption<T>[]
+  range: SizeRange
+  sizeLabel: string
+  preview?: ReactNode
+}) {
+  const font = useThemeStore((state) => state[fontKey]) as T
+  const size = useThemeStore((state) => state[sizeKey])
+  const update = useThemeStore((state) => state.update)
+  const changed =
+    font !== DEFAULT_APPEARANCE[fontKey] || size !== DEFAULT_APPEARANCE[sizeKey]
+
+  return (
+    <SettingsRow
+      title={title}
+      description={description}
+      htmlFor={id}
+      action={
+        changed ? (
+          <ResetButton
+            label={m.reset_setting({ name: title })}
+            onClick={() =>
+              update({
+                [fontKey]: DEFAULT_APPEARANCE[fontKey],
+                [sizeKey]: DEFAULT_APPEARANCE[sizeKey]
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <div className='flex flex-wrap items-center gap-2 @min-[32rem]/settings-row:flex-nowrap'>
+          <OptionSelect
+            id={id}
+            options={options}
+            value={font}
+            onChange={(value) => update({ [fontKey]: value })}
+          />
+          <SizeSelect
+            label={sizeLabel}
+            range={range}
+            value={size}
+            onChange={(value) => update({ [sizeKey]: value })}
+          />
+        </div>
+      }
+    >
+      {preview}
+    </SettingsRow>
+  )
+}
+
+function ResetButton({
+  label,
+  onClick
+}: {
+  label: string
+  onClick: () => void
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant='ghost'
+            size='icon-xs'
+            aria-label={label}
+            onClick={onClick}
+            className='text-muted-foreground size-5'
+          />
+        }
+      >
+        <HugeiconsIcon icon={RotateLeft01Icon} strokeWidth={2} />
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+function OptionSelect<T extends string>({
   id,
   options,
   value,
   onChange
 }: {
   id: string
-  options: readonly { value: T; label: () => string }[]
+  options: readonly FontOption<T>[]
   value: T
   onChange: (value: T) => void
 }) {
@@ -322,7 +367,7 @@ function OptionSelect<T extends Appearance['interfaceFont' | 'codeFont']>({
   )
 }
 
-function SizeSlider({
+function SizeSelect({
   label,
   range,
   value,
@@ -333,22 +378,28 @@ function SizeSlider({
   value: number
   onChange: (value: number) => void
 }) {
+  const items = sizeOptions(range).map((size) => ({
+    value: size,
+    label: m.font_size_px({ size })
+  }))
   return (
-    <div className='flex w-56 items-center gap-3'>
-      <Slider
-        aria-label={label}
-        min={range.min}
-        max={range.max}
-        step={1}
-        value={[value]}
-        onValueChange={(next) => {
-          const size = Array.isArray(next) ? next[0] : next
-          if (typeof size === 'number') onChange(size)
-        }}
-      />
-      <span className='text-muted-foreground w-12 shrink-0 text-right text-xs tabular-nums'>
-        {m.font_size_px({ size: value })}
-      </span>
-    </div>
+    <Select
+      items={items}
+      value={value}
+      onValueChange={(next: number | null) => {
+        if (next !== null && next !== value) onChange(next)
+      }}
+    >
+      <SelectTrigger aria-label={label} className='w-24 shrink-0'>
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent>
+        {items.map((item) => (
+          <SelectItem key={item.value} value={item.value}>
+            {item.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }

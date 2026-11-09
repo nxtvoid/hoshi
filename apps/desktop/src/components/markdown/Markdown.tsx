@@ -1,5 +1,6 @@
-import { memo, useMemo } from 'react'
 import { cn } from '@hoshi/utils'
+import { type ComponentProps, memo, useMemo } from 'react'
+import { useThemeStore } from '@/state/theme-store'
 import { CodeBlock } from './CodeBlock'
 import { MarkdownLink } from './MarkdownLink'
 import { rehypeMentions } from './rehype-mentions'
@@ -75,12 +76,7 @@ const COMPONENTS: Components = {
   pre: ({ node, ...props }) => {
     const block = codeBlockOf(node)
     if (block) return <CodeBlock {...block} />
-    return (
-      <pre
-        className='bg-muted my-2.5 overflow-x-auto rounded-lg p-3 font-mono text-(length:--code-font-size)'
-        {...props}
-      />
-    )
+    return <PlainPre {...props} />
   },
   table: ({ node: _, ...props }) => (
     <div className='my-2.5 overflow-x-auto'>
@@ -223,3 +219,16 @@ const MarkdownBlock = memo(function MarkdownBlock({
     </ReactMarkdown>
   )
 })
+
+function PlainPre(props: ComponentProps<'pre'>) {
+  const wrap = useThemeStore((state) => state.wordWrap)
+  return (
+    <pre
+      className={cn(
+        'bg-muted my-2.5 overflow-x-auto rounded-lg p-3 font-mono text-(length:--code-font-size)',
+        wrap && 'wrap-break-word whitespace-pre-wrap'
+      )}
+      {...props}
+    />
+  )
+}
