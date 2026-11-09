@@ -117,19 +117,15 @@ impl State {
     /// `thread_read`: a thread's latest messages, oldest first.
     pub(crate) fn read_thread(&self, arguments: &Value) -> Result<Value, String> {
         let thread = thread_argument(self, arguments)?;
-        let items = self
-            .store
-            .thread_items(&thread.id)
-            .map_err(|error| error.to_string())?;
         let limit = number(arguments, "limit", READ_LIMIT, MAX_READ_LIMIT);
         let max_chars = number(arguments, "maxCharsPerItem", ITEM_CHARS, MAX_ITEM_CHARS);
-        let messages: Vec<_> = items
+        let (items, earlier) = self
+            .store
+            .latest_messages(&thread.id, limit)
+            .map_err(|error| error.to_string())?;
+        let read: Vec<Value> = items
             .iter()
             .filter_map(|item| Some((item, readable(item)?)))
-            .collect();
-        let start = messages.len().saturating_sub(limit);
-        let read: Vec<Value> = messages[start..]
-            .iter()
             .map(|(item, (role, text))| {
                 let (text, truncated) = cut(text, max_chars);
                 json!({ "id": item.id, "role": role, "text": text, "truncated": truncated })
@@ -137,7 +133,7 @@ impl State {
             .collect();
         let mut detail = summary(self, thread);
         detail["messages"] = Value::Array(read);
-        detail["earlierMessages"] = json!(start);
+        detail["earlierMessages"] = json!(earlier);
         Ok(detail)
     }
 
@@ -199,14 +195,10 @@ pub(crate) fn wait_for_thread(
         if done || timed_out {
             let answer = state
                 .store
-                .thread_items(&thread.id)
-                .unwrap_or_default()
-                .iter()
-                .rev()
-                .find_map(|item| match &item.content {
-                    ItemContent::AssistantMessage { text } => Some(cut(text, ANSWER_CHARS).0),
-                    _ => None,
-                });
+                .last_answer(&thread.id)
+                .ok()
+                .flatten()
+                .map(|text| cut(&text, ANSWER_CHARS).0);
             let mut result = summary(&state, thread);
             result["timedOut"] = json!(!done);
             result["lastAnswer"] = json!(answer);
