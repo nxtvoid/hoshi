@@ -6,6 +6,7 @@ import { TooltipProvider } from '@hoshi/ui/components/tooltip'
 import { DialogHost } from '@/components/dialogs/DialogHost'
 import { FirstRunGate } from '@/components/onboarding/FirstRunGate'
 import { CommandPalette } from '@/components/palette/CommandPalette'
+import { EditContextMenu } from '@/components/window/EditContextMenu'
 import { useUnseenTracking } from '@/state/unseen-store'
 import { useThreadNotifications } from '@/state/thread-notifications'
 import { useThreadShortcuts } from '@/components/sidebar/use-thread-shortcuts'
@@ -26,6 +27,7 @@ export function App() {
       <CommandPalette />
       <DialogHost />
       <FirstRunGate />
+      <EditContextMenu />
     </TooltipProvider>
   )
 }
