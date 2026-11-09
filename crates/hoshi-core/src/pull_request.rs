@@ -64,6 +64,23 @@ pub struct PullRequest {
     pub updated_at: String,
 }
 
+/// What an update on a watched pull request told the agent, for the UI to name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PullRequestUpdate {
+    pub number: u32,
+    /// Checks that failed since the last update.
+    pub failed_checks: Vec<String>,
+    pub checks_passed: bool,
+    /// Comments and reviews since the last update.
+    pub comments: u32,
+    pub conflicting: bool,
+    pub closed: bool,
+    /// The watch ended with this update.
+    pub stopped: bool,
+}
+
 /// One CI check of a pull request's latest commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

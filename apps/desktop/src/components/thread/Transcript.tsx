@@ -13,6 +13,7 @@ import { DelegationRow, TaskResultRow } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
 import { TurnChangesCard } from './TurnChangesCard'
 import { RewindButton } from './RewindButton'
+import { PullRequestUpdateRow } from './PullRequestUpdateRow'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
@@ -404,6 +405,14 @@ const Item = memo(function Item({
   const { content } = item
   switch (content.kind) {
     case 'userMessage':
+      if (content.pullRequestUpdate) {
+        return (
+          <PullRequestUpdateRow
+            update={content.pullRequestUpdate}
+            text={content.text}
+          />
+        )
+      }
       return content.taskResult ? (
         <TaskResultRow text={content.text} childThreadId={content.taskResult} />
       ) : (

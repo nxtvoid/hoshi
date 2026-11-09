@@ -257,6 +257,16 @@ fn tools() -> Value {
                 "required": ["threadId"],
             },
         },
+        {
+            "name": "watch_pull_request",
+            "description": "Watch this thread's open pull request: hoshi wakes you with a message when checks fail, all checks pass, someone comments or reviews, or the branch conflicts. Handle what is already there first; only later news wakes you. After this call, end your turn. The watch stays on after each wake, so don't call this again on a wake. A wake is not a merge decision: check readiness yourself.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": "unwatch_pull_request",
+            "description": "Stop watching this thread's pull request. Call it before you hand the work back to the user.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
@@ -319,7 +329,9 @@ mod tests {
                 "thread_list",
                 "thread_read",
                 "thread_send",
-                "thread_wait"
+                "thread_wait",
+                "watch_pull_request",
+                "unwatch_pull_request"
             ]
         );
 

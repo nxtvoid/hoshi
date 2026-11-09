@@ -23,7 +23,8 @@ import {
   FolderOpenIcon,
   GitBranchIcon,
   GitForkIcon,
-  LeftToRightListBulletIcon
+  LeftToRightListBulletIcon,
+  ViewIcon
 } from '@hugeicons/core-free-icons'
 import {
   Popover,
@@ -325,6 +326,12 @@ function DetailsContent({
           <span className='text-muted-foreground min-w-0 flex-1 truncate font-normal'>
             {pullRequest.title}
           </span>
+          {thread.watchingPullRequest ? (
+            <span title={m.pr_watching_tooltip()} className='shrink-0'>
+              <HugeiconsIcon icon={ViewIcon} strokeWidth={2} className={ICON} />
+              <span className='sr-only'>{m.pr_watching()}</span>
+            </span>
+          ) : null}
         </button>
       ) : null}
       {thread.projectId ? (

@@ -22,9 +22,9 @@ pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
     answer_task, answers_message, cancel_task, close_stale_turn, decide, record_branch,
-    record_conversation_cursor, record_delegation, record_output, record_title,
-    record_turn_changes, record_worktree, record_worktree_left, send_task_result,
-    start_queued_turn, subagent_thread_id, turn_failed,
+    record_conversation_cursor, record_delegation, record_output, record_pull_request_watch,
+    record_title, record_turn_changes, record_worktree, record_worktree_left,
+    send_pull_request_update, send_task_result, start_queued_turn, subagent_thread_id, turn_failed,
 };
 pub use project::{FolderListing, Project, RemoteRepository};
 pub use provider::ProviderOutput;
@@ -32,8 +32,8 @@ pub use provider_update::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion
 pub use pull_request::{
     ChecksState, ForgeAccount, ForgeKind, MergeMethod, Mergeability, PullRequest,
     PullRequestAction, PullRequestCheck, PullRequestDetail, PullRequestLabel, PullRequestState,
-    PullRequestSupport, ReviewComment, ReviewState, ReviewThread, Reviewer, ThreadPullRequest,
-    ThreadPullRequestDetail, TimelineItem,
+    PullRequestSupport, PullRequestUpdate, ReviewComment, ReviewState, ReviewThread, Reviewer,
+    ThreadPullRequest, ThreadPullRequestDetail, TimelineItem,
 };
 pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
 pub use settings::{

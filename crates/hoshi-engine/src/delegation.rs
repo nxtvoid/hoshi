@@ -29,7 +29,7 @@ pub(crate) const TASK_INSTRUCTIONS: &str =
     "You are a delegated task: do the work yourself. Delegate only what your task asks you to.";
 
 /// Added to the system prompt of agents that can delegate.
-pub(crate) const INSTRUCTIONS: &str = "hoshi can run work in child threads the user can open, through the hoshi MCP server's tools (load them with ToolSearch, \"select:mcp__hoshi__delegate_task\").\n- Subagents: use your own Agent tool with run_in_background: false and wait for them; start several in one message to run them in parallel, then answer once with all they found. Never start a background Agent: use delegate_task for work that should go on in the background, run as a thread of its own, or in its own checkout and branch (isolation: \"worktree\").\n- The child gets only `task`: include everything it needs.\n- delegate_task returns at once. The child's answer arrives later as a message in this thread, so end your turn after delegating; don't wait, sleep or poll with task_status.\n- Stop a task with task_cancel.\n- A token, password, PIN or pairing code only the user can give: call request_secret, never ask for it in chat. Use the file it returns only inside commands and never print it.\n- Other threads of the user: thread_list finds them, thread_read reads one (always before you answer about it), thread_send messages one and thread_wait waits for its turn to end.";
+pub(crate) const INSTRUCTIONS: &str = "hoshi can run work in child threads the user can open, through the hoshi MCP server's tools (load them with ToolSearch, \"select:mcp__hoshi__delegate_task\").\n- Subagents: use your own Agent tool with run_in_background: false and wait for them; start several in one message to run them in parallel, then answer once with all they found. Never start a background Agent: use delegate_task for work that should go on in the background, run as a thread of its own, or in its own checkout and branch (isolation: \"worktree\").\n- The child gets only `task`: include everything it needs.\n- delegate_task returns at once. The child's answer arrives later as a message in this thread, so end your turn after delegating; don't wait, sleep or poll with task_status.\n- Stop a task with task_cancel.\n- A token, password, PIN or pairing code only the user can give: call request_secret, never ask for it in chat. Use the file it returns only inside commands and never print it.\n- Other threads of the user: thread_list finds them, thread_read reads one (always before you answer about it), thread_send messages one and thread_wait waits for its turn to end.\n- When asked to monitor or babysit a pull request, or when work you were asked to do still waits on its checks or reviews: push first, call watch_pull_request, then end your turn; never sleep, loop or poll for it. Before you hand the work back, call unwatch_pull_request. Delegated tasks never watch.";
 
 /// A task a thread delegated, until its answer goes back.
 pub(crate) struct Delegation {
@@ -158,6 +158,8 @@ impl State {
             "thread_list" => self.list_threads(caller, arguments),
             "thread_read" => self.read_thread(arguments),
             "thread_send" => self.send_to_thread(caller, arguments),
+            "watch_pull_request" => self.watch_pull_request(caller),
+            "unwatch_pull_request" => self.unwatch_pull_request(caller),
             _ => Err(format!("hoshi has no tool named {tool}")),
         }
     }

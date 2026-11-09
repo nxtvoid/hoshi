@@ -2,6 +2,7 @@
 import type { ApprovalDecision } from "./ApprovalDecision";
 import type { DiffFile } from "./DiffFile";
 import type { MessageAttachment } from "./MessageAttachment";
+import type { PullRequestUpdate } from "./PullRequestUpdate";
 import type { Question } from "./Question";
 import type { RequestStatus } from "./RequestStatus";
 import type { Rewind } from "./Rewind";
@@ -19,6 +20,10 @@ steer: boolean,
  * not the user.
  */
 taskResult: string | null, 
+/**
+ * News on a pull request the thread watches, sent by hoshi, not the user.
+ */
+pullRequestUpdate: PullRequestUpdate | null, 
 /**
  * Where the conversation goes back to when the user edits from this message; `None`
  * for a message that can't be edited from, such as a steer.

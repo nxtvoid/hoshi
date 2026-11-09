@@ -201,6 +201,23 @@
   "git_commit_message_placeholder": "Leave empty to auto-generate",
   "git_commit_new_branch": "Commit on new branch",
   "secret_request_placeholder": "Paste or type it",
+  "pr_update_checks_failed": "checks failed",
+  "pr_update_checks_passed": "checks passed",
+  "pr_update_comments": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} new comment",
+        "countPlural=*": "{count} new comments"
+      }
+    }
+  ],
+  "pr_update_conflicting": "conflicts with its base",
+  "pr_update_closed": "closed, stopped watching",
+  "pr_update_stopped": "stopped watching",
+  "pr_watching": "Watching",
+  "pr_watching_tooltip": "Watching: the agent wakes when checks finish, someone comments, or the branch conflicts",
   "secret_request_note": "Saved to a file only the agent's commands read. It never goes to the chat.",
   "secret_request_save": "Save",
   "secret_request_composer_placeholder": "Answer the card above first",

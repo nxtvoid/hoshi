@@ -16,6 +16,7 @@ use mcp::{McpServer, ToolHandler};
 mod paths;
 mod project_icon;
 mod pull_request_cache;
+mod pull_request_watch;
 mod pull_requests;
 mod refreshing;
 mod secret_requests;
@@ -54,6 +55,7 @@ use hoshi_providers::{
 };
 use hoshi_store::{CachedPullRequestDetail, Store, StoreError};
 use pull_request_cache::{PullRequestCache, Version};
+use pull_request_watch::{Wake, WatchState};
 use pull_requests::PullRequestSync;
 use refreshing::Refreshing;
 use secrets::SecretKey;
@@ -171,6 +173,14 @@ struct State {
     /// The `request_secret` calls waiting for the user, by request id: they get the file the
     /// secret was saved to, or `None` when the user declined.
     secret_waits: HashMap<String, mpsc::Sender<Option<PathBuf>>>,
+    /// What each thread watching its pull request was told so far.
+    watches: HashMap<String, WatchState>,
+    /// When each watched pull request was last read in detail, and as what.
+    watch_reads: HashMap<String, (Instant, hoshi_core::PullRequest)>,
+    /// Updates for watching threads whose turn ran, held until it ends.
+    pending_wakes: HashMap<String, Vec<Wake>>,
+    /// The account each forge is read with, whose own comments never wake its agent.
+    viewers: HashMap<ForgeKind, String>,
 }
 
 /// A message waiting for the thread's running turn to end.
@@ -273,6 +283,10 @@ impl Engine {
             checkpoints: Arc::new(Checkpointer::new()),
             secrets_dir: data_dir.join("secrets"),
             secret_waits: HashMap::new(),
+            watches: HashMap::new(),
+            watch_reads: HashMap::new(),
+            pending_wakes: HashMap::new(),
+            viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -1672,6 +1686,7 @@ impl State {
                 self.deliver_task_result(thread_id, outcome);
             }
             self.start_next_queued(thread_id);
+            self.deliver_pending_wakes(thread_id);
         }
     }
 
@@ -2461,7 +2476,28 @@ fn sync_pull_requests(state: Weak<Mutex<State>>) {
                 let result = job
                     .forge
                     .pull_request_for_branch(&job.repository, &job.branch);
-                lock(&shared).record_pull_request(&job, result);
+                let watch = {
+                    let mut state = lock(&shared);
+                    state.record_pull_request(&job, result);
+                    state.watch_due(&job.thread_id)
+                };
+                let Some((pull_request, viewer)) = watch else {
+                    continue;
+                };
+                let viewer = viewer.or_else(|| job.forge.viewer().ok());
+                match job
+                    .forge
+                    .pull_request_detail(&job.repository, pull_request.number)
+                {
+                    Ok(detail) => lock(&shared).observe_watch(
+                        &job.thread_id,
+                        job.repository.forge,
+                        &pull_request,
+                        &detail,
+                        viewer,
+                    ),
+                    Err(error) => eprintln!("hoshi: couldn't read a watched pull request: {error}"),
+                }
             }
         }
     });
@@ -2515,7 +2551,7 @@ impl State {
         if thread.branch.as_deref() != Some(job.branch.as_str()) {
             return;
         }
-        let working = thread.status == ThreadStatus::Working;
+        let working = thread.status == ThreadStatus::Working || thread.watching_pull_request;
         let changed = self.pull_requests.record(
             &job.thread_id,
             job.repository.forge,
@@ -4043,6 +4079,90 @@ Blue"
         for path in [worktree, pushed_path] {
             let _ = git::remove_worktree(&harness.root, &path);
         }
+    }
+
+    #[test]
+    fn a_watched_pull_request_wakes_its_thread_on_a_failing_check() {
+        let harness = Harness::in_memory("pr-watch", completed_turn());
+        let pull_request = hoshi_core::PullRequest {
+            forge: ForgeKind::Github,
+            number: 7,
+            title: "Work".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+            author: Some("me".into()),
+            head_branch: "hoshi/work".into(),
+            head_sha: Some("abc1234".into()),
+            base_branch: "main".into(),
+            state: hoshi_core::PullRequestState::Open,
+            checks: None,
+            unresolved_comments: 0,
+            additions: 0,
+            deletions: 0,
+            updated_at: "2026-11-07T12:00:00Z".into(),
+        };
+        let detail = |state: hoshi_core::ChecksState| hoshi_core::PullRequestDetail {
+            supports: hoshi_core::PullRequestSupport::all(),
+            forge_id: "id".into(),
+            repository: "o/r".into(),
+            mergeability: hoshi_core::Mergeability::Mergeable,
+            merge_methods: Vec::new(),
+            can_edit: true,
+            body: String::new(),
+            changed_files: 1,
+            reviewers: Vec::new(),
+            labels: Vec::new(),
+            checks: vec![hoshi_core::PullRequestCheck {
+                name: "lint".into(),
+                state,
+                url: None,
+            }],
+            review_threads: Vec::new(),
+            timeline: Vec::new(),
+        };
+        let call =
+            |tool: &str| lock(&harness.engine.state).call_tool("t", tool, &serde_json::json!({}));
+        assert!(call("watch_pull_request").is_err());
+        lock(&harness.engine.state).pull_requests.record(
+            "t",
+            ForgeKind::Github,
+            Ok(Some(pull_request.clone())),
+            false,
+            Instant::now(),
+            chrono::Utc::now(),
+        );
+
+        let watched = call("watch_pull_request").unwrap();
+        assert_eq!(watched["number"], 7);
+        assert!(harness.thread("t").watching_pull_request);
+        let observe = |state: hoshi_core::ChecksState| {
+            lock(&harness.engine.state).observe_watch(
+                "t",
+                ForgeKind::Github,
+                &pull_request,
+                &detail(state),
+                Some("me".into()),
+            );
+        };
+        observe(hoshi_core::ChecksState::Pending);
+        observe(hoshi_core::ChecksState::Failing);
+
+        let update = harness.wait_for(|event| match event {
+            Event::ItemAdded { item } => match item.content {
+                ItemContent::UserMessage {
+                    pull_request_update: Some(update),
+                    text,
+                    ..
+                } => Some((update, text)),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(update.0.failed_checks, ["lint"]);
+        assert!(update.1.contains("Checks failed on abc1234"));
+        harness.wait_for_turn_end();
+        let unwatched = call("unwatch_pull_request").unwrap();
+        assert_eq!(unwatched["wasWatching"], true);
+        assert!(!harness.thread("t").watching_pull_request);
     }
 
     #[test]

@@ -27,6 +27,10 @@ conversationCursor: string | null,
  */
 resumeAt: string | null, 
 /**
+ * Its agent asked to be woken on its pull request's news.
+ */
+watchingPullRequest: boolean, 
+/**
  * Provider model alias; `None` uses the provider's default.
  */
 model: string | null, effort: Effort | null, 

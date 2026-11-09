@@ -1,8 +1,8 @@
 use crate::{
     AccessMode, ApprovalDecision, DiffFile, Effort, ItemContent, MessageAttachment, OpenToolCall,
-    Project, ProviderOutput, RequestResponse, RequestStatus, Rewind, Thread, ThreadContextUsage,
-    ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure,
-    TurnOutcome,
+    Project, ProviderOutput, PullRequestUpdate, RequestResponse, RequestStatus, Rewind, Thread,
+    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail,
+    TurnFailure, TurnOutcome,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -232,6 +232,11 @@ pub enum Event {
     ThreadStatusSet {
         thread_id: String,
         status: ThreadStatus,
+    },
+    /// The thread's agent asked to be woken on its pull request's news, or stopped.
+    PullRequestWatchSet {
+        thread_id: String,
+        watching: bool,
     },
     /// A turn ended with `cursor` as the provider's last message of the conversation.
     ConversationCursorSet {
@@ -716,6 +721,14 @@ impl ReadModel {
                     thread.task_answered = true;
                 }
             }
+            Event::PullRequestWatchSet {
+                thread_id,
+                watching,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.watching_pull_request = *watching;
+                }
+            }
             Event::ConversationCursorSet { thread_id, cursor } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.conversation_cursor = Some(cursor.clone());
@@ -820,6 +833,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     session_id: None,
                     conversation_cursor: None,
                     resume_at: None,
+                    watching_pull_request: false,
                     model: thread_model,
                     effort,
                     fast_mode,
@@ -988,7 +1002,15 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             message_id,
             text,
             attachments,
-        } => message_events(model, thread_id, message_id, text, attachments, None, now),
+        } => message_events(
+            model,
+            thread_id,
+            message_id,
+            text,
+            attachments,
+            Origin::User,
+            now,
+        ),
         Command::TurnInterrupt { thread_id } => {
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
@@ -1152,13 +1174,21 @@ fn working_again(model: &ReadModel, thread: &Thread, closed: &str) -> Option<Eve
 }
 
 /// A message to the thread: it starts a turn, or joins the running one.
+/// Who a message comes from: the user, or hoshi on the agent's behalf.
+enum Origin {
+    User,
+    /// The answer of the task child thread `0` worked on.
+    TaskResult(String),
+    PullRequest(PullRequestUpdate),
+}
+
 fn message_events(
     model: &ReadModel,
     thread_id: String,
     message_id: String,
     text: String,
     attachments: Vec<MessageAttachment>,
-    task_result: Option<String>,
+    origin: Origin,
     now: &str,
 ) -> Result<Vec<Event>, CommandError> {
     let Some(thread) = model.threads.get(&thread_id) else {
@@ -1196,11 +1226,18 @@ fn message_events(
             thread_id: thread_id.clone(),
             created_at: now.to_owned(),
             content: ItemContent::UserMessage {
-                rewind: rewind_point(thread, task_result.is_some()),
+                rewind: rewind_point(thread, !matches!(origin, Origin::User)),
                 text,
                 attachments,
                 steer: thread.active_turn_id.is_some(),
-                task_result,
+                task_result: match &origin {
+                    Origin::TaskResult(child) => Some(child.clone()),
+                    _ => None,
+                },
+                pull_request_update: match origin {
+                    Origin::PullRequest(update) => Some(update),
+                    _ => None,
+                },
             },
         },
     });
@@ -1259,9 +1296,47 @@ pub fn send_task_result(
         message_id.to_owned(),
         text.to_owned(),
         Vec::new(),
-        Some(child_thread_id.to_owned()),
+        Origin::TaskResult(child_thread_id.to_owned()),
         now,
     )
+}
+
+/// Tells a thread's agent what changed on the pull request it watches, as a message from
+/// hoshi that starts its turn.
+pub fn send_pull_request_update(
+    model: &ReadModel,
+    thread_id: &str,
+    message_id: &str,
+    text: &str,
+    update: PullRequestUpdate,
+    now: &str,
+) -> Result<Vec<Event>, CommandError> {
+    message_events(
+        model,
+        thread_id.to_owned(),
+        message_id.to_owned(),
+        text.to_owned(),
+        Vec::new(),
+        Origin::PullRequest(update),
+        now,
+    )
+}
+
+/// Starts or stops waking the thread's agent on its pull request's news. Delegated tasks
+/// never watch: their parent owns the pull request.
+pub fn record_pull_request_watch(model: &ReadModel, thread_id: &str, watching: bool) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread)
+            if thread.watching_pull_request != watching
+                && (!watching || thread.parent_thread_id.is_none()) =>
+        {
+            vec![Event::PullRequestWatchSet {
+                thread_id: thread_id.to_owned(),
+                watching,
+            }]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// Links a thread to the one whose agent delegated its task to it.
@@ -2026,6 +2101,7 @@ const a = 1
                 attachments: vec![image("screenshot.png")],
                 steer: false,
                 task_result: None,
+                pull_request_update: None,
                 rewind: Some(Rewind::Start),
             }
         )));

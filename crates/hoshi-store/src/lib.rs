@@ -170,6 +170,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE threads ADD COLUMN conversation_cursor TEXT;
     ALTER TABLE threads ADD COLUMN resume_at TEXT;
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN watching_pull_request INTEGER NOT NULL DEFAULT 0;
+    ",
 ];
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
@@ -263,7 +266,7 @@ impl Store {
                         active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                         fast_mode, ultracode, access_mode, plan_mode, worktree_released,
                         worktree_adopted, parent_thread_id, task_cancelled, task_answered,
-                        conversation_cursor, resume_at
+                        conversation_cursor, resume_at, watching_pull_request
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -293,6 +296,7 @@ impl Store {
                     task_answered: row.get(22)?,
                     conversation_cursor: row.get(23)?,
                     resume_at: row.get(24)?,
+                    watching_pull_request: row.get(25)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -686,9 +690,9 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                   active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                   fast_mode, ultracode, access_mode, plan_mode, worktree_released,
                   worktree_adopted, parent_thread_id, task_cancelled, task_answered,
-                  conversation_cursor, resume_at)
+                  conversation_cursor, resume_at, watching_pull_request)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -714,7 +718,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     thread.task_cancelled,
                     thread.task_answered,
                     thread.conversation_cursor,
-                    thread.resume_at
+                    thread.resume_at,
+                    thread.watching_pull_request
                 ],
             )?;
         }
@@ -936,6 +941,15 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 params![thread_id, enum_text(*status)?],
             )?;
         }
+        Event::PullRequestWatchSet {
+            thread_id,
+            watching,
+        } => {
+            tx.execute(
+                "UPDATE threads SET watching_pull_request = ?2 WHERE id = ?1",
+                params![thread_id, watching],
+            )?;
+        }
         Event::ConversationCursorSet { thread_id, cursor } => {
             tx.execute(
                 "UPDATE threads SET conversation_cursor = ?2, resume_at = NULL WHERE id = ?1",
@@ -1000,6 +1014,7 @@ mod tests {
                 session_id: None,
                 conversation_cursor: None,
                 resume_at: None,
+                watching_pull_request: false,
                 model: Some("sonnet".into()),
                 effort: Some(Effort::High),
                 fast_mode: true,

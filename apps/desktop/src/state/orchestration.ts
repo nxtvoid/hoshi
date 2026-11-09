@@ -116,6 +116,10 @@ export function applyEvent(
       return updateThread(event.threadId, { taskCancelled: true })
     case 'taskAnswered':
       return updateThread(event.threadId, { taskAnswered: true })
+    case 'pullRequestWatchSet':
+      return updateThread(event.threadId, {
+        watchingPullRequest: event.watching
+      })
     case 'conversationCursorSet':
       return updateThread(event.threadId, {
         conversationCursor: event.cursor,

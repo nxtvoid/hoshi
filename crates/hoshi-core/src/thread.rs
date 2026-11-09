@@ -1,4 +1,6 @@
-use crate::{ApprovalDecision, DiffFile, MessageAttachment, Question, RequestStatus};
+use crate::{
+    ApprovalDecision, DiffFile, MessageAttachment, PullRequestUpdate, Question, RequestStatus,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -22,6 +24,8 @@ pub struct Thread {
     /// Set by a rewind: the next turn resumes the session from this message, leaving out
     /// what came after it.
     pub resume_at: Option<String>,
+    /// Its agent asked to be woken on its pull request's news.
+    pub watching_pull_request: bool,
     /// Provider model alias; `None` uses the provider's default.
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -198,6 +202,9 @@ pub enum ItemContent {
         /// not the user.
         #[serde(default)]
         task_result: Option<String>,
+        /// News on a pull request the thread watches, sent by hoshi, not the user.
+        #[serde(default)]
+        pull_request_update: Option<PullRequestUpdate>,
         /// Where the conversation goes back to when the user edits from this message; `None`
         /// for a message that can't be edited from, such as a steer.
         #[serde(default)]
