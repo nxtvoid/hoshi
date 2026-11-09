@@ -354,12 +354,15 @@ export type ThemeErrorCode =
   | 'not_installed'
   | 'empty_collection'
   | 'invalid_collection_themes'
+  | 'palette_taken'
+  | 'palettes_taken'
 
 /** A theme that can't be read or saved; the UI words `code`, `subject` names what it's about. */
 export class ThemeError extends Error {
   constructor(
     readonly code: ThemeErrorCode,
-    readonly subject?: string
+    readonly subject?: string,
+    readonly appearance?: ThemeAppearance
   ) {
     super(subject ? `${code}: ${subject}` : code)
   }
@@ -908,23 +911,4 @@ export function updateColorFamily(
     default:
       return { ...colors, [role]: normalized }
   }
-}
-
-/** A name nothing installed uses yet: `Name copy`, then `Name copy 2`… */
-export function copyName(
-  label: string,
-  suffix: string,
-  themes: readonly ThemeDefinition[]
-): string {
-  const taken = (name: string) =>
-    themes.some((theme) => theme.id === themeIdFromName(name)) ||
-    RESERVED_THEME_IDS.has(themeIdFromName(name))
-  const base = `${label} ${suffix}`.slice(0, THEME_NAME_MAX)
-  if (!taken(base)) return base
-  for (let count = 2; count < 100; count += 1) {
-    const tail = ` ${count}`
-    const name = `${base.slice(0, THEME_NAME_MAX - tail.length)}${tail}`
-    if (!taken(name)) return name
-  }
-  return base
 }

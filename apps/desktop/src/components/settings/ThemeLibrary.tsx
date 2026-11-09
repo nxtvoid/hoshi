@@ -4,7 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { confirm, notify } from '@/state/dialog-store'
 import { Button } from '@hoshi/ui/components/button'
-import { useThemeStore } from '@/state/theme-store'
+import { useThemeEditorStore } from '@/state/theme-editor-store'
+import { useResolvedAppearance, useThemeStore } from '@/state/theme-store'
 import { THEME_OPTIONS } from './theme-options'
 import type { ThemePreference } from '@/state/appearance'
 import { ThemeOrb, ThemeWireframe } from './ThemePreviews'
@@ -17,6 +18,8 @@ import {
   Copy01Icon,
   Delete02Icon,
   Moon02Icon,
+  PaintBrush01Icon,
+  PencilEdit02Icon,
   Sun03Icon,
   Upload04Icon
 } from '@hugeicons/core-free-icons'
@@ -25,10 +28,8 @@ import {
   chooseCard,
   chooseHalf,
   chooseTheme,
-  copyName,
   findTheme,
   halfOwners,
-  installTheme,
   removeThemes,
   selectionWithout,
   serializeThemeFile,
@@ -36,7 +37,6 @@ import {
   type ThemeAppearance,
   themeColorsFor,
   type ThemeDefinition,
-  themeIdFromName,
   themeModes
 } from '@/state/themes'
 
@@ -134,23 +134,21 @@ export function ThemeGrid() {
   const customThemes = useThemeStore((state) => state.customThemes)
   const setSelection = useThemeStore((state) => state.setSelection)
   const setCustomThemes = useThemeStore((state) => state.setCustomThemes)
+  const openThemeEditor = useThemeEditorStore((state) => state.openThemeEditor)
+  const initialAppearance = useResolvedAppearance()
   const owners = halfOwners(selection, customThemes)
   const pickedModes = (cardId: string | null) =>
     (['light', 'dark'] as const).filter(
       (appearance) => owners[appearance] === cardId
     )
 
-  const duplicate = (theme: ThemeDefinition) => {
-    const label = copyName(theme.label, m.theme_copy_suffix(), customThemes)
-    const copy: ThemeDefinition = {
-      id: themeIdFromName(label),
-      label,
-      appearance: theme.appearance,
-      colors: theme.colors,
-      ...(theme.variants ? { variants: theme.variants } : {})
-    }
-    setCustomThemes(installTheme(customThemes, copy), chooseTheme(copy.id))
-  }
+  const duplicate = (theme: ThemeDefinition) =>
+    openThemeEditor({
+      editingThemeId: null,
+      seedThemeId: theme.id === STANDARD_THEME_ID ? null : theme.id,
+      seedName: m.theme_copy_name({ name: theme.label }),
+      initialAppearance
+    })
 
   const exportTheme = (theme: ThemeDefinition) => {
     invoke<boolean>('export_theme', {
@@ -211,6 +209,14 @@ export function ThemeGrid() {
             setSelection(chooseHalf(selection, appearance, theme.id))
           }
           onDuplicate={() => duplicate(theme)}
+          onEdit={() =>
+            openThemeEditor({
+              editingThemeId: theme.id,
+              seedThemeId: null,
+              seedName: null,
+              initialAppearance
+            })
+          }
           onExport={() => exportTheme(theme)}
           onRemove={() => void remove(theme)}
         />
@@ -225,6 +231,7 @@ function ThemeCard({
   onUse,
   onUseMode,
   onDuplicate,
+  onEdit,
   onExport,
   onRemove
 }: {
@@ -233,6 +240,7 @@ function ThemeCard({
   onUse: () => void
   onUseMode: (appearance: ThemeAppearance) => void
   onDuplicate: () => void
+  onEdit?: () => void
   onExport?: () => void
   onRemove?: () => void
 }) {
@@ -274,6 +282,13 @@ function ThemeCard({
               icon={Copy01Icon}
               onClick={onDuplicate}
             />
+            {onEdit ? (
+              <CardAction
+                label={m.edit_theme()}
+                icon={PencilEdit02Icon}
+                onClick={onEdit}
+              />
+            ) : null}
             {onExport ? (
               <CardAction
                 label={m.export_theme()}
@@ -433,5 +448,29 @@ function CardAction({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  )
+}
+
+export function CreateThemeButton() {
+  const openThemeEditor = useThemeEditorStore((state) => state.openThemeEditor)
+  const customThemes = useThemeStore((state) => state.customThemes)
+  const selection = useSelection()
+  const initialAppearance = useResolvedAppearance()
+  return (
+    <Button
+      size='xs'
+      variant='outline'
+      onClick={() =>
+        openThemeEditor({
+          editingThemeId: null,
+          seedThemeId: halfOwners(selection, customThemes)[initialAppearance],
+          seedName: null,
+          initialAppearance
+        })
+      }
+    >
+      <HugeiconsIcon icon={PaintBrush01Icon} strokeWidth={2} />
+      {m.create_theme()}
+    </Button>
   )
 }
