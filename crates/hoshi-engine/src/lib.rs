@@ -1308,12 +1308,6 @@ impl Engine {
         if busy {
             return state.run_command(send);
         }
-        state.run_command(Command::MessageSend {
-            thread_id: thread_id.to_owned(),
-            message_id: delegation::new_id(),
-            text: COMPACT_COMMAND.to_owned(),
-            attachments: Vec::new(),
-        })?;
         state.after_compaction.insert(
             thread_id.to_owned(),
             QueuedMessage {
@@ -1322,7 +1316,21 @@ impl Engine {
                 attachments,
             },
         );
-        Ok(())
+        let compacted = state.run_command(Command::MessageSend {
+            thread_id: thread_id.to_owned(),
+            message_id: delegation::new_id(),
+            text: COMPACT_COMMAND.to_owned(),
+            attachments: Vec::new(),
+        });
+        if compacted.is_err()
+            && state
+                .after_compaction
+                .get(thread_id)
+                .is_some_and(|message| message.id == message_id)
+        {
+            state.after_compaction.remove(thread_id);
+        }
+        compacted
     }
 
     /// Saves an image the user is about to send. `base64` holds its bytes.
@@ -4504,6 +4512,28 @@ Blue"
         let now = Utc::now().timestamp_millis() as u64;
         let expires = usage.cache_expires_at.unwrap();
         assert!(expires > now + 3_500_000 && expires <= now + 3_600_000);
+    }
+
+    #[test]
+    fn a_message_after_a_compaction_that_failed_at_once_is_still_sent() {
+        let harness = Harness::in_memory("compact-failed", completed_turn());
+        harness.engine.set_adapter(None);
+
+        harness
+            .engine
+            .compact_then_send("t", "m1", "carry on".into(), Vec::new())
+            .unwrap();
+
+        let ids: Vec<_> = harness
+            .engine
+            .transcript("t", None)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(ids.contains(&"m1".to_owned()));
+        assert!(lock(&harness.engine.state).after_compaction.is_empty());
     }
 
     #[test]
