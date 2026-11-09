@@ -28,7 +28,9 @@ pub use orchestration::{
     record_title, record_turn_changes, record_worktree, record_worktree_left,
     send_pull_request_update, send_task_result, start_queued_turn, subagent_thread_id, turn_failed,
 };
-pub use project::{FolderListing, Project, RemoteRepository};
+pub use project::{
+    FolderListing, Project, RemoteRepository, WorktreeSetup, WorktreeSetupRun, WorktreeSetupStatus,
+};
 pub use provider::ProviderOutput;
 pub use provider_update::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion};
 pub use pull_request::{

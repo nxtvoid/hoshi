@@ -32,6 +32,31 @@
   "surface_diff": "Diff",
   "surface_terminal": "Terminal",
   "surface_browser": "Browser",
+  "worktree_setup_menu": "Worktree setup…",
+  "worktree_setup_title": "Worktree setup",
+  "worktree_setup_description": "A command run in each new worktree of {project}, such as installing its dependencies. It runs in its own terminal, with HOSHI_PROJECT_ROOT and HOSHI_WORKTREE_PATH set.",
+  "worktree_setup_command": "Command",
+  "worktree_setup_placeholder": "bun install",
+  "worktree_setup_wait": "Wait for it before the agent starts",
+  "worktree_setup_wait_hint": "Messages wait until the command succeeds. If it fails, you choose whether to send them anyway.",
+  "worktree_setup_running": "Setting up the worktree…",
+  "worktree_setup_succeeded": "Worktree ready",
+  "worktree_setup_failed": "Worktree ready, setup script failed",
+  "worktree_setup_failed_code": "Worktree ready, setup script failed (exit {code})",
+  "worktree_setup_held": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} message waits for it",
+        "countPlural=*": "{count} messages wait for it"
+      }
+    }
+  ],
+  "worktree_setup_open_terminal": "Open terminal",
+  "worktree_setup_run_again": "Run again",
+  "worktree_setup_send_anyway": "Send anyway",
+  "worktree_setup_dismiss": "Dismiss",
   "compact_context": "Compact context",
   "compact_and_send": "Compact and send",
   "compaction_chip_compact": "Compact · {tokens}",

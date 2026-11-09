@@ -177,6 +177,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE context_usages ADD COLUMN cache_ttl_secs INTEGER;
     ALTER TABLE context_usages ADD COLUMN cache_expires_at INTEGER;
     ",
+    r"
+    ALTER TABLE projects ADD COLUMN worktree_setup TEXT;
+    ",
 ];
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
@@ -250,7 +253,7 @@ impl Store {
         let projects = self
             .conn
             .prepare(
-                "SELECT id, title, workspace_root, created_at, updated_at
+                "SELECT id, title, workspace_root, created_at, updated_at, worktree_setup
                  FROM projects ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -260,6 +263,7 @@ impl Store {
                     workspace_root: row.get(2)?,
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
+                    worktree_setup: optional_json_document_column(row, 5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -638,6 +642,20 @@ fn json_document_column<T: serde::de::DeserializeOwned>(
     })
 }
 
+fn optional_json_document_column<T: serde::de::DeserializeOwned>(
+    row: &Row,
+    index: usize,
+) -> rusqlite::Result<Option<T>> {
+    match row.get::<_, Option<String>>(index)? {
+        Some(_) => json_document_column(row, index).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn optional_json(value: Option<&impl serde::Serialize>) -> Result<Option<String>, StoreError> {
+    Ok(value.map(serde_json::to_string).transpose()?)
+}
+
 fn optional_json_column<T: serde::de::DeserializeOwned>(
     row: &Row,
     index: usize,
@@ -663,15 +681,23 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
     match event {
         Event::ProjectCreated { project } => {
             tx.execute(
-                "INSERT INTO projects (id, title, workspace_root, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO projects
+                 (id, title, workspace_root, created_at, updated_at, worktree_setup)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     project.id,
                     project.title,
                     project.workspace_root,
                     project.created_at,
-                    project.updated_at
+                    project.updated_at,
+                    optional_json(project.worktree_setup.as_ref())?
                 ],
+            )?;
+        }
+        Event::ProjectWorktreeSetupSet { project_id, setup } => {
+            tx.execute(
+                "UPDATE projects SET worktree_setup = ?2 WHERE id = ?1",
+                params![project_id, optional_json(setup.as_ref())?],
             )?;
         }
         Event::ProjectRemoved { project_id } => {
@@ -1015,8 +1041,45 @@ mod tests {
                 workspace_root: format!("/repo/{id}"),
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
+                worktree_setup: None,
             },
         }
+    }
+
+    #[test]
+    fn a_project_keeps_its_worktree_setup() {
+        let mut store = Store::open_in_memory().unwrap();
+        let setup = hoshi_core::WorktreeSetup {
+            command: "bun install".into(),
+            wait: true,
+        };
+        store
+            .append(
+                &[
+                    project_created("p"),
+                    Event::ProjectWorktreeSetupSet {
+                        project_id: "p".into(),
+                        setup: Some(setup.clone()),
+                    },
+                ],
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            store.snapshot().unwrap().projects[0].worktree_setup,
+            Some(setup)
+        );
+
+        store
+            .append(
+                &[Event::ProjectWorktreeSetupSet {
+                    project_id: "p".into(),
+                    setup: None,
+                }],
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(store.snapshot().unwrap().projects[0].worktree_setup, None);
     }
 
     fn thread_created(id: &str, project_id: &str) -> Event {

@@ -28,6 +28,8 @@ import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
 import { useGitActionStore } from './git-action-store'
+import { useWorktreeSetupStore } from './worktree-setup-store'
+import type { WorktreeSetupRun } from '@/bindings/WorktreeSetupRun'
 import { COMPACT_COMMAND } from '@/lib/compaction'
 import { useBrowserStore } from './browser-store'
 import type { BrowserPage } from '@/bindings/BrowserPage'
@@ -465,6 +467,10 @@ async function startSync() {
     'hoshi://browser-page',
     (message) => useBrowserStore.getState().receivePage(message.payload)
   )
+  const unlistenWorktreeSetups = await listen<WorktreeSetupRun>(
+    'hoshi://worktree-setup',
+    (message) => useWorktreeSetupStore.getState().receive(message.payload)
+  )
   const unlistenGitActions = await listen<GitActionProgress>(
     'hoshi://git-action',
     (message) => useGitActionStore.getState().receive(message.payload)
@@ -485,8 +491,10 @@ async function startSync() {
     unlistenGitActions()
     unlistenBrowserFrames()
     unlistenBrowserPages()
+    unlistenWorktreeSetups()
     stopAppUpdates()
   })
+  void useWorktreeSetupStore.getState().load()
   const snapshot = await invoke<Snapshot>('get_snapshot')
   const settings = await loadedSettings()
   const start = startupSelection(

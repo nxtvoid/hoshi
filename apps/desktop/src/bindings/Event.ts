@@ -7,8 +7,9 @@ import type { ThreadItem } from "./ThreadItem";
 import type { ThreadStatus } from "./ThreadStatus";
 import type { ToolDetail } from "./ToolDetail";
 import type { TurnOutcome } from "./TurnOutcome";
+import type { WorktreeSetup } from "./WorktreeSetup";
 
-export type Event = { "type": "projectCreated", project: Project, } | { "type": "projectRemoved", projectId: string, } | { "type": "threadCreated", thread: Thread, } | { "type": "threadDeleted", threadId: string, } | { "type": "threadTitleSet", threadId: string, title: string, } | { "type": "threadBranchSet", threadId: string, branch: string | null, } | { "type": "threadWorktreeAttached", threadId: string, worktreePath: string, branch: string | null, 
+export type Event = { "type": "projectCreated", project: Project, } | { "type": "projectRemoved", projectId: string, } | { "type": "projectWorktreeSetupSet", projectId: string, setup: WorktreeSetup | null, } | { "type": "threadCreated", thread: Thread, } | { "type": "threadDeleted", threadId: string, } | { "type": "threadTitleSet", threadId: string, title: string, } | { "type": "threadBranchSet", threadId: string, branch: string | null, } | { "type": "threadWorktreeAttached", threadId: string, worktreePath: string, branch: string | null, 
 /**
  * The worktree existed before, so it is not the thread's to remove.
  */

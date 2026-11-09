@@ -6,6 +6,7 @@ import {
   addTerminal,
   closeTerminal,
   NO_DRAWER,
+  showTerminal,
   type TerminalDrawer,
   toggleDrawer
 } from './terminal-drawer'
@@ -22,6 +23,8 @@ type TerminalState = {
   toggleDrawer: (threadId: string) => void
   addTerminal: (threadId: string) => void
   activateTerminal: (threadId: string, terminalId: string) => void
+  /** Opens the drawer on a terminal the engine started, such as a worktree's setup. */
+  showTerminal: (threadId: string, terminalId: string) => void
   /** Stops the terminal's shell too. */
   closeTerminal: (threadId: string, terminalId: string) => void
   requestFocus: (terminalId: string) => void
@@ -61,6 +64,8 @@ export const useTerminalStore = create<TerminalState>()(
           changeDrawer(threadId, (drawer) =>
             activateTerminal(drawer, terminalId)
           ),
+        showTerminal: (threadId, terminalId) =>
+          changeDrawer(threadId, (drawer) => showTerminal(drawer, terminalId)),
         closeTerminal: (threadId, terminalId) => {
           void invoke('close_terminal', { terminalId })
           changeDrawer(threadId, (drawer) => closeTerminal(drawer, terminalId))

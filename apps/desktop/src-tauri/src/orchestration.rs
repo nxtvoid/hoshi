@@ -31,6 +31,7 @@ const GIT_ACTION_CHANNEL: &str = "hoshi://git-action";
 const BROWSER_FRAME_CHANNEL: &str = "hoshi://browser-frame";
 /// Where a thread's browser page is, and what the agent just did on it.
 const BROWSER_PAGE_CHANNEL: &str = "hoshi://browser-page";
+const WORKTREE_SETUP_CHANNEL: &str = "hoshi://worktree-setup";
 
 pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
@@ -50,6 +51,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
             Notification::GitActionProgress(progress) => handle.emit(GIT_ACTION_CHANNEL, progress),
             Notification::BrowserFrame(frame) => handle.emit(BROWSER_FRAME_CHANNEL, frame),
             Notification::BrowserPage(page) => handle.emit(BROWSER_PAGE_CHANNEL, page),
+            Notification::WorktreeSetup(run) => handle.emit(WORKTREE_SETUP_CHANNEL, run),
         };
         if let Err(error) = result {
             eprintln!("hoshi: failed to emit to the UI: {error}");
@@ -536,6 +538,27 @@ pub fn browser_input(
 #[tauri::command(async)]
 pub fn browser_close(engine: State<'_, Engine>, thread_id: String) {
     engine.browser_close(&thread_id);
+}
+
+#[tauri::command]
+pub fn worktree_setups(engine: State<'_, Engine>) -> Vec<hoshi_core::WorktreeSetupRun> {
+    engine.worktree_setups()
+}
+
+#[tauri::command(async)]
+pub fn rerun_worktree_setup(
+    engine: State<'_, Engine>,
+    thread_id: String,
+) -> Result<(), CommandError> {
+    engine.rerun_worktree_setup(&thread_id)
+}
+
+#[tauri::command(async)]
+pub fn skip_worktree_setup(
+    engine: State<'_, Engine>,
+    thread_id: String,
+) -> Result<(), CommandError> {
+    engine.skip_worktree_setup(&thread_id)
 }
 
 /// The user's answer to an agent's secret request; `None` declines. The value only reaches

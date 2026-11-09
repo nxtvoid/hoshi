@@ -2,7 +2,7 @@ use crate::{
     AccessMode, ApprovalDecision, CompactionStatus, DiffFile, Effort, ItemContent,
     MessageAttachment, OpenToolCall, Project, ProviderOutput, PullRequestUpdate, RequestResponse,
     RequestStatus, Rewind, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus,
-    ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
+    ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome, WorktreeSetup,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +25,11 @@ pub enum Command {
     },
     ProjectRemove {
         project_id: String,
+    },
+    /// `None`, or a blank command, stops setting up the project's new worktrees.
+    ProjectWorktreeSetupSet {
+        project_id: String,
+        setup: Option<WorktreeSetup>,
     },
     ThreadCreate {
         thread_id: String,
@@ -121,6 +126,10 @@ pub enum Event {
     },
     ProjectRemoved {
         project_id: String,
+    },
+    ProjectWorktreeSetupSet {
+        project_id: String,
+        setup: Option<WorktreeSetup>,
     },
     ThreadCreated {
         thread: Thread,
@@ -519,6 +528,11 @@ impl ReadModel {
             Event::ProjectCreated { project } => {
                 self.projects.insert(project.id.clone(), project.clone());
             }
+            Event::ProjectWorktreeSetupSet { project_id, setup } => {
+                if let Some(project) = self.projects.get_mut(project_id) {
+                    project.worktree_setup.clone_from(setup);
+                }
+            }
             Event::ProjectRemoved { project_id } => {
                 self.projects.remove(project_id);
                 self.threads
@@ -781,8 +795,21 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     workspace_root,
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
+                    worktree_setup: None,
                 },
             }])
+        }
+        Command::ProjectWorktreeSetupSet { project_id, setup } => {
+            if !model.projects.contains_key(&project_id) {
+                return Err(CommandError::ProjectNotFound { project_id });
+            }
+            let setup = setup
+                .map(|setup| WorktreeSetup {
+                    command: setup.command.trim().to_owned(),
+                    wait: setup.wait,
+                })
+                .filter(|setup| !setup.command.is_empty());
+            Ok(vec![Event::ProjectWorktreeSetupSet { project_id, setup }])
         }
         Command::ProjectRemove { project_id } => {
             if !model.projects.contains_key(&project_id) {

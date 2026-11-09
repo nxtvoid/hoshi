@@ -29,6 +29,17 @@ export function addTerminal(
   return { open: true, terminalIds: [...drawer.terminalIds, id], activeId: id }
 }
 
+/** Opens the drawer on terminal `id`, adding its tab if it has none. */
+export function showTerminal(
+  drawer: TerminalDrawer,
+  id: string
+): TerminalDrawer {
+  const terminalIds = drawer.terminalIds.includes(id)
+    ? drawer.terminalIds
+    : [...drawer.terminalIds, id]
+  return { open: true, terminalIds, activeId: id }
+}
+
 export function activateTerminal(
   drawer: TerminalDrawer,
   id: string

@@ -3,6 +3,7 @@ import {
   addTerminal,
   closeTerminal,
   NO_DRAWER,
+  showTerminal,
   toggleDrawer
 } from '@/state/terminal-drawer'
 
@@ -47,4 +48,18 @@ describe('closeTerminal', () => {
 
     expect(closeTerminal(drawer, 'term-1')).toEqual(NO_DRAWER)
   })
+})
+
+test('showing an engine terminal opens the drawer on it, once', () => {
+  const drawer = addTerminal(NO_DRAWER, () => 'term-1')
+  const shown = showTerminal({ ...drawer, open: false }, 'setup-t')
+  expect(shown).toEqual({
+    open: true,
+    terminalIds: ['term-1', 'setup-t'],
+    activeId: 'setup-t'
+  })
+  expect(showTerminal(shown, 'setup-t').terminalIds).toEqual([
+    'term-1',
+    'setup-t'
+  ])
 })

@@ -28,6 +28,7 @@ mod thread_tools;
 mod titles;
 mod watch;
 mod worktree;
+mod worktree_setup;
 
 use attachments::Attachments;
 use browser::tools::Browsing;
@@ -71,6 +72,7 @@ pub use terminal::TerminalSink;
 use terminal::{Launch, Terminals};
 use watch::GitWatcher;
 use worktree::TurnWorkspace;
+use worktree_setup::{SetupLaunch, WorktreeSetups};
 
 pub enum Notification {
     Event(EventEnvelope),
@@ -91,6 +93,8 @@ pub enum Notification {
     BrowserFrame(BrowserFrame),
     /// Where a thread's browser page is, and whether the agent just acted on it.
     BrowserPage(BrowserPage),
+    /// A worktree's setup command started, wrote output, or ended.
+    WorktreeSetup(hoshi_core::WorktreeSetupRun),
 }
 
 pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
@@ -99,7 +103,7 @@ pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
 /// reader threads of running turns.
 pub struct Engine {
     state: Arc<Mutex<State>>,
-    terminals: Terminals,
+    terminals: Arc<Terminals>,
     /// The headless browser agents open pages in; apart from the state, as pages are slow.
     browsing: Arc<Mutex<Browsing>>,
     /// Per working folder.
@@ -147,6 +151,8 @@ struct State {
     attachments: Attachments,
     /// Lets background work (branch refreshes) reach the state without keeping it alive.
     this: Weak<Mutex<State>>,
+    /// The projects' setup commands running in their new worktrees.
+    setups: WorktreeSetups,
     /// `None` when the platform watcher failed to start; branches then refresh after turns only.
     watcher: Option<GitWatcher>,
     forges: HashMap<ForgeKind, Arc<dyn Forge>>,
@@ -267,7 +273,10 @@ impl Engine {
             eprintln!("hoshi: failed to read the cached usage limits: {error}");
             None
         });
+        let terminals = Arc::new(Terminals::default());
+        let setups = WorktreeSetups::new(terminals.clone(), notify.clone());
         let mut state = State {
+            setups,
             model: ReadModel::from_snapshot(&snapshot),
             sequence: snapshot.sequence,
             store,
@@ -372,7 +381,7 @@ impl Engine {
         thread::spawn(editors::installed);
         Ok(Self {
             state: shared,
-            terminals: Terminals::default(),
+            terminals,
             browsing,
             paths: Refreshing::new(PATHS_FRESH_FOR),
             slash_commands: Refreshing::new(SLASH_COMMANDS_FRESH_FOR),
@@ -1381,8 +1390,35 @@ impl Engine {
             cwd: &cwd,
             project_root: &project_root,
             worktree_path: worktree_path.as_deref(),
+            command: None,
         };
         self.terminals.open(terminal_id, launch, size, sink)
+    }
+
+    /// Every worktree setup since the app started, running or ended.
+    pub fn worktree_setups(&self) -> Vec<hoshi_core::WorktreeSetupRun> {
+        lock(&self.state).setups.runs()
+    }
+
+    /// Runs the thread's worktree setup again, with the project's command as it is now.
+    pub fn rerun_worktree_setup(&self, thread_id: &str) -> Result<(), CommandError> {
+        let state = lock(&self.state);
+        let launch = state
+            .setup_launch(thread_id)
+            .or_else(|| state.setups.launch(thread_id))
+            .ok_or_else(|| CommandError::ThreadNotFound {
+                thread_id: thread_id.to_owned(),
+            })?;
+        state.run_worktree_setup(launch)
+    }
+
+    /// Lets the agent start without the thread's setup, sending what it held.
+    pub fn skip_worktree_setup(&self, thread_id: &str) -> Result<(), CommandError> {
+        let mut state = lock(&self.state);
+        for command in state.setups.stop_waiting(thread_id) {
+            state.run_command(command)?;
+        }
+        Ok(())
     }
 
     pub fn write_terminal(&self, terminal_id: &str, data: &str) -> Result<(), CommandError> {
@@ -1857,8 +1893,86 @@ impl State {
 
     /// Carries out a command: decides its events, records them, and starts what they call for.
     fn run_command(&mut self, command: Command) -> Result<(), CommandError> {
+        let restoring = match &command {
+            Command::MessageSend { thread_id, .. } if self.worktree_missing(thread_id) => {
+                Some(thread_id.clone())
+            }
+            _ => None,
+        };
+        let creating = match &command {
+            Command::ThreadCreate {
+                thread_id,
+                workspace: ThreadWorkspace::NewWorktree | ThreadWorkspace::BranchWorktree { .. },
+                ..
+            } => Some(thread_id.clone()),
+            _ => None,
+        };
         let command = self.prepare(command)?;
-        self.run_prepared(command)
+        if let Some(thread_id) = restoring {
+            self.start_worktree_setup(&thread_id);
+        }
+        let Some(command) = self.setups.hold(command) else {
+            return Ok(());
+        };
+        self.run_prepared(command)?;
+        if let Some(thread_id) = creating {
+            self.start_worktree_setup(&thread_id);
+        }
+        Ok(())
+    }
+
+    /// Whether the thread's worktree was released and its folder is gone.
+    fn worktree_missing(&self, thread_id: &str) -> bool {
+        self.model.thread(thread_id).is_some_and(|thread| {
+            thread.worktree_released
+                && thread
+                    .worktree_path
+                    .as_deref()
+                    .is_some_and(|path| !Path::new(path).is_dir())
+        })
+    }
+
+    /// Runs the project's setup command in the thread's worktree, if it has one.
+    fn start_worktree_setup(&self, thread_id: &str) {
+        let Some(launch) = self.setup_launch(thread_id) else {
+            return;
+        };
+        if let Err(error) = self.run_worktree_setup(launch) {
+            eprintln!("hoshi: the setup of thread {thread_id} didn't start: {error}");
+        }
+    }
+
+    fn setup_launch(&self, thread_id: &str) -> Option<SetupLaunch> {
+        let thread = self.model.thread(thread_id)?;
+        let worktree_path = thread.worktree_path.clone()?;
+        let project = self.model.project(thread.project_id.as_deref()?)?;
+        let setup = project.worktree_setup.clone()?;
+        Some(SetupLaunch {
+            thread_id: thread_id.to_owned(),
+            project_root: project.workspace_root.clone(),
+            worktree_path,
+            command: setup.command,
+            wait: setup.wait,
+        })
+    }
+
+    /// The messages a setup held are sent apart from its terminal, whose lock it ends under.
+    fn run_worktree_setup(&self, launch: SetupLaunch) -> Result<(), CommandError> {
+        let this = self.this.clone();
+        self.setups.start(launch, move |held| {
+            let this = this.clone();
+            thread::spawn(move || {
+                let Some(state) = this.upgrade() else {
+                    return;
+                };
+                let mut state = lock(&state);
+                for command in held {
+                    if let Err(error) = state.run_command(command) {
+                        eprintln!("hoshi: failed to send a message held for setup: {error}");
+                    }
+                }
+            });
+        })
     }
 
     /// Carries out a command `prepare` already went through, or one the engine itself made.
@@ -1947,6 +2061,8 @@ impl State {
             ..
         } = self;
         context_usages.retain(|thread_id, _| model.thread(thread_id).is_some());
+        self.setups
+            .retain_threads(|thread_id| self.model.thread(thread_id).is_some());
         for (repository, path) in freed_worktrees {
             self.checkpoints.settle(&path);
             if let Err(error) = git::remove_worktree(&repository, &path) {
@@ -2072,8 +2188,6 @@ impl State {
         }
     }
 
-    /// Starts the oldest message waiting for its own turn, such as one sent while the user
-    /// stopped the running turn.
     /// The message the user sent to go once the context was compacted.
     fn send_after_compaction(&mut self, thread_id: &str) {
         let idle = self
@@ -2097,6 +2211,8 @@ impl State {
         }
     }
 
+    /// Starts the oldest message waiting for its own turn, such as one sent while the user
+    /// stopped the running turn.
     fn start_next_queued(&mut self, thread_id: &str) {
         let Some(message) = self.queued.get_mut(thread_id).and_then(VecDeque::pop_front) else {
             return;
@@ -4183,6 +4299,87 @@ Blue"
             .unwrap_err();
 
         assert!(matches!(error, CommandError::WorkspaceRootNotFound { .. }));
+    }
+
+    #[test]
+    fn a_new_worktree_runs_its_project_s_setup_before_the_held_message() {
+        let repo = git::tests::temp_repository("engine-setup");
+        let harness = Harness::new(
+            "setup",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        let marker = if cfg!(windows) {
+            "Set-Content -Path ready.txt -Value ok"
+        } else {
+            "echo ok > ready.txt"
+        };
+        harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    command: format!("  {marker}  "),
+                    wait: true,
+                }),
+            })
+            .unwrap();
+        harness
+            .create_thread("s1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        harness.send("s1234567-rest", "m1", "go");
+
+        harness.wait_for_turn_end();
+        let worktree = harness.thread("s1234567-rest").worktree_path.unwrap();
+        assert!(Path::new(&worktree).join("ready.txt").is_file());
+        let runs = harness.engine.worktree_setups();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, hoshi_core::WorktreeSetupStatus::Succeeded);
+        assert_eq!(runs[0].held_messages, 0);
+        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_failed_setup_keeps_the_message_until_the_user_sends_it_anyway() {
+        let repo = git::tests::temp_repository("engine-setup-failed");
+        let harness = Harness::new(
+            "setup-failed",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    command: "exit 3".into(),
+                    wait: true,
+                }),
+            })
+            .unwrap();
+        harness
+            .create_thread("f1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        harness.send("f1234567-rest", "m1", "go");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let failed = loop {
+            let runs = harness.engine.worktree_setups();
+            if runs[0].status != hoshi_core::WorktreeSetupStatus::Running {
+                break runs[0].clone();
+            }
+            assert!(Instant::now() < deadline, "the setup never ended");
+            thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(failed.status, hoshi_core::WorktreeSetupStatus::Failed);
+        assert_eq!(failed.exit_code, Some(3));
+        assert_eq!(failed.held_messages, 1);
+        assert!(harness.adapter.requests.lock().unwrap().is_empty());
+
+        harness.engine.skip_worktree_setup("f1234567-rest").unwrap();
+        harness.wait_for_turn_end();
+        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -22,6 +22,7 @@ import { draftKey } from '@/state/draft-store'
 import { ProjectIcon } from '@/components/sidebar/ProjectIcon'
 import { MergedCleanupBanner } from './MergedCleanupBanner'
 import { ReviewCommentsBar } from './ReviewCommentsBar'
+import { WorktreeSetupBar } from './WorktreeSetupBar'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { LogoMark } from '@/components/brand/Logo'
 import { usePanelStore } from '@/state/panel-store'
@@ -214,6 +215,7 @@ export function ThreadView() {
                     )}
                   />
                 </div>
+                {thread ? <WorktreeSetupBar threadId={thread.id} /> : null}
                 {thread ? <ReviewCommentsBar threadId={thread.id} /> : null}
                 <Composer
                   key={composerDraft}

@@ -20,6 +20,8 @@ pub struct Launch<'a> {
     pub cwd: &'a str,
     pub project_root: &'a str,
     pub worktree_path: Option<&'a str>,
+    /// Run by the shell, which exits with it, instead of an interactive session.
+    pub command: Option<&'a str>,
 }
 
 #[derive(Default)]
@@ -39,6 +41,8 @@ struct Session {
 struct Shared {
     history: String,
     sink: Option<TerminalSink>,
+    /// Hears everything too, whether a view is attached or not.
+    observer: Option<TerminalSink>,
     /// Dropped once the shell exits, which ends the reader on every platform.
     master: Option<Box<dyn MasterPty + Send>>,
     exit: Option<TerminalExit>,
@@ -48,6 +52,9 @@ struct Shared {
 
 impl Shared {
     fn send(&self, event: TerminalEvent) {
+        if let Some(observer) = &self.observer {
+            observer(event.clone());
+        }
         if let Some(sink) = &self.sink {
             sink(event);
         }
@@ -76,7 +83,7 @@ impl Terminals {
     ) -> Result<TerminalAttach, CommandError> {
         let mut sessions = guard(&self.sessions);
         if !sessions.contains_key(terminal_id) {
-            let session = spawn(&launch, size)?;
+            let session = spawn(&launch, size, None)?;
             sessions.insert(terminal_id.to_owned(), session);
         }
         let session = &sessions[terminal_id];
@@ -90,6 +97,22 @@ impl Terminals {
             history: shared.history.clone(),
             exit: shared.exit,
         })
+    }
+
+    /// Starts `launch` afresh, replacing a terminal of the same id, with `observer` hearing
+    /// its output and exit until it ends.
+    pub fn run(
+        &self,
+        terminal_id: &str,
+        launch: Launch<'_>,
+        observer: TerminalSink,
+    ) -> Result<(), CommandError> {
+        let session = spawn(&launch, (120, 30), Some(observer))?;
+        let replaced = guard(&self.sessions).insert(terminal_id.to_owned(), session);
+        if let Some(replaced) = replaced {
+            stop(replaced);
+        }
+        Ok(())
     }
 
     pub fn write(&self, terminal_id: &str, data: &str) -> Result<(), CommandError> {
@@ -125,10 +148,11 @@ impl Terminals {
         }
     }
 
+    /// Whether a shell still runs for the thread; one that exited keeps only its output.
     pub fn any_open_for(&self, thread_id: &str) -> bool {
         guard(&self.sessions)
             .values()
-            .any(|session| session.thread_id == thread_id)
+            .any(|session| session.thread_id == thread_id && guard(&session.shared).exit.is_none())
     }
 
     /// Closes the terminals of every thread `keep` rejects.
@@ -171,12 +195,17 @@ fn stop(mut session: Session) {
     let master = {
         let mut shared = guard(&session.shared);
         shared.sink = None;
+        shared.observer = None;
         shared.master.take()
     };
     drop(master);
 }
 
-fn spawn(launch: &Launch<'_>, size: (u16, u16)) -> Result<Session, CommandError> {
+fn spawn(
+    launch: &Launch<'_>,
+    size: (u16, u16),
+    observer: Option<TerminalSink>,
+) -> Result<Session, CommandError> {
     let failed = |error: &dyn std::fmt::Display| CommandError::TerminalFailed {
         detail: error.to_string(),
     };
@@ -192,11 +221,14 @@ fn spawn(launch: &Launch<'_>, size: (u16, u16)) -> Result<Session, CommandError>
         .master
         .try_clone_reader()
         .map_err(|error| failed(&error))?;
-    let writer = pair.master.take_writer().map_err(|error| failed(&error))?;
+    let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(
+        pair.master.take_writer().map_err(|error| failed(&error))?,
+    ));
     let killer = child.clone_killer();
     let shared = Arc::new(Mutex::new(Shared {
         history: String::new(),
         sink: None,
+        observer,
         master: Some(pair.master),
         exit: None,
         reader_done: false,
@@ -204,7 +236,8 @@ fn spawn(launch: &Launch<'_>, size: (u16, u16)) -> Result<Session, CommandError>
     }));
 
     let output = shared.clone();
-    thread::spawn(move || read_output(reader, &output));
+    let answers = writer.clone();
+    thread::spawn(move || read_output(reader, &output, &answers));
     let waited = shared.clone();
     thread::spawn(move || {
         let code = child.wait().ok().map(|status| status.exit_code());
@@ -222,13 +255,21 @@ fn spawn(launch: &Launch<'_>, size: (u16, u16)) -> Result<Session, CommandError>
     Ok(Session {
         thread_id: launch.thread_id.to_owned(),
         cwd: launch.cwd.to_owned(),
-        writer: Arc::new(Mutex::new(writer)),
+        writer,
         killer,
         shared,
     })
 }
 
-fn read_output(mut reader: Box<dyn Read + Send>, shared: &Mutex<Shared>) {
+/// Asked by Windows' pseudo console before a shell starts; a view answers it, and with
+/// none attached the shell would wait forever.
+const CURSOR_POSITION_QUERY: &str = "\u{1b}[6n";
+
+fn read_output(
+    mut reader: Box<dyn Read + Send>,
+    shared: &Mutex<Shared>,
+    writer: &Mutex<Box<dyn Write + Send>>,
+) {
     let mut buffer = vec![0; READ_BUFFER];
     let mut decoder = Utf8Decoder::default();
     loop {
@@ -241,6 +282,10 @@ fn read_output(mut reader: Box<dyn Read + Send>, shared: &Mutex<Shared>) {
             continue;
         }
         let mut shared = guard(shared);
+        if shared.sink.is_none() && data.contains(CURSOR_POSITION_QUERY) {
+            let mut writer = guard(writer);
+            let _ = writer.write_all(b"\x1b[1;1R").and_then(|()| writer.flush());
+        }
         push_history(&mut shared.history, &data);
         shared.send(TerminalEvent::Output { data });
     }
@@ -266,6 +311,9 @@ fn push_history(history: &mut String, data: &str) {
 
 fn shell_command(launch: &Launch<'_>) -> CommandBuilder {
     let mut command = default_shell();
+    if let Some(script) = launch.command {
+        command.args(script_args(script));
+    }
     command.cwd(launch.cwd);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
@@ -296,6 +344,16 @@ fn default_shell() -> CommandBuilder {
         command.arg("-l");
     }
     command
+}
+
+#[cfg(windows)]
+fn script_args(script: &str) -> [&str; 2] {
+    ["-Command", script]
+}
+
+#[cfg(not(windows))]
+fn script_args(script: &str) -> [&str; 2] {
+    ["-c", script]
 }
 
 #[cfg(windows)]
@@ -401,6 +459,7 @@ mod tests {
             cwd: &cwd,
             project_root: &cwd,
             worktree_path: None,
+            command: None,
         };
 
         let attach = terminals

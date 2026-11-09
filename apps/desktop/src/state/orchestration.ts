@@ -22,6 +22,15 @@ export function applyEvent(
   switch (event.type) {
     case 'projectCreated':
       return { ...state, projects: [...state.projects, event.project] }
+    case 'projectWorktreeSetupSet':
+      return {
+        ...state,
+        projects: state.projects.map((project) =>
+          project.id === event.projectId
+            ? { ...project, worktreeSetup: event.setup }
+            : project
+        )
+      }
     case 'projectRemoved':
       return {
         projects: state.projects.filter(

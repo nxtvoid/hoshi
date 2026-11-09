@@ -5,8 +5,9 @@ import type { MessageAttachment } from "./MessageAttachment";
 import type { RequestResponse } from "./RequestResponse";
 import type { Rewind } from "./Rewind";
 import type { ThreadWorkspace } from "./ThreadWorkspace";
+import type { WorktreeSetup } from "./WorktreeSetup";
 
-export type Command = { "type": "projectCreate", projectId: string, title: string, workspaceRoot: string, } | { "type": "projectRemove", projectId: string, } | { "type": "threadCreate", threadId: string, 
+export type Command = { "type": "projectCreate", projectId: string, title: string, workspaceRoot: string, } | { "type": "projectRemove", projectId: string, } | { "type": "projectWorktreeSetupSet", projectId: string, setup: WorktreeSetup | null, } | { "type": "threadCreate", threadId: string, 
 /**
  * `None` starts a chat, which always works locally in its own folder.
  */
