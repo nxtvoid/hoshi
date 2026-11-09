@@ -266,7 +266,7 @@ const ComposerKeys = Extension.create({
 })
 
 const CONTENT_CLASSES = cn(
-  'px-2.5 text-base wrap-break-word whitespace-pre-wrap outline-none md:text-sm',
+  'px-2.5 font-(family-name:--font-composer) wrap-break-word whitespace-pre-wrap text-(length:--composer-font-size) outline-none',
   '[&_p]:my-0 [&_strong]:font-semibold',
   '[&_blockquote]:border-foreground/25 [&_blockquote]:text-muted-foreground [&_blockquote]:my-1 [&_blockquote]:border-s-2 [&_blockquote]:ps-3',
   '[&_code]:bg-foreground/10 [&_code]:rounded [&_code]:px-[0.35em] [&_code]:py-[0.1em] [&_code]:font-mono [&_code]:text-[0.85em]',

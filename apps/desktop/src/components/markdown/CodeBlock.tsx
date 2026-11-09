@@ -1,4 +1,6 @@
+import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
+import { useThemeStore } from '@/state/theme-store'
 import { languageFileName } from '@/lib/file-icons'
 import { useEffect, useRef, useState } from 'react'
 import { codeLanguageLabel } from '@/lib/code-languages'
@@ -27,6 +29,7 @@ export function CodeBlock({
   language: string | null
 }) {
   const html = useHighlighted(code, language)
+  const wrap = useThemeStore((state) => state.wordWrap)
   return (
     <div className='border-border/70 bg-secondary/60 dark:bg-input/30 my-2.5 overflow-hidden rounded-lg border dark:border-transparent'>
       <div className='text-muted-foreground flex h-7 items-center justify-between gap-2 ps-3 pe-1.5 select-none'>
@@ -50,11 +53,14 @@ export function CodeBlock({
       </div>
       {html ? (
         <div
-          className={HIGHLIGHTED}
+          className={cn(
+            HIGHLIGHTED,
+            wrap && '[&_pre]:wrap-break-word [&_pre]:whitespace-pre-wrap'
+          )}
           dangerouslySetInnerHTML={{ __html: html }}
         />
       ) : (
-        <pre className={PRE}>
+        <pre className={cn(PRE, wrap && 'wrap-break-word whitespace-pre-wrap')}>
           <code>{code}</code>
         </pre>
       )}

@@ -82,33 +82,70 @@
 
 /* Outside the inline theme so utilities read the variables and Settings › Appearance can swap them. */
 @theme {
-  --font-sans: "Geist Variable", sans-serif;
-  --font-mono:
-    "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas,
-    "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --font-sans: var(--stack-geist);
+  --font-mono: var(--stack-jetbrains);
 }
 
 :root {
+  --stack-geist: "Geist Variable", sans-serif;
+  --stack-inter: "Inter Variable", sans-serif;
+  --stack-system:
+    system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell,
+    "Noto Sans", sans-serif;
+  --stack-jetbrains:
+    "JetBrains Mono", "Cascadia Mono", "SF Mono", Menlo, Consolas,
+    "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --stack-cascadia:
+    "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo,
+    Consolas, "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --stack-system-mono:
+    "SF Mono", Menlo, Consolas, "Ubuntu Mono", "DejaVu Sans Mono",
+    "Liberation Mono", monospace;
+  --font-composer: var(--font-sans);
+  --font-terminal: var(--font-mono);
   --code-font-size: 13px;
+  --composer-font-size: 0.875rem;
+  --terminal-font-size: var(--code-font-size);
 }
 
 html[data-font="inter"] {
-  --font-sans: "Inter Variable", sans-serif;
+  --font-sans: var(--stack-inter);
 }
 html[data-font="system"] {
-  --font-sans:
-    system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell,
-    "Noto Sans", sans-serif;
+  --font-sans: var(--stack-system);
 }
 html[data-code-font="cascadia"] {
-  --font-mono:
-    "Cascadia Mono", "Cascadia Code", "JetBrains Mono", "SF Mono", Menlo,
-    Consolas, "Ubuntu Mono", "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --font-mono: var(--stack-cascadia);
 }
 html[data-code-font="system"] {
-  --font-mono:
-    "SF Mono", Menlo, Consolas, "Ubuntu Mono", "DejaVu Sans Mono",
-    "Liberation Mono", monospace;
+  --font-mono: var(--stack-system-mono);
+}
+html[data-composer-font="geist"] {
+  --font-composer: var(--stack-geist);
+}
+html[data-composer-font="inter"] {
+  --font-composer: var(--stack-inter);
+}
+html[data-composer-font="system"] {
+  --font-composer: var(--stack-system);
+}
+html[data-composer-font="jetbrains"] {
+  --font-composer: var(--stack-jetbrains);
+}
+html[data-composer-font="cascadia"] {
+  --font-composer: var(--stack-cascadia);
+}
+html[data-composer-font="system-mono"] {
+  --font-composer: var(--stack-system-mono);
+}
+html[data-terminal-font="jetbrains"] {
+  --font-terminal: var(--stack-jetbrains);
+}
+html[data-terminal-font="cascadia"] {
+  --font-terminal: var(--stack-cascadia);
+}
+html[data-terminal-font="system"] {
+  --font-terminal: var(--stack-system-mono);
 }
 
 @theme inline {
@@ -337,6 +374,10 @@ html[data-code-font="system"] {
     @apply font-sans;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+  html[data-font-smoothing="off"] {
+    -webkit-font-smoothing: auto;
+    -moz-osx-font-smoothing: auto;
   }
   /* WebKitGTK draws Geist heavier than Chromium and WebKit on macOS do. */
   html[data-platform="linux"]:not([data-text-weight="regular"]) {

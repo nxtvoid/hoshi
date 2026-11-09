@@ -91,8 +91,19 @@ export function useSystemDark() {
 }
 
 function setData(root: HTMLElement, key: string, value: string | undefined) {
+  if (root.dataset[key] === value) return
   if (value === undefined) delete root.dataset[key]
   else root.dataset[key] = value
+}
+
+function setVariable(
+  root: HTMLElement,
+  name: string,
+  value: string | undefined
+) {
+  if (root.style.getPropertyValue(name) === (value ?? '')) return
+  if (value === undefined) root.style.removeProperty(name)
+  else root.style.setProperty(name, value)
 }
 
 let appliedColors: ThemeColors | undefined | null = null
@@ -120,13 +131,16 @@ function applyAppearance() {
   setColors(root, preview ? preview.colors : applied.colors)
   setData(root, 'font', applied.font)
   setData(root, 'codeFont', applied.codeFont)
+  setData(root, 'composerFont', applied.composerFont)
+  setData(root, 'terminalFont', applied.terminalFont)
+  setData(root, 'fontSmoothing', applied.fontSmoothing)
   setData(root, 'textWeight', applied.textWeight)
-  root.style.fontSize = applied.fontSize ?? ''
-  if (applied.codeFontSize === undefined) {
-    root.style.removeProperty('--code-font-size')
-  } else {
-    root.style.setProperty('--code-font-size', applied.codeFontSize)
+  if (root.style.fontSize !== (applied.fontSize ?? '')) {
+    root.style.fontSize = applied.fontSize ?? ''
   }
+  setVariable(root, '--code-font-size', applied.codeFontSize)
+  setVariable(root, '--composer-font-size', applied.composerFontSize)
+  setVariable(root, '--terminal-font-size', applied.terminalFontSize)
   if (dark === mirrored) return
   mirrored = dark
   invoke('set_appearance', { dark }).catch(() => {})
