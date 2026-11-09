@@ -208,6 +208,13 @@ const MIGRATIONS: &[&str] = &[
         watch_json TEXT NOT NULL
     );
     ",
+    r"
+    DELETE FROM events
+    WHERE thread_id IS NOT NULL
+      AND event_type <> 'threadDeleted'
+      AND coalesce(substr(thread_id, 1, nullif(instr(thread_id, ':'), 0) - 1), thread_id)
+          NOT IN (SELECT id FROM threads);
+    ",
 ];
 
 const JOURNAL_SIZE_LIMIT: i64 = 8 * 1024 * 1024;
@@ -1231,6 +1238,70 @@ mod tests {
         assert!(store.pull_request_watches().unwrap().is_empty());
     }
 
+    #[test]
+    fn upgrading_forgets_the_events_of_threads_deleted_before() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let before = MIGRATIONS.len() - 1;
+        let tx = conn.transaction().unwrap();
+        for migration in &MIGRATIONS[..before] {
+            tx.execute_batch(migration).unwrap();
+        }
+        tx.execute(
+            "INSERT INTO threads (id, project_id, title, status, created_at, updated_at)
+             VALUES ('t', 'p', 'kept', 'idle', ?1, ?1)",
+            [NOW],
+        )
+        .unwrap();
+        let events = [
+            (
+                "projectCreated",
+                r#"{"type":"projectCreated","project":{"id":"p"}}"#,
+            ),
+            (
+                "threadTitleSet",
+                r#"{"type":"threadTitleSet","threadId":"t","title":"kept"}"#,
+            ),
+            (
+                "itemAdded",
+                r#"{"type":"itemAdded","item":{"threadId":"t:sub"}}"#,
+            ),
+            (
+                "threadTitleSet",
+                r#"{"type":"threadTitleSet","threadId":"gone","title":"secret"}"#,
+            ),
+            (
+                "itemAdded",
+                r#"{"type":"itemAdded","item":{"threadId":"gone:sub"}}"#,
+            ),
+            (
+                "threadDeleted",
+                r#"{"type":"threadDeleted","threadId":"gone"}"#,
+            ),
+        ];
+        for (event_type, payload) in events {
+            tx.execute(
+                "INSERT INTO events (event_type, payload_json, occurred_at) VALUES (?1, ?2, ?3)",
+                params![event_type, payload, NOW],
+            )
+            .unwrap();
+        }
+        tx.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        tx.commit().unwrap();
+
+        let store = Store::init(conn).unwrap();
+
+        let kept: Vec<String> = store
+            .conn
+            .prepare("SELECT coalesce(thread_id, '-') FROM events ORDER BY sequence")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(kept, ["-", "t", "t:sub", "gone"]);
+    }
+
     fn thread_created(id: &str, project_id: &str) -> Event {
         Event::ThreadCreated {
             thread: Thread {
@@ -2073,11 +2144,20 @@ mod tests {
     #[test]
     fn a_database_from_before_the_indexes_keeps_its_items_and_events() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let before = MIGRATIONS.len() - 3;
+        let before = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("thread_items_thread_ordinal"))
+            .unwrap();
         let tx = conn.transaction().unwrap();
         for migration in &MIGRATIONS[..before] {
             tx.execute_batch(migration).unwrap();
         }
+        tx.execute(
+            "INSERT INTO threads (id, project_id, title, status, created_at, updated_at)
+             VALUES ('t', 'p', 'x', 'idle', ?1, ?1)",
+            [NOW],
+        )
+        .unwrap();
         tx.execute(
             "INSERT INTO thread_items (id, thread_id, created_at, content_json)
              VALUES ('a', 't', ?1, '{\"kind\":\"assistantMessage\",\"text\":\"done\"}')",
