@@ -119,11 +119,12 @@ fn recorded_base(dir: &str) -> Option<String> {
 /// The branch a feature branch is compared with: origin's default, else the first that
 /// exists of the usual names. Remembered for a while, since it almost never changes.
 pub(crate) fn default_branch(dir: &str) -> Result<String, String> {
-    let mut seen = DEFAULT_BRANCHES_SEEN
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    let seen = seen.get_or_insert_with(HashMap::new);
-    if let Some((branch, at)) = seen.get(dir)
+    let seen = || {
+        DEFAULT_BRANCHES_SEEN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    };
+    if let Some((branch, at)) = seen().get_or_insert_with(HashMap::new).get(dir)
         && at.elapsed() < DEFAULT_BRANCH_TTL
     {
         return Ok(branch.clone());
@@ -136,7 +137,9 @@ pub(crate) fn default_branch(dir: &str) -> Result<String, String> {
         .chain(DEFAULT_BRANCHES.map(str::to_owned))
         .find(|name| git::stdout(dir, &["rev-parse", "--verify", "--quiet", name]).is_ok())
         .ok_or_else(|| "no default branch to compare with".to_owned())?;
-    seen.insert(dir.to_owned(), (branch.clone(), Instant::now()));
+    seen()
+        .get_or_insert_with(HashMap::new)
+        .insert(dir.to_owned(), (branch.clone(), Instant::now()));
     Ok(branch)
 }
 
