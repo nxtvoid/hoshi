@@ -11,7 +11,7 @@ import { Button } from '@hoshi/ui/components/button'
 import { useSettingsStore } from '@/state/settings-store'
 import { ArrowRight01Icon } from '@hugeicons/core-free-icons'
 import { LogoMark, Wordmark } from '@/components/brand/Logo'
-import { THEME_OPTIONS } from '@/components/settings/AppearanceSection'
+import { THEME_OPTIONS } from '@/components/settings/theme-options'
 import {
   Wizard,
   WizardDescription,

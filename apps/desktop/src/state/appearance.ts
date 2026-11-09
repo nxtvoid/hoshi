@@ -1,14 +1,20 @@
+import {
+  findTheme,
+  isBuiltInPalette,
+  parseHalves,
+  parseStoredThemes,
+  resolveThemeAppearance,
+  resolveThemeFor,
+  STANDARD_THEME_ID,
+  type ThemeAppearance,
+  type ThemeColors,
+  type ThemeDefinition,
+  type ThemeHalves,
+  validHalves
+} from './themes'
+
 export const THEME_PREFERENCES = ['system', 'light', 'dark'] as const
 export type ThemePreference = (typeof THEME_PREFERENCES)[number]
-
-export const COLOR_PALETTES = [
-  'hoshi',
-  'grove',
-  'ocean',
-  'ember',
-  'iris'
-] as const
-export type ColorPalette = (typeof COLOR_PALETTES)[number]
 
 export const INTERFACE_FONTS = ['geist', 'inter', 'system'] as const
 export type InterfaceFont = (typeof INTERFACE_FONTS)[number]
@@ -23,7 +29,10 @@ export const CODE_SIZE: SizeRange = { min: 10, max: 18, default: 13 }
 
 export type Appearance = {
   preference: ThemePreference
-  palette: ColorPalette
+  /** The whole theme: hoshi's own, a built-in palette or a custom theme. */
+  theme: string
+  halves: ThemeHalves
+  customThemes: readonly ThemeDefinition[]
   interfaceFont: InterfaceFont
   interfaceSize: number
   codeFont: CodeFont
@@ -33,7 +42,9 @@ export type Appearance = {
 
 export const DEFAULT_APPEARANCE: Appearance = {
   preference: 'system',
-  palette: 'hoshi',
+  theme: STANDARD_THEME_ID,
+  halves: {},
+  customThemes: [],
   interfaceFont: 'geist',
   interfaceSize: INTERFACE_SIZE.default,
   codeFont: 'jetbrains',
@@ -54,18 +65,34 @@ function oneOf<T extends string>(
   return options.includes(value as T) ? (value as T) : fallback
 }
 
+/** Earlier versions saved a built-in palette as `palette`. */
+function savedTheme(
+  raw: Record<string, unknown>,
+  customThemes: readonly ThemeDefinition[]
+): string {
+  for (const candidate of [raw.theme, raw.palette]) {
+    if (typeof candidate !== 'string') continue
+    const theme = findTheme(candidate, customThemes)
+    if (theme) return theme.id
+  }
+  return STANDARD_THEME_ID
+}
+
 /** Reads what an earlier version saved; unknown or missing fields take their default. */
 export function normalizeAppearance(saved: unknown): Appearance {
   const raw = (
     typeof saved === 'object' && saved !== null ? saved : {}
   ) as Record<string, unknown>
+  const customThemes = parseStoredThemes(raw.customThemes)
   return {
     preference: oneOf(
       THEME_PREFERENCES,
       raw.preference,
       DEFAULT_APPEARANCE.preference
     ),
-    palette: oneOf(COLOR_PALETTES, raw.palette, DEFAULT_APPEARANCE.palette),
+    theme: savedTheme(raw, customThemes),
+    halves: validHalves(parseHalves(raw.halves), customThemes),
+    customThemes,
     interfaceFont: oneOf(
       INTERFACE_FONTS,
       raw.interfaceFont,
@@ -81,11 +108,16 @@ export function normalizeAppearance(saved: unknown): Appearance {
   }
 }
 
-export function resolveDark(
-  preference: ThemePreference,
+export function resolveAppearance(
+  appearance: Appearance,
   systemDark: boolean
-): boolean {
-  return preference === 'dark' || (preference === 'system' && systemDark)
+): ThemeAppearance {
+  return resolveThemeAppearance(
+    appearance,
+    appearance.preference,
+    systemDark,
+    appearance.customThemes
+  )
 }
 
 /**
@@ -93,7 +125,11 @@ export function resolveDark(
  * default in place. `index.html` applies the same before the first paint.
  */
 export type RootAppearance = {
+  dark: boolean
+  /** A built-in palette the stylesheet paints. */
   palette: string | undefined
+  /** A custom theme's colors, set inline. */
+  colors: ThemeColors | undefined
   font: string | undefined
   codeFont: string | undefined
   textWeight: 'regular' | undefined
@@ -101,14 +137,23 @@ export type RootAppearance = {
   codeFontSize: string | undefined
 }
 
-export function rootAppearance(appearance: Appearance): RootAppearance {
+export function rootAppearance(
+  appearance: Appearance,
+  systemDark: boolean
+): RootAppearance {
+  const resolved = resolveAppearance(appearance, systemDark)
+  const { theme, colors } = resolveThemeFor(
+    appearance,
+    resolved,
+    appearance.customThemes
+  )
   const interfaceSize = clampSize(appearance.interfaceSize, INTERFACE_SIZE)
   const codeSize = clampSize(appearance.codeSize, CODE_SIZE)
+  const builtIn = theme.id === STANDARD_THEME_ID || isBuiltInPalette(theme.id)
   return {
-    palette:
-      appearance.palette === DEFAULT_APPEARANCE.palette
-        ? undefined
-        : appearance.palette,
+    dark: resolved === 'dark',
+    palette: isBuiltInPalette(theme.id) ? theme.id : undefined,
+    colors: builtIn ? undefined : colors,
     font:
       appearance.interfaceFont === DEFAULT_APPEARANCE.interfaceFont
         ? undefined

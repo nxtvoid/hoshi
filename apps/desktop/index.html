@@ -50,18 +50,65 @@
         try {
           saved = JSON.parse(localStorage.getItem('hoshi-theme'))?.state ?? {}
         } catch (_) {}
-        const preference = saved.preference ?? 'system'
-        const dark =
-          preference === 'dark' ||
-          (preference === 'system' &&
-            window.matchMedia('(prefers-color-scheme: dark)').matches)
-        root.classList.toggle('dark', dark)
+        const mode = ['light', 'dark'].includes(saved.preference)
+          ? saved.preference
+          : 'system'
+        const palettes = ['grove', 'ocean', 'ember', 'iris']
+        const builtIn = ['hoshi', ...palettes]
+        const customs = Array.isArray(saved.customThemes)
+          ? saved.customThemes.filter(
+              (theme) =>
+                theme &&
+                typeof theme.id === 'string' &&
+                theme.colors &&
+                typeof theme.colors === 'object'
+            )
+          : []
+        const find = (id) =>
+          typeof id !== 'string'
+            ? undefined
+            : builtIn.includes(id)
+              ? { id, builtIn: true }
+              : customs.find((theme) => theme.id === id)
+        const colorsFor = (theme, appearance) =>
+          theme.builtIn ||
+          (theme.appearance === appearance
+            ? theme.colors
+            : theme.variants?.[appearance]) ||
+          null
+        const half = (appearance) => {
+          const theme = find(saved.halves?.[appearance])
+          return theme && colorsFor(theme, appearance) ? theme : undefined
+        }
+        const base = find(saved.theme) ?? find(saved.palette) ?? find('hoshi')
+        const wanted =
+          mode === 'system'
+            ? window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+            : mode
+        const appearance =
+          half(wanted) || colorsFor(base, wanted) ? wanted : base.appearance
+        const theme = half(appearance) ?? base
+        root.classList.toggle('dark', appearance === 'dark')
         const set = (key, value, fallback) => {
           if (typeof value === 'string' && value !== fallback) {
             root.dataset[key] = value
           }
         }
-        set('palette', saved.palette, 'hoshi')
+        if (palettes.includes(theme.id)) root.dataset.palette = theme.id
+        if (!theme.builtIn) {
+          const colors = colorsFor(theme, appearance) || theme.colors
+          for (const [role, value] of Object.entries(colors)) {
+            if (/^[a-z][a-zA-Z]*$/.test(role) && /^[^;{}]+$/.test(value)) {
+              const name = role.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)
+              root.style.setProperty(`--${name}`, value)
+            }
+          }
+          if (typeof colors.background === 'string') {
+            root.style.backgroundColor = colors.background
+          }
+        }
         set('font', saved.interfaceFont, 'geist')
         set('codeFont', saved.codeFont, 'jetbrains')
         if (saved.lighterText === false) root.dataset.textWeight = 'regular'
