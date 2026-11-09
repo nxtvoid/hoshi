@@ -133,6 +133,8 @@ const PAGE_MAX_ITEMS: usize = 600;
 const TITLE_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// What asks the agent to compact its conversation.
 const COMPACT_COMMAND: &str = "/compact";
+/// How often secret files are checked for being past their day.
+const SECRETS_SWEPT_EVERY: Duration = Duration::from_secs(60 * 60);
 
 struct State {
     /// Wakes the pull request sync before its next tick.
@@ -328,6 +330,7 @@ impl Engine {
         }
         // A task the close cut short answers once the user has it finish.
         state.delegations = state.pending_delegations();
+        secret_requests::forget_old(&state.secrets_dir);
         let thread_ids = state
             .model
             .threads()
@@ -2802,6 +2805,7 @@ fn sync_pull_requests(state: Weak<Mutex<State>>) {
         lock(&shared).sync_wake = Some(wake);
     }
     thread::spawn(move || {
+        let mut swept = Instant::now();
         loop {
             if let Err(mpsc::RecvTimeoutError::Disconnected) =
                 woken.recv_timeout(pull_requests::TICK)
@@ -2812,6 +2816,11 @@ fn sync_pull_requests(state: Weak<Mutex<State>>) {
             let Some(shared) = state.upgrade() else {
                 return;
             };
+            if swept.elapsed() >= SECRETS_SWEPT_EVERY {
+                swept = Instant::now();
+                let secrets = lock(&shared).secrets_dir.clone();
+                secret_requests::forget_old(&secrets);
+            }
             let jobs = lock(&shared).due_pull_request_jobs();
             for job in jobs {
                 let result = job
@@ -3449,6 +3458,27 @@ mod tests {
 
         let restarted = Engine::open(&data_dir, notify).unwrap();
         assert_eq!(restarted.known_usage_limits(), Some(forced));
+    }
+
+    #[test]
+    fn secret_files_past_their_day_go_when_the_engine_starts() {
+        let data_dir = scratch_dir("old-secrets");
+        let secrets = data_dir.join("secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        let (old, fresh) = (secrets.join("old"), secrets.join("fresh"));
+        std::fs::write(&old, "token-1").unwrap();
+        std::fs::write(&fresh, "token-2").unwrap();
+        let file = std::fs::File::options().write(true).open(&old).unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(25 * 60 * 60))
+            .unwrap();
+        drop(file);
+
+        let _engine =
+            Engine::from_store(Store::open_in_memory().unwrap(), &data_dir, Arc::new(|_| {}))
+                .unwrap();
+
+        assert!(!old.exists());
+        assert!(fresh.exists());
     }
 
     fn scratch_dir(name: &str) -> PathBuf {

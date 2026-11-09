@@ -42,7 +42,8 @@ pub(crate) fn save(dir: &Path, value: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn forget_old(dir: &Path) {
+/// Deletes the secret files older than a day.
+pub(crate) fn forget_old(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
