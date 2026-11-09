@@ -6,7 +6,7 @@ mod actions;
 mod model;
 mod patch;
 
-use crate::{Forge, ForgeError, PullRequestFile, RepositoryRef};
+use crate::{Forge, ForgeError, NewPullRequest, PullRequestFile, RepositoryRef};
 use actions::Plan;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -17,7 +17,7 @@ use hoshi_core::{
 use model::{Page, RawComment, RawCommit, RawDiffStat, RawPullRequest, RawStatus, Summary, User};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -500,6 +500,25 @@ impl Forge for Bitbucket {
         number: u32,
     ) -> Result<PullRequest, ForgeError> {
         let raw: RawPullRequest = self.get(&pull_request_path(repository, number))?;
+        self.summarize(repository, &raw)
+    }
+
+    fn create_pull_request(
+        &self,
+        repository: &RepositoryRef,
+        pull_request: &NewPullRequest,
+    ) -> Result<PullRequest, ForgeError> {
+        let path = format!("{}/pullrequests", repository_path(repository));
+        let body = json!({
+            "title": pull_request.title,
+            "description": pull_request.body,
+            "source": { "branch": { "name": pull_request.head } },
+            "destination": { "branch": { "name": pull_request.base } },
+            "draft": pull_request.draft,
+        });
+        let text = self.request(Method::Post, &path, Some(&body))?;
+        let raw: RawPullRequest = serde_json::from_str(&text)
+            .map_err(|error| ForgeError::Unexpected(error.to_string()))?;
         self.summarize(repository, &raw)
     }
 

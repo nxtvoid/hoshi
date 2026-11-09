@@ -7,10 +7,12 @@ use crate::claude_requests::{self, Access, Grants, Requests};
 use crate::claude_titles;
 use crate::claude_tools;
 use crate::claude_usage;
+use crate::claude_writing;
 use crate::process::{ProcessTurn, hide_console, spawn_turn};
 use crate::{
-    GeneratedTitle, Installation, MCP_SERVER_NAME, McpServer, OutputSink, ProviderAdapter,
-    RunningTurn, TitleRequest, TurnAttachment, TurnRequest, truncate,
+    CommitMessage, CommitMessageRequest, GeneratedTitle, Installation, MCP_SERVER_NAME, McpServer,
+    OutputSink, ProviderAdapter, PullRequestText, PullRequestTextRequest, RunningTurn,
+    TitleRequest, TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
     AccessMode, ContextUsage, ProviderModels, ProviderOutput, RequestResponse, SlashCommand,
@@ -104,6 +106,14 @@ impl ProviderAdapter for ClaudeCodeAdapter {
 
     fn generate_title(&self, request: &TitleRequest) -> Option<GeneratedTitle> {
         claude_titles::generate(self.binary(), request)
+    }
+
+    fn write_commit_message(&self, request: &CommitMessageRequest) -> Option<CommitMessage> {
+        claude_writing::write_commit(self.binary(), request)
+    }
+
+    fn write_pull_request(&self, request: &PullRequestTextRequest) -> Option<PullRequestText> {
+        claude_writing::write_pull_request(self.binary(), request)
     }
 
     fn start_turn(

@@ -275,6 +275,24 @@ pub enum CommandError {
         thread_id: String,
         message_id: String,
     },
+    /// Nothing was staged, so there is nothing to commit.
+    #[error("thread {thread_id} has nothing to commit")]
+    NothingToCommit { thread_id: String },
+    /// No commit message came back from the provider; the user can write one.
+    #[error("no commit message could be written for thread {thread_id}")]
+    CommitMessageUnavailable { thread_id: String },
+    /// The remote has commits the branch lacks.
+    #[error("the remote is ahead of the branch of thread {thread_id}")]
+    PushBehind { thread_id: String },
+    /// `origin` is not configured.
+    #[error("thread {thread_id}'s repository has no remote")]
+    NoRemote { thread_id: String },
+    /// Neither a recorded base nor a default branch to open a pull request on.
+    #[error("thread {thread_id}'s branch has no base to open a pull request on")]
+    NoBaseBranch { thread_id: String },
+    /// On a detached HEAD there is no branch to push or open a pull request from.
+    #[error("thread {thread_id} is not on a branch")]
+    DetachedHead { thread_id: String },
     /// Nothing recorded the files before that message's turn, as outside a git repository.
     #[error("thread {thread_id} kept no files from before message {message_id}")]
     NoCheckpoint {

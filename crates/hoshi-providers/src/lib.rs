@@ -12,6 +12,7 @@ mod claude_requests;
 mod claude_titles;
 mod claude_tools;
 mod claude_usage;
+mod claude_writing;
 mod process;
 mod updater;
 
@@ -79,6 +80,50 @@ pub struct TitleRequest {
     pub instructions: String,
 }
 
+/// What a commit message is written from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMessageRequest {
+    pub branch: String,
+    /// `git diff --cached --name-status` of what the commit holds.
+    pub files: String,
+    pub patch: String,
+    /// The repository's latest commit subjects, newest first: the style to follow.
+    pub recent_subjects: Vec<String>,
+    /// Also name a branch for the change, as when it leaves the default branch.
+    pub wants_branch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMessage {
+    pub subject: String,
+    /// Empty when the subject says it all.
+    pub body: String,
+    /// Asked for with [`CommitMessageRequest::wants_branch`]; a name without prefix.
+    pub branch: Option<String>,
+}
+
+/// What a pull request's title and description are written from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestTextRequest {
+    pub base: String,
+    pub head: String,
+    /// `git log --oneline base..head`.
+    pub commits: String,
+    /// `git diff --stat base...head`.
+    pub stat: String,
+    pub patch: String,
+    /// The repository's pull request template, to fill in.
+    pub template: Option<String>,
+    pub recent_subjects: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestText {
+    pub title: String,
+    /// Markdown.
+    pub body: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedTitle {
     pub title: String,
@@ -139,6 +184,16 @@ pub trait ProviderAdapter: Send + Sync {
     /// Names a thread. `None` when the provider can't. Runs the CLI, so it takes a
     /// few seconds.
     fn generate_title(&self, _request: &TitleRequest) -> Option<GeneratedTitle> {
+        None
+    }
+
+    /// Writes a commit message for the staged change. `None` when the provider can't.
+    fn write_commit_message(&self, _request: &CommitMessageRequest) -> Option<CommitMessage> {
+        None
+    }
+
+    /// Writes a pull request's title and description. `None` when the provider can't.
+    fn write_pull_request(&self, _request: &PullRequestTextRequest) -> Option<PullRequestText> {
         None
     }
 

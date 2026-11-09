@@ -9,6 +9,7 @@ mod diff;
 mod editors;
 mod folders;
 mod git;
+mod git_actions;
 mod mcp;
 use delegation::Delegation;
 use mcp::{McpServer, ToolHandler};
@@ -18,6 +19,7 @@ mod pull_request_cache;
 mod pull_requests;
 mod refreshing;
 mod secrets;
+mod source_control;
 mod terminal;
 mod titles;
 mod watch;
@@ -37,7 +39,9 @@ use hoshi_core::{
     record_branch, record_conversation_cursor, record_output, record_title, record_turn_changes,
     record_worktree, record_worktree_left, start_queued_turn, turn_failed,
 };
-use hoshi_core::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage};
+use hoshi_core::{
+    GitActionProgress, ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage,
+};
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
     parse_pull_request_url, parse_remote, parse_repository_name,
@@ -74,6 +78,8 @@ pub enum Notification {
     UsageLimits(UsageLimits),
     /// `None` once the provider is disabled.
     ProviderVersion(Option<ProviderVersion>),
+    /// The step a running git action reached.
+    GitActionProgress(GitActionProgress),
 }
 
 pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
@@ -2792,8 +2798,8 @@ fn internal(error: StoreError) -> CommandError {
 mod tests {
     use super::*;
     use hoshi_core::{
-        AccessMode, ApprovalDecision, Effort, RequestResponse, RequestStatus, ThreadStatus,
-        ToolDetail,
+        AccessMode, ApprovalDecision, Effort, GitAction, GitActionRequest, RequestResponse,
+        RequestStatus, ThreadStatus, ToolDetail,
     };
     use hoshi_providers::OutputSink;
     use std::sync::mpsc::{self, Receiver, Sender};
@@ -4021,6 +4027,60 @@ Blue"
         for path in [worktree, pushed_path] {
             let _ = git::remove_worktree(&harness.root, &path);
         }
+    }
+
+    #[test]
+    fn a_git_action_commits_on_a_new_branch_and_pushes_it() {
+        let origin = git::tests::temp_repository("engine-git-origin");
+        let origin_dir = origin.to_string_lossy().into_owned();
+        git::stdout(
+            &origin_dir,
+            &["config", "receive.denyCurrentBranch", "ignore"],
+        )
+        .unwrap();
+        let repo = git::tests::temp_repository("engine-git-action");
+        let harness = Harness::new(
+            "git-action",
+            repo.clone(),
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        git::stdout(&harness.root, &["remote", "add", "origin", &origin_dir]).unwrap();
+        git::stdout(&harness.root, &["fetch", "origin"]).unwrap();
+        std::fs::write(repo.join("login.txt"), "fixed\n").unwrap();
+        let request = |message: Option<&str>| GitActionRequest {
+            action: GitAction::CommitPush,
+            message: message.map(Into::into),
+            paths: None,
+            new_branch: true,
+            draft: false,
+        };
+
+        assert_eq!(
+            harness
+                .engine
+                .run_git_action("t", &request(None))
+                .unwrap_err(),
+            CommandError::CommitMessageUnavailable {
+                thread_id: "t".into()
+            }
+        );
+        let before = harness.engine.git_status("t").unwrap();
+        assert!(before.has_changes && before.has_remote);
+        let message = "fix: stop the login loop\n\n- keep it";
+        let result = harness
+            .engine
+            .run_git_action("t", &request(Some(message)))
+            .unwrap();
+
+        assert_eq!(result.subject.as_deref(), Some("fix: stop the login loop"));
+        let branch = "hoshi/fix-stop-the-login-loop";
+        assert_eq!(result.pushed.as_deref(), Some(branch));
+        let after = harness.engine.git_status("t").unwrap();
+        assert!(!after.has_changes && after.has_upstream);
+        assert_eq!(after.branch.as_deref(), Some(branch));
+        assert!(git::branch_tip(&origin_dir, branch).is_some());
+        let _ = std::fs::remove_dir_all(&origin);
     }
 
     #[test]

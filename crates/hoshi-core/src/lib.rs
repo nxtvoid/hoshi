@@ -10,6 +10,7 @@ mod provider_update;
 mod pull_request;
 mod request;
 mod settings;
+mod source_control;
 mod terminal;
 mod thread;
 mod usage;
@@ -38,6 +39,10 @@ pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, R
 pub use settings::{
     AppSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
     ThreadTitleSettings,
+};
+pub use source_control::{
+    GitAction, GitActionPhase, GitActionProgress, GitActionPullRequest, GitActionRequest,
+    GitActionResult, GitStatus,
 };
 pub use terminal::{TerminalAttach, TerminalEvent, TerminalExit};
 pub use thread::{

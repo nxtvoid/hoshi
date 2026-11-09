@@ -5,10 +5,12 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import type { Editor } from '@/bindings/Editor'
 import { usePanelStore } from '@/state/panel-store'
 import { ThreadAgents } from './ThreadAgents'
+import { GitActionsRow } from './GitActionsRow'
+import { ICON, ROW, SPLIT_PRIMARY, SplitRow } from './details-rows'
 import { useEditorStore } from '@/state/editor-store'
 import { useDetailsStore } from '@/state/details-store'
 import { EditorIcon, isMac, isWindows } from '@/components/brand/EditorIcon'
-import { type ReactNode, useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { revealItemInDir } from '@tauri-apps/plugin-opener'
 import type { CommandError } from '@/bindings/CommandError'
 import { Button } from '@hoshi/ui/components/button'
@@ -93,10 +95,6 @@ export function useOpenInShortcut(threadId: string | undefined) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [threadId])
 }
-
-const ROW =
-  'flex h-8 w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] font-medium text-foreground/80 outline-none transition-colors hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset disabled:cursor-default disabled:opacity-60 disabled:hover:bg-transparent'
-const ICON = 'size-4 shrink-0 text-muted-foreground'
 
 function errorMessage(error: CommandError) {
   switch (error.code) {
@@ -329,6 +327,16 @@ function DetailsContent({
           </span>
         </button>
       ) : null}
+      {thread.projectId ? (
+        <GitActionsRow
+          threadId={threadId}
+          pullRequestOpen={
+            pullRequest?.state === 'open' || pullRequest?.state === 'draft'
+          }
+          working={thread.activeTurnId !== null}
+          changeKey={changeKey}
+        />
+      ) : null}
       {changes ? (
         <button type='button' onClick={() => show('diff')} className={ROW}>
           <HugeiconsIcon icon={FileDiffIcon} strokeWidth={2} className={ICON} />
@@ -441,56 +449,5 @@ function BranchRow({
         </DropdownMenuGroup>
       </DropdownMenuContent>
     </DropdownMenu>
-  )
-}
-
-const SPLIT_PRIMARY =
-  'flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-s-lg px-2.5 text-left text-[13px] font-medium text-foreground/80 outline-none hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset'
-
-/** A row whose main part runs an action and whose arrow opens alternatives. */
-function SplitRow({
-  primary,
-  menu,
-  menuLabel
-}: {
-  primary: ReactNode
-  /** `null` when there is nothing to choose from. */
-  menu: ReactNode
-  menuLabel: string
-}) {
-  const row = useRef<HTMLDivElement>(null)
-
-  return (
-    <div
-      ref={row}
-      className='group/split hover:bg-foreground/[0.02] flex items-center rounded-lg'
-    >
-      {primary}
-      {menu ? (
-        <>
-          <span className='group-hover/split:bg-border/70 h-4 w-px shrink-0 bg-transparent' />
-          <DropdownMenu>
-            <DropdownMenuTrigger
-              render={
-                <button
-                  type='button'
-                  aria-label={menuLabel}
-                  className='hover:bg-foreground/5 focus-visible:ring-ring flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-e-lg outline-none focus-visible:ring-2 focus-visible:ring-inset'
-                />
-              }
-            >
-              <HugeiconsIcon
-                icon={ArrowDown01Icon}
-                strokeWidth={2}
-                className={ICON}
-              />
-            </DropdownMenuTrigger>
-            <DropdownMenuContent anchor={row} align='end'>
-              {menu}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </>
-      ) : null}
-    </div>
   )
 }

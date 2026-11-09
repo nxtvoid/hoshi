@@ -124,14 +124,7 @@ fn keep_end(text: &str, max_chars: usize) -> String {
 
 /// The title in the CLI's `--output-format json` result; `None` for anything else.
 pub(crate) fn parse(output: &str) -> Option<GeneratedTitle> {
-    let value: Value = serde_json::from_str(output.trim()).ok()?;
-    if value["is_error"] == true {
-        return None;
-    }
-    let answer = match &value["structured_output"] {
-        Value::Object(_) => value["structured_output"].clone(),
-        _ => serde_json::from_str(value["result"].as_str()?).ok()?,
-    };
+    let answer = answer(output)?;
     let title = answer["title"].as_str()?.trim();
     let title = title
         .trim_end_matches(['.', '!', '?', ':'])
@@ -144,17 +137,31 @@ pub(crate) fn parse(output: &str) -> Option<GeneratedTitle> {
 
 /// Runs the CLI outside any project, without tools, hooks or a saved session.
 pub(crate) fn generate(binary: &str, request: &TitleRequest) -> Option<GeneratedTitle> {
-    let model = manifest().resolve(
-        Some(request.model.as_deref().unwrap_or(DEFAULT_MODEL)),
-        Some(hoshi_core::Effort::Low),
-        false,
-        false,
-    );
+    let model = request.model.as_deref().unwrap_or(DEFAULT_MODEL);
+    parse(&run_quick(
+        binary,
+        model,
+        &schema(),
+        &prompt(request),
+        TIMEOUT,
+    )?)
+}
+
+/// One tool-less run of `model` at low effort that answers `prompt` as `schema` says;
+/// what the CLI printed, or `None` when it failed or took longer than `timeout`.
+pub(crate) fn run_quick(
+    binary: &str,
+    model: &str,
+    schema: &Value,
+    prompt: &str,
+    timeout: Duration,
+) -> Option<String> {
+    let model = manifest().resolve(Some(model), Some(hoshi_core::Effort::Low), false, false);
     let mut command = Command::new(binary);
     command
         .current_dir(std::env::temp_dir())
         .args(["-p", "--output-format", "json"])
-        .args(["--json-schema", &schema().to_string()])
+        .args(["--json-schema", &schema.to_string()])
         .args(["--model", &model.slug])
         .args([
             "--settings",
@@ -173,7 +180,7 @@ pub(crate) fn generate(binary: &str, request: &TitleRequest) -> Option<Generated
     hide_console(&mut command);
     let mut child = command.spawn().ok()?;
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt(request).as_bytes());
+        let _ = stdin.write_all(prompt.as_bytes());
     }
     let mut stdout = child.stdout.take()?;
     let (sender, receiver) = mpsc::channel();
@@ -182,10 +189,22 @@ pub(crate) fn generate(binary: &str, request: &TitleRequest) -> Option<Generated
         let _ = stdout.read_to_string(&mut output);
         let _ = sender.send(output);
     });
-    let output = receiver.recv_timeout(TIMEOUT).ok();
+    let output = receiver.recv_timeout(timeout).ok();
     let _ = child.kill();
     let _ = child.wait();
-    parse(&output?)
+    output
+}
+
+/// The structured answer in the CLI's `--output-format json` result.
+pub(crate) fn answer(output: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(output.trim()).ok()?;
+    if value["is_error"] == true {
+        return None;
+    }
+    match &value["structured_output"] {
+        Value::Object(_) => Some(value["structured_output"].clone()),
+        _ => serde_json::from_str(value["result"].as_str()?).ok(),
+    }
 }
 
 #[cfg(test)]

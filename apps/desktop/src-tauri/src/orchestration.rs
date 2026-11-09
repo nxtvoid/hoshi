@@ -1,9 +1,9 @@
 use hoshi_core::{
     AppSettings, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor, FileDiff,
-    FolderListing, ForgeAccount, ForgeKind, MessageAttachment, ProviderModels, ProviderVersion,
-    PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository,
-    SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem, TranscriptPage, UsageLimits,
-    WorkspaceEntry,
+    FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
+    MessageAttachment, ProviderModels, ProviderVersion, PullRequest, PullRequestAction,
+    PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach,
+    TerminalEvent, ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
@@ -25,6 +25,8 @@ const CONTEXT_USAGE_CHANNEL: &str = "hoshi://context-usage";
 const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 /// The provider's CLI against its latest release, and how its update goes.
 const PROVIDER_VERSION_CHANNEL: &str = "hoshi://provider-version";
+/// The step a running commit, push or pull request action reached.
+const GIT_ACTION_CHANNEL: &str = "hoshi://git-action";
 
 pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
@@ -41,6 +43,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
             Notification::ProviderVersion(version) => {
                 handle.emit(PROVIDER_VERSION_CHANNEL, version)
             }
+            Notification::GitActionProgress(progress) => handle.emit(GIT_ACTION_CHANNEL, progress),
         };
         if let Err(error) = result {
             eprintln!("hoshi: failed to emit to the UI: {error}");
@@ -453,6 +456,23 @@ pub fn get_thread_file_diff(
     file: DiffFile,
 ) -> Result<FileDiff, CommandError> {
     engine.thread_file_diff(&thread_id, scope, &file)
+}
+
+#[tauri::command(async)]
+pub fn get_git_status(
+    engine: State<'_, Engine>,
+    thread_id: String,
+) -> Result<GitStatus, CommandError> {
+    engine.git_status(&thread_id)
+}
+
+#[tauri::command(async)]
+pub fn run_git_action(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    request: GitActionRequest,
+) -> Result<GitActionResult, CommandError> {
+    engine.run_git_action(&thread_id, &request)
 }
 
 #[tauri::command(async)]

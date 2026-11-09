@@ -246,6 +246,11 @@ pub fn stdout_with_input(dir: &str, args: &[&str], input: String) -> Result<Stri
     printed(output, &[0])
 }
 
+/// Like [`stdout`], for commands that may take minutes, as a commit whose hooks run tests.
+pub fn slow_stdout(dir: &str, args: &[&str]) -> Result<String, String> {
+    slow(dir, args)
+}
+
 /// For commands that copy or download a whole tree, which may take minutes.
 fn slow(dir: &str, args: &[&str]) -> Result<String, String> {
     let output =

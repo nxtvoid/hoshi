@@ -27,6 +27,8 @@ import { useRequestStore } from './request-store'
 import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
+import { useGitActionStore } from './git-action-store'
+import type { GitActionProgress } from '@/bindings/GitActionProgress'
 import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
 import type { UsageLimits } from '@/bindings/UsageLimits'
@@ -426,6 +428,10 @@ async function startSync() {
     'hoshi://provider-version',
     (message) => useProviderUpdateStore.getState().receive(message.payload)
   )
+  const unlistenGitActions = await listen<GitActionProgress>(
+    'hoshi://git-action',
+    (message) => useGitActionStore.getState().receive(message.payload)
+  )
   const stopAppUpdates = watchAppUpdates()
   const unlistenStream = await listen<StreamDelta>(
     'hoshi://stream',
@@ -439,6 +445,7 @@ async function startSync() {
     unlistenContextUsages()
     unlistenUsageLimits()
     unlistenProviderVersion()
+    unlistenGitActions()
     stopAppUpdates()
   })
   const snapshot = await invoke<Snapshot>('get_snapshot')

@@ -118,7 +118,7 @@ fn recorded_base(dir: &str) -> Option<String> {
 
 /// The branch a feature branch is compared with: origin's default, else the first that
 /// exists of the usual names. Remembered for a while, since it almost never changes.
-fn default_branch(dir: &str) -> Result<String, String> {
+pub(crate) fn default_branch(dir: &str) -> Result<String, String> {
     let mut seen = DEFAULT_BRANCHES_SEEN
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
