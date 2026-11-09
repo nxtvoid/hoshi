@@ -586,6 +586,7 @@
   "edit_select_all": "Select All",
   "usage_refresh": "Refresh",
   "close_usage": "Close (Esc)",
+  "projects": "Projects",
   "inbox": "Inbox",
   "inbox_waiting": "Inbox · {count} waiting",
   "inbox_empty": "Nothing needs you right now",

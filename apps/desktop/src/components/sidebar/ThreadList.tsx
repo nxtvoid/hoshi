@@ -19,6 +19,7 @@ import type {
   ThreadSection
 } from '@/state/thread-sections'
 import {
+  ArrowLeft01Icon,
   ArrowRight01Icon,
   BubbleChatIcon,
   Cancel01Icon,
@@ -226,15 +227,54 @@ function ViewHeader({
   icon: typeof InboxIcon
   title: string
 }) {
+  const hasProjects = useAppStore((state) => state.projects.length > 0)
+
   return (
-    <div className='flex h-8 shrink-0 items-center gap-2 pr-1 pl-2 text-sm font-semibold'>
-      <HugeiconsIcon
-        icon={icon}
-        strokeWidth={2}
-        className='text-muted-foreground size-3.5 shrink-0'
-      />
+    <div className='flex h-8 shrink-0 items-center gap-1.5 pr-1 pl-2 text-sm font-semibold'>
+      {hasProjects ? (
+        <BackToProject />
+      ) : (
+        <HugeiconsIcon
+          icon={icon}
+          strokeWidth={2}
+          className='text-muted-foreground size-3.5 shrink-0'
+        />
+      )}
       <span className='truncate'>{title}</span>
     </div>
+  )
+}
+
+/** Leads back to the project's threads: the lone project by name, or the one the rail picks. */
+function BackToProject() {
+  const lone = useAppStore((state) =>
+    state.projects.length === 1 ? state.projects[0] : undefined
+  )
+  const selectedProjectId = useAppStore((state) => state.selectedProjectId)
+  const selectProject = useAppStore((state) => state.selectProject)
+  const setView = useSidebarStore((state) => state.setView)
+
+  return (
+    <>
+      <button
+        type='button'
+        onClick={() => {
+          setView('project')
+          if (lone && selectedProjectId !== lone.id) selectProject(lone.id)
+        }}
+        className='text-muted-foreground hover:text-foreground focus-visible:ring-sidebar-ring flex max-w-1/2 min-w-0 shrink items-center gap-0.5 rounded-sm font-normal outline-none focus-visible:ring-2'
+      >
+        <HugeiconsIcon
+          icon={ArrowLeft01Icon}
+          strokeWidth={2}
+          className='size-3.5 shrink-0'
+        />
+        <span className='truncate'>{lone ? lone.title : m.projects()}</span>
+      </button>
+      <span aria-hidden className='text-muted-foreground/60 font-normal'>
+        /
+      </span>
+    </>
   )
 }
 

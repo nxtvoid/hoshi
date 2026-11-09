@@ -2,6 +2,7 @@ import { m } from '@/paraglide/messages'
 import { useHasRail } from './ProjectRail'
 import { FooterChatsButton } from './ChatsButton'
 import { FooterInboxButton } from './InboxButton'
+import { FooterProjectButton } from './FooterProjectButton'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import { useNavigate, useRouterState } from '@tanstack/react-router'
@@ -33,8 +34,13 @@ export function SidebarFooter() {
       >
         <HugeiconsIcon icon={Settings02Icon} strokeWidth={2} />
       </IconButton>
-      {hasRail ? null : <FooterInboxButton />}
-      {hasRail ? null : <FooterChatsButton />}
+      {hasRail ? null : (
+        <>
+          <FooterProjectButton />
+          <FooterInboxButton />
+          <FooterChatsButton />
+        </>
+      )}
       <IconButton
         label={m.usage()}
         side='top'
