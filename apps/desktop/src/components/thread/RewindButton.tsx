@@ -38,6 +38,7 @@ export function RewindButton({
       description: m.edit_from_here_description(),
       confirmLabel: m.revert_keep_changes(),
       alternativeLabel: m.revert_files_too(),
+      alternativeDestructive: true,
       tone: 'warning',
       icon: PencilEdit02Icon
     })

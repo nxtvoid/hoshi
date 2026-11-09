@@ -411,6 +411,7 @@ const Item = memo(function Item({
           text={content.text}
           attachments={content.attachments}
           steer={content.steer}
+          createdAt={item.createdAt}
           action={
             content.rewind ? (
               <RewindButton

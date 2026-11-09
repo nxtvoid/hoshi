@@ -109,6 +109,7 @@
   "copy_branch": "Copy {branch}",
   "copied": "Copied",
   "copy_code": "Copy code",
+  "copy_message": "Copy message",
   "checks_all_passed": "All checks passed",
   "checks_failing_count": "{count} checks failing",
   "checks_pending_count": "{count} checks running",

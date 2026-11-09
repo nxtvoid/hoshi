@@ -59,3 +59,18 @@ export function formatDuration(milliseconds: number, locale: string) {
   }
   return parts.slice(0, 2).join(' ')
 }
+
+/** The time of day of `iso`, as "22:10" or "10:10 PM" in `locale`. */
+export function formatClockTime(
+  iso: string,
+  locale: string,
+  timeZone?: string
+) {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ''
+  return new Intl.DateTimeFormat(locale, {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone
+  }).format(date)
+}

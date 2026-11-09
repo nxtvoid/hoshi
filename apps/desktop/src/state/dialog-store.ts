@@ -14,6 +14,8 @@ export type DialogRequest = {
   confirmLabel: string
   /** A second way to go ahead, shown before the first. */
   alternativeLabel?: string
+  /** The second way loses something, as reverting files does. */
+  alternativeDestructive?: boolean
   /** `false` leaves only the confirm button, for a notice. */
   cancelLabel?: string | false
   tone?: DialogTone

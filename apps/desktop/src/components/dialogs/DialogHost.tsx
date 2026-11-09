@@ -62,7 +62,12 @@ export function DialogHost() {
         if (!next) settle(null)
       }}
     >
-      <AlertDialogContent className='flex flex-col gap-0 rounded-2xl p-5 shadow-2xl data-[size=default]:max-w-[calc(100%-2rem)] data-[size=default]:sm:max-w-100'>
+      <AlertDialogContent
+        className={cn(
+          'flex flex-col gap-0 rounded-2xl p-5 shadow-2xl data-[size=default]:max-w-[calc(100%-2rem)] data-[size=default]:sm:max-w-100',
+          current?.alternativeLabel && 'data-[size=default]:sm:max-w-124'
+        )}
+      >
         {current ? (
           <>
             <span
@@ -85,7 +90,7 @@ export function DialogHost() {
                 {current.description}
               </AlertDialogDescription>
             ) : null}
-            <div className='mt-6 flex justify-end gap-2'>
+            <div className='mt-6 flex flex-wrap justify-end gap-2'>
               {current.cancelLabel === false ? null : (
                 <AlertDialogCancel className={BUTTON}>
                   {current.cancelLabel ?? m.cancel()}
@@ -94,7 +99,11 @@ export function DialogHost() {
               {current.alternativeLabel ? (
                 <AlertDialogAction
                   variant='outline'
-                  className={BUTTON}
+                  className={cn(
+                    BUTTON,
+                    current.alternativeDestructive &&
+                      'text-destructive hover:text-destructive dark:text-destructive'
+                  )}
                   onClick={() => settle('alternative')}
                 >
                   {current.alternativeLabel}
