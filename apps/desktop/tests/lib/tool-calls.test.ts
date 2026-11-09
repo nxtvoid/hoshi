@@ -447,3 +447,72 @@ describe('foldTurns', () => {
     expect(fold?.kind === 'fold' && fold.rows.length).toBe(2)
   })
 })
+
+describe('turn changes', () => {
+  const user = (id: string, steer = false): ThreadItem => ({
+    id,
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'userMessage',
+      text: id,
+      attachments: [],
+      steer,
+      taskResult: null
+    }
+  })
+  const changes = (turnId: string, paths: string[] | null): ThreadItem => ({
+    id: `${turnId}:changes`,
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'turnChanges',
+      files:
+        paths?.map((path) => ({
+          path,
+          oldPath: null,
+          status: 'modified',
+          additions: 1,
+          deletions: 0
+        })) ?? null
+    }
+  })
+  const changed = (rows: TranscriptRow[]) =>
+    rows.flatMap((row) =>
+      row.kind === 'item' && row.changes
+        ? [[row.item.id, row.changes.turnId, row.changes.files.length]]
+        : []
+    )
+
+  test('go on the turn’s last answer, past a steer', () => {
+    const rows = groupTranscript([
+      user('m1'),
+      text('a1'),
+      user('s1', true),
+      tool('c1', 'Edit'),
+      text('a2'),
+      changes('m1', ['a.ts', 'b.ts'])
+    ])
+
+    expect(changed(rows)).toEqual([['a2', 'm1', 2]])
+    expect(
+      rows.some((row) => row.kind === 'item' && row.item.id === 'm1:changes')
+    ).toBe(false)
+  })
+
+  test('are left out while read, when empty, or when the turn never answered', () => {
+    const rows = groupTranscript([
+      user('m1'),
+      text('a1'),
+      changes('m1', null),
+      user('m2'),
+      text('a2'),
+      changes('m2', []),
+      user('m3'),
+      tool('c1', 'Edit'),
+      changes('m3', ['a.ts'])
+    ])
+
+    expect(changed(rows)).toEqual([])
+  })
+})

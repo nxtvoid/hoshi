@@ -505,6 +505,19 @@ impl Engine {
         diff::file(&cwd, scope, file).map_err(|detail| CommandError::Internal { detail })
     }
 
+    /// The files a finished turn changed, read from its checkpoints.
+    pub fn turn_diff_files(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Result<Vec<DiffFile>, CommandError> {
+        let cwd = self.repository_cwd(thread_id)?;
+        let before = checkpoint::reference(thread_id, turn_id, Moment::Before);
+        let after = checkpoint::reference(thread_id, turn_id, Moment::After);
+        checkpoint::changes(&cwd, &before, &after)
+            .map_err(|detail| CommandError::Internal { detail })
+    }
+
     /// How one file listed in a turn's changes changed during that turn.
     pub fn turn_file_diff(
         &self,
@@ -4225,6 +4238,7 @@ Blue"
             .map(|file| (file.path.as_str(), file.additions))
             .collect();
         assert_eq!(summary, [("notes.txt", Some(2))]);
+        assert_eq!(harness.engine.turn_diff_files("t", "m1").unwrap(), files);
         let diff = harness.engine.turn_file_diff("t", "m1", &files[0]).unwrap();
         assert!(diff.text.contains("+two"));
     }

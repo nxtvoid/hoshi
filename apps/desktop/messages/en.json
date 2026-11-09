@@ -126,6 +126,22 @@
   "diff_scope_uncommitted": "Uncommitted",
   "diff_scope_branch": "Branch",
   "diff_file_count": "{count} files",
+  "diff_scope_turn": "Turn",
+  "turn_changed_files": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} changed file",
+        "countPlural=*": "{count} changed files"
+      }
+    }
+  ],
+  "open_diff": "Open diff",
+  "open_full_diff": "Open the full diff",
+  "expand_all_folders": "Expand all folders",
+  "collapse_all_folders": "Collapse all folders",
+  "diff_stat_label": "{additions} additions, {deletions} deletions",
   "refresh": "Refresh",
   "no_changes": "No changes",
   "diff_load_failed": "Couldn't read the changes",

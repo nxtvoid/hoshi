@@ -7,17 +7,20 @@ import type { Surface } from '@/state/panel-surfaces'
 import type { DiffFile } from '@/bindings/DiffFile'
 import type { FileDiff } from '@/bindings/FileDiff'
 import { useCallback, useEffect, useState } from 'react'
-import type { DiffScope } from '@/bindings/DiffScope'
 import { Button } from '@hoshi/ui/components/button'
 import type { CommandError } from '@/bindings/CommandError'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import { Refresh01Icon } from '@hugeicons/core-free-icons'
 import { ChangedFiles, PanelMessage, totalChanges } from './ChangedFiles'
 
-const SCOPES: { id: DiffScope; label: () => string }[] = [
+type ScopeOption = { id: DiffSurfaceState['scope']; label: () => string }
+
+const SCOPES: ScopeOption[] = [
   { id: 'uncommitted', label: m.diff_scope_uncommitted },
   { id: 'branch', label: m.diff_scope_branch }
 ]
+
+const TURN_SCOPE: ScopeOption = { id: 'turn', label: m.diff_scope_turn }
 
 type Files =
   | { kind: 'loading' }
@@ -44,13 +47,15 @@ export function DiffSurface({
   threadId: string
   surface: DiffSurfaceState
 }) {
-  const scope = surface.scope
+  const { scope, turnId, focusPath } = surface
   const updateSurface = usePanelStore((state) => state.updateSurface)
-  const setScope = (next: DiffScope) =>
+  const setScope = (next: DiffSurfaceState['scope']) =>
     updateSurface<DiffSurfaceState>(threadId, surface.id, (current) => ({
       ...current,
-      scope: next
+      scope: next,
+      focusPath: undefined
     }))
+  const scopes = turnId ? [...SCOPES, TURN_SCOPE] : SCOPES
   const changeKey = useChangeKey(threadId)
   const [refreshes, setRefreshes] = useState(0)
   const [files, setFiles] = useState<Files>({ kind: 'loading' })
@@ -58,7 +63,11 @@ export function DiffSurface({
 
   useEffect(() => {
     let current = true
-    invoke<DiffFile[]>('get_thread_diff_files', { threadId, scope })
+    const listing =
+      scope === 'turn'
+        ? invoke<DiffFile[]>('get_turn_diff_files', { threadId, turnId })
+        : invoke<DiffFile[]>('get_thread_diff_files', { threadId, scope })
+    listing
       .then((value) => current && setFiles({ kind: 'ready', value }))
       .catch(
         (error: CommandError) => current && setFiles({ kind: 'failed', error })
@@ -66,19 +75,21 @@ export function DiffSurface({
     return () => {
       current = false
     }
-  }, [threadId, scope, reloadKey])
+  }, [threadId, scope, turnId, reloadKey])
 
   const loadDiff = useCallback(
     (file: DiffFile) =>
-      invoke<FileDiff>('get_thread_file_diff', { threadId, scope, file }),
-    [threadId, scope]
+      scope === 'turn'
+        ? invoke<FileDiff>('get_turn_file_diff', { threadId, turnId, file })
+        : invoke<FileDiff>('get_thread_file_diff', { threadId, scope, file }),
+    [threadId, scope, turnId]
   )
   const totals = files.kind === 'ready' ? totalChanges(files.value) : null
 
   return (
     <>
       <div className='border-border flex shrink-0 items-center gap-1 border-b px-2 py-1.5'>
-        {SCOPES.map(({ id, label }) => (
+        {scopes.map(({ id, label }) => (
           <Button
             key={id}
             size='xs'
@@ -116,8 +127,9 @@ export function DiffSurface({
           <PanelMessage>{m.no_changes()}</PanelMessage>
         ) : (
           <ChangedFiles
-            key={scope}
+            key={`${scope}:${turnId}:${focusPath}`}
             files={files.value}
+            focusPath={focusPath}
             loadDiff={loadDiff}
             reloadKey={reloadKey}
           />

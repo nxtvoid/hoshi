@@ -11,6 +11,7 @@ import { approvalsByCall } from '@/lib/requests'
 import { SubagentGroup, SubagentRow } from './SubagentRow'
 import { DelegationRow, TaskResultRow } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
+import { TurnChangesCard } from './TurnChangesCard'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { UserMessage } from './UserMessage'
 import { useWholeToolCall } from './use-whole-tool-call'
@@ -64,6 +65,7 @@ import {
   type ToolSummaryPart,
   type TranscriptRow,
   type TranscriptItem,
+  type TurnChanges,
   type WorkItem
 } from '@/lib/tool-calls'
 
@@ -304,7 +306,12 @@ function Row({
           data-item-id={row.item.id}
           className={cn(ROW, 'scroll-mt-6')}
         >
-          <Item item={row.item} cwd={cwd} live={row.item.id === liveTasks} />
+          <Item
+            item={row.item}
+            cwd={cwd}
+            live={row.item.id === liveTasks}
+            changes={row.changes}
+          />
         </li>
       )
     case 'work':
@@ -383,12 +390,15 @@ function TurnFold({
 const Item = memo(function Item({
   item,
   cwd,
-  live
+  live,
+  changes
 }: {
   item: TranscriptItem
   cwd: string | null
   /** The turn this item belongs to is still running. */
   live: boolean
+  /** What the turn changed, on its last answer. */
+  changes?: TurnChanges
 }) {
   const { content } = item
   switch (content.kind) {
@@ -403,7 +413,12 @@ const Item = memo(function Item({
         />
       )
     case 'assistantMessage':
-      return <Markdown text={content.text} />
+      return (
+        <>
+          <Markdown text={content.text} />
+          {changes ? <TurnChangesCard changes={changes} /> : null}
+        </>
+      )
     case 'reasoning':
       return (
         <ReasoningRow text={content.text} streaming={item.streaming === true} />

@@ -7,6 +7,7 @@ import {
   closeSurface,
   NO_SURFACES,
   openSurface,
+  showTurnDiff,
   type Surface,
   type SurfaceKind,
   type ThreadSurfaces,
@@ -31,6 +32,8 @@ type PanelState = {
   setWidth: (width: number) => void
   /** Opens the panel on a surface of that kind, reusing a single-instance one. */
   openSurface: (threadId: string, kind: SurfaceKind) => void
+  /** Opens the panel on what a turn changed, at `focusPath` when given. */
+  openTurnDiff: (threadId: string, turnId: string, focusPath?: string) => void
   activateSurface: (threadId: string, surfaceId: string) => void
   /** Closing the last surface closes the panel too. */
   closeSurface: (threadId: string, surfaceId: string) => void
@@ -80,6 +83,12 @@ export const usePanelStore = create<PanelState>()(
           if (kind === 'terminal' && activeId) {
             useTerminalStore.getState().requestFocus(activeId)
           }
+        },
+        openTurnDiff: (threadId, turnId, focusPath) => {
+          changeThread(threadId, (panel) =>
+            showTurnDiff(panel, turnId, focusPath, makeId)
+          )
+          set({ open: true })
         },
         activateSurface: (threadId, surfaceId) =>
           changeThread(threadId, (panel) => activateSurface(panel, surfaceId)),

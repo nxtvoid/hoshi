@@ -456,6 +456,15 @@ pub fn get_thread_file_diff(
 }
 
 #[tauri::command(async)]
+pub fn get_turn_diff_files(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    turn_id: String,
+) -> Result<Vec<DiffFile>, CommandError> {
+    engine.turn_diff_files(&thread_id, &turn_id)
+}
+
+#[tauri::command(async)]
 pub fn get_turn_file_diff(
     engine: State<'_, Engine>,
     thread_id: String,

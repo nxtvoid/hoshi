@@ -1,3 +1,4 @@
+import type { DiffFile } from '@/bindings/DiffFile'
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamKind } from '@/bindings/StreamKind'
 import type { ItemContent } from '@/bindings/ItemContent'
@@ -15,8 +16,11 @@ export type WorkItem = TranscriptItem & {
 
 export type StreamingText = { kind: StreamKind; text: string }
 
+/** The files a finished turn changed, shown under its last answer. */
+export type TurnChanges = { turnId: string; files: DiffFile[] }
+
 export type TranscriptRow =
-  | { kind: 'item'; item: TranscriptItem }
+  | { kind: 'item'; item: TranscriptItem; changes?: TurnChanges }
   | { kind: 'work'; id: string; entries: WorkItem[] }
   | {
       kind: 'fold'
@@ -197,13 +201,35 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
     if (isToolCall(item) && REQUEST_TOOLS.has(item.content.name)) continue
     const { content } = item
     if (content.kind === 'approval' && content.toolCallId !== null) continue
-    if (content.kind === 'turnChanges') continue
+    if (content.kind === 'turnChanges') {
+      if (content.files?.length) {
+        const turnId = item.id.slice(0, -CHANGES_SUFFIX.length)
+        attachToAnswer(rows, { turnId, files: content.files })
+      }
+      continue
+    }
     const last = rows.at(-1)
     if (!isWork(item)) rows.push({ kind: 'item', item })
     else if (last?.kind === 'work') last.entries.push(item)
     else rows.push({ kind: 'work', id: item.id, entries: [item] })
   }
   return rows
+}
+
+const CHANGES_SUFFIX = ':changes'
+
+/** Puts a turn's changes on its last answer; a turn that never answered shows none. */
+function attachToAnswer(rows: TranscriptRow[], changes: TurnChanges) {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index] as TranscriptRow
+    if (row.kind !== 'item') continue
+    const { content } = row.item
+    if (content.kind === 'userMessage' && !content.steer) return
+    if (content.kind === 'assistantMessage') {
+      rows[index] = { ...row, changes }
+      return
+    }
+  }
 }
 
 function isAgent(row: TranscriptRow) {

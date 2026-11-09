@@ -5,7 +5,15 @@ import type { DiffScope } from '@/bindings/DiffScope'
  * new member here, its defaults in `newSurface`, and an entry in the panel's registry.
  */
 export type Surface =
-  | { id: string; kind: 'diff'; scope: DiffScope }
+  | {
+      id: string
+      kind: 'diff'
+      /** `turn` shows what the turn `turnId` changed. */
+      scope: DiffScope | 'turn'
+      turnId?: string
+      /** The file to open and scroll to, as a turn's changes ask. */
+      focusPath?: string
+    }
   | { id: string; kind: 'pullRequest' }
   /** Its id is also its terminal's id. */
   | { id: string; kind: 'terminal' }
@@ -45,6 +53,21 @@ export function openSurface(
   }
   const surface = newSurface(kind, makeId())
   return { surfaces: [...panel.surfaces, surface], activeId: surface.id }
+}
+
+/** Opens the diff surface on what a turn changed, at `focusPath` when given. */
+export function showTurnDiff(
+  panel: ThreadSurfaces,
+  turnId: string,
+  focusPath: string | undefined,
+  makeId: () => string
+): ThreadSurfaces {
+  const opened = openSurface(panel, 'diff', makeId)
+  return updateSurface(opened, opened.activeId ?? '', (surface) =>
+    surface.kind === 'diff'
+      ? { ...surface, scope: 'turn', turnId, focusPath }
+      : surface
+  )
 }
 
 export function activateSurface(
