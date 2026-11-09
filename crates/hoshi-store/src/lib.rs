@@ -5,8 +5,9 @@
 //! thread projection must match `ReadModel::apply`; a test checks that.
 
 use hoshi_core::{
-    ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, Snapshot, Thread,
-    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits,
+    ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, PullRequestWatch,
+    Snapshot, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome,
+    UsageLimits,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, types::Type};
 use std::path::Path;
@@ -200,6 +201,12 @@ const MIGRATIONS: &[&str] = &[
         json_extract(payload_json, '$.thread.id')
     )) VIRTUAL;
     CREATE INDEX events_thread_id ON events (thread_id);
+    ",
+    r"
+    CREATE TABLE pull_request_watches (
+        thread_id TEXT PRIMARY KEY,
+        watch_json TEXT NOT NULL
+    );
     ",
 ];
 
@@ -555,6 +562,31 @@ impl Store {
         Ok(details)
     }
 
+    /// What each thread's agent was told about its pull request, watched now or before.
+    pub fn pull_request_watches(&self) -> Result<Vec<(String, PullRequestWatch)>, StoreError> {
+        let watches = self
+            .conn
+            .prepare("SELECT thread_id, watch_json FROM pull_request_watches")?
+            .query_map([], |row| Ok((row.get(0)?, json_document_column(row, 1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(watches)
+    }
+
+    /// Not an event: it changes on reads of the forge, which would flood the event log.
+    pub fn save_pull_request_watch(
+        &mut self,
+        thread_id: &str,
+        watch: &PullRequestWatch,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO pull_request_watches (thread_id, watch_json)
+                 VALUES (?1, ?2)",
+            )?
+            .execute(params![thread_id, serde_json::to_string(watch)?])?;
+        Ok(())
+    }
+
     /// Caches what a forge last said about a thread's pull request. Not an event: it is
     /// read again from the forge, and polling would flood the event log.
     pub fn save_pull_request(&mut self, update: &ThreadPullRequest) -> Result<(), StoreError> {
@@ -767,6 +799,11 @@ fn forget_thread(tx: &Transaction, thread_id: &str, sequence: i64) -> Result<(),
     execute(
         tx,
         "DELETE FROM context_usages WHERE thread_id = ?1",
+        [thread_id],
+    )?;
+    execute(
+        tx,
+        "DELETE FROM pull_request_watches WHERE thread_id = ?1",
         [thread_id],
     )?;
     execute(tx, "DELETE FROM threads WHERE id = ?1", [thread_id])
@@ -1162,6 +1199,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(store.snapshot().unwrap().projects[0].worktree_setup, None);
+    }
+
+    #[test]
+    fn a_pull_request_watch_is_kept_until_its_thread_goes() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .append(&[project_created("p"), thread_created("t", "p")], NOW)
+            .unwrap();
+        let watch = PullRequestWatch {
+            number: 7,
+            head_sha: Some("abc".into()),
+            failed_checks: vec!["lint".into()],
+            remarks_through: NOW.into(),
+            ..PullRequestWatch::default()
+        };
+        store.save_pull_request_watch("t", &watch).unwrap();
+        assert_eq!(
+            store.pull_request_watches().unwrap(),
+            [("t".to_owned(), watch)]
+        );
+
+        store
+            .append(
+                &[Event::ThreadDeleted {
+                    thread_id: "t".into(),
+                }],
+                NOW,
+            )
+            .unwrap();
+        assert!(store.pull_request_watches().unwrap().is_empty());
     }
 
     fn thread_created(id: &str, project_id: &str) -> Event {
@@ -2006,7 +2073,7 @@ mod tests {
     #[test]
     fn a_database_from_before_the_indexes_keeps_its_items_and_events() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let before = MIGRATIONS.len() - 2;
+        let before = MIGRATIONS.len() - 3;
         let tx = conn.transaction().unwrap();
         for migration in &MIGRATIONS[..before] {
             tx.execute_batch(migration).unwrap();

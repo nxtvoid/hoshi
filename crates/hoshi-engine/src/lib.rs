@@ -60,7 +60,7 @@ use hoshi_providers::{
 };
 use hoshi_store::{CachedPullRequestDetail, Store, StoreError};
 use pull_request_cache::{PullRequestCache, Version};
-use pull_request_watch::{Wake, WatchState};
+use pull_request_watch::Wake;
 use pull_requests::PullRequestSync;
 use refreshing::Refreshing;
 use secrets::SecretKey;
@@ -195,11 +195,8 @@ struct State {
     /// The `request_secret` calls waiting for the user, by request id: they get the file the
     /// secret was saved to, or `None` when the user declined.
     secret_waits: HashMap<String, mpsc::Sender<Option<PathBuf>>>,
-    /// What each thread watching its pull request was told so far.
-    watches: HashMap<String, WatchState>,
-    /// Threads that watched their pull request when the app last closed, with when each
-    /// last moved, until their first read.
-    resumed_watches: HashMap<String, String>,
+    /// What each thread's agent was told about its pull request, watched now or before.
+    watches: HashMap<String, hoshi_core::PullRequestWatch>,
     /// When each watched pull request was last read in detail, and as what.
     watch_reads: HashMap<String, (Instant, hoshi_core::PullRequest)>,
     /// Updates for watching threads whose turn ran, held until it ends.
@@ -270,6 +267,7 @@ impl Engine {
             (cached.thread_id, version, cached.detail)
         });
         let pull_request_cache = PullRequestCache::with_details(saved_details);
+        let watches = store.pull_request_watches()?.into_iter().collect();
         let context_usages = snapshot
             .context_usages
             .iter()
@@ -312,20 +310,13 @@ impl Engine {
             checkpoints: Arc::new(Checkpointer::new()),
             secrets_dir: data_dir.join("secrets"),
             secret_waits: HashMap::new(),
-            watches: HashMap::new(),
-            resumed_watches: HashMap::new(),
+            watches,
             watch_reads: HashMap::new(),
             pending_wakes: HashMap::new(),
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
-        state.resumed_watches = state
-            .model
-            .threads()
-            .filter(|thread| thread.watching_pull_request)
-            .map(|thread| (thread.id.clone(), thread.updated_at.clone()))
-            .collect();
         let stale: Vec<_> = state
             .model
             .threads()
@@ -2235,7 +2226,6 @@ impl State {
         self.queued.remove(thread_id);
         self.after_compaction.remove(thread_id);
         self.watches.remove(thread_id);
-        self.resumed_watches.remove(thread_id);
         self.watch_reads.remove(thread_id);
         self.pending_wakes.remove(thread_id);
         self.titles_to_refine.remove(thread_id);
@@ -3747,7 +3737,7 @@ mod tests {
                 .or_default()
                 .push_back(message());
             state.after_compaction.insert("t".into(), message());
-            state.watches.insert("t".into(), WatchState::default());
+            state.watches.insert("t".into(), Default::default());
             state.pending_wakes.insert(
                 "t".into(),
                 vec![Wake {
@@ -4861,6 +4851,107 @@ Blue"
             })
             .expect("a wake for the comment");
         assert_eq!(update.comments, 1);
+    }
+
+    #[test]
+    fn a_check_that_failed_while_the_app_was_closed_wakes_the_watching_thread() {
+        let dir = scratch_dir("pr-watch-checks-restart");
+        let database = dir.join("state.sqlite");
+        let harness = Harness::new(
+            "pr-watch-checks-restart",
+            dir,
+            Store::open(&database).unwrap(),
+            completed_turn(),
+        );
+        let pull_request = hoshi_core::PullRequest {
+            forge: ForgeKind::Github,
+            number: 7,
+            title: "Work".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+            author: Some("me".into()),
+            head_branch: "hoshi/work".into(),
+            head_sha: Some("abc1234".into()),
+            base_branch: "main".into(),
+            state: hoshi_core::PullRequestState::Open,
+            checks: None,
+            unresolved_comments: 0,
+            additions: 0,
+            deletions: 0,
+            updated_at: "2026-11-07T12:00:00Z".into(),
+        };
+        let detail = |state: hoshi_core::ChecksState| hoshi_core::PullRequestDetail {
+            supports: hoshi_core::PullRequestSupport::all(),
+            forge_id: "id".into(),
+            repository: "o/r".into(),
+            mergeability: hoshi_core::Mergeability::Mergeable,
+            merge_methods: Vec::new(),
+            can_edit: true,
+            body: String::new(),
+            changed_files: 1,
+            reviewers: Vec::new(),
+            labels: Vec::new(),
+            checks: vec![hoshi_core::PullRequestCheck {
+                name: "lint".into(),
+                state,
+                url: None,
+            }],
+            review_threads: Vec::new(),
+            timeline: Vec::new(),
+        };
+        lock(&harness.engine.state).pull_requests.record(
+            "t",
+            ForgeKind::Github,
+            Ok(Some(pull_request.clone())),
+            false,
+            Instant::now(),
+            chrono::Utc::now(),
+        );
+        lock(&harness.engine.state)
+            .call_tool("t", "watch_pull_request", &serde_json::json!({}))
+            .unwrap();
+        lock(&harness.engine.state).observe_watch(
+            "t",
+            ForgeKind::Github,
+            &pull_request,
+            &detail(hoshi_core::ChecksState::Pending),
+            Some("me".into()),
+        );
+        drop(harness);
+
+        let (sender, events) = mpsc::channel();
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::Event(envelope) = notification {
+                let _ = sender.send(envelope.event);
+            }
+        });
+        let engine = Engine::from_store(
+            Store::open(&database).unwrap(),
+            &scratch_dir("pr-watch-checks-restarted"),
+            notify,
+        )
+        .unwrap();
+        lock(&engine.state).observe_watch(
+            "t",
+            ForgeKind::Github,
+            &pull_request,
+            &detail(hoshi_core::ChecksState::Failing),
+            Some("me".into()),
+        );
+
+        let update = events
+            .try_iter()
+            .find_map(|event| match event {
+                Event::ItemAdded { item } => match item.content {
+                    ItemContent::UserMessage {
+                        pull_request_update: Some(update),
+                        ..
+                    } => Some(update),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a wake for the failed check");
+        assert_eq!(update.failed_checks, ["lint"]);
     }
 
     #[test]
