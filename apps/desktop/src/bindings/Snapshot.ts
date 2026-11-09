@@ -2,6 +2,7 @@
 import type { OpenToolCall } from "./OpenToolCall";
 import type { Project } from "./Project";
 import type { Thread } from "./Thread";
+import type { ThreadBackgroundTasks } from "./ThreadBackgroundTasks";
 import type { ThreadContextUsage } from "./ThreadContextUsage";
 import type { ThreadItem } from "./ThreadItem";
 import type { ThreadPullRequest } from "./ThreadPullRequest";
@@ -29,4 +30,8 @@ openToolCalls: Array<OpenToolCall>,
 /**
  * Delegated tasks whose answer hasn't gone back yet, by thread id.
  */
-pendingTasks: Array<string>, };
+pendingTasks: Array<string>, 
+/**
+ * The commands each running turn waits for in the background.
+ */
+backgroundTasks: Array<ThreadBackgroundTasks>, };

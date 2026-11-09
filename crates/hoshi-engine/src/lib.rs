@@ -44,11 +44,11 @@ use hoshi_core::{
     EventEnvelope, FileDiff, FolderListing, ForgeAccount, ForgeKind, ItemContent,
     MessageAttachment, ProviderModels, ProviderOutput, PullRequest, PullRequestAction,
     PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository, SlashCommand, Snapshot,
-    StreamDelta, StreamKind, TerminalAttach, ThreadContextUsage, ThreadItem, ThreadPullRequest,
-    ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace, TurnFailure,
-    TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn, decide,
-    record_branch, record_conversation_cursor, record_output, record_title, record_turn_changes,
-    record_worktree, record_worktree_left, start_queued_turn, turn_failed,
+    StreamDelta, StreamKind, TerminalAttach, ThreadBackgroundTasks, ThreadContextUsage, ThreadItem,
+    ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace,
+    TurnFailure, TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn,
+    decide, record_branch, record_conversation_cursor, record_output, record_title,
+    record_turn_changes, record_worktree, record_worktree_left, start_queued_turn, turn_failed,
 };
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
@@ -84,6 +84,8 @@ pub enum Notification {
     PullRequestDetail(ThreadPullRequestDetail),
     /// Cached, not part of the event log: it changes on every model call.
     ContextUsage(ThreadContextUsage),
+    /// The commands a thread's running turn waits for; empty once none is left.
+    BackgroundTasks(ThreadBackgroundTasks),
     /// The provider plan's limits, as a running turn last reported them.
     UsageLimits(UsageLimits),
     /// `None` once the provider is disabled.
@@ -365,6 +367,8 @@ struct Turn {
     checkpointed: Option<String>,
     /// The provider's latest message of the conversation so far.
     cursor: Option<String>,
+    /// The commands the turn waits for in the background, once it reported any.
+    background: Option<ThreadBackgroundTasks>,
 }
 
 /// What a background check for a worktree the turn created needs from the state.
@@ -1323,6 +1327,12 @@ impl Engine {
                     usage: *usage,
                 })
                 .collect(),
+            background_tasks: state
+                .turns
+                .values()
+                .filter_map(|turn| turn.background.clone())
+                .filter(|background| !background.tasks.is_empty())
+                .collect(),
         }
     }
 
@@ -2140,6 +2150,20 @@ impl State {
                 }
                 return;
             }
+            ProviderOutput::BackgroundTasks { tasks, waiting } => {
+                if let Some(turn) = self.turns.get_mut(thread_id)
+                    && turn.id == turn_id
+                {
+                    let background = ThreadBackgroundTasks {
+                        thread_id: thread_id.to_owned(),
+                        tasks,
+                        waiting,
+                    };
+                    turn.background = Some(background.clone());
+                    (self.notify)(Notification::BackgroundTasks(background));
+                }
+                return;
+            }
             _ => {}
         }
         if let ProviderOutput::ToolCallStarted { input, .. } = &output
@@ -2181,12 +2205,22 @@ impl State {
             self.read_turn_changes(thread_id, turn_id, dir);
         }
         if completed {
-            let workspace = match self.turns.get(thread_id) {
-                Some(turn) if turn.id == turn_id => {
-                    self.turns.remove(thread_id).and_then(|turn| turn.workspace)
-                }
+            let ended_turn = match self.turns.get(thread_id) {
+                Some(turn) if turn.id == turn_id => self.turns.remove(thread_id),
                 _ => None,
             };
+            if ended_turn
+                .as_ref()
+                .and_then(|turn| turn.background.as_ref())
+                .is_some_and(|background| !background.tasks.is_empty())
+            {
+                (self.notify)(Notification::BackgroundTasks(ThreadBackgroundTasks {
+                    thread_id: thread_id.to_owned(),
+                    tasks: Vec::new(),
+                    waiting: false,
+                }));
+            }
+            let workspace = ended_turn.and_then(|turn| turn.workspace);
             if self.titles_to_refine.remove(thread_id) {
                 self.rename_from_conversation(thread_id, false);
             }
@@ -2332,6 +2366,12 @@ impl State {
             } => Some((thread_id.clone(), tool_use_id.clone())),
             _ => None,
         };
+        let stop_background = match &command {
+            Command::BackgroundTaskStop { thread_id, task_id } => {
+                Some((thread_id.clone(), task_id.clone()))
+            }
+            _ => None,
+        };
         let answer = match &command {
             Command::RequestRespond {
                 thread_id,
@@ -2398,6 +2438,11 @@ impl State {
             && let Some(turn) = self.turns.get(&thread_id)
         {
             turn.running.stop_subagent(&tool_use_id);
+        }
+        if let Some((thread_id, task_id)) = stop_background
+            && let Some(turn) = self.turns.get(&thread_id)
+        {
+            turn.running.stop_background_task(&task_id);
         }
         // A deleted thread (or a removed project's threads) must not keep an agent running.
         let orphaned: Vec<_> = self
@@ -3496,6 +3541,7 @@ fn start_turn(
                 workspace,
                 checkpointed,
                 cursor: None,
+                background: None,
             };
             state.turns.insert(thread_id.to_owned(), turn);
         }
@@ -3659,8 +3705,8 @@ fn internal(error: StoreError) -> CommandError {
 mod tests {
     use super::*;
     use hoshi_core::{
-        AccessMode, ApprovalDecision, Effort, GitAction, GitActionRequest, RequestResponse,
-        RequestStatus, ThreadStatus, ToolDetail,
+        AccessMode, ApprovalDecision, BackgroundTask, Effort, GitAction, GitActionRequest,
+        RequestResponse, RequestStatus, ThreadStatus, ToolDetail,
     };
     use hoshi_providers::OutputSink;
     use std::sync::mpsc::{self, Receiver, Sender};
@@ -3700,6 +3746,10 @@ mod tests {
     impl RunningTurn for FakeTurn {
         fn interrupt(&self) {
             let _ = self.stop.send(TurnOutcome::Interrupted);
+        }
+
+        fn stop_background_task(&self, _task_id: &str) {
+            let _ = self.stop.send(TurnOutcome::Completed);
         }
 
         fn steer(&self, message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
@@ -4055,6 +4105,49 @@ mod tests {
                 .find(|thread| thread.id == thread_id)
                 .unwrap()
         }
+    }
+
+    #[test]
+    fn a_turn_s_background_commands_are_known_until_it_ends_and_can_be_stopped() {
+        let harness = Harness::in_memory("background-commands", Vec::new());
+        harness.send("t", "m1", "run it in the background");
+        let turn_id = harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } => Some(turn_id),
+            _ => None,
+        });
+        let task = BackgroundTask {
+            task_id: "b1".into(),
+            tool_call_id: Some("toolu_1".into()),
+            description: "Start the dev server".into(),
+            started_at: 1,
+        };
+        lock(&harness.engine.state).receive(
+            "t",
+            &turn_id,
+            ProviderOutput::BackgroundTasks {
+                tasks: vec![task.clone()],
+                waiting: true,
+            },
+        );
+        assert_eq!(
+            harness.engine.snapshot().background_tasks,
+            [ThreadBackgroundTasks {
+                thread_id: "t".into(),
+                tasks: vec![task],
+                waiting: true,
+            }]
+        );
+
+        harness
+            .engine
+            .dispatch(Command::BackgroundTaskStop {
+                thread_id: "t".into(),
+                task_id: "b1".into(),
+            })
+            .unwrap();
+
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+        assert!(harness.engine.snapshot().background_tasks.is_empty());
     }
 
     fn completed_turn() -> Vec<ProviderOutput> {

@@ -22,6 +22,8 @@ const PULL_REQUEST_CHANNEL: &str = "hoshi://pull-request";
 const PULL_REQUEST_DETAIL_CHANNEL: &str = "hoshi://pull-request-detail";
 /// A thread's context usage after each model call of its agent.
 const CONTEXT_USAGE_CHANNEL: &str = "hoshi://context-usage";
+/// The commands a thread's running turn waits for in the background.
+const BACKGROUND_TASKS_CHANNEL: &str = "hoshi://background-tasks";
 /// The provider plan's limits, as a running turn reported them.
 const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 /// The provider's CLI against its latest release, and how its update goes.
@@ -45,6 +47,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
                 handle.emit(PULL_REQUEST_DETAIL_CHANNEL, update)
             }
             Notification::ContextUsage(update) => handle.emit(CONTEXT_USAGE_CHANNEL, update),
+            Notification::BackgroundTasks(update) => handle.emit(BACKGROUND_TASKS_CHANNEL, update),
             Notification::UsageLimits(limits) => handle.emit(USAGE_LIMITS_CHANNEL, limits),
             Notification::ProviderVersion(version) => {
                 handle.emit(PROVIDER_VERSION_CHANNEL, version)

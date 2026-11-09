@@ -1,8 +1,9 @@
 use crate::{
     AccessMode, ApprovalDecision, CompactionStatus, DiffFile, Effort, ItemContent,
     MessageAttachment, OpenToolCall, Project, ProviderOutput, PullRequestUpdate, RequestResponse,
-    RequestStatus, Rewind, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus,
-    ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome, WorktreeSetup,
+    RequestStatus, Rewind, Thread, ThreadBackgroundTasks, ThreadContextUsage, ThreadItem,
+    ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
+    WorktreeSetup,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -96,6 +97,11 @@ pub enum Command {
     SubagentStop {
         thread_id: String,
         tool_use_id: String,
+    },
+    /// Stops one command the running turn left in the background.
+    BackgroundTaskStop {
+        thread_id: String,
+        task_id: String,
     },
     /// Answers what the agent asked mid-turn; the engine passes it on to the agent.
     RequestRespond {
@@ -402,6 +408,8 @@ pub struct Snapshot {
     pub open_tool_calls: Vec<OpenToolCall>,
     /// Delegated tasks whose answer hasn't gone back yet, by thread id.
     pub pending_tasks: Vec<String>,
+    /// The commands each running turn waits for in the background.
+    pub background_tasks: Vec<ThreadBackgroundTasks>,
 }
 
 /// An event as delivered to the UI, with its position in the event log.
@@ -1054,7 +1062,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             Ok(Vec::new())
         }
-        Command::SubagentStop { thread_id, .. } => {
+        Command::SubagentStop { thread_id, .. } | Command::BackgroundTaskStop { thread_id, .. } => {
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
@@ -1522,6 +1530,7 @@ pub fn record_output(
         | ProviderOutput::ContextUsage(_)
         | ProviderOutput::UsageLimits(_)
         | ProviderOutput::WorkingDirectory { .. }
+        | ProviderOutput::BackgroundTasks { .. }
         | ProviderOutput::ConversationCursor { .. } => Vec::new(),
         ProviderOutput::Subagent {
             tool_use_id,

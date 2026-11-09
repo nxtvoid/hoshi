@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   formatClockTime,
   formatDuration,
+  formatElapsed,
   formatFileSize,
   relativeTimeParts
 } from '../src/format'
@@ -29,6 +30,15 @@ describe('formatDuration', () => {
     expect(formatDuration(3_725_000, 'en')).toBe('1h 2m')
     expect(formatDuration(400, 'en')).toBe('0s')
     expect(formatDuration(120_000, 'en')).toBe('2m')
+  })
+})
+
+describe('formatElapsed', () => {
+  test('reads like a clock, with hours only when it ran that long', () => {
+    expect(formatElapsed(7_400)).toBe('0:07')
+    expect(formatElapsed(750_000)).toBe('12:30')
+    expect(formatElapsed(3_725_000)).toBe('1:02:05')
+    expect(formatElapsed(-500)).toBe('0:00')
   })
 })
 
