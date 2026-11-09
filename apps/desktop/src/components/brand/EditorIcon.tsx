@@ -27,6 +27,18 @@ export function EditorIcon({
       ) : (
         <FileExplorerIcon className={className} />
       )
+    case 'idea':
+    case 'webstorm':
+    case 'pycharm':
+    case 'goland':
+    case 'rider':
+    case 'clion':
+    case 'phpstorm':
+    case 'rubymine':
+    case 'rustrover':
+      return (
+        <JetBrainsIcon {...JETBRAINS_MARKS[editor]} className={className} />
+      )
     case 'windsurf':
       return (
         <HugeiconsIcon
@@ -115,6 +127,62 @@ function ZedIcon({ className }: IconProps) {
         clipRule='evenodd'
         d='M9 6a3 3 0 0 0-3 3v66H0V9a9 9 0 0 1 9-9h80.379c4.009 0 6.016 4.847 3.182 7.682L43.055 57.187H57V51h6v7.688a4.5 4.5 0 0 1-4.5 4.5H37.055L26.743 73.5H73.5V36h6v37.5a6 6 0 0 1-6 6H20.743L10.243 90H87a3 3 0 0 0 3-3V21h6v66a9 9 0 0 1-9 9H6.621c-4.009 0-6.016-4.847-3.182-7.682L52.757 39H39v6h-6v-7.5a4.5 4.5 0 0 1 4.5-4.5h21.257l10.5-10.5H22.5V60h-6V22.5a6 6 0 0 1 6-6h52.757L85.757 6H9Z'
       />
+    </svg>
+  )
+}
+
+type JetBrainsEditor = Extract<
+  Editor,
+  | 'idea'
+  | 'webstorm'
+  | 'pycharm'
+  | 'goland'
+  | 'rider'
+  | 'clion'
+  | 'phpstorm'
+  | 'rubymine'
+  | 'rustrover'
+>
+
+const JETBRAINS_MARKS: Record<
+  JetBrainsEditor,
+  { letters: string; color: string }
+> = {
+  idea: { letters: 'IJ', color: '#FE315D' },
+  webstorm: { letters: 'WS', color: '#07C3F2' },
+  pycharm: { letters: 'PC', color: '#21D789' },
+  goland: { letters: 'GO', color: '#3BEA62' },
+  rider: { letters: 'RD', color: '#DD1265' },
+  clion: { letters: 'CL', color: '#22D88F' },
+  phpstorm: { letters: 'PS', color: '#B345F1' },
+  rubymine: { letters: 'RM', color: '#FE2857' },
+  rustrover: { letters: 'RR', color: '#FF8100' }
+}
+
+function JetBrainsIcon({
+  letters,
+  color,
+  className
+}: IconProps & { letters: string; color: string }) {
+  return (
+    <svg
+      viewBox='0 0 24 24'
+      aria-hidden='true'
+      className={cn('shrink-0', className)}
+    >
+      <rect x='1' y='1' width='22' height='22' rx='5' fill={color} />
+      <rect x='5' y='5' width='14' height='14' fill='#000' />
+      <text
+        x='6.5'
+        y='12.6'
+        fill='#fff'
+        fontSize='6.4'
+        fontWeight='700'
+        fontFamily='system-ui, sans-serif'
+      >
+        {letters}
+      </text>
+      <rect x='6.5' y='15.6' width='5.5' height='1.3' fill='#fff' />
     </svg>
   )
 }

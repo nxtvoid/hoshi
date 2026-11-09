@@ -10,13 +10,36 @@ pub enum Editor {
     Cursor,
     Windsurf,
     Zed,
+    Idea,
+    Webstorm,
+    Pycharm,
+    Goland,
+    Rider,
+    Clion,
+    Phpstorm,
+    Rubymine,
+    Rustrover,
     /// File Explorer, Finder or the desktop's file manager; always there.
     FileManager,
 }
 
 impl Editor {
     /// The code editors, which are only offered when installed.
-    pub const CODE_EDITORS: [Self; 4] = [Self::Vscode, Self::Cursor, Self::Windsurf, Self::Zed];
+    pub const CODE_EDITORS: [Self; 13] = [
+        Self::Vscode,
+        Self::Cursor,
+        Self::Windsurf,
+        Self::Zed,
+        Self::Idea,
+        Self::Webstorm,
+        Self::Pycharm,
+        Self::Goland,
+        Self::Rider,
+        Self::Clion,
+        Self::Phpstorm,
+        Self::Rubymine,
+        Self::Rustrover,
+    ];
 
     /// The command a code editor installs on the `PATH`; `None` for the file manager.
     pub fn command(self) -> Option<&'static str> {
@@ -25,6 +48,15 @@ impl Editor {
             Self::Cursor => Some("cursor"),
             Self::Windsurf => Some("windsurf"),
             Self::Zed => Some("zed"),
+            Self::Idea => Some("idea"),
+            Self::Webstorm => Some("webstorm"),
+            Self::Pycharm => Some("pycharm"),
+            Self::Goland => Some("goland"),
+            Self::Rider => Some("rider"),
+            Self::Clion => Some("clion"),
+            Self::Phpstorm => Some("phpstorm"),
+            Self::Rubymine => Some("rubymine"),
+            Self::Rustrover => Some("rustrover"),
             Self::FileManager => None,
         }
     }

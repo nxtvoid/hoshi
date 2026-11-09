@@ -52,6 +52,15 @@ const EDITOR_LABEL: Record<Editor, () => string> = {
   cursor: m.editor_cursor,
   windsurf: m.editor_windsurf,
   zed: m.editor_zed,
+  idea: m.editor_idea,
+  webstorm: m.editor_webstorm,
+  pycharm: m.editor_pycharm,
+  goland: m.editor_goland,
+  rider: m.editor_rider,
+  clion: m.editor_clion,
+  phpstorm: m.editor_phpstorm,
+  rubymine: m.editor_rubymine,
+  rustrover: m.editor_rustrover,
   fileManager: () =>
     isMac() ? m.finder() : isWindows() ? m.file_explorer() : m.files_app()
 }
