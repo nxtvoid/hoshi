@@ -104,6 +104,27 @@ impl Connection {
     }
 }
 
+#[cfg(test)]
+impl Connection {
+    /// A connection to no browser, whose events the test reports itself.
+    pub fn offline() -> Self {
+        let (outgoing, _) = mpsc::channel();
+        Self {
+            outgoing,
+            pending: Arc::default(),
+            listeners: Arc::default(),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Hands `event` to every listener still there; returns how many took it.
+    pub fn report(&self, event: &CdpEvent) -> usize {
+        let mut listeners = lock(&self.listeners);
+        listeners.retain(|listener| listener.send(event.clone()).is_ok());
+        listeners.len()
+    }
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

@@ -125,13 +125,13 @@ fn listen(
     let session = session.to_owned();
     thread::spawn(move || {
         for event in events {
+            let Some(console) = console.upgrade() else {
+                return;
+            };
             if event.session_id.as_deref() != Some(session.as_str()) {
                 continue;
             }
             let Some(connection) = connection.upgrade() else {
-                return;
-            };
-            let Some(console) = console.upgrade() else {
                 return;
             };
             let changed = match event.method.as_str() {
@@ -694,6 +694,27 @@ mod tests {
         assert_eq!(refs["e2"], 14);
         let (cut, _) = format_tree(&nodes, 40);
         assert!(cut.ends_with("[truncated: the page has more]\n"));
+    }
+
+    #[test]
+    fn a_page_s_listener_stops_once_the_page_is_gone() {
+        let connection = Arc::new(Connection::offline());
+        let console = Arc::new(Mutex::new(VecDeque::new()));
+        listen(&connection, "page", Arc::downgrade(&console), Arc::new(|_| {}));
+        let elsewhere = cdp::CdpEvent {
+            method: "Page.screencastFrame".into(),
+            params: json!({}),
+            session_id: Some("other".into()),
+        };
+        assert_eq!(connection.report(&elsewhere), 1);
+
+        drop(console);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while connection.report(&elsewhere) > 0 {
+            assert!(Instant::now() < deadline, "the listener kept running");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
