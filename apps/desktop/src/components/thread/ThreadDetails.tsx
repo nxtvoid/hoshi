@@ -6,6 +6,7 @@ import type { Editor } from '@/bindings/Editor'
 import { usePanelStore } from '@/state/panel-store'
 import { ThreadAgents } from './ThreadAgents'
 import { GitActionsRow } from './GitActionsRow'
+import { useChangeKey } from './use-change-key'
 import { ICON, ROW, SPLIT_PRIMARY, SplitRow } from './details-rows'
 import { useEditorStore } from '@/state/editor-store'
 import { useDetailsStore } from '@/state/details-store'
@@ -206,9 +207,7 @@ function DetailsContent({
   const preferred = useEditorStore((state) => state.preferred)
   const setPreferred = useEditorStore((state) => state.setPreferred)
   const [error, setError] = useState<string | null>(null)
-  const changeKey = thread
-    ? `${thread.branch}|${thread.worktreePath}|${thread.status}|${thread.updatedAt}`
-    : ''
+  const changeKey = useChangeKey(threadId)
 
   useEffect(() => {
     void loadEditors()

@@ -136,16 +136,19 @@ function FileDiffBlock({
   reloadKey: string
 }) {
   const [diff, setDiff] = useState<DiffState>({ kind: 'loading' })
+  const fileRef = useRef(file)
+  fileRef.current = file
+  const fileKey = `${file.path}|${file.oldPath}|${file.status}|${file.additions}|${file.deletions}`
 
   useEffect(() => {
     let current = true
-    loadDiff(file)
+    loadDiff(fileRef.current)
       .then((value) => current && setDiff({ kind: 'ready', value }))
       .catch(() => current && setDiff({ kind: 'failed' }))
     return () => {
       current = false
     }
-  }, [loadDiff, file, reloadKey])
+  }, [loadDiff, fileKey, reloadKey])
 
   if (diff.kind === 'loading') return null
   if (diff.kind === 'failed')

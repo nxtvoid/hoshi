@@ -1,12 +1,12 @@
 import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
-import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { usePanelStore } from '@/state/panel-store'
 import type { Surface } from '@/state/panel-surfaces'
 import type { DiffFile } from '@/bindings/DiffFile'
 import type { FileDiff } from '@/bindings/FileDiff'
 import { useCallback, useEffect, useState } from 'react'
+import { useChangeKey } from '@/components/thread/use-change-key'
 import { Button } from '@hoshi/ui/components/button'
 import type { CommandError } from '@/bindings/CommandError'
 import { IconButton } from '@hoshi/ui/components/icon-button'
@@ -26,16 +26,6 @@ type Files =
   | { kind: 'loading' }
   | { kind: 'ready'; value: DiffFile[] }
   | { kind: 'failed'; error: CommandError | null }
-
-/** Changes a thread's turns or tool calls may have made; read again after each turn. */
-function useChangeKey(threadId: string) {
-  return useAppStore((state) => {
-    const thread = state.threads.find((candidate) => candidate.id === threadId)
-    return thread
-      ? `${thread.updatedAt}|${thread.status}|${thread.branch}|${thread.worktreePath}`
-      : ''
-  })
-}
 
 type DiffSurfaceState = Extract<Surface, { kind: 'diff' }>
 
