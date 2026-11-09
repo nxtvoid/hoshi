@@ -2,6 +2,7 @@ import '@xterm/xterm/css/xterm.css'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { m } from '@/paraglide/messages'
+import { CODE_SIZE } from '@/state/appearance'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -14,9 +15,6 @@ import type { CommandError } from '@/bindings/CommandError'
 import type { TerminalEvent } from '@/bindings/TerminalEvent'
 import type { TerminalAttach } from '@/bindings/TerminalAttach'
 import { GitForkIcon } from '@hugeicons/core-free-icons'
-
-const FONT_FAMILY =
-  "'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Menlo, Consolas, 'Ubuntu Mono', 'DejaVu Sans Mono', 'Liberation Mono', monospace"
 
 /** Keys the app handles even while a terminal has the keyboard. */
 function isAppShortcut(event: KeyboardEvent) {
@@ -32,6 +30,16 @@ function readTheme(element: HTMLElement) {
     cursor: token('--foreground'),
     cursorAccent: token('--background'),
     selectionBackground: token('--terminal-selection')
+  }
+}
+
+function readFont(element: HTMLElement) {
+  const style = getComputedStyle(element)
+  return {
+    fontFamily: style.getPropertyValue('--font-mono').trim() || 'monospace',
+    fontSize:
+      Number.parseFloat(style.getPropertyValue('--code-font-size')) ||
+      CODE_SIZE.default
   }
 }
 
@@ -89,8 +97,7 @@ export function TerminalView({
     const container = containerRef.current
     if (!container) return
     const terminal = new Terminal({
-      fontFamily: FONT_FAMILY,
-      fontSize: 12,
+      ...readFont(container),
       lineHeight: 1.2,
       cursorBlink: true,
       scrollback: 5000,
@@ -174,10 +181,19 @@ export function TerminalView({
     sizeObserver.observe(container)
     const themeObserver = new MutationObserver(() => {
       terminal.options.theme = readTheme(container)
+      const font = readFont(container)
+      if (
+        font.fontFamily !== terminal.options.fontFamily ||
+        font.fontSize !== terminal.options.fontSize
+      ) {
+        terminal.options.fontFamily = font.fontFamily
+        terminal.options.fontSize = font.fontSize
+        fitVisible()
+      }
     })
     themeObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['class', 'style']
+      attributeFilter: ['class', 'style', 'data-palette', 'data-code-font']
     })
 
     return () => {

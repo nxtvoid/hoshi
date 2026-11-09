@@ -15,7 +15,7 @@ export function DiffView({ text }: { text: string }) {
   const lines = useMemo(() => parseUnifiedDiff(text), [text])
 
   return (
-    <div className='overflow-x-auto pb-1 font-mono text-[0.6875rem] leading-5'>
+    <div className='overflow-x-auto pb-1 font-mono leading-normal text-(length:--code-font-size)'>
       <table className='w-full min-w-max border-collapse'>
         <tbody>
           {lines.map((line, index) => (

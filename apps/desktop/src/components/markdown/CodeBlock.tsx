@@ -12,10 +12,11 @@ import {
   rememberHighlight
 } from '@/lib/highlight'
 
-const PRE = 'overflow-x-auto px-3 pb-3 font-mono text-xs leading-relaxed'
+const PRE =
+  'overflow-x-auto px-3 pb-3 font-mono text-(length:--code-font-size) leading-relaxed'
 
 const HIGHLIGHTED =
-  '[&_pre]:overflow-x-auto [&_pre]:px-3 [&_pre]:pb-3 [&_pre]:font-mono [&_pre]:text-xs [&_pre]:leading-relaxed [&_pre]:outline-none [&_span]:text-(--shiki-light) dark:[&_span]:text-(--shiki-dark)'
+  '[&_pre]:overflow-x-auto [&_pre]:px-3 [&_pre]:pb-3 [&_pre]:font-mono [&_pre]:text-(length:--code-font-size) [&_pre]:leading-relaxed [&_pre]:outline-none [&_span]:text-(--shiki-light) dark:[&_span]:text-(--shiki-dark)'
 
 /** A fenced code block: its language, a copy button and the code with syntax colors. */
 export function CodeBlock({
