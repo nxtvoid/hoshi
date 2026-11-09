@@ -6,6 +6,8 @@ import type { MessageAttachment } from '@/bindings/MessageAttachment'
 export type ComposerImage = {
   key: string
   name: string
+  /** In bytes, as added. */
+  size: number
   /** Shown while the image is saved, and after. */
   previewUrl: string
   /** Set once the engine saved it. */
@@ -30,12 +32,14 @@ export function useComposerImages() {
       )
     )
 
-  const add = (files: File[]) => {
-    for (const file of files) {
+  /** Returns the images as added, before they are saved. */
+  const add = (files: File[]): ComposerImage[] =>
+    files.map((file) => {
       const key = crypto.randomUUID()
       const image: ComposerImage = {
         key,
         name: file.name || 'image.png',
+        size: file.size,
         previewUrl: URL.createObjectURL(file),
         saved: null,
         failed: false
@@ -60,8 +64,8 @@ export function useComposerImages() {
           console.error('hoshi: failed to attach an image', error)
           update(key, { failed: true })
         })
-    }
-  }
+      return image
+    })
 
   /** Puts back images a message was sent with, already saved; `urls` shows them. */
   const restore = (
@@ -75,6 +79,7 @@ export function useComposerImages() {
       .map((attachment) => ({
         key: crypto.randomUUID(),
         name: attachment.name,
+        size: Number(attachment.size),
         previewUrl: urls[attachment.id] ?? '',
         saved: attachment,
         failed: false

@@ -60,6 +60,26 @@ export function formatDuration(milliseconds: number, locale: string) {
   return parts.slice(0, 2).join(' ')
 }
 
+const SIZE_UNITS = [
+  ['gigabyte', 1_000_000_000],
+  ['megabyte', 1_000_000],
+  ['kilobyte', 1_000]
+] as const
+
+/** A file size such as "8 kB" or "1.4 MB", in `locale`. */
+export function formatFileSize(bytes: number, locale: string) {
+  const [unit, size] = SIZE_UNITS.find(([, size]) => bytes >= size) ?? [
+    'byte',
+    1
+  ]
+  return new Intl.NumberFormat(locale, {
+    style: 'unit',
+    unit,
+    unitDisplay: 'short',
+    maximumFractionDigits: bytes >= 1_000_000 ? 1 : 0
+  }).format(bytes / size)
+}
+
 /** The time of day of `iso`, as "22:10" or "10:10 PM" in `locale`. */
 export function formatClockTime(
   iso: string,

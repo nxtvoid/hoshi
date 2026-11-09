@@ -3,7 +3,8 @@ import { promptSegments } from '../../src/lib/prompt-segments'
 
 const known = {
   pullRequests: new Set([12]),
-  skills: new Set(['pdf', 'anthropic-skills:docx'])
+  skills: new Set(['pdf', 'anthropic-skills:docx']),
+  images: ['screenshot.png']
 }
 
 const chips = (text: string) =>
@@ -40,5 +41,18 @@ test('mentions inside words and commands mid-prompt stay text', () => {
 test('a quoted path with spaces is one chip', () => {
   expect(chips('open @"docs/My Notes.md" now')).toEqual([
     ['file', '@"docs/My Notes.md"']
+  ])
+})
+
+test('an image the message sent shows as a chip with its name', () => {
+  const segments = promptSegments('fix this[Image #1] and [Image #2]', known)
+  expect(segments.filter((segment) => segment.kind === 'image')).toEqual([
+    {
+      kind: 'image',
+      text: '[Image #1]',
+      start: 8,
+      end: 18,
+      label: 'screenshot.png'
+    }
   ])
 })
