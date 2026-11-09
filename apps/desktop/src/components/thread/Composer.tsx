@@ -4,8 +4,8 @@ import { imageFiles } from '@/lib/images'
 import { CHAT_LANE } from '@/lib/chat-lane'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
-import { useDraftStore } from '@/state/draft-store'
 import { useImageStore } from '@/state/image-store'
+import { flushDrafts, useDraftStore } from '@/state/draft-store'
 import { useComposerFillStore } from '@/state/composer-fill-store'
 import { useInChat, useScopeProjectId } from '@/state/use-scope'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -488,6 +488,7 @@ export function Composer({
                 onChange={onChange}
                 initialContent={initialDraft}
                 onDocument={(doc) => saveDraft(draftKey, doc)}
+                onBlur={flushDrafts}
                 onKeyDown={onKeyDown}
                 onFiles={images.add}
               />
