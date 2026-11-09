@@ -34,6 +34,11 @@ import {
 import { ComposerSuggestions, suggestionOptionId } from './ComposerSuggestions'
 import { usePendingRequest, useRequestActions } from './use-request-actions'
 import {
+  type PastedImages,
+  pastedImages,
+  readPastedImages
+} from '@/lib/pasted-images'
+import {
   ArrowUp02Icon,
   Attachment01Icon,
   BubbleChatIcon,
@@ -183,6 +188,13 @@ export function Composer({
     setSnapshot(next)
     if (!next.trigger) setDismissed(null)
     if (next.empty) setTall(false)
+  }
+
+  /** A path that turns out to be no image file is pasted as the text it was. */
+  const addImages = async (pasted: PastedImages) => {
+    const files = await readPastedImages(pasted)
+    if (files) images.add(files)
+    else if (pasted.kind === 'paths') editorRef.current?.paste(pasted.text)
   }
 
   const runAction = (action: ComposerAction) => {
@@ -463,7 +475,10 @@ export function Composer({
           onDrop={(event) => {
             event.preventDefault()
             setDragging(false)
-            images.add(imageFiles(event.dataTransfer))
+            const dropped = pastedImages(event.dataTransfer, {
+              orClipboard: false
+            })
+            if (dropped) void addImages(dropped)
           }}
         >
           {images.images.length > 0 ? (
@@ -490,7 +505,7 @@ export function Composer({
                 onDocument={(doc) => saveDraft(draftKey, doc)}
                 onBlur={flushDrafts}
                 onKeyDown={onKeyDown}
-                onFiles={images.add}
+                onImages={(pasted) => void addImages(pasted)}
               />
             </div>
             {stacked ? (

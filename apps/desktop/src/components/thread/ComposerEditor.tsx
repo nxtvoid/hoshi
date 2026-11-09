@@ -1,7 +1,7 @@
 import { useImperativeHandle, useRef } from 'react'
 import type { Ref } from 'react'
 import { cn } from '@hoshi/utils'
-import { imageFiles } from '@/lib/images'
+import { type PastedImages, pastedImages } from '@/lib/pasted-images'
 import { CHIP_CLASSES } from '@/lib/chips'
 import { fileIcon } from '@/lib/file-icons'
 import StarterKit from '@tiptap/starter-kit'
@@ -61,6 +61,8 @@ export type ComposerEditorHandle = {
   mentions: () => MessageAttachment[]
   /** Keeps the editor's combobox state in step with the menu. */
   setMenu: (menu: { listId: string | null; activeId: string | null }) => void
+  /** Pastes `text` at the caret as if the user had. */
+  paste: (text: string) => void
 }
 
 type ComposerEditorProps = {
@@ -79,7 +81,8 @@ type ComposerEditorProps = {
   onBlur?: () => void
   /** `true` when the composer handled the key. */
   onKeyDown: (event: KeyboardEvent, context: KeyContext) => boolean
-  onFiles: (files: File[]) => void
+  /** Images pasted; the editor leaves them to the composer. */
+  onImages: (pasted: PastedImages) => void
 }
 
 const leafText = (node: ProseMirrorNode) =>
@@ -243,10 +246,10 @@ export function ComposerEditor({
   onDocument,
   onBlur,
   onKeyDown,
-  onFiles
+  onImages
 }: ComposerEditorProps) {
-  const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onFiles })
-  handlers.current = { onChange, onDocument, onBlur, onKeyDown, onFiles }
+  const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onImages })
+  handlers.current = { onChange, onDocument, onBlur, onKeyDown, onImages }
   /** The last document read, so a caret move doesn't convert it again. */
   const lastRead = useRef<{
     doc: ProseMirrorNode
@@ -314,14 +317,18 @@ export function ComposerEditor({
       handleKeyDown: (view, event) =>
         openFencedBlock(view, event) ||
         handlers.current.onKeyDown(event, keyContext(view)),
+      // Never left to WebKit, which pastes an image as an attachment element of its own.
       handlePaste: (_view, event) => {
-        const files = imageFiles(event.clipboardData)
-        if (files.length === 0) return false
-        handlers.current.onFiles(files)
+        const data = event.clipboardData
+        const pasted = data ? pastedImages(data, { orClipboard: true }) : null
+        if (!pasted) return false
+        handlers.current.onImages(pasted)
         return true
       },
       // The form around the editor takes dropped images; the editor only stays out of it.
-      handleDrop: (_view, event) => imageFiles(event.dataTransfer).length > 0
+      handleDrop: (_view, event) =>
+        event.dataTransfer !== null &&
+        pastedImages(event.dataTransfer, { orClipboard: false }) !== null
     },
     onCreate: ({ editor }) => {
       if (!editor.isEmpty) emit(editor)
@@ -343,6 +350,9 @@ export function ComposerEditor({
     () => ({
       focus: () => {
         editor?.commands.focus()
+      },
+      paste: (text) => {
+        editor?.view.pasteText(text)
       },
       setText: (text) => {
         if (!editor) return
