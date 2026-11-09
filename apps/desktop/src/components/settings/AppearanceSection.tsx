@@ -1,7 +1,12 @@
 import { m } from '@/paraglide/messages'
 import { Slider } from '@hoshi/ui/components/slider'
 import { Switch } from '@hoshi/ui/components/switch'
-import { ColorSchemeTiles, CreateThemeButton, ThemeGrid } from './ThemeLibrary'
+import {
+  AddThemeButton,
+  ColorSchemeTiles,
+  CreateThemeButton,
+  ThemeGrid
+} from './ThemeLibrary'
 import { SettingsPage, SettingsRow, SettingsSection } from './SettingsLayout'
 import {
   type Appearance,
@@ -44,6 +49,7 @@ export function AppearanceSection() {
           <h2 className='text-base font-semibold'>{m.themes()}</h2>
           <div className='flex flex-wrap items-center justify-end gap-2'>
             <CreateThemeButton />
+            <AddThemeButton />
           </div>
         </div>
         <ThemeGrid />
