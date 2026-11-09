@@ -3,6 +3,7 @@
 //! (provider turns, git). Provider output comes back through the same path.
 
 mod attachments;
+mod browser;
 mod checkpoint;
 mod delegation;
 mod diff;
@@ -29,6 +30,7 @@ mod watch;
 mod worktree;
 
 use attachments::Attachments;
+use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
 use hoshi_core::{
@@ -93,6 +95,8 @@ pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
 pub struct Engine {
     state: Arc<Mutex<State>>,
     terminals: Terminals,
+    /// The headless browser agents open pages in; apart from the state, as pages are slow.
+    browsing: Arc<Mutex<Browsing>>,
     /// Per working folder.
     paths: Refreshing<Vec<paths::Indexed>>,
     /// Per working folder, which may add its own commands and skills.
@@ -315,7 +319,15 @@ impl Engine {
         });
         refresh_branches(Arc::downgrade(&shared), thread_ids);
         let weak = Arc::downgrade(&shared);
+        let browsing = Arc::new(Mutex::new(Browsing::new(data_dir.join("browser"))));
+        let pages = browsing.clone();
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
+            if tool.starts_with("preview_") {
+                let mut pages = pages
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                return pages.call(caller, tool, arguments);
+            }
             match tool {
                 "request_secret" => {
                     return secret_requests::request_secret(&weak, caller, arguments);
@@ -348,6 +360,7 @@ impl Engine {
         Ok(Self {
             state: shared,
             terminals: Terminals::default(),
+            browsing,
             paths: Refreshing::new(PATHS_FRESH_FOR),
             slash_commands: Refreshing::new(SLASH_COMMANDS_FRESH_FOR),
             usage_probe: Arc::default(),
@@ -1158,11 +1171,22 @@ impl Engine {
     }
 
     pub fn dispatch(&self, command: Command) -> Result<(), CommandError> {
+        let deleted = match &command {
+            Command::ThreadDelete { thread_id } => Some(thread_id.clone()),
+            _ => None,
+        };
         let mut state = lock(&self.state);
         state.run_command(command)?;
         let model = &state.model;
         self.terminals
             .retain_threads(|thread_id| model.thread(thread_id).is_some());
+        drop(state);
+        if let Some(thread_id) = deleted {
+            self.browsing
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .forget(&thread_id);
+        }
         Ok(())
     }
 

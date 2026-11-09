@@ -132,10 +132,19 @@ pub(crate) fn reply(caller: &str, message: &Value, handler: &ToolHandler) -> Opt
             let name = message["params"]["name"].as_str().unwrap_or_default();
             let arguments = &message["params"]["arguments"];
             match handler(caller, name, arguments) {
-                Ok(value) => json!({
-                    "content": [{ "type": "text", "text": value.to_string() }],
-                    "structuredContent": value,
-                }),
+                Ok(mut value) => {
+                    let image = value
+                        .as_object_mut()
+                        .and_then(|fields| fields.remove("image"))
+                        .and_then(|image| image.as_str().map(str::to_owned));
+                    let mut content = vec![json!({ "type": "text", "text": value.to_string() })];
+                    if let Some(data) = image {
+                        content.push(
+                            json!({ "type": "image", "data": data, "mimeType": "image/png" }),
+                        );
+                    }
+                    json!({ "content": content, "structuredContent": value })
+                }
                 Err(error) => json!({
                     "content": [{ "type": "text", "text": error }],
                     "isError": true,
@@ -267,6 +276,104 @@ fn tools() -> Value {
             "description": "Stop watching this thread's pull request. Call it before you hand the work back to the user.",
             "inputSchema": { "type": "object", "properties": {} },
         },
+        {
+            "name": "preview_open",
+            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. Use it to check web work: then preview_snapshot to read the page and preview_act to use it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string" },
+                    "width": { "type": "integer", "description": "Viewport width in CSS pixels; 1280 by default." },
+                    "height": { "type": "integer", "description": "Viewport height in CSS pixels; 800 by default." },
+                },
+                "required": ["url"],
+            },
+        },
+        {
+            "name": "preview_navigate",
+            "description": "Go to another address in this thread's page.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"],
+            },
+        },
+        {
+            "name": "preview_snapshot",
+            "description": "Read the page as its accessibility tree, each element with a `ref` to pass to preview_act. Refs last until the next snapshot. includeImage adds a screenshot, to check how it looks.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "includeImage": { "type": "boolean" } },
+            },
+        },
+        {
+            "name": "preview_act",
+            "description": "Use the page as a person would, with real input: click (a ref, or x and y), hover, type (text into a ref; clear empties it first), press (a key such as Enter, Tab, Escape, ArrowDown), select (values of a <select> ref) or scroll (deltaX, deltaY, at a ref or the page). Snapshot again to see the result.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["click", "hover", "type", "press", "select", "scroll"] },
+                    "ref": { "type": "string" },
+                    "text": { "type": "string" },
+                    "clear": { "type": "boolean" },
+                    "key": { "type": "string" },
+                    "values": { "type": "array", "items": { "type": "string" } },
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "deltaX": { "type": "number" },
+                    "deltaY": { "type": "number" },
+                },
+                "required": ["action"],
+            },
+        },
+        {
+            "name": "preview_evaluate",
+            "description": "Run JavaScript in the page and get its value, awaiting a promise.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "expression": { "type": "string" } },
+                "required": ["expression"],
+            },
+        },
+        {
+            "name": "preview_wait_for",
+            "description": "Wait until the page shows `text`, has an element matching `selector`, or both.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": { "type": "string" },
+                    "selector": { "type": "string" },
+                    "timeoutMs": { "type": "integer", "description": "10 seconds by default, at most a minute." },
+                },
+            },
+        },
+        {
+            "name": "preview_resize",
+            "description": "Change the page's viewport, as for a phone (390x844) or a wide screen.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "width": { "type": "integer" }, "height": { "type": "integer" } },
+            },
+        },
+        {
+            "name": "preview_set_appearance",
+            "description": "Show the page in dark or light mode, through prefers-color-scheme; system follows the browser's own.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "colorScheme": { "type": "string", "enum": ["dark", "light", "system"] } },
+                "required": ["colorScheme"],
+            },
+        },
+        {
+            "name": "preview_status",
+            "description": "Whether this thread has a page open, its address, title and size, and its latest console messages and errors.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
+        {
+            "name": "preview_close",
+            "description": "Close this thread's page.",
+            "inputSchema": { "type": "object", "properties": {} },
+        },
     ])
 }
 
@@ -331,7 +438,17 @@ mod tests {
                 "thread_send",
                 "thread_wait",
                 "watch_pull_request",
-                "unwatch_pull_request"
+                "unwatch_pull_request",
+                "preview_open",
+                "preview_navigate",
+                "preview_snapshot",
+                "preview_act",
+                "preview_evaluate",
+                "preview_wait_for",
+                "preview_resize",
+                "preview_set_appearance",
+                "preview_status",
+                "preview_close"
             ]
         );
 
