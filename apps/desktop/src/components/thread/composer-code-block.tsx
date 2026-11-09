@@ -40,7 +40,7 @@ function ComposerCodeBlockView({
       <div contentEditable={false} className='flex h-7 items-center px-1'>
         <CodeLanguagePicker language={language} onChange={changeLanguage} />
       </div>
-      <pre className='overflow-x-auto px-3 pb-2 font-mono text-xs leading-relaxed'>
+      <pre className='overflow-x-auto px-3 pb-2 font-mono leading-relaxed text-(length:--code-font-size)'>
         <NodeViewContent<'code'>
           as='code'
           className='block min-h-[1lh] whitespace-pre-wrap'

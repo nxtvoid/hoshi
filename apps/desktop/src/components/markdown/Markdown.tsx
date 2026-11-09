@@ -76,7 +76,7 @@ const COMPONENTS: Components = {
     if (block) return <CodeBlock {...block} />
     return (
       <pre
-        className='bg-muted my-2.5 overflow-x-auto rounded-lg p-3 font-mono text-xs'
+        className='bg-muted my-2.5 overflow-x-auto rounded-lg p-3 font-mono text-(length:--code-font-size)'
         {...props}
       />
     )
