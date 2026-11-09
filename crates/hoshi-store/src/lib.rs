@@ -8,7 +8,7 @@ use hoshi_core::{
     ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, Snapshot, Thread,
     ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits,
 };
-use rusqlite::{Connection, Row, Transaction, params, types::Type};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, types::Type};
 use std::path::Path;
 
 const MIGRATIONS: &[&str] = &[
@@ -180,7 +180,110 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE projects ADD COLUMN worktree_setup TEXT;
     ",
+    r"
+    CREATE INDEX thread_items_thread_ordinal ON thread_items (thread_id, ordinal);
+    CREATE INDEX thread_items_thread_kind
+        ON thread_items (thread_id, json_extract(content_json, '$.kind'), ordinal);
+    CREATE INDEX thread_items_pending ON thread_items (ordinal)
+        WHERE json_extract(content_json, '$.status') = 'pending';
+    CREATE INDEX thread_items_open_tool_calls ON thread_items (ordinal)
+        WHERE json_extract(content_json, '$.kind') = 'toolCall'
+          AND json_extract(content_json, '$.output') IS NULL
+          AND coalesce(json_extract(content_json, '$.interrupted'), 0) = 0;
+    CREATE INDEX thread_items_task_results ON thread_items (ordinal)
+        WHERE json_extract(content_json, '$.taskResult') IS NOT NULL;
+    ",
 ];
+
+const JOURNAL_SIZE_LIMIT: i64 = 8 * 1024 * 1024;
+const STATEMENT_CACHE_CAPACITY: usize = 64;
+
+const PENDING_REQUESTS: &str = "
+    SELECT id, thread_id, created_at, content_json FROM thread_items
+    WHERE json_extract(content_json, '$.status') = 'pending'
+      AND json_extract(content_json, '$.kind')
+          IN ('approval', 'questions', 'proposedPlan', 'secretRequest')
+    ORDER BY ordinal";
+
+const OPEN_TOOL_CALLS: &str = "
+    SELECT thread_id, id FROM thread_items
+    WHERE json_extract(content_json, '$.kind') = 'toolCall'
+      AND json_extract(content_json, '$.output') IS NULL
+      AND coalesce(json_extract(content_json, '$.interrupted'), 0) = 0
+    ORDER BY ordinal";
+
+const THREAD_ITEM: &str = "
+    SELECT id, thread_id, created_at, content_json
+    FROM thread_items WHERE thread_id = ?1 AND id = ?2";
+
+const ORDINAL_OF: &str = "SELECT ordinal FROM thread_items WHERE thread_id = ?1 AND id = ?2";
+
+const TURN_START: &str = "
+    SELECT ordinal FROM thread_items
+    WHERE thread_id = ?1 AND json_extract(content_json, '$.kind') = 'userMessage'
+      AND ordinal < ?2
+    ORDER BY ordinal DESC LIMIT 1 OFFSET ?3";
+
+const PAGE_ITEMS: &str = "
+    SELECT id, thread_id, created_at, content_json FROM thread_items
+    WHERE thread_id = ?1 AND ordinal >= ?2 AND ordinal < ?3
+    ORDER BY ordinal DESC LIMIT ?4";
+
+const HAS_OLDER: &str = "
+    SELECT EXISTS (SELECT 1 FROM thread_items WHERE thread_id = ?1 AND ordinal < ?2)";
+
+const LAST_ANSWER: &str = "
+    SELECT json_extract(content_json, '$.text') FROM thread_items
+    WHERE thread_id = ?1 AND json_extract(content_json, '$.kind') = 'assistantMessage'
+    ORDER BY ordinal DESC LIMIT 1";
+
+const LAST_PLAN: &str = "
+    SELECT json_extract(content_json, '$.plan') FROM thread_items
+    WHERE thread_id = ?1 AND json_extract(content_json, '$.kind') = 'proposedPlan'
+    ORDER BY ordinal DESC LIMIT 1";
+
+const LAST_DECISION: &str = "
+    SELECT json_extract(content_json, '$.decision') FROM thread_items
+    WHERE ordinal = max(
+        coalesce((SELECT max(ordinal) FROM thread_items
+                  WHERE thread_id = ?1
+                    AND json_extract(content_json, '$.kind') = 'userMessage'), 0),
+        coalesce((SELECT max(ordinal) FROM thread_items
+                  WHERE thread_id = ?1
+                    AND json_extract(content_json, '$.kind') = 'proposedPlan'), 0))";
+
+const ANSWERED_TASKS: &str = "
+    SELECT json_extract(content_json, '$.taskResult') FROM thread_items
+    WHERE json_extract(content_json, '$.kind') = 'userMessage'
+      AND json_extract(content_json, '$.taskResult') IS NOT NULL";
+
+const THREAD_ITEMS: &str = "
+    SELECT id, thread_id, created_at, content_json
+    FROM thread_items WHERE thread_id = ?1 ORDER BY ordinal";
+
+const LATEST_MESSAGES: &str = "
+    SELECT id, thread_id, created_at, content_json FROM thread_items
+    WHERE ordinal IN (
+        SELECT ordinal FROM thread_items INDEXED BY thread_items_thread_kind
+        WHERE thread_id = ?1 AND json_extract(content_json, '$.kind')
+              IN ('userMessage', 'assistantMessage', 'proposedPlan')
+        ORDER BY ordinal DESC LIMIT ?2)
+    ORDER BY ordinal";
+
+const MESSAGE_COUNT: &str = "
+    SELECT count(*) FROM thread_items
+    WHERE thread_id = ?1 AND json_extract(content_json, '$.kind')
+          IN ('userMessage', 'assistantMessage', 'proposedPlan')";
+
+/// `?1` is a thread; `?1:...` are its subagents' transcripts. `;` follows `:` in ASCII.
+const DELETE_THREAD_ITEMS: &str = "
+    DELETE FROM thread_items
+    WHERE thread_id = ?1 OR (thread_id >= ?1 || ':' AND thread_id < ?1 || ';')";
+
+const REWIND_ITEMS: &str = "
+    DELETE FROM thread_items
+    WHERE (thread_id = ?1 OR (thread_id >= ?1 || ':' AND thread_id < ?1 || ';'))
+      AND ordinal >= (SELECT ordinal FROM thread_items WHERE thread_id = ?1 AND id = ?2)";
 
 /// The last detail read of a thread's pull request, to show at once on the next start.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +311,9 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        conn.pragma_update(None, "journal_size_limit", JOURNAL_SIZE_LIMIT)?;
         Self::init(conn)
     }
 
@@ -216,6 +322,7 @@ impl Store {
     }
 
     fn init(mut conn: Connection) -> Result<Self, StoreError> {
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let tx = conn.transaction()?;
         for migration in MIGRATIONS.iter().skip(version as usize) {
@@ -231,11 +338,11 @@ impl Store {
         let tx = self.conn.transaction()?;
         let mut sequences = Vec::with_capacity(events.len());
         for event in events {
-            let payload = serde_json::to_value(event)?;
-            let event_type = payload["type"].as_str().unwrap_or_default().to_owned();
-            tx.execute(
-                "INSERT INTO events (event_type, payload_json, occurred_at) VALUES (?1, ?2, ?3)",
-                params![event_type, payload.to_string(), occurred_at],
+            execute(
+                &tx,
+                "INSERT INTO events (event_type, payload_json, occurred_at)
+                 VALUES (json_extract(?1, '$.type'), ?1, ?2)",
+                params![serde_json::to_string(event)?, occurred_at],
             )?;
             sequences.push(tx.last_insert_rowid() as u64);
             project(&tx, event)?;
@@ -340,23 +447,10 @@ impl Store {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let pending_requests = self.items(
-            "SELECT id, thread_id, created_at, content_json FROM thread_items
-             WHERE json_extract(content_json, '$.status') = 'pending'
-               AND json_extract(content_json, '$.kind')
-                   IN ('approval', 'questions', 'proposedPlan', 'secretRequest')
-             ORDER BY ordinal",
-            [],
-        )?;
+        let pending_requests = self.items(PENDING_REQUESTS, [])?;
         let open_tool_calls = self
             .conn
-            .prepare(
-                "SELECT thread_id, id FROM thread_items
-                 WHERE json_extract(content_json, '$.kind') = 'toolCall'
-                   AND json_extract(content_json, '$.output') IS NULL
-                   AND coalesce(json_extract(content_json, '$.interrupted'), 0) = 0
-                 ORDER BY ordinal",
-            )?
+            .prepare(OPEN_TOOL_CALLS)?
             .query_map([], |row| {
                 Ok(OpenToolCall {
                     thread_id: row.get(0)?,
@@ -379,18 +473,19 @@ impl Store {
 
     /// Caches a thread's context usage. Not an event: it changes on every model call.
     pub fn save_context_usage(&mut self, update: &ThreadContextUsage) -> Result<(), StoreError> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO context_usages
-             (thread_id, used_tokens, max_tokens, cache_ttl_secs, cache_expires_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
+        self.conn
+            .prepare_cached(
+                "INSERT OR REPLACE INTO context_usages
+                 (thread_id, used_tokens, max_tokens, cache_ttl_secs, cache_expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            )?
+            .execute(params![
                 update.thread_id,
                 update.usage.used_tokens as i64,
                 update.usage.max_tokens.map(|tokens| tokens as i64),
                 update.usage.cache_ttl_secs.map(|secs| secs as i64),
                 update.usage.cache_expires_at.map(|at| at as i64)
-            ],
-        )?;
+            ])?;
         Ok(())
     }
 
@@ -469,13 +564,7 @@ impl Store {
         thread_id: &str,
         item_id: &str,
     ) -> Result<Option<ThreadItem>, StoreError> {
-        Ok(self
-            .items(
-                "SELECT id, thread_id, created_at, content_json
-                 FROM thread_items WHERE thread_id = ?1 AND id = ?2",
-                [thread_id, item_id],
-            )?
-            .pop())
+        Ok(self.items(THREAD_ITEM, [thread_id, item_id])?.pop())
     }
 
     /// The last `turns` turns before item `before` (the end when `None`), at most
@@ -487,95 +576,42 @@ impl Store {
         turns: usize,
         max_items: usize,
     ) -> Result<(Vec<ThreadItem>, bool), StoreError> {
-        let ordinal_of = |id: &str| -> Result<Option<i64>, StoreError> {
-            Ok(self
-                .conn
-                .prepare("SELECT ordinal FROM thread_items WHERE thread_id = ?1 AND id = ?2")?
-                .query_map([thread_id, id], |row| row.get(0))?
-                .next()
-                .transpose()?)
-        };
+        let ordinal_of = |id: &str| self.first::<i64>(ORDINAL_OF, [thread_id, id]);
         let end = match before {
             Some(id) => ordinal_of(id)?.unwrap_or(i64::MAX),
             None => i64::MAX,
         };
-        let start: i64 = self
-            .conn
-            .prepare(
-                "SELECT ordinal FROM thread_items
-                 WHERE thread_id = ?1 AND ordinal < ?2
-                   AND json_extract(content_json, '$.kind') = 'userMessage'
-                 ORDER BY ordinal DESC LIMIT 1 OFFSET ?3",
-            )?
-            .query_map(
+        let start = self
+            .first::<i64>(
+                TURN_START,
                 params![thread_id, end, turns.saturating_sub(1) as i64],
-                |row| row.get(0),
             )?
-            .next()
-            .transpose()?
             .unwrap_or(i64::MIN);
-        let mut items = self.items(
-            "SELECT id, thread_id, created_at, content_json FROM thread_items
-             WHERE thread_id = ?1 AND ordinal >= ?2 AND ordinal < ?3
-             ORDER BY ordinal DESC LIMIT ?4",
-            params![thread_id, start, end, max_items as i64],
-        )?;
+        let mut items = self.items(PAGE_ITEMS, params![thread_id, start, end, max_items as i64])?;
         items.reverse();
         let first = match items.first() {
             Some(item) => ordinal_of(&item.id)?.unwrap_or(i64::MIN),
             None => end,
         };
-        let has_older: bool = self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM thread_items WHERE thread_id = ?1 AND ordinal < ?2)",
-            params![thread_id, first],
-            |row| row.get(0),
-        )?;
+        let has_older = self
+            .first::<bool>(HAS_OLDER, params![thread_id, first])?
+            .unwrap_or(false);
         Ok((items, has_older))
     }
 
     /// The thread's latest answer, which is what a delegated task reports back.
     pub fn last_answer(&self, thread_id: &str) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT json_extract(content_json, '$.text') FROM thread_items
-                 WHERE thread_id = ?1
-                   AND json_extract(content_json, '$.kind') = 'assistantMessage'
-                 ORDER BY ordinal DESC LIMIT 1",
-            )?
-            .query_map([thread_id], |row| row.get(0))?
-            .next()
-            .transpose()?)
+        self.first(LAST_ANSWER, [thread_id])
     }
 
     /// The thread's latest proposed plan, in markdown.
     pub fn last_plan(&self, thread_id: &str) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .conn
-            .prepare(
-                "SELECT json_extract(content_json, '$.plan') FROM thread_items
-                 WHERE thread_id = ?1
-                   AND json_extract(content_json, '$.kind') = 'proposedPlan'
-                 ORDER BY ordinal DESC LIMIT 1",
-            )?
-            .query_map([thread_id], |row| row.get(0))?
-            .next()
-            .transpose()?)
+        self.first(LAST_PLAN, [thread_id])
     }
 
     /// Whether the user sent the thread's plan back to planning since their last message.
     pub fn plan_declined_last(&self, thread_id: &str) -> Result<bool, StoreError> {
-        let decision: Option<Option<String>> = self
-            .conn
-            .prepare(
-                "SELECT json_extract(content_json, '$.decision') FROM thread_items
-                 WHERE thread_id = ?1
-                   AND json_extract(content_json, '$.kind') IN ('userMessage', 'proposedPlan')
-                 ORDER BY ordinal DESC LIMIT 1",
-            )?
-            .query_map([thread_id], |row| row.get(0))?
-            .next()
-            .transpose()?;
+        let decision = self.first::<Option<String>>(LAST_DECISION, [thread_id])?;
         Ok(decision.flatten().as_deref() == Some("decline"))
     }
 
@@ -583,22 +619,39 @@ impl Store {
     pub fn answered_tasks(&self) -> Result<Vec<String>, StoreError> {
         Ok(self
             .conn
-            .prepare(
-                "SELECT json_extract(content_json, '$.taskResult') FROM thread_items
-                 WHERE json_extract(content_json, '$.kind') = 'userMessage'
-                   AND json_extract(content_json, '$.taskResult') IS NOT NULL",
-            )?
+            .prepare(ANSWERED_TASKS)?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?)
     }
 
     /// A thread's transcript, oldest first.
     pub fn thread_items(&self, thread_id: &str) -> Result<Vec<ThreadItem>, StoreError> {
-        self.items(
-            "SELECT id, thread_id, created_at, content_json
-             FROM thread_items WHERE thread_id = ?1 ORDER BY ordinal",
-            [thread_id],
-        )
+        self.items(THREAD_ITEMS, [thread_id])
+    }
+
+    /// The thread's last `limit` messages (the user's, the agent's answers and plans),
+    /// oldest first, and how many came before them.
+    pub fn latest_messages(
+        &self,
+        thread_id: &str,
+        limit: usize,
+    ) -> Result<(Vec<ThreadItem>, usize), StoreError> {
+        let items = self.items(LATEST_MESSAGES, params![thread_id, limit as i64])?;
+        let count = self.first::<i64>(MESSAGE_COUNT, [thread_id])?.unwrap_or(0) as usize;
+        let earlier = count.saturating_sub(items.len());
+        Ok((items, earlier))
+    }
+
+    fn first<T: rusqlite::types::FromSql>(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Option<T>, StoreError> {
+        Ok(self
+            .conn
+            .prepare_cached(sql)?
+            .query_row(params, |row| row.get(0))
+            .optional()?)
     }
 
     fn items(
@@ -608,7 +661,7 @@ impl Store {
     ) -> Result<Vec<ThreadItem>, StoreError> {
         Ok(self
             .conn
-            .prepare(sql)?
+            .prepare_cached(sql)?
             .query_map(params, |row| {
                 let content: String = row.get(3)?;
                 Ok(ThreadItem {
@@ -677,10 +730,37 @@ fn enum_text(value: impl serde::Serialize) -> Result<String, StoreError> {
         .to_owned())
 }
 
+fn execute(tx: &Transaction, sql: &str, params: impl rusqlite::Params) -> Result<(), StoreError> {
+    tx.prepare_cached(sql)?.execute(params)?;
+    Ok(())
+}
+
+/// Drops a thread's rows and its subagents' transcripts.
+fn forget_thread(tx: &Transaction, thread_id: &str) -> Result<(), StoreError> {
+    execute(tx, DELETE_THREAD_ITEMS, [thread_id])?;
+    execute(
+        tx,
+        "DELETE FROM pull_requests WHERE thread_id = ?1",
+        [thread_id],
+    )?;
+    execute(
+        tx,
+        "DELETE FROM pull_request_details WHERE thread_id = ?1",
+        [thread_id],
+    )?;
+    execute(
+        tx,
+        "DELETE FROM context_usages WHERE thread_id = ?1",
+        [thread_id],
+    )?;
+    execute(tx, "DELETE FROM threads WHERE id = ?1", [thread_id])
+}
+
 fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
     match event {
         Event::ProjectCreated { project } => {
-            tx.execute(
+            execute(
+                tx,
                 "INSERT INTO projects
                  (id, title, workspace_root, created_at, updated_at, worktree_setup)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -695,39 +775,25 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             )?;
         }
         Event::ProjectWorktreeSetupSet { project_id, setup } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE projects SET worktree_setup = ?2 WHERE id = ?1",
                 params![project_id, optional_json(setup.as_ref())?],
             )?;
         }
         Event::ProjectRemoved { project_id } => {
-            tx.execute(
-                "DELETE FROM thread_items WHERE thread_id IN
-                 (SELECT id FROM threads WHERE project_id = ?1)
-                 OR substr(thread_id, 1, instr(thread_id, ':') - 1) IN
-                 (SELECT id FROM threads WHERE project_id = ?1)",
-                [project_id],
-            )?;
-            tx.execute(
-                "DELETE FROM pull_requests WHERE thread_id IN
-                 (SELECT id FROM threads WHERE project_id = ?1)",
-                [project_id],
-            )?;
-            tx.execute(
-                "DELETE FROM pull_request_details WHERE thread_id IN
-                 (SELECT id FROM threads WHERE project_id = ?1)",
-                [project_id],
-            )?;
-            tx.execute(
-                "DELETE FROM context_usages WHERE thread_id IN
-                 (SELECT id FROM threads WHERE project_id = ?1)",
-                [project_id],
-            )?;
-            tx.execute("DELETE FROM threads WHERE project_id = ?1", [project_id])?;
-            tx.execute("DELETE FROM projects WHERE id = ?1", [project_id])?;
+            let thread_ids = tx
+                .prepare_cached("SELECT id FROM threads WHERE project_id = ?1")?
+                .query_map([project_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            for thread_id in thread_ids {
+                forget_thread(tx, &thread_id)?;
+            }
+            execute(tx, "DELETE FROM projects WHERE id = ?1", [project_id])?;
         }
         Event::ThreadCreated { thread } => {
-            tx.execute(
+            execute(
+                tx,
                 "INSERT INTO threads
                  (id, project_id, title, status, branch, worktree_path, session_id,
                   active_turn_id, created_at, updated_at, model, effort, archived, pinned,
@@ -766,34 +832,17 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 ],
             )?;
         }
-        Event::ThreadDeleted { thread_id } => {
-            tx.execute(
-                "DELETE FROM thread_items
-                 WHERE thread_id = ?1 OR substr(thread_id, 1, length(?1) + 1) = ?1 || ':'",
-                [thread_id],
-            )?;
-            tx.execute(
-                "DELETE FROM pull_requests WHERE thread_id = ?1",
-                [thread_id],
-            )?;
-            tx.execute(
-                "DELETE FROM pull_request_details WHERE thread_id = ?1",
-                [thread_id],
-            )?;
-            tx.execute(
-                "DELETE FROM context_usages WHERE thread_id = ?1",
-                [thread_id],
-            )?;
-            tx.execute("DELETE FROM threads WHERE id = ?1", [thread_id])?;
-        }
+        Event::ThreadDeleted { thread_id } => forget_thread(tx, thread_id)?,
         Event::ThreadTitleSet { thread_id, title } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET title = ?2 WHERE id = ?1",
                 params![thread_id, title],
             )?;
         }
         Event::ThreadBranchSet { thread_id, branch } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET branch = ?2 WHERE id = ?1",
                 params![thread_id, branch],
             )?;
@@ -804,33 +853,38 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             branch,
             adopted,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET worktree_path = ?2, branch = ?3, worktree_released = 0,
                  worktree_adopted = ?4 WHERE id = ?1",
                 params![thread_id, worktree_path, branch, adopted],
             )?;
         }
         Event::ThreadWorktreeDetached { thread_id, branch } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET worktree_path = NULL, branch = ?2, worktree_released = 0,
                  worktree_adopted = 0 WHERE id = ?1",
                 params![thread_id, branch],
             )?;
         }
         Event::ThreadWorktreeReleased { thread_id } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET worktree_released = 1 WHERE id = ?1",
                 [thread_id],
             )?;
         }
         Event::ThreadWorktreeRestored { thread_id } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET worktree_released = 0 WHERE id = ?1",
                 [thread_id],
             )?;
         }
         Event::ThreadCleanedUp { thread_id } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET worktree_path = NULL, branch = NULL, session_id = NULL,
                  worktree_released = 0, worktree_adopted = 0 WHERE id = ?1",
                 [thread_id],
@@ -840,13 +894,15 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             thread_id,
             archived,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET archived = ?2 WHERE id = ?1",
                 params![thread_id, archived],
             )?;
         }
         Event::ThreadPinnedSet { thread_id, pinned } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET pinned = ?2 WHERE id = ?1",
                 params![thread_id, pinned],
             )?;
@@ -858,7 +914,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             fast_mode,
             ultracode,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET model = ?2, effort = ?3, fast_mode = ?4, ultracode = ?5
                  WHERE id = ?1",
                 params![thread_id, model, effort_text(*effort), fast_mode, ultracode],
@@ -869,7 +926,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             access_mode,
             plan_mode,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET access_mode = ?2, plan_mode = ?3 WHERE id = ?1",
                 params![thread_id, enum_text(*access_mode)?, plan_mode],
             )?;
@@ -879,7 +937,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             turn_id,
             at,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET status = ?2, active_turn_id = ?3, updated_at = ?4 WHERE id = ?1",
                 params![thread_id, enum_text(ThreadStatus::Working)?, turn_id, at],
             )?;
@@ -888,13 +947,15 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             thread_id,
             session_id,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET session_id = ?2 WHERE id = ?1",
                 params![thread_id, session_id],
             )?;
         }
         Event::ItemAdded { item } => {
-            tx.execute(
+            execute(
+                tx,
                 "INSERT INTO thread_items (id, thread_id, created_at, content_json)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (thread_id, id) DO UPDATE SET content_json = excluded.content_json",
@@ -905,7 +966,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                     serde_json::to_string(&item.content)?
                 ],
             )?;
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET updated_at = ?2 WHERE id = ?1",
                 params![item.thread_id, item.created_at],
             )?;
@@ -917,7 +979,8 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             is_error,
             detail,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE thread_items
                  SET content_json = json_set(content_json, '$.output', ?3, '$.isError', json(?4),
                                              '$.detail', json(?5))
@@ -941,14 +1004,16 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
                 TurnOutcome::Failed { .. } => ThreadStatus::Error,
                 TurnOutcome::Completed | TurnOutcome::Interrupted => ThreadStatus::Idle,
             };
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET status = ?2, active_turn_id = NULL, updated_at = ?3
                  WHERE id = ?1",
                 params![thread_id, enum_text(status)?, at],
             )?;
         }
         Event::ToolCallInterrupted { thread_id, item_id } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE thread_items
                  SET content_json = json_set(content_json, '$.interrupted', json('true'))
                  WHERE thread_id = ?1 AND id = ?2",
@@ -960,26 +1025,30 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             parent_thread_id,
             shares_worktree,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET parent_thread_id = ?2,
                  worktree_adopted = worktree_adopted OR ?3 WHERE id = ?1",
                 params![thread_id, parent_thread_id, shares_worktree],
             )?;
         }
         Event::TaskCancelled { thread_id } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET task_cancelled = 1 WHERE id = ?1",
                 [thread_id],
             )?;
         }
         Event::TaskAnswered { thread_id } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET task_answered = 1 WHERE id = ?1",
                 [thread_id],
             )?;
         }
         Event::ThreadStatusSet { thread_id, status } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET status = ?2 WHERE id = ?1",
                 params![thread_id, enum_text(*status)?],
             )?;
@@ -988,13 +1057,15 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             thread_id,
             watching,
         } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET watching_pull_request = ?2 WHERE id = ?1",
                 params![thread_id, watching],
             )?;
         }
         Event::ConversationCursorSet { thread_id, cursor } => {
-            tx.execute(
+            execute(
+                tx,
                 "UPDATE threads SET conversation_cursor = ?2, resume_at = NULL WHERE id = ?1",
                 params![thread_id, cursor],
             )?;
@@ -1004,14 +1075,9 @@ fn project(tx: &Transaction, event: &Event) -> Result<(), StoreError> {
             message_id,
             resume_at,
         } => {
-            tx.execute(
-                "DELETE FROM thread_items
-                 WHERE (thread_id = ?1 OR substr(thread_id, 1, length(?1) + 1) = ?1 || ':')
-                   AND ordinal >= (SELECT ordinal FROM thread_items
-                                   WHERE thread_id = ?1 AND id = ?2)",
-                params![thread_id, message_id],
-            )?;
-            tx.execute(
+            execute(tx, REWIND_ITEMS, params![thread_id, message_id])?;
+            execute(
+                tx,
                 "UPDATE threads SET conversation_cursor = ?2, resume_at = ?2,
                  session_id = CASE WHEN ?2 IS NULL THEN NULL ELSE session_id END
                  WHERE id = ?1",
@@ -1619,6 +1685,260 @@ mod tests {
         let snapshot = Store::open(&path).unwrap().snapshot().unwrap();
 
         assert_eq!(snapshot.projects.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn query_plan(store: &Store, sql: &str) -> Vec<String> {
+        let mut statement = store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        for index in 1..=statement.parameter_count() {
+            statement
+                .raw_bind_parameter(index, rusqlite::types::Null)
+                .unwrap();
+        }
+        let mut rows = statement.raw_query();
+        let mut details = Vec::new();
+        while let Some(row) = rows.next().unwrap() {
+            details.push(row.get::<_, String>(3).unwrap());
+        }
+        details
+    }
+
+    #[test]
+    fn transcript_queries_search_an_index() {
+        let store = Store::open_in_memory().unwrap();
+        for sql in [
+            PENDING_REQUESTS,
+            OPEN_TOOL_CALLS,
+            THREAD_ITEM,
+            ORDINAL_OF,
+            TURN_START,
+            PAGE_ITEMS,
+            HAS_OLDER,
+            LAST_ANSWER,
+            LAST_PLAN,
+            LAST_DECISION,
+            ANSWERED_TASKS,
+            THREAD_ITEMS,
+            LATEST_MESSAGES,
+            MESSAGE_COUNT,
+            DELETE_THREAD_ITEMS,
+            REWIND_ITEMS,
+        ] {
+            let plan = query_plan(&store, sql);
+            let full_scan = plan.iter().any(|step| {
+                (step.starts_with("SCAN thread_items") || step.starts_with("SCAN events"))
+                    && !step.contains("USING")
+            });
+            assert!(!full_scan, "{sql}\n{plan:#?}");
+            assert!(plan.iter().any(|step| step.contains("INDEX")), "{sql}");
+        }
+        for (sql, index) in [
+            (PENDING_REQUESTS, "INDEX thread_items_pending"),
+            (OPEN_TOOL_CALLS, "INDEX thread_items_open_tool_calls"),
+            (ANSWERED_TASKS, "INDEX thread_items_task_results"),
+            (TURN_START, "INDEX thread_items_thread_kind"),
+            (LAST_ANSWER, "INDEX thread_items_thread_kind"),
+            (LAST_PLAN, "INDEX thread_items_thread_kind"),
+            (LAST_DECISION, "INDEX thread_items_thread_kind"),
+            (PAGE_ITEMS, "INDEX thread_items_thread_ordinal"),
+            (THREAD_ITEMS, "INDEX thread_items_thread_ordinal"),
+            (LATEST_MESSAGES, "COVERING INDEX thread_items_thread_kind"),
+            (MESSAGE_COUNT, "COVERING INDEX thread_items_thread_kind"),
+        ] {
+            let plan = query_plan(&store, sql);
+            assert!(
+                plan.iter().any(|step| step.contains(index)),
+                "{sql}\n{plan:#?}"
+            );
+        }
+        for sql in [
+            THREAD_ITEMS,
+            LAST_ANSWER,
+            LAST_PLAN,
+            TURN_START,
+            OPEN_TOOL_CALLS,
+        ] {
+            let plan = query_plan(&store, sql);
+            assert!(
+                !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+                "{sql}"
+            );
+        }
+    }
+
+    fn item(thread_id: &str, id: &str, content: ItemContent) -> Event {
+        Event::ItemAdded {
+            item: ThreadItem {
+                id: id.into(),
+                thread_id: thread_id.into(),
+                created_at: NOW.into(),
+                content,
+            },
+        }
+    }
+
+    fn answer(thread_id: &str, id: &str) -> Event {
+        item(
+            thread_id,
+            id,
+            ItemContent::AssistantMessage { text: id.into() },
+        )
+    }
+
+    #[test]
+    fn deleting_a_thread_deletes_exactly_it_and_its_subagents() {
+        let mut store = Store::open_in_memory().unwrap();
+        let ids = ["t", "t:a", "t:b:c", "tx", "t0", "t;", "s:t", "s"];
+        let items: Vec<_> = ids.iter().map(|id| answer(id, "a")).collect();
+        store.append(&items, NOW).unwrap();
+
+        store
+            .append(
+                &[Event::ThreadDeleted {
+                    thread_id: "t".into(),
+                }],
+                NOW,
+            )
+            .unwrap();
+
+        let remaining: Vec<_> = ids
+            .iter()
+            .filter(|id| !store.thread_items(id).unwrap().is_empty())
+            .copied()
+            .collect();
+        assert_eq!(remaining, ["tx", "t0", "t;", "s:t", "s"]);
+    }
+
+    #[test]
+    fn a_rewind_keeps_other_threads_that_share_the_prefix() {
+        let (mut store, mut model) = store_with_thread();
+        let events = decide(&model, send_text("m1"), NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        store
+            .append(&[answer("t:agent", "a"), answer("tx", "a")], NOW)
+            .unwrap();
+
+        store
+            .append(
+                &[Event::ThreadRewound {
+                    thread_id: "t".into(),
+                    message_id: "m1".into(),
+                    resume_at: None,
+                }],
+                NOW,
+            )
+            .unwrap();
+
+        assert!(store.thread_items("t").unwrap().is_empty());
+        assert!(store.thread_items("t:agent").unwrap().is_empty());
+        assert_eq!(store.thread_items("tx").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_latest_messages_skip_tool_calls_and_count_the_earlier_ones() {
+        let mut store = Store::open_in_memory().unwrap();
+        let tool = |id: &str| {
+            item(
+                "t",
+                id,
+                ItemContent::ToolCall {
+                    name: "Read".into(),
+                    input: "{}".into(),
+                    output: None,
+                    is_error: false,
+                    detail: None,
+                    output_omitted: false,
+                    interrupted: false,
+                },
+            )
+        };
+        store
+            .append(
+                &[
+                    answer("t", "a1"),
+                    tool("c1"),
+                    answer("t", "a2"),
+                    tool("c2"),
+                    answer("t:agent", "inside"),
+                    answer("t", "a3"),
+                    tool("c3"),
+                ],
+                NOW,
+            )
+            .unwrap();
+        let ids = |items: Vec<ThreadItem>| -> Vec<String> {
+            items.into_iter().map(|item| item.id).collect()
+        };
+
+        let (latest, earlier) = store.latest_messages("t", 2).unwrap();
+        assert_eq!(ids(latest), ["a2", "a3"]);
+        assert_eq!(earlier, 1);
+
+        let (all, earlier) = store.latest_messages("t", 10).unwrap();
+        assert_eq!(ids(all), ["a1", "a2", "a3"]);
+        assert_eq!(earlier, 0);
+        assert_eq!(store.last_answer("t").unwrap().as_deref(), Some("a3"));
+        assert_eq!(store.snapshot().unwrap().open_tool_calls.len(), 3);
+    }
+
+    #[test]
+    fn a_database_from_before_the_indexes_keeps_its_items_and_events() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let before = MIGRATIONS.len() - 1;
+        let tx = conn.transaction().unwrap();
+        for migration in &MIGRATIONS[..before] {
+            tx.execute_batch(migration).unwrap();
+        }
+        tx.execute(
+            "INSERT INTO thread_items (id, thread_id, created_at, content_json)
+             VALUES ('a', 't', ?1, '{\"kind\":\"assistantMessage\",\"text\":\"done\"}')",
+            [NOW],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO events (event_type, payload_json, occurred_at)
+             VALUES ('threadTitleSet', '{\"type\":\"threadTitleSet\",\"threadId\":\"t\",\"title\":\"x\"}', ?1)",
+            [NOW],
+        )
+        .unwrap();
+        tx.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        tx.commit().unwrap();
+
+        let mut store = Store::init(conn).unwrap();
+
+        assert_eq!(store.last_answer("t").unwrap().as_deref(), Some("done"));
+        store
+            .append(
+                &[Event::ThreadDeleted {
+                    thread_id: "t".into(),
+                }],
+                NOW,
+            )
+            .unwrap();
+        assert!(store.thread_items("t").unwrap().is_empty());
+        assert_eq!(store.snapshot().unwrap().sequence, 2);
+    }
+
+    #[test]
+    fn a_file_database_is_tuned_for_a_desktop_app() {
+        let dir = std::env::temp_dir().join(format!("hoshi-store-pragmas-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("state.sqlite")).unwrap();
+        let pragma = |name: &str| -> i64 {
+            store
+                .conn
+                .pragma_query_value(None, name, |row| row.get(0))
+                .unwrap()
+        };
+
+        assert_eq!(pragma("synchronous"), 1);
+        assert_eq!(pragma("temp_store"), 2);
+        assert_eq!(pragma("journal_size_limit"), JOURNAL_SIZE_LIMIT);
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
