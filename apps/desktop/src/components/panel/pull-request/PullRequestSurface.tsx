@@ -117,7 +117,7 @@ export function PullRequestSurface({ threadId }: { threadId: string }) {
         {ready ? <ChecksSummary checks={ready.checks} /> : null}
       </div>
       {ready === null ? (
-        <div className='min-h-0 flex-1 overflow-y-auto'>
+        <div className='min-h-0 flex-1 overflow-y-auto overscroll-contain'>
           {failed ? (
             <PanelMessage>{m.pr_load_failed()}</PanelMessage>
           ) : (
@@ -165,7 +165,7 @@ function TabPanel({
     <div
       role='tabpanel'
       hidden={!active}
-      className='min-h-0 flex-1 overflow-y-auto'
+      className='min-h-0 flex-1 overflow-y-auto overscroll-contain'
     >
       {children}
     </div>
@@ -231,7 +231,7 @@ function ChecksSummary({ checks }: { checks: PullRequestCheck[] }) {
         <span className={cn(overall !== 'passing' && color)}>{label}</span>
       </PopoverTrigger>
       <PopoverContent align='end' className='w-72 gap-0 p-1'>
-        <ul className='flex max-h-80 flex-col overflow-y-auto'>
+        <ul className='flex max-h-80 flex-col overflow-y-auto overscroll-contain'>
           {checks.map((check) => {
             const state = CHECK_STATE[check.state]
             const url = check.url
