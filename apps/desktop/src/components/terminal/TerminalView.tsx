@@ -15,6 +15,7 @@ import type { CommandError } from '@/bindings/CommandError'
 import type { TerminalEvent } from '@/bindings/TerminalEvent'
 import type { TerminalAttach } from '@/bindings/TerminalAttach'
 import { GitForkIcon } from '@hugeicons/core-free-icons'
+import { registerEditTerminal } from '@/components/window/edit-terminals'
 
 /** Keys the app handles even while a terminal has the keyboard. */
 function isAppShortcut(event: KeyboardEvent) {
@@ -115,6 +116,7 @@ export function TerminalView({
       // The DOM renderer stays in use.
     }
     terminalRef.current = terminal
+    const unregisterEdit = registerEditTerminal(container, terminal)
     const fitVisible = () => {
       if (container.clientWidth > 0 && container.clientHeight > 0) fit.fit()
     }
@@ -202,6 +204,7 @@ export function TerminalView({
       themeObserver.disconnect()
       input.dispose()
       resize.dispose()
+      unregisterEdit()
       terminal.dispose()
       terminalRef.current = null
       void invoke('detach_terminal', { terminalId })

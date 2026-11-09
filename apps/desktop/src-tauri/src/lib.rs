@@ -87,6 +87,7 @@ pub fn run() {
             orchestration::get_slash_commands,
             clipboard::read_image_file,
             clipboard::read_clipboard_image,
+            clipboard::read_clipboard_text,
             orchestration::save_image,
             orchestration::discard_image,
             orchestration::get_image,
