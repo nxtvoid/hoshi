@@ -2560,21 +2560,13 @@ impl State {
         result
     }
 
-    /// Starts the turns that waited for git to finish with `folder`, creating their worktree
-    /// again if the work removed it.
+    /// Starts the turns that waited for git to finish with `folder`.
     fn start_parked(&mut self, folder: &str) {
         for turn in self.parked.remove(folder).unwrap_or_default() {
             let current = self.model.thread(&turn.thread_id).is_some_and(|thread| {
                 thread.active_turn_id.as_deref() == Some(turn.turn_id.as_str())
             });
             if !current {
-                continue;
-            }
-            if let Err(error) = self.restore_worktree(&turn.thread_id) {
-                let failure = TurnFailure::SpawnFailed {
-                    detail: error.to_string(),
-                };
-                self.receive(&turn.thread_id, &turn.turn_id, turn_failed(failure));
                 continue;
             }
             start_turn(
@@ -3120,6 +3112,12 @@ fn read_branches(state: &Weak<Mutex<State>>, thread_ids: &[String]) {
         let Some(cwd) = cwd else { continue };
         let branch = git::current_branch(&cwd);
         let mut state = lock(&shared);
+        // What git does there may have removed the folder this read found no branch in.
+        if state.thread_ops.contains_key(thread_id)
+            || state.folder_ops.contains(&git::normalize(&cwd))
+        {
+            continue;
+        }
         let events = record_branch(&state.model, thread_id, branch);
         if !events.is_empty() {
             state.pull_requests.check_soon(thread_id);
@@ -3382,6 +3380,15 @@ fn start_turn(
             prompt,
             attachments,
         });
+        return;
+    }
+    // Turns hoshi starts itself, such as a task's answer, come here without the restore a
+    // message from the user goes through.
+    if let Err(error) = state.restore_worktree(thread_id) {
+        let failure = TurnFailure::SpawnFailed {
+            detail: error.to_string(),
+        };
+        state.receive(thread_id, turn_id, turn_failed(failure));
         return;
     }
     let Some(thread) = state.model.thread(thread_id) else {
@@ -6091,6 +6098,137 @@ Blue"
 
         assert!(harness.adapter.requests.lock().unwrap().is_empty());
         assert_eq!(harness.thread("t").status, ThreadStatus::Idle);
+    }
+
+    #[test]
+    fn creating_a_worktree_leaves_the_engine_free_for_other_threads() {
+        let repo = git::tests::temp_repository("engine-slow-checkout");
+        let hooks = repo.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(hooks.join("post-checkout"), "#!/bin/sh\nsleep 2\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = hooks.join("post-checkout");
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let harness = Harness::new(
+            "slow-checkout",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+
+        let engine = &harness.engine;
+        let (created_in, snapshot_in) = thread::scope(|scope| {
+            let creating = scope.spawn(|| {
+                let started = Instant::now();
+                engine
+                    .dispatch(Command::ThreadCreate {
+                        thread_id: "s1234567-rest".into(),
+                        project_id: Some("p".into()),
+                        title: String::new(),
+                        workspace: ThreadWorkspace::NewWorktree,
+                        model: None,
+                        effort: None,
+                        fast_mode: false,
+                        ultracode: false,
+                        access_mode: AccessMode::AcceptEdits,
+                        plan_mode: false,
+                    })
+                    .unwrap();
+                started.elapsed()
+            });
+            thread::sleep(Duration::from_millis(500));
+            let started = Instant::now();
+            engine.snapshot();
+            let snapshot_in = started.elapsed();
+            (creating.join().unwrap(), snapshot_in)
+        });
+
+        assert!(created_in >= Duration::from_millis(1500), "{created_in:?}");
+        assert!(snapshot_in < Duration::from_millis(500), "{snapshot_in:?}");
+        assert!(harness.thread("s1234567-rest").worktree_path.is_some());
+    }
+
+    #[test]
+    fn a_wake_for_a_released_thread_creates_its_worktree_again() {
+        let repo = git::tests::temp_repository("engine-wake-released");
+        let harness = Harness::new(
+            "wake-released",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        harness
+            .create_thread("r1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        let worktree = harness.thread("r1234567-rest").worktree_path.unwrap();
+        harness.engine.release_worktree("r1234567-rest").unwrap();
+        assert!(!Path::new(&worktree).exists());
+        let pull_request = hoshi_core::PullRequest {
+            forge: ForgeKind::Github,
+            number: 7,
+            title: "Work".into(),
+            url: "https://github.com/o/r/pull/7".into(),
+            author: Some("me".into()),
+            head_branch: "hoshi/r1234567".into(),
+            head_sha: Some("abc1234".into()),
+            base_branch: "main".into(),
+            state: hoshi_core::PullRequestState::Open,
+            checks: None,
+            unresolved_comments: 0,
+            additions: 0,
+            deletions: 0,
+            updated_at: "2026-11-07T12:00:00Z".into(),
+        };
+        lock(&harness.engine.state).pull_requests.record(
+            "r1234567-rest",
+            ForgeKind::Github,
+            Ok(Some(pull_request.clone())),
+            false,
+            Instant::now(),
+            chrono::Utc::now(),
+        );
+        lock(&harness.engine.state)
+            .call_tool(
+                "r1234567-rest",
+                "watch_pull_request",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let detail = hoshi_core::PullRequestDetail {
+            supports: hoshi_core::PullRequestSupport::all(),
+            forge_id: "id".into(),
+            repository: "o/r".into(),
+            mergeability: hoshi_core::Mergeability::Mergeable,
+            merge_methods: Vec::new(),
+            can_edit: true,
+            body: String::new(),
+            changed_files: 1,
+            reviewers: Vec::new(),
+            labels: Vec::new(),
+            checks: vec![hoshi_core::PullRequestCheck {
+                name: "lint".into(),
+                state: hoshi_core::ChecksState::Failing,
+                url: None,
+            }],
+            review_threads: Vec::new(),
+            timeline: Vec::new(),
+        };
+
+        lock(&harness.engine.state).observe_watch(
+            "r1234567-rest",
+            ForgeKind::Github,
+            &pull_request,
+            &detail,
+            Some("me".into()),
+        );
+
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+        assert!(Path::new(&worktree).is_dir());
+        let requests = harness.adapter.requests.lock().unwrap();
+        assert_eq!(requests.last().unwrap().cwd, worktree);
     }
 
     fn wait_until(mut done: impl FnMut() -> bool) {
