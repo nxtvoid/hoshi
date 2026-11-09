@@ -8,4 +8,4 @@ export type RequestResponse = { "type": "decision", decision: ApprovalDecision,
 /**
  * What the agent should do instead; only with `Decline`.
  */
-feedback: string | null, } | { "type": "answers", answers: Array<string>, };
+feedback: string | null, } | { "type": "answers", answers: Array<string>, } | { "type": "secret", saved: boolean, };

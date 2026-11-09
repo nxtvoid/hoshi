@@ -268,6 +268,18 @@ pub enum ItemContent {
     TaskList {
         tasks: Vec<Task>,
     },
+    /// A secret the agent asked the user for, such as a token. Its value is never recorded:
+    /// it goes to a file only the agent's commands read.
+    SecretRequest {
+        /// What it is, such as "GitHub token".
+        label: String,
+        /// What it is for and where to get it, in the agent's words.
+        reason: String,
+        placeholder: Option<String>,
+        status: RequestStatus,
+        /// Once resolved: whether the user saved one or declined.
+        saved: Option<bool>,
+    },
     /// A plan mode turn's plan, which the agent carries out once accepted.
     ProposedPlan {
         /// Markdown.
@@ -322,7 +334,8 @@ impl ItemContent {
         match self {
             Self::Approval { status, .. }
             | Self::Questions { status, .. }
-            | Self::ProposedPlan { status, .. } => Some(*status),
+            | Self::ProposedPlan { status, .. }
+            | Self::SecretRequest { status, .. } => Some(*status),
             _ => None,
         }
     }

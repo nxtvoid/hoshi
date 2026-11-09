@@ -192,6 +192,22 @@ fn tools() -> Value {
             "description": "Stop a delegated task. Its answer won't arrive.",
             "inputSchema": task_id,
         },
+        {
+            "name": "request_secret",
+            "description": "Ask the user for one secret, such as a token, password, PIN or pairing code, in a card they type it into; one secret per call, never several in one. Call it instead of asking in chat. Waits for the answer and returns a file holding the value: read it only inside the command that needs it, such as `curl -H \"Authorization: Bearer $(cat <file>)\"`, and never print it. A secret the user already pasted in this thread goes in `value`, with no card.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "Card title, such as \"GitHub token\"." },
+                    "reason": { "type": "string", "description": "What it is for and where to get it." },
+                    "placeholder": { "type": "string", "description": "Hint in the empty field, such as \"ghp_…\"." },
+                    "value": { "type": "string", "description": "A secret the user pasted in this thread, saved with no card." },
+                    "timeoutMs": { "type": "integer", "description": "How long to wait for the user; 10 minutes by default, at most an hour." },
+                },
+                "required": ["label", "reason"],
+            },
+            "_meta": { "anthropic/alwaysLoad": true },
+        },
     ])
 }
 
@@ -244,7 +260,15 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect();
-        assert_eq!(names, ["delegate_task", "task_status", "task_cancel"]);
+        assert_eq!(
+            names,
+            [
+                "delegate_task",
+                "task_status",
+                "task_cancel",
+                "request_secret"
+            ]
+        );
 
         let server = McpServer::start(Arc::new(echo)).unwrap();
         let token = server.token_for("t1").unwrap();

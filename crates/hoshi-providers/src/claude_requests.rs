@@ -245,6 +245,10 @@ pub(crate) fn reply(
 ) -> String {
     let tool_use_id = &pending.tool_use_id;
     let result = match response {
+        // Secrets are hoshi's own requests; none reaches the agent's.
+        RequestResponse::Secret { .. } => {
+            json!({ "behavior": "deny", "message": "", "toolUseID": tool_use_id })
+        }
         RequestResponse::Answers { answers } => {
             let mut input = pending.input.clone();
             let answered: serde_json::Map<String, Value> = input["questions"]

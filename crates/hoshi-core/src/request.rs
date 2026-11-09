@@ -70,4 +70,6 @@ pub enum RequestResponse {
     /// One answer per question, in order: an option's label, several joined with ", ",
     /// or the user's own text.
     Answers { answers: Vec<String> },
+    /// For a secret: whether the user saved one. The value goes straight to the engine.
+    Secret { saved: bool },
 }

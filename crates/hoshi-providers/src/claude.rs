@@ -334,6 +334,9 @@ impl RunningTurn for ClaudeTurn {
     }
 }
 
+/// An hour for the user to answer a card, and some slack, as t3code gives its tools.
+const MCP_TOOL_TIMEOUT_MS: u64 = 65 * 60 * 1000;
+
 fn mcp_servers(server: &McpServer) -> Value {
     json!({
         "type": "control_request",
@@ -345,6 +348,8 @@ fn mcp_servers(server: &McpServer) -> Value {
                     "type": "http",
                     "url": server.url,
                     "headers": { "Authorization": server.authorization },
+                    // A tool can wait on the user, as `request_secret` does.
+                    "timeout": MCP_TOOL_TIMEOUT_MS,
                 },
             },
         },

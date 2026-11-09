@@ -1098,6 +1098,21 @@ fn resolved(content: &ItemContent, response: &RequestResponse) -> Option<ItemCon
             decision: Some(*decision),
             feedback: feedback(*decision, text),
         }),
+        (
+            ItemContent::SecretRequest {
+                label,
+                reason,
+                placeholder,
+                ..
+            },
+            RequestResponse::Secret { saved },
+        ) => Some(ItemContent::SecretRequest {
+            label,
+            reason,
+            placeholder,
+            status: RequestStatus::Resolved,
+            saved: Some(*saved),
+        }),
         (ItemContent::Questions { questions, .. }, RequestResponse::Answers { answers })
             if answers.len() == questions.len() =>
         {
@@ -1117,7 +1132,8 @@ fn cancelled(content: &ItemContent) -> ItemContent {
     match &mut content {
         ItemContent::Approval { status, .. }
         | ItemContent::Questions { status, .. }
-        | ItemContent::ProposedPlan { status, .. } => *status = RequestStatus::Cancelled,
+        | ItemContent::ProposedPlan { status, .. }
+        | ItemContent::SecretRequest { status, .. } => *status = RequestStatus::Cancelled,
         _ => {}
     }
     content

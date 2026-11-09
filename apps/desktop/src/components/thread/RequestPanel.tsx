@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { toolTarget } from '@/lib/tool-calls'
@@ -10,10 +10,17 @@ import { useAppStore } from '@/state/app-store'
 import { isPlanningWithUser } from '@/lib/agents'
 import { useRequestStore } from '@/state/request-store'
 import { useDelegatedRequest, useRequestActions } from './use-request-actions'
-import type { QuestionsContent, RequestItem } from '@/lib/requests'
+import { invoke } from '@tauri-apps/api/core'
+import { Input } from '@hoshi/ui/components/input'
+import type {
+  QuestionsContent,
+  RequestItem,
+  SecretRequestContent
+} from '@/lib/requests'
 import {
   ArrowRight01Icon,
   GitForkIcon,
+  Key01Icon,
   ShieldUserIcon,
   TaskDone01Icon,
   UserQuestion01Icon
@@ -144,7 +151,75 @@ export function RequestPanel({
       )
     case 'questions':
       return <QuestionsPanel request={request} content={content} />
+    case 'secretRequest':
+      return <SecretPanel request={request} content={content} />
   }
+}
+
+/** A secret the agent waits on: typed here, it goes to a file and never to the chat. */
+function SecretPanel({
+  request,
+  content
+}: {
+  request: RequestItem
+  content: SecretRequestContent
+}) {
+  const [value, setValue] = useState('')
+  const [sending, setSending] = useState(false)
+  const answer = async (secret: string | null) => {
+    setSending(true)
+    try {
+      await invoke('answer_secret_request', {
+        threadId: request.threadId,
+        requestId: request.id,
+        secret
+      })
+    } catch (error) {
+      console.error('hoshi: failed to answer a secret request', error)
+      setSending(false)
+    }
+  }
+  return (
+    <form
+      className={PANEL}
+      role='alertdialog'
+      aria-label={m.request_waiting()}
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (value.trim()) void answer(value)
+      }}
+    >
+      <PanelTitle icon={Key01Icon}>{content.label}</PanelTitle>
+      <p className='text-muted-foreground text-xs'>{content.reason}</p>
+      <Input
+        type='password'
+        autoFocus
+        autoComplete='off'
+        spellCheck={false}
+        value={value}
+        placeholder={content.placeholder ?? m.secret_request_placeholder()}
+        aria-label={content.label}
+        onChange={(event) => setValue(event.target.value)}
+      />
+      <p className='text-muted-foreground text-[0.6875rem]'>
+        {m.secret_request_note()}
+      </p>
+      <div className='flex justify-end gap-1.5'>
+        <Button
+          type='button'
+          size='sm'
+          variant='ghost'
+          disabled={sending}
+          onClick={() => void answer(null)}
+        >
+          {m.request_decline()}
+        </Button>
+        <Button type='submit' size='sm' disabled={sending || !value.trim()}>
+          {m.secret_request_save()}
+        </Button>
+      </div>
+    </form>
+  )
 }
 
 function PanelTitle({

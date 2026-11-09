@@ -52,7 +52,19 @@ input: string,
 /**
  * Why the agent asks, in its own words.
  */
-reason: string | null, canAcceptForSession: boolean, status: RequestStatus, decision: ApprovalDecision | null, feedback: string | null, } | { "kind": "questions", questions: Array<Question>, status: RequestStatus, answers: Array<string> | null, } | { "kind": "taskList", tasks: Array<Task>, } | { "kind": "proposedPlan", 
+reason: string | null, canAcceptForSession: boolean, status: RequestStatus, decision: ApprovalDecision | null, feedback: string | null, } | { "kind": "questions", questions: Array<Question>, status: RequestStatus, answers: Array<string> | null, } | { "kind": "taskList", tasks: Array<Task>, } | { "kind": "secretRequest", 
+/**
+ * What it is, such as "GitHub token".
+ */
+label: string, 
+/**
+ * What it is for and where to get it, in the agent's words.
+ */
+reason: string, placeholder: string | null, status: RequestStatus, 
+/**
+ * Once resolved: whether the user saved one or declined.
+ */
+saved: boolean | null, } | { "kind": "proposedPlan", 
 /**
  * Markdown.
  */

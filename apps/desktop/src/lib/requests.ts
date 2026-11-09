@@ -3,11 +3,15 @@ import type { ItemContent } from '@/bindings/ItemContent'
 
 export type RequestContent = Extract<
   ItemContent,
-  { kind: 'approval' | 'questions' | 'proposedPlan' }
+  { kind: 'approval' | 'questions' | 'proposedPlan' | 'secretRequest' }
 >
 export type RequestItem = ThreadItem & { content: RequestContent }
 export type QuestionsContent = Extract<ItemContent, { kind: 'questions' }>
 export type ApprovalContent = Extract<ItemContent, { kind: 'approval' }>
+export type SecretRequestContent = Extract<
+  ItemContent,
+  { kind: 'secretRequest' }
+>
 
 /**
  * Approvals by the tool call they held back, which shows them on its own row: in the
@@ -33,12 +37,18 @@ export const REQUEST_TOOLS = new Set([
   'TaskCreate',
   'TaskUpdate',
   'TaskList',
-  'TaskGet'
+  'TaskGet',
+  'mcp__hoshi__request_secret'
 ])
 
 export function isRequest(item: ThreadItem): item is RequestItem {
   const { kind } = item.content
-  return kind === 'approval' || kind === 'questions' || kind === 'proposedPlan'
+  return (
+    kind === 'approval' ||
+    kind === 'questions' ||
+    kind === 'proposedPlan' ||
+    kind === 'secretRequest'
+  )
 }
 
 /** The oldest request still waiting for the user, which is the one to answer first. */

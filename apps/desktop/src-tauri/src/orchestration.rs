@@ -458,6 +458,18 @@ pub fn get_thread_file_diff(
     engine.thread_file_diff(&thread_id, scope, &file)
 }
 
+/// The user's answer to an agent's secret request; `None` declines. The value only reaches
+/// a file the agent's commands read.
+#[tauri::command(async)]
+pub fn answer_secret_request(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    request_id: String,
+    secret: Option<String>,
+) -> Result<(), CommandError> {
+    engine.answer_secret_request(&thread_id, &request_id, secret.as_deref())
+}
+
 #[tauri::command(async)]
 pub fn get_git_status(
     engine: State<'_, Engine>,

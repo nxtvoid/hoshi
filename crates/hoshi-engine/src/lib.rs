@@ -18,6 +18,7 @@ mod project_icon;
 mod pull_request_cache;
 mod pull_requests;
 mod refreshing;
+mod secret_requests;
 mod secrets;
 mod source_control;
 mod terminal;
@@ -164,6 +165,11 @@ struct State {
     /// Tasks delegated to child threads, by child thread id, until their answer goes back.
     delegations: HashMap<String, Delegation>,
     checkpoints: Arc<Checkpointer>,
+    /// Secrets the user typed for agents, one file each.
+    secrets_dir: PathBuf,
+    /// The `request_secret` calls waiting for the user, by request id: they get the file the
+    /// secret was saved to, or `None` when the user declined.
+    secret_waits: HashMap<String, mpsc::Sender<Option<PathBuf>>>,
 }
 
 /// A message waiting for the thread's running turn to end.
@@ -264,6 +270,8 @@ impl Engine {
             mcp: None,
             delegations: HashMap::new(),
             checkpoints: Arc::new(Checkpointer::new()),
+            secrets_dir: data_dir.join("secrets"),
+            secret_waits: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -293,6 +301,9 @@ impl Engine {
         refresh_branches(Arc::downgrade(&shared), thread_ids);
         let weak = Arc::downgrade(&shared);
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
+            if tool == "request_secret" {
+                return secret_requests::request_secret(&weak, caller, arguments);
+            }
             let shared = weak.upgrade().ok_or("hoshi is closing")?;
             lock(&shared).call_tool(caller, tool, arguments)
         });
@@ -4027,6 +4038,64 @@ Blue"
         for path in [worktree, pushed_path] {
             let _ = git::remove_worktree(&harness.root, &path);
         }
+    }
+
+    #[test]
+    fn a_secret_the_user_saves_reaches_the_agent_as_a_file_only() {
+        let harness = Harness::in_memory("secret", Vec::new());
+        harness.send("t", "m1", "deploy it");
+        let ask = |label: &'static str| {
+            let state = Arc::downgrade(&harness.engine.state);
+            thread::spawn(move || {
+                let arguments = serde_json::json!({ "label": label, "reason": "To deploy." });
+                secret_requests::request_secret(&state, "t", &arguments)
+            })
+        };
+        let opened = |harness: &Harness| {
+            harness.wait_for(|event| match event {
+                Event::ItemAdded { item } => match item.content {
+                    ItemContent::SecretRequest {
+                        status: RequestStatus::Pending,
+                        ..
+                    } => Some(item.id),
+                    _ => None,
+                },
+                _ => None,
+            })
+        };
+
+        let saving = ask("Deploy token");
+        let request_id = opened(&harness);
+        assert_eq!(harness.thread("t").status, ThreadStatus::WaitingForInput);
+        harness
+            .engine
+            .answer_secret_request("t", &request_id, Some("s3cret"))
+            .unwrap();
+        let answer = saving.join().unwrap().unwrap();
+        let declining = ask("Other token");
+        let declined_id = opened(&harness);
+        harness
+            .engine
+            .answer_secret_request("t", &declined_id, None)
+            .unwrap();
+        let declined = declining.join().unwrap().unwrap();
+
+        assert_eq!(answer["status"], "saved");
+        let file = answer["file"].as_str().unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "s3cret");
+        assert_eq!(declined["status"], "declined");
+        let items = harness.engine.transcript("t", None).unwrap().items;
+        let recorded = serde_json::to_string(&items).unwrap();
+        assert!(!recorded.contains("s3cret"));
+        assert!(items.iter().any(|item| matches!(
+            item.content,
+            ItemContent::SecretRequest {
+                saved: Some(true),
+                status: RequestStatus::Resolved,
+                ..
+            }
+        )));
+        assert_eq!(harness.thread("t").status, ThreadStatus::Working);
     }
 
     #[test]

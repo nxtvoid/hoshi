@@ -126,7 +126,11 @@ export function Composer({
   const request = usePendingRequest()
   const requestActions = useRequestActions(request)
   const { text } = snapshot
-  const answering = request !== null && text.trim() !== ''
+  /** A secret is typed in its own card, so it never reaches the chat. */
+  const answering =
+    request !== null &&
+    request.content.kind !== 'secretRequest' &&
+    text.trim() !== ''
   const written = text.trim() !== '' || images.saved.length > 0
   /** A message sent while the agent works joins its turn. */
   const canSend = request
@@ -547,10 +551,17 @@ function ComposerFooter() {
 }
 
 function placeholder(
-  request: 'approval' | 'questions' | 'proposedPlan' | undefined,
+  request:
+    | 'approval'
+    | 'questions'
+    | 'proposedPlan'
+    | 'secretRequest'
+    | undefined,
   working: boolean
 ) {
   switch (request) {
+    case 'secretRequest':
+      return m.secret_request_composer_placeholder()
     case 'approval':
       return m.request_approval_placeholder()
     case 'questions':

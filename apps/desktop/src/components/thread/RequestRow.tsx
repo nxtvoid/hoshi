@@ -30,13 +30,40 @@ export function RequestRow({
       return <QuestionsRow content={content} />
     case 'proposedPlan':
       return <PlanRow content={content} />
+    case 'secretRequest':
+      return <SecretRow content={content} />
   }
+}
+
+function SecretRow({
+  content
+}: {
+  content: Extract<RequestContent, { kind: 'secretRequest' }>
+}) {
+  const label =
+    content.status === 'pending'
+      ? m.secret_request_waiting({ label: content.label })
+      : content.status === 'cancelled'
+        ? m.secret_request_unanswered({ label: content.label })
+        : content.saved
+          ? m.secret_request_saved({ label: content.label })
+          : m.secret_request_declined({ label: content.label })
+  return (
+    <div className='text-muted-foreground flex min-h-6 items-center gap-2 text-sm'>
+      <StatusIcon content={content} />
+      <span className='text-foreground min-w-0 truncate font-medium'>
+        {label}
+      </span>
+    </div>
+  )
 }
 
 function StatusIcon({ content }: { content: RequestContent }) {
   const declined =
-    content.kind !== 'questions' &&
-    (content.decision === 'decline' || content.decision === 'cancel')
+    content.kind === 'secretRequest'
+      ? content.saved === false
+      : content.kind !== 'questions' &&
+        (content.decision === 'decline' || content.decision === 'cancel')
   const icon =
     content.status === 'pending'
       ? Clock01Icon
