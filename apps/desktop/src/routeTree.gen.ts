@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as UsageRouteImport } from './routes/usage'
+import { Route as WelcomeRouteImport } from './routes/welcome'
 import { Route as SettingsSectionRouteImport } from './routes/settings/$section'
 
 const IndexRoute = IndexRouteImport.update({
@@ -23,6 +24,11 @@ const UsageRoute = UsageRouteImport.update({
   path: '/usage',
   getParentRoute: () => rootRouteImport,
 } as any)
+const WelcomeRoute = WelcomeRouteImport.update({
+  id: '/welcome',
+  path: '/welcome',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsSectionRoute = SettingsSectionRouteImport.update({
   id: '/settings/$section',
   path: '/settings/$section',
@@ -32,30 +38,34 @@ const SettingsSectionRoute = SettingsSectionRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/usage': typeof UsageRoute
+  '/welcome': typeof WelcomeRoute
   '/settings/$section': typeof SettingsSectionRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/usage': typeof UsageRoute
+  '/welcome': typeof WelcomeRoute
   '/settings/$section': typeof SettingsSectionRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/usage': typeof UsageRoute
+  '/welcome': typeof WelcomeRoute
   '/settings/$section': typeof SettingsSectionRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/usage' | '/settings/$section'
+  fullPaths: '/' | '/usage' | '/welcome' | '/settings/$section'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/usage' | '/settings/$section'
-  id: '__root__' | '/' | '/usage' | '/settings/$section'
+  to: '/' | '/usage' | '/welcome' | '/settings/$section'
+  id: '__root__' | '/' | '/usage' | '/welcome' | '/settings/$section'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   UsageRoute: typeof UsageRoute
+  WelcomeRoute: typeof WelcomeRoute
   SettingsSectionRoute: typeof SettingsSectionRoute
 }
 
@@ -75,6 +85,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UsageRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/welcome': {
+      id: '/welcome'
+      path: '/welcome'
+      fullPath: '/welcome'
+      preLoaderRoute: typeof WelcomeRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings/$section': {
       id: '/settings/$section'
       path: '/settings/$section'
@@ -88,6 +105,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   UsageRoute: UsageRoute,
+  WelcomeRoute: WelcomeRoute,
   SettingsSectionRoute: SettingsSectionRoute,
 }
 export const routeTree = rootRouteImport

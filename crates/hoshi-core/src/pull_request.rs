@@ -64,6 +64,43 @@ pub struct PullRequest {
     pub updated_at: String,
 }
 
+/// What an update on a watched pull request told the agent, for the UI to name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct PullRequestUpdate {
+    pub number: u32,
+    /// Checks that failed since the last update.
+    pub failed_checks: Vec<String>,
+    pub checks_passed: bool,
+    /// Comments and reviews since the last update.
+    pub comments: u32,
+    pub conflicting: bool,
+    pub closed: bool,
+    /// The watch ended with this update.
+    pub stopped: bool,
+}
+
+/// What an agent watching its pull request was told so far. Kept across restarts, and
+/// after the watch ends, so news from while hoshi was closed still wakes the agent and
+/// watching again never repeats it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestWatch {
+    pub number: u32,
+    /// The commit the checks below belong to; `None` until first read.
+    pub head_sha: Option<String>,
+    pub failed_checks: Vec<String>,
+    pub passed: bool,
+    pub conflicting: bool,
+    /// Comments up to this moment were told. RFC 3339.
+    pub remarks_through: String,
+    /// The comments at `remarks_through` already told, since forges stamp them to the second.
+    pub remark_ids: Vec<String>,
+    /// Comment-only wakes in a row.
+    pub wakes: u32,
+}
+
 /// One CI check of a pull request's latest commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

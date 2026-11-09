@@ -12,4 +12,8 @@ planModeEnabled: boolean,
 /**
  * Listed first in the model picker.
  */
-favoriteModels: Array<FavoriteModel>, threadTitles: ThreadTitleSettings, general: GeneralSettings, };
+favoriteModels: Array<FavoriteModel>, threadTitles: ThreadTitleSettings, general: GeneralSettings, 
+/**
+ * When the first-run setup was finished or skipped; `None` until then.
+ */
+onboardingCompletedAt: string | null, };

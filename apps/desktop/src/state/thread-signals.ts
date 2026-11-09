@@ -1,4 +1,5 @@
 import type { Thread } from '@/bindings/Thread'
+import { withDelegatedWork } from './thread-sections'
 
 /** The strongest thing a project's threads have to tell, for its rail button. */
 export type ProjectSignal = 'error' | 'waiting' | 'done' | 'working'
@@ -41,7 +42,8 @@ export function threadNotices(
 
 /**
  * A failure first, then a question, then a finished turn not seen yet, then work going on.
- * A `null` project stands for the chats.
+ * A `null` project stands for the chats. Only listed threads count; a task's work and
+ * questions count through the thread that delegated it.
  */
 export function projectSignal(
   threads: Thread[],
@@ -55,7 +57,7 @@ export function projectSignal(
     done: 2,
     working: 1
   }
-  for (const thread of threads) {
+  for (const thread of withDelegatedWork(threads)) {
     if (thread.projectId !== projectId || thread.archived) continue
     const own: ProjectSignal | null =
       thread.status === 'error'

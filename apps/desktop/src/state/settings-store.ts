@@ -13,6 +13,8 @@ type SettingsState = {
   updateSettings: (patch: Partial<AppSettings>) => Promise<void>
   updateClaudeCode: (patch: Partial<ClaudeCodeSettings>) => Promise<void>
   toggleFavoriteModel: (favorite: FavoriteModel) => Promise<void>
+  /** Saves the first-run setup as finished, so it doesn't open again by itself. */
+  completeOnboarding: () => Promise<void>
 }
 
 let loading: Promise<void> | null = null
@@ -58,6 +60,8 @@ export const useSettingsStore = create<SettingsState>()((set, get) => ({
       : [...current.favoriteModels, favorite]
     await get().update({ ...current, favoriteModels })
   },
+  completeOnboarding: () =>
+    get().updateSettings({ onboardingCompletedAt: new Date().toISOString() }),
   updateClaudeCode: async (patch) => {
     const current = get().settings
     if (!current) return

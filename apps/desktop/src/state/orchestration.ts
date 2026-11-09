@@ -22,6 +22,15 @@ export function applyEvent(
   switch (event.type) {
     case 'projectCreated':
       return { ...state, projects: [...state.projects, event.project] }
+    case 'projectWorktreeSetupSet':
+      return {
+        ...state,
+        projects: state.projects.map((project) =>
+          project.id === event.projectId
+            ? { ...project, worktreeSetup: event.setup }
+            : project
+        )
+      }
     case 'projectRemoved':
       return {
         projects: state.projects.filter(
@@ -46,7 +55,15 @@ export function applyEvent(
       return updateThread(event.threadId, {
         worktreePath: event.worktreePath,
         branch: event.branch,
-        worktreeReleased: false
+        worktreeReleased: false,
+        worktreeAdopted: event.adopted
+      })
+    case 'threadWorktreeDetached':
+      return updateThread(event.threadId, {
+        worktreePath: null,
+        branch: event.branch,
+        worktreeReleased: false,
+        worktreeAdopted: false
       })
     case 'threadWorktreeReleased':
       return updateThread(event.threadId, { worktreeReleased: true })
@@ -57,6 +74,7 @@ export function applyEvent(
         worktreePath: null,
         branch: null,
         worktreeReleased: false,
+        worktreeAdopted: false,
         sessionId: null
       })
     case 'threadArchivedSet':
@@ -88,12 +106,39 @@ export function applyEvent(
         updatedAt: event.item.createdAt
       })
     case 'toolCallCompleted':
+    case 'toolCallInterrupted':
       return state
     case 'turnCompleted':
       return updateThread(event.threadId, {
         status: event.outcome.type === 'failed' ? 'error' : 'idle',
         activeTurnId: null,
         updatedAt: event.at
+      })
+    case 'threadStatusSet':
+      return updateThread(event.threadId, { status: event.status })
+    case 'threadDelegated':
+      return updateThread(event.threadId, {
+        parentThreadId: event.parentThreadId,
+        ...(event.sharesWorktree ? { worktreeAdopted: true } : {})
+      })
+    case 'taskCancelled':
+      return updateThread(event.threadId, { taskCancelled: true })
+    case 'taskAnswered':
+      return updateThread(event.threadId, { taskAnswered: true })
+    case 'pullRequestWatchSet':
+      return updateThread(event.threadId, {
+        watchingPullRequest: event.watching
+      })
+    case 'conversationCursorSet':
+      return updateThread(event.threadId, {
+        conversationCursor: event.cursor,
+        resumeAt: null
+      })
+    case 'threadRewound':
+      return updateThread(event.threadId, {
+        conversationCursor: event.resumeAt,
+        resumeAt: event.resumeAt,
+        ...(event.resumeAt === null ? { sessionId: null } : {})
       })
   }
 }
@@ -119,13 +164,32 @@ export function applyItemEvent(
             content: {
               ...item.content,
               output: event.output,
-              isError: event.isError
+              isError: event.isError,
+              detail: event.detail
             }
           }
         : item
     )
   }
+  if (event.type === 'threadRewound' && event.threadId === threadId) {
+    const index = items.findIndex((item) => item.id === event.messageId)
+    return index === -1 ? items : items.slice(0, index)
+  }
+  if (event.type === 'toolCallInterrupted' && event.threadId === threadId) {
+    return items.map((item) =>
+      item.id === event.itemId && item.content.kind === 'toolCall'
+        ? { ...item, content: { ...item.content, interrupted: true } }
+        : item
+    )
+  }
   return items
+}
+
+/** Threads that were there before and are gone now, as with a deleted thread or project. */
+export function removedThreadIds(before: Thread[], after: Thread[]): string[] {
+  if (after.length >= before.length) return []
+  const kept = new Set(after.map((thread) => thread.id))
+  return before.filter((thread) => !kept.has(thread.id)).map(({ id }) => id)
 }
 
 /** A quick client-side duplicate check; the engine canonicalizes and decides. */

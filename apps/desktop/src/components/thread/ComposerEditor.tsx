@@ -76,6 +76,7 @@ type ComposerEditorProps = {
   initialContent?: JSONContent
   /** The document after each edit; `null` once it is empty. */
   onDocument?: (doc: JSONContent | null) => void
+  onBlur?: () => void
   /** `true` when the composer handled the key. */
   onKeyDown: (event: KeyboardEvent, context: KeyContext) => boolean
   onFiles: (files: File[]) => void
@@ -240,11 +241,27 @@ export function ComposerEditor({
   onChange,
   initialContent,
   onDocument,
+  onBlur,
   onKeyDown,
   onFiles
 }: ComposerEditorProps) {
-  const handlers = useRef({ onChange, onDocument, onKeyDown, onFiles })
-  handlers.current = { onChange, onDocument, onKeyDown, onFiles }
+  const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onFiles })
+  handlers.current = { onChange, onDocument, onBlur, onKeyDown, onFiles }
+  /** The last document read, so a caret move doesn't convert it again. */
+  const lastRead = useRef<{
+    doc: ProseMirrorNode
+    json: JSONContent
+    text: string
+  } | null>(null)
+
+  const read = (editor: { state: EditorState; getJSON: () => JSONContent }) => {
+    const { doc } = editor.state
+    if (lastRead.current?.doc !== doc) {
+      const json = editor.getJSON()
+      lastRead.current = { doc, json, text: toMarkdown(json) }
+    }
+    return lastRead.current
+  }
 
   const emit = (editor: {
     state: EditorState
@@ -253,7 +270,7 @@ export function ComposerEditor({
     isFocused: boolean
   }) =>
     handlers.current.onChange({
-      text: toMarkdown(editor.getJSON()),
+      text: read(editor).text,
       empty: editor.isEmpty,
       trigger: locateTrigger(editor.state),
       focused: editor.isFocused
@@ -311,11 +328,14 @@ export function ComposerEditor({
     },
     onUpdate: ({ editor }) => {
       emit(editor)
-      handlers.current.onDocument?.(editor.isEmpty ? null : editor.getJSON())
+      handlers.current.onDocument?.(editor.isEmpty ? null : read(editor).json)
     },
     onSelectionUpdate: ({ editor }) => emit(editor),
     onFocus: ({ editor }) => emit(editor),
-    onBlur: ({ editor }) => emit(editor)
+    onBlur: ({ editor }) => {
+      emit(editor)
+      handlers.current.onBlur?.()
+    }
   })
 
   useImperativeHandle(

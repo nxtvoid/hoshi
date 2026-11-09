@@ -19,6 +19,17 @@ pub(crate) fn ask(
     request_id: &'static str,
     request: Value,
 ) -> Option<Value> {
+    ask_within(binary, cwd, request_id, request, TIMEOUT)
+}
+
+/// Like `ask`, giving up after `timeout`.
+pub(crate) fn ask_within(
+    binary: &str,
+    cwd: &Path,
+    request_id: &'static str,
+    request: Value,
+    timeout: Duration,
+) -> Option<Value> {
     let mut command = Command::new(binary);
     command
         .current_dir(cwd)
@@ -47,7 +58,7 @@ pub(crate) fn ask(
             .find_map(|line| response(&line, request_id));
         let _ = sender.send(answer);
     });
-    let answer = receiver.recv_timeout(TIMEOUT).ok().flatten();
+    let answer = receiver.recv_timeout(timeout).ok().flatten();
     let _ = child.kill();
     let _ = child.wait();
     answer

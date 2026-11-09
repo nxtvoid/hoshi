@@ -2,13 +2,17 @@ import { describe, expect, test } from 'bun:test'
 import type { ThreadItem } from '../../src/bindings/ThreadItem'
 import {
   activeEntry,
+  foldTurns,
   groupTranscript,
   reasoningPreview,
   relativePath,
   summarizeToolCalls,
+  subagentTranscriptId,
+  toolName,
   toolTarget,
   withStreaming,
-  type ToolCallItem
+  type ToolCallItem,
+  type TranscriptRow
 } from '../../src/lib/tool-calls'
 
 function tool(id: string, name: string, input: object = {}): ToolCallItem {
@@ -21,7 +25,10 @@ function tool(id: string, name: string, input: object = {}): ToolCallItem {
       name,
       input: JSON.stringify(input),
       output: '',
-      isError: false
+      isError: false,
+      detail: null,
+      outputOmitted: false,
+      interrupted: false
     }
   }
 }
@@ -48,6 +55,38 @@ const ids = (rows: ReturnType<typeof groupTranscript>) =>
   rows.map((row) =>
     row.kind === 'item' ? row.item.id : row.entries.map((entry) => entry.id)
   )
+
+test('the calls a request stands for are left to the request', () => {
+  const rows = groupTranscript([
+    tool('a', 'AskUserQuestion'),
+    tool('b', 'Read'),
+    tool('c', 'ExitPlanMode'),
+    tool('d', 'TaskUpdate')
+  ])
+  expect(rows).toEqual([
+    { kind: 'work', id: 'b', entries: [tool('b', 'Read')] }
+  ])
+})
+
+test('an MCP tool shows its own name and its server', () => {
+  expect(toolName('mcp__claude_ai_Google_Drive__search_files')).toEqual({
+    label: 'search files',
+    source: 'Google Drive'
+  })
+  expect(toolName('Bash')).toEqual({ label: 'Bash', source: null })
+})
+
+test('a subagent stands apart from the work, its transcript beside the thread', () => {
+  const rows = groupTranscript([
+    tool('a', 'Read'),
+    tool('b', 'Agent', { description: 'Count files' }),
+    tool('c', 'Grep')
+  ])
+
+  expect(rows.map((row) => row.kind)).toEqual(['work', 'item', 'work'])
+  expect(subagentTranscriptId('t', 'toolu_1')).toBe('t:toolu_1')
+  expect(subagentTranscriptId('t:toolu_1', 'toolu_2')).toBe('t:toolu_2')
+})
 
 describe('groupTranscript', () => {
   test('folds consecutive tool calls into one row between messages', () => {
@@ -165,5 +204,315 @@ describe('toolTarget', () => {
   test('shows the command of a shell call', () => {
     const input = JSON.stringify({ command: 'git status', description: 'x' })
     expect(toolTarget('Bash', input, null)).toBe('git status')
+  })
+})
+
+describe('foldTurns', () => {
+  const user = (id: string, createdAt: string): ThreadItem => ({
+    id,
+    threadId: 't',
+    createdAt,
+    content: { kind: 'userMessage', text: id, attachments: [], steer: false }
+  })
+  const answer = (id: string, createdAt: string): ThreadItem => ({
+    ...text(id),
+    createdAt
+  })
+
+  test('folds the work of a finished turn behind its answer', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      text('note'),
+      tool('e', 'Edit'),
+      answer('a1', '2026-11-08T10:01:12Z')
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(folded.map((row) => row.kind)).toEqual(['item', 'fold', 'item'])
+    const fold = folded[1]
+    expect(fold?.kind === 'fold' && fold.durationMs).toBe(72_000)
+    expect(fold?.kind === 'fold' && fold.rows.length).toBe(3)
+  })
+
+  test('leaves the running turn, and turns without work or answer, open', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      answer('a1', '2026-11-08T10:00:05Z'),
+      user('u2', '2026-11-08T10:01:00Z'),
+      tool('r', 'Read'),
+      user('u3', '2026-11-08T10:02:00Z'),
+      tool('s', 'Grep'),
+      answer('a3', '2026-11-08T10:02:30Z')
+    ])
+
+    expect(foldTurns(rows, false).map((row) => row.kind)).toEqual([
+      'item',
+      'item',
+      'item',
+      'work',
+      'item',
+      'fold',
+      'item'
+    ])
+    expect(foldTurns(rows, true).at(-2)?.kind).toBe('work')
+  })
+
+  test('folds each run of a turn that went on behind its own answer', () => {
+    const runEnded = (id: string, createdAt: string): ThreadItem => ({
+      id,
+      threadId: 't',
+      createdAt,
+      content: { kind: 'runEnded' }
+    })
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('agent', 'Read'),
+      answer('a1', '2026-11-08T10:00:10Z'),
+      runEnded('run1', '2026-11-08T10:00:11Z'),
+      tool('r', 'Grep'),
+      answer('a2', '2026-11-08T10:00:31Z'),
+      runEnded('run2', '2026-11-08T10:00:32Z'),
+      answer('a3', '2026-11-08T10:00:40Z')
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(
+      folded.map((row) => (row.kind === 'item' ? row.item.id : row.kind))
+    ).toEqual(['u1', 'fold', 'a1', 'fold', 'a2', 'a3'])
+    const second = folded[3]
+    expect(second?.kind === 'fold' && second.durationMs).toBe(20_000)
+  })
+
+  test('folds a turn whose only work was agents, once they are done', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('one', 'Agent'),
+      tool('two', 'Agent'),
+      answer('a1', '2026-11-08T10:00:10Z')
+    ])
+    const kinds = (folded: TranscriptRow[]) =>
+      folded.map((row) => (row.kind === 'item' ? row.item.id : row.kind))
+
+    expect(kinds(foldTurns(rows, false))).toEqual(['u1', 'fold', 'a1'])
+    expect(kinds(foldTurns(rows, false, (row) => row.kind === 'item'))).toEqual(
+      ['u1', 'one', 'two', 'a1']
+    )
+  })
+
+  const marker = (
+    id: string,
+    createdAt: string,
+    content: ThreadItem['content']
+  ): ThreadItem => ({ id, threadId: 't', createdAt, content })
+  const shape = (folded: TranscriptRow[]) =>
+    folded.map((row) =>
+      row.kind === 'item'
+        ? row.item.id
+        : row.kind === 'fold'
+          ? `${row.ending}:${row.after}:${row.rows.length}`
+          : row.kind
+    )
+
+  test('starts a run at a background task that ended, which stays in view', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:10Z'),
+      marker('run1', '2026-11-08T10:00:11Z', { kind: 'runEnded' }),
+      marker('ended', '2026-11-08T10:00:20Z', {
+        kind: 'backgroundTaskEnded',
+        toolCallId: 'agent',
+        failed: false
+      }),
+      tool('g', 'Grep'),
+      answer('a2', '2026-11-08T10:00:30Z')
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(shape(folded)).toEqual([
+      'u1',
+      'answered:start:1',
+      'a1',
+      'ended',
+      'answered:start:1',
+      'a2'
+    ])
+    const second = folded[4]
+    expect(second?.kind === 'fold' && second.durationMs).toBe(10_000)
+  })
+
+  test('folds what a steer cut once the turn is over, and what followed apart', () => {
+    const steer = marker('s', '2026-11-08T10:00:20Z', {
+      kind: 'userMessage',
+      text: 's',
+      attachments: [],
+      steer: true,
+      taskResult: null
+    })
+    const items = [
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      text('partial'),
+      steer,
+      tool('e', 'Edit'),
+      answer('a1', '2026-11-08T10:00:50Z')
+    ]
+
+    expect(shape(foldTurns(groupTranscript(items), false))).toEqual([
+      'u1',
+      'steered:start:2',
+      's',
+      'answered:steer:1',
+      'a1'
+    ])
+    expect(shape(foldTurns(groupTranscript(items.slice(0, 5)), true))).toEqual([
+      'u1',
+      'work',
+      'partial',
+      's',
+      'work'
+    ])
+  })
+
+  test('folds a stopped turn whole, with what the agent said last in view', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('said', '2026-11-08T10:00:05Z'),
+      marker('stop', '2026-11-08T10:00:12Z', { kind: 'turnInterrupted' })
+    ])
+
+    const folded = foldTurns(rows, false)
+
+    expect(shape(folded)).toEqual(['u1', 'stopped:start:1', 'said'])
+    const fold = folded[1]
+    expect(fold?.kind === 'fold' && fold.durationMs).toBe(12_000)
+  })
+
+  test('folds settled work after the answer, and leaves a failed turn open', () => {
+    const failed = { ...tool('x', 'Bash') }
+    failed.content = { ...failed.content, isError: true }
+    const start = [
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:05Z')
+    ]
+    expect(
+      shape(foldTurns(groupTranscript([...start, tool('w', 'Write')]), false))
+    ).toEqual(['u1', 'answered:start:2', 'a1'])
+    expect(
+      shape(foldTurns(groupTranscript([...start, failed]), false))
+    ).toEqual(['u1', 'answered:start:1', 'a1', 'work'])
+
+    const errored = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:05Z'),
+      marker('fail', '2026-11-08T10:00:06Z', {
+        kind: 'turnFailed',
+        reason: { code: 'providerError', detail: 'x' }
+      })
+    ])
+    expect(shape(foldTurns(errored, false))).toEqual([
+      'u1',
+      'work',
+      'a1',
+      'fail'
+    ])
+  })
+
+  test('keeps live rows out of the fold, after it', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      tool('agent', 'Agent'),
+      tool('e', 'Edit'),
+      answer('a1', '2026-11-08T10:01:00Z')
+    ])
+
+    const folded = foldTurns(
+      rows,
+      false,
+      (row) => row.kind === 'item' && row.item.id === 'agent'
+    )
+
+    expect(
+      folded.map((row) => (row.kind === 'item' ? row.item.id : row.kind))
+    ).toEqual(['u1', 'fold', 'agent', 'a1'])
+    const fold = folded[1]
+    expect(fold?.kind === 'fold' && fold.rows.length).toBe(2)
+  })
+})
+
+describe('turn changes', () => {
+  const user = (id: string, steer = false): ThreadItem => ({
+    id,
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'userMessage',
+      text: id,
+      attachments: [],
+      steer,
+      taskResult: null
+    }
+  })
+  const changes = (turnId: string, paths: string[] | null): ThreadItem => ({
+    id: `${turnId}:changes`,
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'turnChanges',
+      files:
+        paths?.map((path) => ({
+          path,
+          oldPath: null,
+          status: 'modified',
+          additions: 1,
+          deletions: 0
+        })) ?? null
+    }
+  })
+  const changed = (rows: TranscriptRow[]) =>
+    rows.flatMap((row) =>
+      row.kind === 'item' && row.changes
+        ? [[row.item.id, row.changes.turnId, row.changes.files.length]]
+        : []
+    )
+
+  test('go on the turn’s last answer, past a steer', () => {
+    const rows = groupTranscript([
+      user('m1'),
+      text('a1'),
+      user('s1', true),
+      tool('c1', 'Edit'),
+      text('a2'),
+      changes('m1', ['a.ts', 'b.ts'])
+    ])
+
+    expect(changed(rows)).toEqual([['a2', 'm1', 2]])
+    expect(
+      rows.some((row) => row.kind === 'item' && row.item.id === 'm1:changes')
+    ).toBe(false)
+  })
+
+  test('are left out while read, when empty, or when the turn never answered', () => {
+    const rows = groupTranscript([
+      user('m1'),
+      text('a1'),
+      changes('m1', null),
+      user('m2'),
+      text('a2'),
+      changes('m2', []),
+      user('m3'),
+      tool('c1', 'Edit'),
+      changes('m3', ['a.ts'])
+    ])
+
+    expect(changed(rows)).toEqual([])
   })
 })

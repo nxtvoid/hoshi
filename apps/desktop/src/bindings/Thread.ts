@@ -17,6 +17,20 @@ worktreePath: string | null,
  */
 sessionId: string | null, 
 /**
+ * The provider's id for the last message of the conversation, a point a rewind can
+ * come back to.
+ */
+conversationCursor: string | null, 
+/**
+ * Set by a rewind: the next turn resumes the session from this message, leaving out
+ * what came after it.
+ */
+resumeAt: string | null, 
+/**
+ * Its agent asked to be woken on its pull request's news.
+ */
+watchingPullRequest: boolean, 
+/**
  * Provider model alias; `None` uses the provider's default.
  */
 model: string | null, effort: Effort | null, 
@@ -44,7 +58,24 @@ pinned: boolean,
  * Its worktree folder was removed to free the disk; the next message recreates it at
  * the same path from the branch, which stays.
  */
-worktreeReleased: boolean, createdAt: string, 
+worktreeReleased: boolean, 
+/**
+ * Its worktree existed before the thread moved into it, as one the user made; hoshi
+ * never removes it.
+ */
+worktreeAdopted: boolean, 
+/**
+ * The thread whose agent delegated this one's task to it; `None` for one the user started.
+ */
+parentThreadId: string | null, 
+/**
+ * As a delegated task, it was cancelled: its answer never goes back.
+ */
+taskCancelled: boolean, 
+/**
+ * As a delegated task, its answer went back to the agent that delegated it.
+ */
+taskAnswered: boolean, createdAt: string, 
 /**
  * RFC 3339 timestamp of the last activity.
  */

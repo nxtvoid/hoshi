@@ -15,6 +15,7 @@ import {
   ArrowDown01Icon,
   Copy01Icon,
   File01Icon,
+  GitPullRequestClosedIcon,
   LinkSquare02Icon,
   MoreHorizontalIcon,
   PencilEdit02Icon
@@ -282,7 +283,8 @@ function PullRequestMenu({
           number: pullRequest.number
         }),
         confirmLabel: m.close_pull_request(),
-        tone: 'destructive'
+        tone: 'destructive',
+        icon: GitPullRequestClosedIcon
       })
       if (!confirmed) return
     }

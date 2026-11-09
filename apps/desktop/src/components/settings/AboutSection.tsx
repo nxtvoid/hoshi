@@ -2,9 +2,12 @@ import { m } from '@/paraglide/messages'
 import { useEffect, useState } from 'react'
 import { getVersion } from '@tauri-apps/api/app'
 import { LogoMark } from '@/components/brand/Logo'
+import { useNavigate } from '@tanstack/react-router'
+import { Button } from '@hoshi/ui/components/button'
 import { SettingsPage, SettingsRow, SettingsSection } from './SettingsLayout'
 
 export function AboutSection() {
+  const navigate = useNavigate()
   const [version, setVersion] = useState<string | null>(null)
 
   // The version comes from the Tauri runtime, outside React.
@@ -29,6 +32,19 @@ export function AboutSection() {
             </span>
           }
           description={version ? m.app_version({ version }) : null}
+        />
+        <SettingsRow
+          title={m.onboarding_run_again()}
+          description={m.onboarding_run_again_description()}
+          control={
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={() => void navigate({ to: '/welcome' })}
+            >
+              {m.onboarding_run_again_action()}
+            </Button>
+          }
         />
       </SettingsSection>
     </SettingsPage>

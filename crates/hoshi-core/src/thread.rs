@@ -1,4 +1,6 @@
-use crate::MessageAttachment;
+use crate::{
+    ApprovalDecision, DiffFile, MessageAttachment, PullRequestUpdate, Question, RequestStatus,
+};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -16,6 +18,14 @@ pub struct Thread {
     pub worktree_path: Option<String>,
     /// The provider's own session, resumed on the next turn.
     pub session_id: Option<String>,
+    /// The provider's id for the last message of the conversation, a point a rewind can
+    /// come back to.
+    pub conversation_cursor: Option<String>,
+    /// Set by a rewind: the next turn resumes the session from this message, leaving out
+    /// what came after it.
+    pub resume_at: Option<String>,
+    /// Its agent asked to be woken on its pull request's news.
+    pub watching_pull_request: bool,
     /// Provider model alias; `None` uses the provider's default.
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -35,6 +45,19 @@ pub struct Thread {
     /// the same path from the branch, which stays.
     #[serde(default)]
     pub worktree_released: bool,
+    /// Its worktree existed before the thread moved into it, as one the user made; hoshi
+    /// never removes it.
+    #[serde(default)]
+    pub worktree_adopted: bool,
+    /// The thread whose agent delegated this one's task to it; `None` for one the user started.
+    #[serde(default)]
+    pub parent_thread_id: Option<String>,
+    /// As a delegated task, it was cancelled: its answer never goes back.
+    #[serde(default)]
+    pub task_cancelled: bool,
+    /// As a delegated task, its answer went back to the agent that delegated it.
+    #[serde(default)]
+    pub task_answered: bool,
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,
@@ -78,12 +101,15 @@ impl Effort {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum AccessMode {
+    /// Asks before anything the agent's settings don't allow, file edits included.
+    Ask,
     /// File edits apply on their own; anything else the agent's settings don't
-    /// allow is refused.
+    /// allow is asked first.
     #[default]
     AcceptEdits,
     /// The provider judges what is safe to run.
     Auto,
+    /// Runs everything, except what the agent's own rules and safety checks ask about.
     FullAccess,
 }
 
@@ -110,6 +136,27 @@ pub enum ThreadWorkspace {
     },
 }
 
+/// Part of a thread's transcript, latest turns first loaded, older ones on request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TranscriptPage {
+    /// Oldest first, each as `ItemContent::summary` leaves it.
+    pub items: Vec<ThreadItem>,
+    /// Items before these remain.
+    pub has_older: bool,
+}
+
+/// A tool call still waiting for its output.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct OpenToolCall {
+    /// The thread's transcript, or one of its subagents'.
+    pub thread_id: String,
+    pub item_id: String,
+}
+
 /// One entry in a thread's transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -119,6 +166,30 @@ pub struct ThreadItem {
     pub thread_id: String,
     pub created_at: String,
     pub content: ItemContent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum CompactionStatus {
+    Running,
+    Done,
+    Failed,
+}
+
+/// The point of the conversation a user message started from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export)]
+pub enum Rewind {
+    /// The first message: going back starts a new session.
+    Start,
+    /// After the provider's message `cursor`.
+    After { cursor: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -133,6 +204,20 @@ pub enum ItemContent {
         text: String,
         #[serde(default)]
         attachments: Vec<MessageAttachment>,
+        /// Sent while the agent worked, to steer the running turn.
+        #[serde(default)]
+        steer: bool,
+        /// The answer of a task this thread delegated, from that child thread; sent by hoshi,
+        /// not the user.
+        #[serde(default)]
+        task_result: Option<String>,
+        /// News on a pull request the thread watches, sent by hoshi, not the user.
+        #[serde(default)]
+        pull_request_update: Option<PullRequestUpdate>,
+        /// Where the conversation goes back to when the user edits from this message; `None`
+        /// for a message that can't be edited from, such as a steer.
+        #[serde(default)]
+        rewind: Option<Rewind>,
     },
     AssistantMessage {
         text: String,
@@ -146,10 +231,197 @@ pub enum ItemContent {
         input: String,
         output: Option<String>,
         is_error: bool,
+        /// What the call did, beyond its output, once it completed.
+        #[serde(default)]
+        detail: Option<ToolDetail>,
+        /// `output` is only its start: a page of the transcript leaves the rest out.
+        #[serde(default)]
+        output_omitted: bool,
+        /// Its turn ended before it did, so it has no output.
+        #[serde(default)]
+        interrupted: bool,
     },
     TurnFailed {
         reason: TurnFailure,
     },
+    /// The turn stopped before it finished, as the user asked or as the app closed.
+    TurnInterrupted,
+    /// The agent answered one run of a turn that went on, as each background task that
+    /// ended gets a run of its own.
+    RunEnded,
+    /// A task that ran in the background ended; the agent's answer to it follows. The call
+    /// that started it, when one did, is `tool_call_id`.
+    BackgroundTaskEnded {
+        tool_call_id: Option<String>,
+        failed: bool,
+    },
+    /// The files a turn changed in its working tree, read from its checkpoints once it
+    /// ended; `None` while they are still being read.
+    TurnChanges {
+        files: Option<Vec<DiffFile>>,
+    },
+    /// The conversation compacted into a summary, to free its context window.
+    Compaction {
+        status: CompactionStatus,
+        /// The context's size before and after, once done.
+        before_tokens: Option<u64>,
+        after_tokens: Option<u64>,
+        /// Why it failed, in the provider's words.
+        error: Option<String>,
+    },
+    /// A tool call held back until the user approves it.
+    Approval {
+        /// The call it held back, in the thread's transcript or a subagent's; `None` in
+        /// approvals recorded before calls were kept.
+        tool_call_id: Option<String>,
+        tool_name: String,
+        /// The tool input as JSON, truncated for display.
+        input: String,
+        /// Why the agent asks, in its own words.
+        reason: Option<String>,
+        can_accept_for_session: bool,
+        status: RequestStatus,
+        decision: Option<ApprovalDecision>,
+        feedback: Option<String>,
+    },
+    Questions {
+        questions: Vec<Question>,
+        status: RequestStatus,
+        answers: Option<Vec<String>>,
+    },
+    /// The agent's task list as it stands, one per turn, kept up to date in place.
+    TaskList {
+        tasks: Vec<Task>,
+    },
+    /// A secret the agent asked the user for, such as a token. Its value is never recorded:
+    /// it goes to a file only the agent's commands read.
+    SecretRequest {
+        /// What it is, such as "GitHub token".
+        label: String,
+        /// What it is for and where to get it, in the agent's words.
+        reason: String,
+        placeholder: Option<String>,
+        status: RequestStatus,
+        /// Once resolved: whether the user saved one or declined.
+        saved: Option<bool>,
+    },
+    /// A plan mode turn's plan, which the agent carries out once accepted.
+    ProposedPlan {
+        /// Markdown.
+        plan: String,
+        status: RequestStatus,
+        decision: Option<ApprovalDecision>,
+        feedback: Option<String>,
+    },
+}
+
+/// How much of a tool's output a page of the transcript keeps; the item alone has it all.
+const OUTPUT_PREVIEW_CHARS: usize = 200;
+
+impl ItemContent {
+    /// The item as a page of the transcript carries it: tool output cut to its start and
+    /// diffs left out, which the item alone returns.
+    pub fn summary(self) -> Self {
+        match self {
+            Self::ToolCall {
+                name,
+                input,
+                output,
+                is_error,
+                detail,
+                output_omitted,
+                interrupted,
+            } => {
+                let long = output
+                    .as_ref()
+                    .is_some_and(|text| text.chars().nth(OUTPUT_PREVIEW_CHARS).is_some());
+                Self::ToolCall {
+                    name,
+                    input,
+                    output: match output {
+                        Some(text) if long => {
+                            Some(text.chars().take(OUTPUT_PREVIEW_CHARS).collect())
+                        }
+                        other => other,
+                    },
+                    is_error,
+                    detail: detail.as_ref().map(ToolDetail::summary),
+                    output_omitted: output_omitted || long,
+                    interrupted,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Set on the requests the agent makes mid-turn.
+    pub fn request_status(&self) -> Option<RequestStatus> {
+        match self {
+            Self::Approval { status, .. }
+            | Self::Questions { status, .. }
+            | Self::ProposedPlan { status, .. }
+            | Self::SecretRequest { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
+/// One step of the agent's task list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Task {
+    pub subject: String,
+    /// How the agent words it while working on it, such as "Writing a.txt".
+    pub active_form: Option<String>,
+    pub status: TaskStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum TaskStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// What a tool call did, as the provider reported it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export)]
+pub enum ToolDetail {
+    FileChange {
+        path: String,
+        additions: u32,
+        deletions: u32,
+        /// The change as unified diff hunks, capped in size. `None` in a whole
+        /// transcript, which leaves diffs out; the item alone carries it.
+        diff: Option<String>,
+    },
+}
+
+impl ToolDetail {
+    /// The detail without what a whole transcript leaves out.
+    pub fn summary(&self) -> Self {
+        match self {
+            Self::FileChange {
+                path,
+                additions,
+                deletions,
+                ..
+            } => Self::FileChange {
+                path: path.clone(),
+                additions: *additions,
+                deletions: *deletions,
+                diff: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

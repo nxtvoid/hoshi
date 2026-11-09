@@ -6,6 +6,7 @@ import {
   applyEvent,
   applyItemEvent,
   folderName,
+  removedThreadIds,
   samePath
 } from '../../src/state/orchestration'
 
@@ -37,6 +38,7 @@ const thread = (id: string, projectId: string): Thread => ({
   archived: false,
   pinned: false,
   worktreeReleased: false,
+  worktreeAdopted: false,
   createdAt: NOW,
   updatedAt: NOW
 })
@@ -90,6 +92,34 @@ describe('applyEvent', () => {
     })
   })
 
+  test('a thread adopts a worktree its agent entered, then leaves it', () => {
+    const state = { projects: [project('p')], threads: [thread('t', 'p')] }
+
+    const adopted = applyEvent(state, {
+      type: 'threadWorktreeAttached',
+      threadId: 't',
+      worktreePath: '/repo-pr',
+      branch: 'feat/pr',
+      adopted: true
+    })
+    const left = applyEvent(adopted, {
+      type: 'threadWorktreeDetached',
+      threadId: 't',
+      branch: 'main'
+    })
+
+    expect(adopted.threads[0]).toMatchObject({
+      worktreePath: '/repo-pr',
+      branch: 'feat/pr',
+      worktreeAdopted: true
+    })
+    expect(left.threads[0]).toMatchObject({
+      worktreePath: null,
+      branch: 'main',
+      worktreeAdopted: false
+    })
+  })
+
   test('a released worktree comes back, and a cleaned up thread loses it', () => {
     const state = {
       projects: [project('p')],
@@ -131,6 +161,59 @@ describe('applyEvent', () => {
   })
 })
 
+describe('rewinds', () => {
+  test('a rewind to the start drops the session; one to a message pins it', () => {
+    const state = {
+      projects: [project('p')],
+      threads: [
+        { ...thread('t', 'p'), sessionId: 's', conversationCursor: 'u2' }
+      ]
+    }
+
+    const pinned = applyEvent(state, {
+      type: 'threadRewound',
+      threadId: 't',
+      messageId: 'm2',
+      resumeAt: 'u1'
+    })
+    const restarted = applyEvent(state, {
+      type: 'threadRewound',
+      threadId: 't',
+      messageId: 'm1',
+      resumeAt: null
+    })
+
+    expect(pinned.threads[0]).toMatchObject({
+      sessionId: 's',
+      conversationCursor: 'u1',
+      resumeAt: 'u1'
+    })
+    expect(restarted.threads[0]).toMatchObject({
+      sessionId: null,
+      resumeAt: null
+    })
+  })
+
+  test('the transcript loses the message and what followed', () => {
+    const message = (id: string): ThreadItem => ({
+      id,
+      threadId: 't',
+      createdAt: NOW,
+      content: { kind: 'assistantMessage', text: id }
+    })
+    const items = [message('m1'), message('a1'), message('m2'), message('a2')]
+
+    const kept = applyItemEvent('t', items, {
+      type: 'threadRewound',
+      threadId: 't',
+      messageId: 'm2',
+      resumeAt: 'u1'
+    })
+
+    expect(kept.map((item) => item.id)).toEqual(['m1', 'a1'])
+  })
+})
+
 describe('applyItemEvent', () => {
   const tool: ThreadItem = {
     id: 'tool',
@@ -141,20 +224,41 @@ describe('applyItemEvent', () => {
       name: 'Read',
       input: '{}',
       output: null,
-      isError: false
+      isError: false,
+      detail: null,
+      outputOmitted: false,
+      interrupted: false
     }
   }
 
   test('fills in a tool call when it completes', () => {
+    const detail = {
+      kind: 'fileChange' as const,
+      path: '/repo/a.txt',
+      additions: 1,
+      deletions: 0,
+      diff: '@@ -0,0 +1,1 @@\n+a'
+    }
     const items = applyItemEvent('t', [tool], {
       type: 'toolCallCompleted',
       threadId: 't',
       itemId: 'tool',
       output: 'hello',
-      isError: false
+      isError: false,
+      detail
     })
 
-    expect(items[0]?.content).toMatchObject({ output: 'hello' })
+    expect(items[0]?.content).toMatchObject({ output: 'hello', detail })
+  })
+
+  test('stops a tool call whose turn ended first', () => {
+    const items = applyItemEvent('t', [tool], {
+      type: 'toolCallInterrupted',
+      threadId: 't',
+      itemId: 'tool'
+    })
+
+    expect(items[0]?.content).toMatchObject({ output: null, interrupted: true })
   })
 
   test('replaces an item that arrives twice and ignores other threads', () => {
@@ -184,5 +288,22 @@ describe('paths', () => {
     ['/home/me/notes/', 'notes']
   ])('folderName(%s) is %s', (path, expected) => {
     expect(folderName(path)).toBe(expected)
+  })
+})
+
+describe('removedThreadIds', () => {
+  test('names the threads a removed project took with it', () => {
+    const before = [thread('t1', 'p'), thread('t2', 'q'), thread('t3', 'p')]
+    const after = applyEvent(
+      { projects: [project('p'), project('q')], threads: before },
+      { type: 'projectRemoved', projectId: 'p' }
+    ).threads
+    expect(removedThreadIds(before, after)).toEqual(['t1', 't3'])
+  })
+
+  test('is empty when nothing went away', () => {
+    const before = [thread('t1', 'p')]
+    expect(removedThreadIds(before, before)).toEqual([])
+    expect(removedThreadIds(before, [...before, thread('t2', 'p')])).toEqual([])
   })
 })

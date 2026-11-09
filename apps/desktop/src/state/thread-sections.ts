@@ -147,6 +147,71 @@ function inView(thread: Thread, query: SidebarQuery) {
   }
 }
 
+const ESCALATION: Partial<Record<Thread['status'], number>> = {
+  working: 1,
+  waitingForInput: 2
+}
+
+/** Whether `thread` is a task listed under the thread that delegated it, not on its own. */
+function delegatedTest(threads: Thread[]) {
+  const ids = new Set(threads.map((thread) => thread.id))
+  // A task whose thread is gone is the user's to see.
+  return (thread: Thread) =>
+    thread.parentThreadId !== null && ids.has(thread.parentThreadId)
+}
+
+/** The tasks the sidebar doesn't list, since the threads that delegated them are there. */
+export function unlistedTaskIds(threads: Thread[]): string[] {
+  if (!threads.some((thread) => thread.parentThreadId !== null)) return []
+  const delegated = delegatedTest(threads)
+  return threads.filter(delegated).map((thread) => thread.id)
+}
+
+/**
+ * The threads the user started. Tasks their agents delegated aren't listed: a task that
+ * works, or waits for the user, shows on the thread that delegated it.
+ */
+export function withDelegatedWork(threads: Thread[]): Thread[] {
+  if (!threads.some((thread) => thread.parentThreadId !== null)) return threads
+  const delegated = delegatedTest(threads)
+  const byId = new Map(threads.map((thread) => [thread.id, thread]))
+  /** The thread the user started that a task, however deep, works for. */
+  const root = (thread: Thread) => {
+    let current = thread
+    for (let depth = 0; depth < threads.length && delegated(current); depth++) {
+      const parent = byId.get(current.parentThreadId as string)
+      if (!parent) break
+      current = parent
+    }
+    return current.id
+  }
+  const busiest = new Map<string, Thread['status']>()
+  for (const thread of threads) {
+    const rank = ESCALATION[thread.status]
+    if (!delegated(thread) || rank === undefined) continue
+    const top = root(thread)
+    const current = busiest.get(top)
+    if (!current || rank > (ESCALATION[current] ?? 0)) {
+      busiest.set(top, thread.status)
+    }
+  }
+  return threads
+    .filter((thread) => !delegated(thread))
+    .map((thread) => {
+      const delegated = busiest.get(thread.id)
+      const own =
+        ESCALATION[thread.status] ?? (thread.status === 'error' ? 3 : 0)
+      return delegated && (ESCALATION[delegated] ?? 0) > own
+        ? { ...thread, status: delegated }
+        : thread
+    })
+}
+
+/** Orders RFC 3339 UTC timestamps newest first; they sort as plain strings. */
+export function newestFirst(a: string, b: string): number {
+  return a < b ? 1 : a > b ? -1 : 0
+}
+
 /** The sections the sidebar shows for a view, search and filter. */
 export function sidebarSections(
   threads: Thread[],
@@ -156,14 +221,14 @@ export function sidebarSections(
   unseen: Record<string, true> = {}
 ): ThreadSection[] {
   const key = query.sort === 'created' ? 'createdAt' : 'updatedAt'
-  const visible = threads
+  const visible = withDelegatedWork(threads)
     .filter(
       (thread) =>
         inView(thread, query) &&
         matchesSearch(thread, pullRequests[thread.id], query.search) &&
         matchesFilter(thread, pullRequests[thread.id], query.filter)
     )
-    .sort((a, b) => b[key].localeCompare(a[key]))
+    .sort((a, b) => newestFirst(a[key], b[key]))
   return query.view === 'inbox'
     ? inboxSections(visible, pullRequests, now, unseen)
     : groupThreads(visible, pullRequests, now, query.inactiveAfterMs)

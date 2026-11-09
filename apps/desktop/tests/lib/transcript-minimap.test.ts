@@ -14,7 +14,7 @@ const row = (id: string, content: ItemContent): TranscriptRow => ({
   item: { id, threadId: 't', createdAt: '', content }
 })
 const user = (id: string, text: string) =>
-  row(id, { kind: 'userMessage', text, attachments: [] })
+  row(id, { kind: 'userMessage', text, attachments: [], steer: false })
 const assistant = (id: string, text: string) =>
   row(id, { kind: 'assistantMessage', text })
 

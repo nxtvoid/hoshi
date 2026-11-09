@@ -21,23 +21,46 @@ const pullRequest = (state: PullRequest['state']): PullRequest => ({
 
 describe('mergedCleanup', () => {
   test('waits for the merge', () => {
-    const thread = { worktreePath: '/wt', branch: 'feature' }
+    const thread = {
+      worktreePath: '/wt',
+      branch: 'feature',
+      worktreeAdopted: false
+    }
     expect(mergedCleanup(thread, pullRequest('open'))).toBeNull()
     expect(mergedCleanup(thread, undefined)).toBeNull()
   })
 
   test('removes a worktree', () => {
-    const thread = { worktreePath: '/wt', branch: 'feature' }
+    const thread = {
+      worktreePath: '/wt',
+      branch: 'feature',
+      worktreeAdopted: false
+    }
     expect(mergedCleanup(thread, pullRequest('merged'))).toBe('worktree')
   })
 
   test('switches a root thread back only while it is on the merged branch', () => {
     const merged = pullRequest('merged')
     expect(
-      mergedCleanup({ worktreePath: null, branch: 'feature' }, merged)
+      mergedCleanup(
+        { worktreePath: null, branch: 'feature', worktreeAdopted: false },
+        merged
+      )
     ).toBe('root')
     expect(
-      mergedCleanup({ worktreePath: null, branch: 'main' }, merged)
+      mergedCleanup(
+        { worktreePath: null, branch: 'main', worktreeAdopted: false },
+        merged
+      )
     ).toBeNull()
+  })
+
+  test('leaves an adopted worktree alone', () => {
+    const thread = {
+      worktreePath: '/wt',
+      branch: 'feature',
+      worktreeAdopted: true
+    }
+    expect(mergedCleanup(thread, pullRequest('merged'))).toBeNull()
   })
 })

@@ -3,4 +3,4 @@
 /**
  * Which item a [`StreamDelta`] is writing.
  */
-export type StreamKind = "text" | "reasoning";
+export type StreamKind = "text" | "reasoning" | "toolOutput";

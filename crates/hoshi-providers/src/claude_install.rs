@@ -147,11 +147,15 @@ fn npm_latest() -> Option<String> {
     Some(package["version"].as_str()?.to_owned())
 }
 
-fn update_channel() -> String {
-    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+/// Where Claude Code keeps its settings, sessions and task lists.
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
-        .or_else(|| std::env::home_dir().map(|home| home.join(".claude")));
-    let channel = config_dir
+        .or_else(|| std::env::home_dir().map(|home| home.join(".claude")))
+}
+
+fn update_channel() -> String {
+    let channel = config_dir()
         .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|settings| settings["autoUpdatesChannel"].as_str().map(str::to_owned));

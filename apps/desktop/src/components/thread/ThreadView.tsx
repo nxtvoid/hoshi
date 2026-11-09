@@ -13,6 +13,7 @@ import {
 } from './ThreadDetails'
 import { m } from '@/paraglide/messages'
 import { Transcript } from './Transcript'
+import { DelegatedBanner } from './DelegationRows'
 import { ThreadGitChip } from './ThreadGitChip'
 import { useAppStore } from '@/state/app-store'
 import { useSidebarStore } from '@/state/sidebar-store'
@@ -21,6 +22,7 @@ import { draftKey } from '@/state/draft-store'
 import { ProjectIcon } from '@/components/sidebar/ProjectIcon'
 import { MergedCleanupBanner } from './MergedCleanupBanner'
 import { ReviewCommentsBar } from './ReviewCommentsBar'
+import { WorktreeSetupBar } from './WorktreeSetupBar'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { LogoMark } from '@/components/brand/Logo'
 import { usePanelStore } from '@/state/panel-store'
@@ -71,7 +73,8 @@ export function ThreadView() {
   const showDetailsCard = Boolean(thread && detailsOpen && detailsInline)
   const loading = useTranscriptStore((state) => state.loading)
   const empty = useTranscriptStore((state) => state.items.length === 0)
-  const working = thread?.status === 'working'
+  const working =
+    thread?.status === 'working' || thread?.status === 'waitingForInput'
   const draft = !loading && empty && !working
   const composerDraft = draftKey(thread?.id ?? null, scopeProjectId, chat)
 
@@ -191,6 +194,11 @@ export function ThreadView() {
             </div>
           ) : (
             <>
+              {thread?.parentThreadId ? (
+                <div className={cn(CHAT_LANE, 'w-full px-4 pt-3')}>
+                  <DelegatedBanner parentThreadId={thread.parentThreadId} />
+                </div>
+              ) : null}
               <Transcript
                 working={working}
                 cwd={thread?.worktreePath ?? workspaceRoot ?? null}
@@ -207,12 +215,14 @@ export function ThreadView() {
                     )}
                   />
                 </div>
+                {thread ? <WorktreeSetupBar threadId={thread.id} /> : null}
                 {thread ? <ReviewCommentsBar threadId={thread.id} /> : null}
                 <Composer
                   key={composerDraft}
                   draftKey={composerDraft}
                   working={working}
                   variant='docked'
+                  cwd={thread?.worktreePath ?? workspaceRoot ?? null}
                 />
               </div>
             </>

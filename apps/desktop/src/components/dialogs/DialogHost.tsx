@@ -59,10 +59,15 @@ export function DialogHost() {
     <AlertDialog
       open={open}
       onOpenChange={(next) => {
-        if (!next) settle(false)
+        if (!next) settle(null)
       }}
     >
-      <AlertDialogContent className='flex flex-col gap-0 rounded-2xl p-5 shadow-2xl data-[size=default]:max-w-[calc(100%-2rem)] data-[size=default]:sm:max-w-100'>
+      <AlertDialogContent
+        className={cn(
+          'flex flex-col gap-0 rounded-2xl p-5 shadow-2xl data-[size=default]:max-w-[calc(100%-2rem)] data-[size=default]:sm:max-w-100',
+          current?.alternativeLabel && 'data-[size=default]:sm:max-w-124'
+        )}
+      >
         {current ? (
           <>
             <span
@@ -72,7 +77,7 @@ export function DialogHost() {
               )}
             >
               <HugeiconsIcon
-                icon={tone.icon}
+                icon={current.icon ?? tone.icon}
                 strokeWidth={2}
                 className='size-5'
               />
@@ -85,16 +90,29 @@ export function DialogHost() {
                 {current.description}
               </AlertDialogDescription>
             ) : null}
-            <div className='mt-6 flex justify-end gap-2'>
+            <div className='mt-6 flex flex-wrap justify-end gap-2'>
               {current.cancelLabel === false ? null : (
                 <AlertDialogCancel className={BUTTON}>
                   {current.cancelLabel ?? m.cancel()}
                 </AlertDialogCancel>
               )}
+              {current.alternativeLabel ? (
+                <AlertDialogAction
+                  variant='outline'
+                  className={cn(
+                    BUTTON,
+                    current.alternativeDestructive &&
+                      'text-destructive hover:text-destructive dark:text-destructive'
+                  )}
+                  onClick={() => settle('alternative')}
+                >
+                  {current.alternativeLabel}
+                </AlertDialogAction>
+              ) : null}
               <AlertDialogAction
                 autoFocus
                 className={cn(BUTTON, tone.action)}
-                onClick={() => settle(true)}
+                onClick={() => settle('confirm')}
               >
                 {current.confirmLabel}
               </AlertDialogAction>

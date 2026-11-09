@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 use hoshi_core::AppSettings;
 use tauri::{AppHandle, Manager};
 
-const FILE_NAME: &str = "settings.json";
-
 #[tauri::command]
 pub fn get_settings(app: AppHandle) -> Result<AppSettings, String> {
     Ok(load(&settings_path(&app)?))
@@ -26,10 +24,7 @@ pub fn update_settings(app: AppHandle, settings: AppSettings) -> Result<AppSetti
 }
 
 pub fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|dir| dir.join(FILE_NAME))
-        .map_err(|error| error.to_string())
+    Ok(app.state::<crate::home::Home>().settings())
 }
 
 pub fn load(path: &Path) -> AppSettings {
@@ -80,7 +75,7 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("hoshi-settings-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        dir.join(FILE_NAME)
+        dir.join("settings.json")
     }
 
     #[test]
@@ -152,6 +147,7 @@ mod tests {
                 notifications: false,
                 projects_folder: Some("D:\\code".into()),
             },
+            onboarding_completed_at: Some("2026-11-09T08:00:00.000Z".into()),
         };
 
         save(&path, &settings).unwrap();

@@ -39,6 +39,17 @@ pub enum ForgeError {
     Unexpected(String),
 }
 
+/// A pull request to open, from `head` into `base`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewPullRequest {
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    /// Markdown.
+    pub body: String,
+    pub draft: bool,
+}
+
 pub trait Forge: Send + Sync {
     fn kind(&self) -> ForgeKind;
 
@@ -93,6 +104,13 @@ pub trait Forge: Send + Sync {
         forge_id: &str,
         action: &PullRequestAction,
     ) -> Result<(), ForgeError>;
+
+    /// Opens a pull request; `head` must be pushed already.
+    fn create_pull_request(
+        &self,
+        repository: &RepositoryRef,
+        pull_request: &NewPullRequest,
+    ) -> Result<PullRequest, ForgeError>;
 
     /// Accounts that can be asked to review, matching `query`.
     fn reviewer_candidates(

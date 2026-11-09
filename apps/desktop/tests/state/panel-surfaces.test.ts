@@ -4,6 +4,7 @@ import {
   closeSurface,
   NO_SURFACES,
   openSurface,
+  showTurnDiff,
   type ThreadSurfaces,
   updateSurface
 } from '../../src/state/panel-surfaces'
@@ -78,5 +79,42 @@ test('updateSurface changes only that surface', () => {
     id: 's1',
     kind: 'diff',
     scope: 'branch'
+  })
+})
+
+describe('showTurnDiff', () => {
+  test('opens the diff surface on a turn, focused on a file', () => {
+    const panel = showTurnDiff(NO_SURFACES, 'm1', 'src/a.ts', ids())
+
+    expect(panel.surfaces).toEqual([
+      {
+        id: 's1',
+        kind: 'diff',
+        scope: 'turn',
+        turnId: 'm1',
+        focusPath: 'src/a.ts'
+      }
+    ])
+    expect(panel.activeId).toBe('s1')
+  })
+
+  test('reuses the diff surface already open, whatever it showed', () => {
+    const makeId = ids()
+    const opened = openSurface(
+      openSurface(NO_SURFACES, 'diff', makeId),
+      'terminal',
+      makeId
+    )
+
+    const panel = showTurnDiff(opened, 'm2', undefined, makeId)
+
+    expect(panel.surfaces[0]).toEqual({
+      id: 's1',
+      kind: 'diff',
+      scope: 'turn',
+      turnId: 'm2',
+      focusPath: undefined
+    })
+    expect(panel.activeId).toBe('s1')
   })
 })

@@ -1,6 +1,8 @@
+import type { DiffFile } from '@/bindings/DiffFile'
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamKind } from '@/bindings/StreamKind'
 import type { ItemContent } from '@/bindings/ItemContent'
+import { REQUEST_TOOLS } from './requests'
 
 export type ToolCallContent = Extract<ItemContent, { kind: 'toolCall' }>
 export type ReasoningContent = Extract<ItemContent, { kind: 'reasoning' }>
@@ -14,9 +16,25 @@ export type WorkItem = TranscriptItem & {
 
 export type StreamingText = { kind: StreamKind; text: string }
 
+/** The files a finished turn changed, shown under its last answer. */
+export type TurnChanges = { turnId: string; files: DiffFile[] }
+
 export type TranscriptRow =
-  | { kind: 'item'; item: TranscriptItem }
+  | { kind: 'item'; item: TranscriptItem; changes?: TurnChanges }
   | { kind: 'work'; id: string; entries: WorkItem[] }
+  | {
+      kind: 'fold'
+      id: string
+      rows: TranscriptRow[]
+      /** How the work it holds ended: answered, cut by the user's steer, or stopped. */
+      ending: FoldEnding
+      /** What the work follows: a steer, or anything else that started it. */
+      after: 'start' | 'steer'
+      /** From what started the work to its end; `null` when unknown. */
+      durationMs: number | null
+    }
+
+export type FoldEnding = 'answered' | 'steered' | 'stopped'
 
 export type ToolAction =
   | 'command'
@@ -45,8 +63,95 @@ export function toolAction(name: string): ToolAction {
   return ACTIONS[name] ?? 'other'
 }
 
+/** The name to show for a tool: an MCP tool's own name, with the server it comes from. */
+export function toolName(name: string): {
+  label: string
+  source: string | null
+} {
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(name)
+  if (!mcp) return { label: name, source: null }
+  const words = (text: string) =>
+    text
+      .replace(/^claude_ai_/, '')
+      .replaceAll('_', ' ')
+      .trim()
+  return { label: words(mcp[2] ?? ''), source: words(mcp[1] ?? '') }
+}
+
+/** Tools that start a subagent, shown as its own card rather than among the work. */
+const SUBAGENT_TOOLS = new Set(['Agent', 'Task'])
+
+/** The tool an agent delegates a task to a child thread with. */
+const DELEGATE_TOOL = 'mcp__hoshi__delegate_task'
+
+export function isDelegation(item: TranscriptItem): item is ToolCallItem {
+  return item.content.kind === 'toolCall' && item.content.name === DELEGATE_TOOL
+}
+
+/** What a delegation names: its title, the child thread once started, or why it failed. */
+export function delegationOf(call: ToolCallContent): {
+  title: string
+  taskId: string | null
+  error: string | null
+} {
+  const input = parseInput(call.input)
+  const output = call.output && !call.isError ? parseInput(call.output) : null
+  const text = (value: Record<string, unknown> | null, key: string) =>
+    typeof value?.[key] === 'string' ? (value[key] as string) : null
+  return {
+    title:
+      text(output, 'title') ??
+      text(input, 'title') ??
+      text(input, 'task') ??
+      '',
+    taskId: text(output, 'taskId'),
+    error: call.isError ? call.output : null
+  }
+}
+
+export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
+  return (
+    item.content.kind === 'toolCall' && SUBAGENT_TOOLS.has(item.content.name)
+  )
+}
+
+/**
+ * Whether a row is an agent still at work: a subagent without its answer, or a delegated
+ * task whose thread, among `busyTasks`, is still working or waiting.
+ */
+export function isLiveAgent(row: TranscriptRow, busyTasks: Set<string>) {
+  if (row.kind !== 'item' || row.item.content.kind !== 'toolCall') return false
+  const call = row.item.content
+  if (isDelegation(row.item)) {
+    const { taskId } = delegationOf(call)
+    return taskId !== null && busyTasks.has(taskId)
+  }
+  return isSubagentCall(row.item) && call.output === null && !call.interrupted
+}
+
+/** Where a subagent's transcript is kept; mirrors `subagent_thread_id` in hoshi-core. */
+export function subagentTranscriptId(threadId: string, toolUseId: string) {
+  return `${threadId.split(':')[0]}:${toolUseId}`
+}
+
+/** What the agent asked a subagent, read from the call that started it. */
+export function subagentInput(input: string) {
+  const value = parseInput(input)
+  const text = (key: string) =>
+    typeof value?.[key] === 'string' ? (value[key] as string) : ''
+  return {
+    description: text('description'),
+    kind: text('subagent_type'),
+    prompt: text('prompt')
+  }
+}
+
 function isWork(item: TranscriptItem): item is WorkItem {
-  return item.content.kind === 'toolCall' || item.content.kind === 'reasoning'
+  return (
+    (item.content.kind === 'toolCall' || item.content.kind === 'reasoning') &&
+    !isSubagentCall(item) &&
+    !isDelegation(item)
+  )
 }
 
 export function isToolCall(item: TranscriptItem): item is ToolCallItem {
@@ -61,7 +166,9 @@ export function withStreaming(
   items: ThreadItem[],
   streaming: Record<string, StreamingText>
 ): TranscriptItem[] {
-  const ids = Object.keys(streaming)
+  const ids = Object.keys(streaming).filter(
+    (id) => streaming[id]?.kind !== 'toolOutput'
+  )
   if (ids.length === 0) return items
   const stored = new Set(items.map((item) => item.id))
   const pending = ids.filter((id) => !stored.has(id))
@@ -91,6 +198,16 @@ export function withStreaming(
 export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
   const rows: TranscriptRow[] = []
   for (const item of items) {
+    if (isToolCall(item) && REQUEST_TOOLS.has(item.content.name)) continue
+    const { content } = item
+    if (content.kind === 'approval' && content.toolCallId !== null) continue
+    if (content.kind === 'turnChanges') {
+      if (content.files?.length) {
+        const turnId = item.id.slice(0, -CHANGES_SUFFIX.length)
+        attachToAnswer(rows, { turnId, files: content.files })
+      }
+      continue
+    }
     const last = rows.at(-1)
     if (!isWork(item)) rows.push({ kind: 'item', item })
     else if (last?.kind === 'work') last.entries.push(item)
@@ -99,12 +216,170 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
   return rows
 }
 
+const CHANGES_SUFFIX = ':changes'
+
+/** Puts a turn's changes on its last answer; a turn that never answered shows none. */
+function attachToAnswer(rows: TranscriptRow[], changes: TurnChanges) {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index] as TranscriptRow
+    if (row.kind !== 'item') continue
+    const { content } = row.item
+    if (content.kind === 'userMessage' && !content.steer) return
+    if (content.kind === 'assistantMessage') {
+      rows[index] = { ...row, changes }
+      return
+    }
+  }
+}
+
+function isAgent(row: TranscriptRow) {
+  return (
+    row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
+  )
+}
+
+/**
+ * The work of each finished run folds into one row, as t3code does: between what started
+ * it (the user's message, a background task that ended, or the run before) and the agent's
+ * answer, which stays in view, with the finished work after it. A steer cuts the run: what
+ * came before folds whole, and what follows folds on its own. A stopped run folds whole.
+ * The running turn, and a failed one, stay open, as do rows still `live`, after the fold.
+ */
+export function foldTurns(
+  rows: TranscriptRow[],
+  working: boolean,
+  live: (row: TranscriptRow) => boolean = () => false
+): TranscriptRow[] {
+  const folded: TranscriptRow[] = []
+  let started: TranscriptItem | null = null
+  let after: 'start' | 'steer' = 'start'
+  let turn: TranscriptRow[] = []
+  const hasWork = (part: TranscriptRow[]) =>
+    part.some((row) => !live(row) && (row.kind === 'work' || isAgent(row)))
+  const fold = (
+    part: TranscriptRow[],
+    ending: FoldEnding,
+    endedAt: string
+  ): TranscriptRow[] => {
+    if (!started) return part
+    const duration = Date.parse(endedAt) - Date.parse(started.createdAt)
+    return [
+      {
+        kind: 'fold',
+        id: `fold:${started.id}`,
+        rows: part.filter((row) => !live(row)),
+        ending,
+        after,
+        durationMs: Number.isFinite(duration) ? duration : null
+      },
+      ...part.filter(live)
+    ]
+  }
+  const settle = (
+    part: TranscriptRow[],
+    steer: TranscriptItem | null
+  ): TranscriptRow[] => {
+    if (
+      !started ||
+      !hasWork(part) ||
+      part.some(
+        (row) => row.kind === 'item' && row.item.content.kind === 'turnFailed'
+      )
+    ) {
+      return part
+    }
+    if (steer) return fold(part, 'steered', steer.createdAt)
+    const last = part.at(-1)
+    if (last?.kind === 'item' && last.item.content.kind === 'turnInterrupted') {
+      const before = part.slice(0, -1)
+      const said = before.at(-1)
+      const answer =
+        said?.kind === 'item' && said.item.content.kind === 'assistantMessage'
+          ? said
+          : null
+      const work = answer ? before.slice(0, -1) : before
+      if (!hasWork(work)) return part
+      return [
+        ...fold(work, 'stopped', last.item.createdAt),
+        ...(answer ? [answer] : [])
+      ]
+    }
+    let answerAt = part.length - 1
+    while (answerAt >= 0) {
+      const row = part[answerAt] as TranscriptRow
+      if (row.kind === 'item' && row.item.content.kind === 'assistantMessage') {
+        break
+      }
+      answerAt -= 1
+    }
+    const answer = part[answerAt]
+    if (answer?.kind !== 'item') return part
+    const trailing = part.slice(answerAt + 1)
+    const settled = (row: TranscriptRow) =>
+      row.kind === 'work' &&
+      !live(row) &&
+      !row.entries.some(
+        (entry) => entry.content.kind === 'toolCall' && entry.content.isError
+      )
+    const work = [...part.slice(0, answerAt), ...trailing.filter(settled)]
+    if (!hasWork(work)) return part
+    return [
+      ...fold(work, 'answered', answer.item.createdAt),
+      answer,
+      ...trailing.filter((row) => !settled(row))
+    ]
+  }
+  /** Parts of the turn a steer cut, folded only once the turn is over. */
+  let held: { open: TranscriptRow[]; settled: TranscriptRow[] }[] = []
+  const close = (running: boolean) => {
+    for (const part of held)
+      folded.push(...(running ? part.open : part.settled))
+    held = []
+    folded.push(...(running ? turn : settle(turn, null)))
+    turn = []
+  }
+  for (const row of rows) {
+    const content = row.kind === 'item' ? row.item.content : null
+    if (row.kind !== 'item' || !content) {
+      turn.push(row)
+    } else if (content.kind === 'userMessage' && content.steer) {
+      held.push({
+        open: [...turn, row],
+        settled: [...settle(turn, row.item), row]
+      })
+      turn = []
+      started = row.item
+      after = 'steer'
+    } else if (
+      content.kind === 'userMessage' ||
+      content.kind === 'backgroundTaskEnded'
+    ) {
+      close(false)
+      folded.push(row)
+      started = row.item
+      after = 'start'
+    } else if (content.kind === 'runEnded') {
+      close(false)
+      started = row.item
+      after = 'start'
+    } else {
+      turn.push(row)
+    }
+  }
+  close(working)
+  return folded
+}
+
 /** The latest entry still going: a call without output, or reasoning still streaming. */
 export function activeEntry(entries: WorkItem[]) {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index] as WorkItem
     if (entry.streaming) return entry
-    if (entry.content.kind === 'toolCall' && entry.content.output === null) {
+    if (
+      entry.content.kind === 'toolCall' &&
+      entry.content.output === null &&
+      !entry.content.interrupted
+    ) {
       return entry
     }
   }

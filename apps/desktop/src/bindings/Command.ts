@@ -2,10 +2,13 @@
 import type { AccessMode } from "./AccessMode";
 import type { Effort } from "./Effort";
 import type { MessageAttachment } from "./MessageAttachment";
+import type { RequestResponse } from "./RequestResponse";
+import type { Rewind } from "./Rewind";
 import type { ThreadWorkspace } from "./ThreadWorkspace";
+import type { WorktreeSetup } from "./WorktreeSetup";
 
-export type Command = { "type": "projectCreate", projectId: string, title: string, workspaceRoot: string, } | { "type": "projectRemove", projectId: string, } | { "type": "threadCreate", threadId: string, 
+export type Command = { "type": "projectCreate", projectId: string, title: string, workspaceRoot: string, } | { "type": "projectRemove", projectId: string, } | { "type": "projectWorktreeSetupSet", projectId: string, setup: WorktreeSetup | null, } | { "type": "threadCreate", threadId: string, 
 /**
  * `None` starts a chat, which always works locally in its own folder.
  */
-projectId: string | null, title: string, workspace: ThreadWorkspace, model: string | null, effort: Effort | null, fastMode: boolean, ultracode: boolean, accessMode: AccessMode, planMode: boolean, } | { "type": "threadDelete", threadId: string, } | { "type": "threadWorktreeRelease", threadId: string, } | { "type": "threadCleanUp", threadId: string, } | { "type": "threadArchive", threadId: string, archived: boolean, } | { "type": "threadPin", threadId: string, pinned: boolean, } | { "type": "threadModelSet", threadId: string, model: string | null, effort: Effort | null, fastMode: boolean, ultracode: boolean, } | { "type": "threadAccessSet", threadId: string, accessMode: AccessMode, planMode: boolean, } | { "type": "messageSend", threadId: string, messageId: string, text: string, attachments: Array<MessageAttachment>, } | { "type": "turnInterrupt", threadId: string, };
+projectId: string | null, title: string, workspace: ThreadWorkspace, model: string | null, effort: Effort | null, fastMode: boolean, ultracode: boolean, accessMode: AccessMode, planMode: boolean, } | { "type": "threadDelete", threadId: string, } | { "type": "threadWorktreeRelease", threadId: string, } | { "type": "threadCleanUp", threadId: string, } | { "type": "threadArchive", threadId: string, archived: boolean, } | { "type": "threadPin", threadId: string, pinned: boolean, } | { "type": "threadModelSet", threadId: string, model: string | null, effort: Effort | null, fastMode: boolean, ultracode: boolean, } | { "type": "threadAccessSet", threadId: string, accessMode: AccessMode, planMode: boolean, } | { "type": "messageSend", threadId: string, messageId: string, text: string, attachments: Array<MessageAttachment>, } | { "type": "turnInterrupt", threadId: string, } | { "type": "subagentStop", threadId: string, toolUseId: string, } | { "type": "requestRespond", threadId: string, requestId: string, response: RequestResponse, } | { "type": "threadRewind", threadId: string, messageId: string, rewind: Rewind, };

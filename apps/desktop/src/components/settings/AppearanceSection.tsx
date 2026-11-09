@@ -11,7 +11,7 @@ import {
   SelectValue
 } from '@hoshi/ui/components/select'
 
-const THEME_OPTIONS = [
+export const THEME_OPTIONS = [
   { value: 'system', label: m.theme_system, icon: ComputerIcon },
   { value: 'light', label: m.theme_light, icon: Sun03Icon },
   { value: 'dark', label: m.theme_dark, icon: Moon02Icon }

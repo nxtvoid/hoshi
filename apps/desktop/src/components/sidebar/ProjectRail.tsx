@@ -1,4 +1,6 @@
 import { cn } from '@hoshi/utils'
+import { useState } from 'react'
+import { WorktreeSetupDialog } from './WorktreeSetupDialog'
 import { ProjectIcon } from './ProjectIcon'
 import { RailInboxButton } from './InboxButton'
 import { RailChatsButton } from './ChatsButton'
@@ -79,6 +81,7 @@ function ProjectButton({
 }) {
   const selectProject = useAppStore((state) => state.selectProject)
   const removeProject = useAppStore((state) => state.removeProject)
+  const [editingSetup, setEditingSetup] = useState(false)
   const setView = useSidebarStore((state) => state.setView)
   const unseen = useUnseenStore((state) => state.unseen)
   const signal = useAppStore((state) =>
@@ -138,6 +141,9 @@ function ProjectButton({
         </Tooltip>
       </ContextMenuTrigger>
       <ContextMenuContent>
+        <ContextMenuItem onClick={() => setEditingSetup(true)}>
+          {m.worktree_setup_menu()}
+        </ContextMenuItem>
         <ContextMenuItem
           variant='destructive'
           onClick={() => removeProject(project.id)}
@@ -145,6 +151,12 @@ function ProjectButton({
           {m.remove_project()}
         </ContextMenuItem>
       </ContextMenuContent>
+      {editingSetup ? (
+        <WorktreeSetupDialog
+          project={project}
+          onClose={() => setEditingSetup(false)}
+        />
+      ) : null}
     </ContextMenu>
   )
 }

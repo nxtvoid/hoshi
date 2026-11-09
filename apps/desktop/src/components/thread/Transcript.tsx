@@ -1,13 +1,31 @@
-import { cn } from '@hoshi/utils'
+import { cn, formatDuration } from '@hoshi/utils'
 import { CHAT_LANE } from '@/lib/chat-lane'
 import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { TurnFailure } from '@/bindings/TurnFailure'
 import { Markdown } from '@/components/markdown/Markdown'
+import { RequestRow } from './RequestRow'
+import { ApprovalBadge, ApprovalsContext } from './ApprovalBadge'
+import { approvalsByCall } from '@/lib/requests'
+import { SubagentGroup, SubagentRow } from './SubagentRow'
+import { DelegationRow, TaskResultRow } from './DelegationRows'
+import { TaskListRow } from './TaskListRow'
+import { TurnChangesCard } from './TurnChangesCard'
+import { RewindButton } from './RewindButton'
+import { CompactionRow } from './Compaction'
+import { isCompactCommand } from '@/lib/compaction'
+import { PullRequestUpdateRow } from './PullRequestUpdateRow'
+import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { UserMessage } from './UserMessage'
+import { useWholeToolCall } from './use-whole-tool-call'
+import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
 import { useTranscriptStore } from '@/state/transcript-store'
+import { useAppStore } from '@/state/app-store'
+import { useStoppingStore } from '@/state/stopping-store'
+import { useRequestStore } from '@/state/request-store'
+import { isPlanningWithUser } from '@/lib/agents'
 import {
   memo,
   useEffect,
@@ -28,21 +46,30 @@ import {
   Globe02Icon,
   Loading03Icon,
   Search01Icon,
+  StopCircleIcon,
   Wrench01Icon
 } from '@hugeicons/core-free-icons'
 import {
   activeEntry,
+  foldTurns,
   groupTranscript,
+  isDelegation,
+  isLiveAgent,
+  isSubagentCall,
   isToolCall,
   reasoningPreview,
   summarizeToolCalls,
   toolAction,
+  toolName,
   toolTarget,
   withStreaming,
   type ToolAction,
-  type ToolCallContent,
+  type ToolCallItem,
+  type FoldEnding,
   type ToolSummaryPart,
+  type TranscriptRow,
   type TranscriptItem,
+  type TurnChanges,
   type WorkItem
 } from '@/lib/tool-calls'
 
@@ -64,13 +91,65 @@ export function Transcript({
 }) {
   const items = useTranscriptStore((state) => state.items)
   const streaming = useTranscriptStore((state) => state.streaming)
-  const rows = useMemo(
-    () => groupTranscript(withStreaming(items, streaming)),
-    [items, streaming]
+  const threadId = useTranscriptStore((state) => state.threadId)
+  const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const busyTasks = useAppStore((state) =>
+    state.threads
+      .filter(
+        (thread) =>
+          thread.parentThreadId === threadId &&
+          (thread.status === 'working' ||
+            thread.status === 'waitingForInput' ||
+            isPlanningWithUser(thread, pendingTasks))
+      )
+      .map((thread) => thread.id)
+      .join(' ')
   )
+  const rows = useMemo(() => {
+    const busy = new Set(busyTasks.split(' '))
+    return foldTurns(
+      groupTranscript(withStreaming(items, streaming)),
+      working,
+      (row) => isLiveAgent(row, busy)
+    )
+  }, [items, streaming, working, busyTasks])
+  const approvals = useMemo(() => approvalsByCall(items), [items])
+  const liveTasks = working
+    ? items.filter((item) => item.content.kind === 'taskList').at(-1)?.id
+    : undefined
   const scrollRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLOListElement>(null)
+  const olderRef = useRef<HTMLLIElement>(null)
   const pinned = useRef(true)
+  const hasOlder = useTranscriptStore((state) => state.hasOlder)
+  const loadOlder = useTranscriptStore((state) => state.loadOlder)
+  /** The scroll height before older items went in above, to keep the view where it was. */
+  const heightBeforeOlder = useRef<number | null>(null)
+  const firstId = items[0]?.id
+
+  useLayoutEffect(() => {
+    const element = scrollRef.current
+    const before = heightBeforeOlder.current
+    if (!element || before === null || firstId === undefined) return
+    heightBeforeOlder.current = null
+    element.scrollTop += element.scrollHeight - before
+  }, [firstId])
+
+  useEffect(() => {
+    const element = scrollRef.current
+    const sentinel = olderRef.current
+    if (!element || !sentinel || !hasOlder) return
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return
+        heightBeforeOlder.current = element.scrollHeight
+        void loadOlder()
+      },
+      { root: element, rootMargin: '800px 0px 0px 0px' }
+    )
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hasOlder, loadOlder, firstId])
   const [atEnd, setAtEnd] = useState(true)
 
   // Scroll position is DOM state: follow new content only if the reader was at the bottom.
@@ -125,23 +204,14 @@ export function Transcript({
           ref={listRef}
           className={cn(CHAT_LANE, 'flex flex-col gap-4 px-4 py-6')}
         >
-          {rows.map((row) =>
-            row.kind === 'item' ? (
-              <li
-                key={row.item.id}
-                data-item-id={row.item.id}
-                className={cn(ROW, 'scroll-mt-6')}
-              >
-                <Item item={row.item} />
-              </li>
-            ) : (
-              <li key={row.id} className={ROW}>
-                <WorkGroup entries={row.entries} cwd={cwd} />
-              </li>
-            )
-          )}
+          {hasOlder ? <li ref={olderRef} aria-hidden className='h-px' /> : null}
+          <ApprovalsContext.Provider value={approvals}>
+            <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
+          </ApprovalsContext.Provider>
           {working ? (
-            <li className='text-muted-foreground text-sm'>{m.working()}</li>
+            <li>
+              <TurnStatus />
+            </li>
           ) : null}
         </ol>
       </div>
@@ -171,26 +241,261 @@ export function Transcript({
   )
 }
 
-const Item = memo(function Item({ item }: { item: TranscriptItem }) {
+type RowsProps = {
+  rows: TranscriptRow[]
+  cwd: string | null
+  /** The task list of the running turn, which shows what is being worked on. */
+  liveTasks: string | undefined
+}
+
+/** Subagents started one after another, from `index` on. */
+function subagentsFrom(rows: TranscriptRow[], index: number) {
+  const agents: ToolCallItem[] = []
+  for (const row of rows.slice(index)) {
+    if (row.kind !== 'item' || !isSubagentCall(row.item)) break
+    agents.push(row.item)
+  }
+  return agents
+}
+
+function Rows({ rows, cwd, liveTasks }: RowsProps) {
+  const shown: React.ReactNode[] = []
+  for (let index = 0; index < rows.length; index += 1) {
+    const agents = subagentsFrom(rows, index)
+    const [first] = agents
+    if (first && agents.length > 1) {
+      shown.push(
+        <li
+          key={`agents:${first.id}`}
+          data-item-id={first.id}
+          className={cn(ROW, 'scroll-mt-6')}
+        >
+          <SubagentGroup
+            items={agents}
+            renderRows={(inner) => (
+              <Rows rows={inner} cwd={cwd} liveTasks={undefined} />
+            )}
+          />
+        </li>
+      )
+      index += agents.length - 1
+      continue
+    }
+    shown.push(
+      <Row
+        key={rowKey(rows[index] as TranscriptRow)}
+        row={rows[index] as TranscriptRow}
+        cwd={cwd}
+        liveTasks={liveTasks}
+      />
+    )
+  }
+  return shown
+}
+
+function rowKey(row: TranscriptRow) {
+  return row.kind === 'item' ? row.item.id : row.id
+}
+
+function Row({
+  row,
+  cwd,
+  liveTasks
+}: Omit<RowsProps, 'rows'> & { row: TranscriptRow }) {
+  switch (row.kind) {
+    case 'item':
+      return (
+        <li
+          key={row.item.id}
+          data-item-id={row.item.id}
+          className={cn(ROW, 'scroll-mt-6')}
+        >
+          <Item
+            item={row.item}
+            cwd={cwd}
+            live={row.item.id === liveTasks}
+            changes={row.changes}
+          />
+        </li>
+      )
+    case 'work':
+      return (
+        <li key={row.id} className={ROW}>
+          <WorkGroup entries={row.entries} cwd={cwd} />
+        </li>
+      )
+    default:
+      return (
+        <li key={row.id} className={ROW}>
+          <TurnFold
+            rows={row.rows}
+            durationMs={row.durationMs}
+            ending={row.ending}
+            after={row.after}
+            cwd={cwd}
+            liveTasks={liveTasks}
+          />
+        </li>
+      )
+  }
+}
+
+/** A finished turn's work, folded behind one line until opened. */
+function TurnFold({
+  durationMs,
+  ending,
+  after,
+  ...rows
+}: RowsProps & {
+  durationMs: number | null
+  ending: FoldEnding
+  after: 'start' | 'steer'
+}) {
+  const [open, setOpen] = useState(false)
+  const duration =
+    durationMs === null ? null : formatDuration(durationMs, getLocale())
+  return (
+    <div className='border-border/60 border-b pb-2'>
+      <button
+        type='button'
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className='text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-6 items-center gap-1 rounded-md text-sm tabular-nums outline-none focus-visible:ring-2'
+      >
+        {ending === 'stopped'
+          ? duration === null
+            ? m.stopped_response()
+            : m.stopped_after({ duration })
+          : after === 'steer'
+            ? duration === null
+              ? m.continued()
+              : m.continued_for({ duration })
+            : duration === null
+              ? m.worked()
+              : m.worked_for({ duration })}
+        <HugeiconsIcon
+          icon={ArrowRight01Icon}
+          strokeWidth={2}
+          className={cn(
+            'size-3.5 shrink-0 transition-transform',
+            open && 'rotate-90'
+          )}
+        />
+      </button>
+      {open ? (
+        <ol className='border-border/60 ms-2 mt-2 mb-2 flex flex-col gap-4 border-s ps-4'>
+          <Rows {...rows} />
+        </ol>
+      ) : null}
+    </div>
+  )
+}
+
+const Item = memo(function Item({
+  item,
+  cwd,
+  live,
+  changes
+}: {
+  item: TranscriptItem
+  cwd: string | null
+  /** The turn this item belongs to is still running. */
+  live: boolean
+  /** What the turn changed, on its last answer. */
+  changes?: TurnChanges
+}) {
   const { content } = item
   switch (content.kind) {
     case 'userMessage':
-      return (
-        <UserMessage text={content.text} attachments={content.attachments} />
+      if (isCompactCommand(content.text)) return null
+      if (content.pullRequestUpdate) {
+        return (
+          <PullRequestUpdateRow
+            update={content.pullRequestUpdate}
+            text={content.text}
+          />
+        )
+      }
+      return content.taskResult ? (
+        <TaskResultRow text={content.text} childThreadId={content.taskResult} />
+      ) : (
+        <UserMessage
+          text={content.text}
+          attachments={content.attachments}
+          steer={content.steer}
+          createdAt={item.createdAt}
+          action={
+            content.rewind ? (
+              <RewindButton
+                messageId={item.id}
+                text={content.text}
+                attachments={content.attachments}
+              />
+            ) : null
+          }
+        />
       )
     case 'assistantMessage':
-      return <Markdown text={content.text} />
+      return (
+        <>
+          <Markdown text={content.text} />
+          {changes ? <TurnChangesCard changes={changes} /> : null}
+        </>
+      )
     case 'reasoning':
       return (
         <ReasoningRow text={content.text} streaming={item.streaming === true} />
       )
     case 'toolCall':
-      return <ToolCallRow call={content} cwd={null} />
+      if (isDelegation(item)) return <DelegationRow item={item} />
+      return isSubagentCall(item) ? (
+        <SubagentRow
+          item={item}
+          renderRows={(rows) => (
+            <Rows rows={rows} cwd={cwd} liveTasks={undefined} />
+          )}
+        />
+      ) : (
+        <ToolCallRow item={{ ...item, content }} cwd={cwd} />
+      )
     case 'turnFailed':
       return (
         <p className='text-destructive text-sm'>
           {failureMessage(content.reason)}
         </p>
+      )
+    case 'turnInterrupted':
+      return (
+        <div className='text-muted-foreground flex items-center gap-3 text-xs'>
+          <span className='bg-border h-px flex-1' />
+          <span className='flex items-center gap-1.5'>
+            <HugeiconsIcon
+              icon={StopCircleIcon}
+              strokeWidth={2}
+              className='size-3.5'
+            />
+            {m.turn_interrupted()}
+          </span>
+          <span className='bg-border h-px flex-1' />
+        </div>
+      )
+    case 'approval':
+    case 'questions':
+    case 'proposedPlan':
+      return <RequestRow content={content} cwd={cwd} />
+    case 'taskList':
+      return <TaskListRow tasks={content.tasks} working={live} />
+    case 'runEnded':
+      return null
+    case 'compaction':
+      return <CompactionRow content={content} />
+    case 'backgroundTaskEnded':
+      return (
+        <BackgroundTaskRow
+          toolCallId={content.toolCallId}
+          failed={content.failed}
+          cwd={cwd}
+        />
       )
   }
 })
@@ -218,7 +523,8 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
 
   const calls = entries.filter(isToolCall)
   const active = activeEntry(entries)
-  const failed = !active && (calls.at(-1)?.content.isError ?? false)
+  const last = calls.at(-1)?.content
+  const failed = !active && last?.isError === true && !last.interrupted
   const actions = new Set(calls.map((call) => toolAction(call.content.name)))
   const [onlyAction] = actions
   const icon =
@@ -294,13 +600,11 @@ function sameWorkGroup(previous: WorkGroupProps, next: WorkGroupProps) {
 }
 
 function WorkEntry({ entry, cwd }: { entry: WorkItem; cwd: string | null }) {
-  return entry.content.kind === 'toolCall' ? (
-    <ToolCallRow call={entry.content} cwd={cwd} />
+  const { content } = entry
+  return content.kind === 'toolCall' ? (
+    <ToolCallRow item={{ ...entry, content }} cwd={cwd} />
   ) : (
-    <ReasoningRow
-      text={entry.content.text}
-      streaming={entry.streaming === true}
-    />
+    <ReasoningRow text={content.text} streaming={entry.streaming === true} />
   )
 }
 
@@ -367,30 +671,49 @@ function summaryText(parts: ToolSummaryPart[]) {
 }
 
 function ToolCallRow({
-  call,
+  item,
   cwd
 }: {
-  call: ToolCallContent
+  item: ToolCallItem
   cwd: string | null
 }) {
-  const { name, input, output, isError } = call
-  const running = output === null
+  const { name, input, output, isError, detail, interrupted } = item.content
+  const [open, setOpen] = useState(false)
+  const whole = useWholeToolCall(item, open)
+  const diff = whole.detail?.kind === 'fileChange' ? whole.detail.diff : null
+  const running = output === null && !interrupted
+  const live = useTranscriptStore((state) =>
+    running && open ? state.toolOutput[item.id] : undefined
+  )
   const target = toolTarget(name, input, cwd)
-  const expandable = Boolean(target || output)
+  const shown = toolName(name)
+  const change = detail?.kind === 'fileChange' ? detail : null
+  const expandable = Boolean(target || output || change || running)
   return (
-    <details className='group/call'>
+    <details
+      className='group/call'
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary className={ENTRY_SUMMARY}>
         <HugeiconsIcon
           icon={
             running
               ? Loading03Icon
-              : isError
-                ? Cancel01Icon
-                : ACTION_ICONS[toolAction(name)]
+              : interrupted
+                ? StopCircleIcon
+                : isError
+                  ? Cancel01Icon
+                  : ACTION_ICONS[toolAction(name)]
           }
           strokeWidth={2}
           aria-label={
-            running ? m.tool_running() : isError ? m.tool_failed() : undefined
+            running
+              ? m.tool_running()
+              : interrupted
+                ? m.tool_stopped()
+                : isError
+                  ? m.tool_failed()
+                  : undefined
           }
           className={cn(
             'size-4 shrink-0',
@@ -398,8 +721,20 @@ function ToolCallRow({
             isError && 'text-destructive'
           )}
         />
-        <span className='text-foreground shrink-0 font-medium'>{name}</span>
+        <span className='text-foreground shrink-0 font-medium'>
+          {shown.label}
+        </span>
+        {shown.source ? (
+          <span className='shrink-0 text-xs'>{shown.source}</span>
+        ) : null}
         <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+        <ApprovalBadge callId={item.id} />
+        {change ? (
+          <span className='shrink-0 font-mono text-xs tabular-nums'>
+            <span className='text-pr-open'>+{change.additions}</span>{' '}
+            <span className='text-status-error'>−{change.deletions}</span>
+          </span>
+        ) : null}
         {expandable ? (
           <HugeiconsIcon
             icon={ArrowRight01Icon}
@@ -415,19 +750,96 @@ function ToolCallRow({
               {target}
             </pre>
           ) : null}
-          {output ? (
+          {change && !isError ? (
+            diff ? (
+              <div className='border-border/60 max-h-96 overflow-auto border-t py-1'>
+                <DiffView text={diff} />
+              </div>
+            ) : null
+          ) : output ? (
             <pre
               className={cn(
                 'text-muted-foreground max-h-80 overflow-auto px-3 py-2 whitespace-pre-wrap',
                 target && 'border-border/60 border-t'
               )}
             >
-              {output}
+              {whole.output}
             </pre>
+          ) : live ? (
+            <LiveOutput text={live} framed={Boolean(target)} />
           ) : null}
         </div>
       ) : null}
     </details>
+  )
+}
+
+/** A running command's output so far, following its end unless scrolled up. */
+function LiveOutput({ text, framed }: { text: string; framed: boolean }) {
+  const ref = useRef<HTMLPreElement>(null)
+  const following = useRef(true)
+  useLayoutEffect(() => {
+    const element = ref.current
+    if (element && following.current) element.scrollTop = element.scrollHeight
+  })
+  return (
+    <pre
+      ref={ref}
+      onScroll={(event) => {
+        const element = event.currentTarget
+        following.current =
+          element.scrollHeight - element.scrollTop - element.clientHeight < 8
+      }}
+      className={cn(
+        'text-muted-foreground max-h-80 overflow-auto px-3 py-2 whitespace-pre-wrap',
+        framed && 'border-border/60 border-t'
+      )}
+    >
+      {text}
+    </pre>
+  )
+}
+
+/** How long the running turn has worked, or how long it has been stopping. */
+function TurnStatus() {
+  const turnId = useAppStore(
+    (state) =>
+      state.threads.find((thread) => thread.id === state.selectedThreadId)
+        ?.activeTurnId
+  )
+  const threadId = useAppStore((state) => state.selectedThreadId)
+  const stoppingSince = useStoppingStore((state) =>
+    threadId ? state.since[threadId] : undefined
+  )
+  const startedAt = useTranscriptStore((state) => {
+    const asked = state.items.find((item) => item.id === turnId)
+    return asked ? Date.parse(asked.createdAt) : undefined
+  })
+  const [now, setNow] = useState(Date.now)
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const since = stoppingSince ?? startedAt
+  const duration =
+    since === undefined || Number.isNaN(since)
+      ? null
+      : formatDuration(now - since, getLocale())
+  const stopping = stoppingSince !== undefined
+  return (
+    <span className='text-muted-foreground flex items-center gap-2 text-sm'>
+      <HugeiconsIcon
+        icon={stopping ? StopCircleIcon : Loading03Icon}
+        strokeWidth={2}
+        className={cn('size-4 shrink-0', !stopping && 'animate-spin')}
+      />
+      {stopping
+        ? m.stopping_for({ duration: duration ?? '' })
+        : duration === null
+          ? m.working()
+          : m.working_for({ duration })}
+    </span>
   )
 }
 

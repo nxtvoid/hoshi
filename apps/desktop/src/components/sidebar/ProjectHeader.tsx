@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import { ProjectIcon } from './ProjectIcon'
+import { WorktreeSetupDialog } from './WorktreeSetupDialog'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -16,6 +18,7 @@ export function ProjectHeader() {
     state.projects.find((candidate) => candidate.id === state.selectedProjectId)
   )
   const removeProject = useAppStore((state) => state.removeProject)
+  const [editingSetup, setEditingSetup] = useState(false)
   if (!project) return null
 
   return (
@@ -46,7 +49,10 @@ export function ProjectHeader() {
         >
           <HugeiconsIcon icon={MoreHorizontalIcon} strokeWidth={2} />
         </DropdownMenuTrigger>
-        <DropdownMenuContent align='end' className='w-44'>
+        <DropdownMenuContent align='end' className='w-48'>
+          <DropdownMenuItem onClick={() => setEditingSetup(true)}>
+            {m.worktree_setup_menu()}
+          </DropdownMenuItem>
           <DropdownMenuItem
             variant='destructive'
             onClick={() => removeProject(project.id)}
@@ -55,6 +61,12 @@ export function ProjectHeader() {
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      {editingSetup ? (
+        <WorktreeSetupDialog
+          project={project}
+          onClose={() => setEditingSetup(false)}
+        />
+      ) : null}
     </div>
   )
 }

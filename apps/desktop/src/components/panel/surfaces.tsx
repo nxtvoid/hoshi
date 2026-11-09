@@ -1,5 +1,6 @@
 import { m } from '@/paraglide/messages'
 import { DiffSurface } from './DiffSurface'
+import { BrowserSurface } from './BrowserSurface'
 import { useAppStore } from '@/state/app-store'
 import type { ComponentType, ReactNode } from 'react'
 import { usePanelStore } from '@/state/panel-store'
@@ -8,7 +9,8 @@ import { TerminalView } from '@/components/terminal/TerminalView'
 import {
   ComputerTerminal01Icon,
   FileDiffIcon,
-  GitPullRequestIcon
+  GitPullRequestIcon,
+  Globe02Icon
 } from '@hugeicons/core-free-icons'
 import type { Surface, SurfaceKind } from '@/state/panel-surfaces'
 
@@ -57,11 +59,22 @@ export const SURFACES: {
     available: (context) => context.hasPullRequest,
     Title: PullRequestTitle,
     render: (threadId) => <PullRequestSurface threadId={threadId} />
+  },
+  browser: {
+    label: m.surface_browser,
+    icon: Globe02Icon,
+    shortcut: 'B',
+    render: (threadId) => <BrowserSurface threadId={threadId} />
   }
 }
 
 /** Launcher order. */
-export const SURFACE_KINDS: SurfaceKind[] = ['terminal', 'diff', 'pullRequest']
+export const SURFACE_KINDS: SurfaceKind[] = [
+  'terminal',
+  'diff',
+  'pullRequest',
+  'browser'
+]
 
 export function useSurfaceContext(threadId: string): SurfaceContext {
   const hasPullRequest = useAppStore(
@@ -82,6 +95,8 @@ export function renderSurface(threadId: string, surface: Surface): ReactNode {
       return SURFACES.pullRequest.render(threadId, surface)
     case 'terminal':
       return SURFACES.terminal.render(threadId, surface)
+    case 'browser':
+      return SURFACES.browser.render(threadId, surface)
   }
 }
 

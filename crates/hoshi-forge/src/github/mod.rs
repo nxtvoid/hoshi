@@ -1,4 +1,4 @@
-use crate::{Forge, ForgeError, RepositoryRef};
+use crate::{Forge, ForgeError, NewPullRequest, RepositoryRef};
 mod actions;
 mod detail;
 
@@ -338,6 +338,31 @@ impl Forge for GitHub {
                 actions::check_mutation(&text)
             }
         }
+    }
+
+    fn create_pull_request(
+        &self,
+        repository: &RepositoryRef,
+        pull_request: &NewPullRequest,
+    ) -> Result<PullRequest, ForgeError> {
+        #[derive(Deserialize)]
+        struct Created {
+            number: u32,
+        }
+        let path = format!("/repos/{}/{}/pulls", repository.owner, repository.name);
+        let body = json!({
+            "head": pull_request.head,
+            "base": pull_request.base,
+            "title": pull_request.title,
+            "body": pull_request.body,
+            "draft": pull_request.draft,
+            "maintainer_can_modify": true,
+        })
+        .to_string();
+        let text = self.request(Method::Post, &path, Some(&body))?;
+        let created: Created = serde_json::from_str(&text)
+            .map_err(|error| ForgeError::Unexpected(error.to_string()))?;
+        self.pull_request(repository, created.number)
     }
 
     fn reviewer_candidates(

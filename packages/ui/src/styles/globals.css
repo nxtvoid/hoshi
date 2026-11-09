@@ -54,6 +54,7 @@
   --forge-bitbucket-deep: oklch(0.46 0.19 260);
   --favorite: oklch(0.78 0.15 80);
   --link: oklch(0.55 0.17 252);
+  --send: oklch(0.56 0.16 250);
   --pr-open: oklch(0.55 0.15 150);
   --pr-merged: oklch(0.55 0.2 300);
   --diff-added: oklch(0.94 0.06 150);
@@ -88,6 +89,7 @@
   --color-provider-claude: var(--provider-claude);
   --color-favorite: var(--favorite);
   --color-link: var(--link);
+  --color-send: var(--send);
   --color-pr-open: var(--pr-open);
   --color-pr-merged: var(--pr-merged);
   --color-diff-added: var(--diff-added);
@@ -199,6 +201,7 @@
   --forge-bitbucket-deep: oklch(0.46 0.19 260);
   --favorite: oklch(0.83 0.15 85);
   --link: oklch(0.74 0.13 245);
+  --send: oklch(0.74 0.13 245);
   --pr-open: oklch(0.74 0.15 150);
   --pr-merged: oklch(0.72 0.16 300);
   --diff-added: oklch(0.35 0.08 150 / 0.45);

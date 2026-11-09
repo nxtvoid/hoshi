@@ -1,7 +1,7 @@
-use crate::{OutputSink, RunningTurn};
+use crate::OutputSink;
 use hoshi_core::{ProviderOutput, TurnFailure, TurnOutcome};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -9,26 +9,74 @@ use std::thread;
 const STDERR_TAIL_BYTES: usize = 2_000;
 
 /// One agent process running one turn. Dropping it does not stop the process.
+#[derive(Clone)]
 pub struct ProcessTurn {
     child: Arc<Mutex<Child>>,
     pid: u32,
     interrupted: Arc<AtomicBool>,
+    stdin: Stdin,
 }
 
-impl RunningTurn for ProcessTurn {
-    fn interrupt(&self) {
+impl ProcessTurn {
+    pub fn stdin(&self) -> &Stdin {
+        &self.stdin
+    }
+}
+
+impl ProcessTurn {
+    pub fn interrupt(&self) {
         self.interrupted.store(true, Ordering::SeqCst);
         kill_tree(self.pid, &self.child);
     }
 }
 
-/// Spawns `command`, writes `input` to its stdin and closes it, then feeds
-/// each stdout line through `parse` into `sink` on a background thread.
+/// The turn's stdin, open until the turn completes so the agent can be answered mid-turn.
+#[derive(Clone, Default)]
+pub struct Stdin(Arc<Mutex<Option<ChildStdin>>>);
+
+impl Stdin {
+    /// `false` when the process no longer reads.
+    pub fn write_line(&self, line: &str) -> bool {
+        let mut stdin = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(pipe) = stdin.as_mut() else {
+            return false;
+        };
+        let written = pipe
+            .write_all(format!("{line}\n").as_bytes())
+            .and_then(|()| pipe.flush());
+        if written.is_err() {
+            *stdin = None;
+        }
+        written.is_ok()
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    /// An agent reading stream-json exits once its stdin closes.
+    pub fn close(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+/// Spawns `command`, writes `input` to its stdin, then feeds each stdout line through
+/// `parse` into `sink` on a background thread. Stdin stays open until a
+/// `TurnCompleted`, for `parse` and the turn to answer the agent.
 pub fn spawn_turn(
     mut command: Command,
     input: String,
     mut sink: OutputSink,
-    mut parse: impl FnMut(&str) -> Vec<ProviderOutput> + Send + 'static,
+    mut parse: impl FnMut(&str, &Stdin) -> Vec<ProviderOutput> + Send + 'static,
 ) -> Result<ProcessTurn, TurnFailure> {
     command
         .stdin(Stdio::piped())
@@ -41,10 +89,9 @@ pub fn spawn_turn(
     let pid = child.id();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    if let Some(mut stdin) = child.stdin.take() {
-        // A write error means the process already died; the reader reports how.
-        let _ = stdin.write_all(input.as_bytes());
-    }
+    let stdin = Stdin(Arc::new(Mutex::new(child.stdin.take())));
+    // A write error means the process already died; the reader reports how.
+    stdin.write_line(input.trim_end());
     let child = Arc::new(Mutex::new(child));
     let interrupted = Arc::new(AtomicBool::new(false));
 
@@ -59,17 +106,22 @@ pub fn spawn_turn(
 
     let reader_child = Arc::clone(&child);
     let reader_interrupted = Arc::clone(&interrupted);
+    let reader_stdin = stdin.clone();
     thread::spawn(move || {
         let mut completed = false;
         if let Some(stdout) = stdout {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                for output in parse(&line) {
+                for output in parse(&line, &reader_stdin) {
                     completed |= matches!(output, ProviderOutput::TurnCompleted { .. });
                     sink(output);
                 }
+                if completed {
+                    reader_stdin.close();
+                }
             }
         }
+        reader_stdin.close();
         let status = reader_child
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -95,6 +147,7 @@ pub fn spawn_turn(
         child,
         pid,
         interrupted,
+        stdin,
     })
 }
 
@@ -143,7 +196,7 @@ mod tests {
         let sink: OutputSink = Box::new(move |output| {
             let _ = sender.send(output);
         });
-        match spawn_turn(command, String::new(), sink, |_| Vec::new()) {
+        match spawn_turn(command, String::new(), sink, |_, _| Vec::new()) {
             Ok(_turn) => receiver.iter().collect(),
             Err(failure) => vec![ProviderOutput::TurnCompleted {
                 outcome: TurnOutcome::Failed { reason: failure },

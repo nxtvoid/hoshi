@@ -7,4 +7,13 @@ export type ContextUsage = { usedTokens: number,
 /**
  * `None` while the provider has not said how large the window is.
  */
-maxTokens: number | null, };
+maxTokens: number | null, 
+/**
+ * How long the provider keeps the conversation's prompt cached after a model call.
+ */
+cacheTtlSecs: number | null, 
+/**
+ * When that cache runs out, in Unix milliseconds: past it, the next message pays to
+ * read the whole context again, which compacting first avoids.
+ */
+cacheExpiresAt: number | null, };

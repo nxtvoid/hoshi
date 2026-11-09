@@ -1,11 +1,13 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { withoutKeys } from '@/lib/records'
 import { invoke } from '@tauri-apps/api/core'
 import {
   activateTerminal,
   addTerminal,
   closeTerminal,
   NO_DRAWER,
+  showTerminal,
   type TerminalDrawer,
   toggleDrawer
 } from './terminal-drawer'
@@ -22,10 +24,13 @@ type TerminalState = {
   toggleDrawer: (threadId: string) => void
   addTerminal: (threadId: string) => void
   activateTerminal: (threadId: string, terminalId: string) => void
+  /** Opens the drawer on a terminal the engine started, such as a worktree's setup. */
+  showTerminal: (threadId: string, terminalId: string) => void
   /** Stops the terminal's shell too. */
   closeTerminal: (threadId: string, terminalId: string) => void
   requestFocus: (terminalId: string) => void
   clearFocus: () => void
+  forget: (threadIds: string[]) => void
 }
 
 const makeId = () => crypto.randomUUID()
@@ -61,12 +66,19 @@ export const useTerminalStore = create<TerminalState>()(
           changeDrawer(threadId, (drawer) =>
             activateTerminal(drawer, terminalId)
           ),
+        showTerminal: (threadId, terminalId) =>
+          changeDrawer(threadId, (drawer) => showTerminal(drawer, terminalId)),
         closeTerminal: (threadId, terminalId) => {
           void invoke('close_terminal', { terminalId })
           changeDrawer(threadId, (drawer) => closeTerminal(drawer, terminalId))
         },
         requestFocus: (terminalId) => set({ pendingFocus: terminalId }),
-        clearFocus: () => set({ pendingFocus: null })
+        clearFocus: () => set({ pendingFocus: null }),
+        forget: (threadIds) =>
+          set((state) => {
+            const drawers = withoutKeys(state.drawers, threadIds)
+            return drawers === state.drawers ? state : { drawers }
+          })
       }
     },
     {

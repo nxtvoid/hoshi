@@ -1,8 +1,10 @@
 use hoshi_core::{
-    AppSettings, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor, FileDiff,
-    FolderListing, ForgeAccount, ForgeKind, MessageAttachment, ProviderModels, ProviderVersion,
-    PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository,
-    SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem, UsageLimits, WorkspaceEntry,
+    AppSettings, BrowserInput, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor,
+    FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
+    MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderVersion, PullRequest,
+    PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand,
+    Snapshot, TerminalAttach, TerminalEvent, ThreadItem, TranscriptPage, UsageLimits,
+    WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
@@ -24,10 +26,15 @@ const CONTEXT_USAGE_CHANNEL: &str = "hoshi://context-usage";
 const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 /// The provider's CLI against its latest release, and how its update goes.
 const PROVIDER_VERSION_CHANNEL: &str = "hoshi://provider-version";
+/// The step a running commit, push or pull request action reached.
+const GIT_ACTION_CHANNEL: &str = "hoshi://git-action";
+/// What a thread's browser page painted, while the panel shows it.
+const BROWSER_FRAME_CHANNEL: &str = "hoshi://browser-frame";
+/// Where a thread's browser page is, and what the agent just did on it.
+const BROWSER_PAGE_CHANNEL: &str = "hoshi://browser-page";
+const WORKTREE_SETUP_CHANNEL: &str = "hoshi://worktree-setup";
 
-pub fn init(app: &App) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = app.path().app_data_dir()?;
-    std::fs::create_dir_all(&data_dir)?;
+pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
     let notify: Notify = Arc::new(move |notification| {
         let result = match notification {
@@ -42,12 +49,16 @@ pub fn init(app: &App) -> Result<(), Box<dyn std::error::Error>> {
             Notification::ProviderVersion(version) => {
                 handle.emit(PROVIDER_VERSION_CHANNEL, version)
             }
+            Notification::GitActionProgress(progress) => handle.emit(GIT_ACTION_CHANNEL, progress),
+            Notification::BrowserFrame(frame) => handle.emit(BROWSER_FRAME_CHANNEL, frame),
+            Notification::BrowserPage(page) => handle.emit(BROWSER_PAGE_CHANNEL, page),
+            Notification::WorktreeSetup(run) => handle.emit(WORKTREE_SETUP_CHANNEL, run),
         };
         if let Err(error) = result {
             eprintln!("hoshi: failed to emit to the UI: {error}");
         }
     });
-    let engine = Engine::open(&data_dir, notify)?;
+    let engine = Engine::open(data_dir, notify)?;
     let settings = crate::settings::load(&crate::settings::settings_path(app.handle())?);
     engine.set_adapter(adapter_for(&settings));
     engine.set_thread_titles(settings.thread_titles.clone());
@@ -69,12 +80,24 @@ pub fn get_snapshot(engine: State<'_, Engine>) -> Snapshot {
     engine.snapshot()
 }
 
+/// The latest turns before item `before`, or the last ones when it is `None`.
 #[tauri::command(async)]
 pub fn get_thread_items(
     engine: State<'_, Engine>,
     thread_id: String,
-) -> Result<Vec<ThreadItem>, CommandError> {
-    engine.thread_items(&thread_id)
+    before: Option<String>,
+) -> Result<TranscriptPage, CommandError> {
+    engine.transcript(&thread_id, before.as_deref())
+}
+
+/// One transcript item with what `get_thread_items` leaves out, such as a diff.
+#[tauri::command(async)]
+pub fn get_thread_item(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    item_id: String,
+) -> Result<Option<ThreadItem>, CommandError> {
+    engine.thread_item(&thread_id, &item_id)
 }
 
 #[tauri::command(async)]
@@ -84,6 +107,18 @@ pub fn dispatch(engine: State<'_, Engine>, command: Command) -> Result<(), Comma
             eprintln!("hoshi: dispatch failed: {detail}");
         }
     })
+}
+
+/// Hands a delegated task's answer back now, as it stands.
+#[tauri::command(async)]
+pub fn send_task_answer(engine: State<'_, Engine>, thread_id: String) {
+    engine.send_task_answer(&thread_id);
+}
+
+/// Cancels a delegated task: it stops if it runs, and its answer never goes back.
+#[tauri::command(async)]
+pub fn cancel_task(engine: State<'_, Engine>, thread_id: String) {
+    engine.cancel_task(&thread_id);
 }
 
 /// `None` when the project has no icon among its files.
@@ -121,6 +156,12 @@ pub fn get_provider_version(engine: State<'_, Engine>) -> Option<ProviderVersion
 #[tauri::command(async)]
 pub fn check_provider_version(engine: State<'_, Engine>) -> Option<ProviderVersion> {
     engine.check_provider_version()
+}
+
+/// Runs the CLI, which takes a few seconds.
+#[tauri::command(async)]
+pub fn get_provider_account_status(engine: State<'_, Engine>) -> ProviderAccountStatus {
+    engine.provider_account_status()
 }
 
 /// Returns at once; progress arrives on `hoshi://provider-version`.
@@ -430,6 +471,159 @@ pub fn get_thread_file_diff(
     file: DiffFile,
 ) -> Result<FileDiff, CommandError> {
     engine.thread_file_diff(&thread_id, scope, &file)
+}
+
+/// Compacts the thread's conversation first, then sends the message.
+#[tauri::command(async)]
+pub fn compact_then_send(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    message_id: String,
+    text: String,
+    attachments: Vec<MessageAttachment>,
+) -> Result<(), CommandError> {
+    engine.compact_then_send(&thread_id, &message_id, text, attachments)
+}
+
+#[tauri::command(async)]
+pub fn browser_view(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    viewing: bool,
+) -> Result<(), CommandError> {
+    engine.browser_view(&thread_id, viewing)
+}
+
+#[tauri::command(async)]
+pub fn browser_open(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    url: String,
+) -> Result<(), CommandError> {
+    engine.browser_open(&thread_id, &url)
+}
+
+/// Back (`-1`), forward (`1`) or reload (`0`).
+#[tauri::command(async)]
+pub fn browser_go(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    delta: i32,
+) -> Result<(), CommandError> {
+    engine.browser_go(&thread_id, delta)
+}
+
+#[tauri::command(async)]
+pub fn browser_resize(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    width: u32,
+    height: u32,
+) -> Result<(), CommandError> {
+    engine.browser_resize(&thread_id, width, height)
+}
+
+#[tauri::command(async)]
+pub fn browser_fit(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    width: u32,
+    height: u32,
+) -> Result<(), CommandError> {
+    engine.browser_fit(&thread_id, width, height)
+}
+
+#[tauri::command(async)]
+pub fn browser_input(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    input: BrowserInput,
+) -> Result<(), CommandError> {
+    engine.browser_input(&thread_id, &input)
+}
+
+#[tauri::command(async)]
+pub fn browser_close(engine: State<'_, Engine>, thread_id: String) {
+    engine.browser_close(&thread_id);
+}
+
+#[tauri::command]
+pub fn worktree_setups(engine: State<'_, Engine>) -> Vec<hoshi_core::WorktreeSetupRun> {
+    engine.worktree_setups()
+}
+
+#[tauri::command(async)]
+pub fn rerun_worktree_setup(
+    engine: State<'_, Engine>,
+    thread_id: String,
+) -> Result<(), CommandError> {
+    engine.rerun_worktree_setup(&thread_id)
+}
+
+#[tauri::command(async)]
+pub fn skip_worktree_setup(
+    engine: State<'_, Engine>,
+    thread_id: String,
+) -> Result<(), CommandError> {
+    engine.skip_worktree_setup(&thread_id)
+}
+
+/// The user's answer to an agent's secret request; `None` declines. The value only reaches
+/// a file the agent's commands read.
+#[tauri::command(async)]
+pub fn answer_secret_request(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    request_id: String,
+    secret: Option<String>,
+) -> Result<(), CommandError> {
+    engine.answer_secret_request(&thread_id, &request_id, secret.as_deref())
+}
+
+#[tauri::command(async)]
+pub fn get_git_status(
+    engine: State<'_, Engine>,
+    thread_id: String,
+) -> Result<GitStatus, CommandError> {
+    engine.git_status(&thread_id)
+}
+
+#[tauri::command(async)]
+pub fn run_git_action(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    request: GitActionRequest,
+) -> Result<GitActionResult, CommandError> {
+    engine.run_git_action(&thread_id, &request)
+}
+
+#[tauri::command(async)]
+pub fn rewind_thread(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    message_id: String,
+    revert_files: bool,
+) -> Result<(), CommandError> {
+    engine.rewind_thread(&thread_id, &message_id, revert_files)
+}
+
+#[tauri::command(async)]
+pub fn get_turn_diff_files(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    turn_id: String,
+) -> Result<Vec<DiffFile>, CommandError> {
+    engine.turn_diff_files(&thread_id, &turn_id)
+}
+
+#[tauri::command(async)]
+pub fn get_turn_file_diff(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    turn_id: String,
+    file: DiffFile,
+) -> Result<FileDiff, CommandError> {
+    engine.turn_file_diff(&thread_id, &turn_id, &file)
 }
 
 /// Lets `AppHandle` users reach the engine without a `State` parameter.

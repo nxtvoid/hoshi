@@ -1,7 +1,7 @@
 import { cn } from '@hoshi/utils'
 import { DiffView } from './DiffView'
 import { m } from '@/paraglide/messages'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { FileIcon } from '@/components/files/FileIcon'
 import type { DiffFile } from '@/bindings/DiffFile'
@@ -27,12 +27,15 @@ type DiffState =
 export function ChangedFiles({
   files,
   loadDiff,
-  reloadKey
+  reloadKey,
+  focusPath
 }: {
   files: DiffFile[]
   loadDiff: LoadFileDiff
   /** A change reloads the diffs that are open. */
   reloadKey: string
+  /** Opened and scrolled into view at first. */
+  focusPath?: string
 }) {
   return (
     <ul className='flex flex-col'>
@@ -42,6 +45,7 @@ export function ChangedFiles({
           file={file}
           loadDiff={loadDiff}
           reloadKey={reloadKey}
+          focused={file.path === focusPath}
         />
       ))}
     </ul>
@@ -61,19 +65,28 @@ export function totalChanges(files: DiffFile[]) {
 function FileEntry({
   file,
   loadDiff,
-  reloadKey
+  reloadKey,
+  focused
 }: {
   file: DiffFile
   loadDiff: LoadFileDiff
   reloadKey: string
+  focused: boolean
 }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(focused)
+  const entry = useRef<HTMLLIElement>(null)
+  useEffect(() => {
+    if (focused) entry.current?.scrollIntoView({ block: 'start' })
+  }, [focused])
   const slash = file.path.lastIndexOf('/')
   const folder = slash === -1 ? '' : file.path.slice(0, slash + 1)
   const name = file.path.slice(slash + 1)
 
   return (
-    <li className='border-border/60 border-b [content-visibility:auto]'>
+    <li
+      ref={entry}
+      className='border-border/60 border-b [content-visibility:auto]'
+    >
       <button
         type='button'
         aria-expanded={open}
@@ -123,16 +136,19 @@ function FileDiffBlock({
   reloadKey: string
 }) {
   const [diff, setDiff] = useState<DiffState>({ kind: 'loading' })
+  const fileRef = useRef(file)
+  fileRef.current = file
+  const fileKey = `${file.path}|${file.oldPath}|${file.status}|${file.additions}|${file.deletions}`
 
   useEffect(() => {
     let current = true
-    loadDiff(file)
+    loadDiff(fileRef.current)
       .then((value) => current && setDiff({ kind: 'ready', value }))
       .catch(() => current && setDiff({ kind: 'failed' }))
     return () => {
       current = false
     }
-  }, [loadDiff, file, reloadKey])
+  }, [loadDiff, fileKey, reloadKey])
 
   if (diff.kind === 'loading') return null
   if (diff.kind === 'failed')

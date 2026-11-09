@@ -3,7 +3,7 @@ resolver = "3"
 members = ["apps/desktop/src-tauri", "crates/*"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -26,6 +26,9 @@ ignore = "0.4"
 portable-pty = "0.9"
 notify = "8"
 ureq = "3"
+tiny_http = "0.12"
+tungstenite = { version = "0.27", default-features = false, features = ["handshake"] }
+getrandom = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 tauri-plugin-dialog = "2"

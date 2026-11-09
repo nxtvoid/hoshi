@@ -19,15 +19,31 @@ import { useSidebarStore } from './sidebar-store'
 import { loadedSettings } from './settings-store'
 import { useLastSelectionStore } from './last-selection-store'
 import { useTranscriptStore } from './transcript-store'
+import { useSubagentStore } from './subagent-store'
+import { useStoppingStore } from './stopping-store'
 import { usePullRequestStore } from './pull-request-store'
-import { useDraftStore } from './draft-store'
+import { draftKey, useDraftStore } from './draft-store'
+import { usePanelStore } from './panel-store'
+import { useCleanupStore } from './cleanup-store'
+import { useDetailsStore } from './details-store'
+import { useTerminalStore } from './terminal-store'
+import { useRequestStore } from './request-store'
 import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
+import { useGitActionStore } from './git-action-store'
+import { useWorktreeSetupStore } from './worktree-setup-store'
+import type { WorktreeSetupRun } from '@/bindings/WorktreeSetupRun'
+import { COMPACT_COMMAND } from '@/lib/compaction'
+import { useBrowserStore } from './browser-store'
+import type { BrowserPage } from '@/bindings/BrowserPage'
+import type { BrowserFrame } from '@/bindings/BrowserFrame'
+import type { GitActionProgress } from '@/bindings/GitActionProgress'
 import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
 import type { UsageLimits } from '@/bindings/UsageLimits'
 import type { ContextUsage } from '@/bindings/ContextUsage'
+import type { RequestResponse } from '@/bindings/RequestResponse'
 import type { CommandError } from '@/bindings/CommandError'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
 import type { EventEnvelope } from '@/bindings/EventEnvelope'
@@ -35,7 +51,12 @@ import type { ThreadPullRequest } from '@/bindings/ThreadPullRequest'
 import type { ThreadContextUsage } from '@/bindings/ThreadContextUsage'
 import type { ThreadPullRequestDetail } from '@/bindings/ThreadPullRequestDetail'
 import { inChat, scopeProjectId } from './scope'
-import { applyEvent, folderName, samePath } from './orchestration'
+import {
+  applyEvent,
+  folderName,
+  removedThreadIds,
+  samePath
+} from './orchestration'
 
 type AppState = {
   ready: boolean
@@ -83,11 +104,23 @@ type AppState = {
   archiveThread: (threadId: string, archived: boolean) => Promise<void>
   pinThread: (threadId: string, pinned: boolean) => Promise<void>
   /** Sends to the selected thread, creating one first when none is selected. */
+  /** `compactFirst` compacts the thread's conversation, then sends the message. */
   sendMessage: (
     text: string,
-    attachments?: MessageAttachment[]
+    attachments?: MessageAttachment[],
+    compactFirst?: boolean
   ) => Promise<boolean>
+  /** Compacts the selected thread's conversation into a summary. */
+  compactContext: () => Promise<void>
   interruptTurn: () => Promise<void>
+  /** Stops one subagent of the selected thread's turn; `toolUseId` is the call that started it. */
+  stopSubagent: (toolUseId: string) => Promise<void>
+  /** Answers what a thread's agent asked; `false` when it was refused. */
+  respondToRequest: (
+    threadId: string,
+    requestId: string,
+    response: RequestResponse
+  ) => Promise<boolean>
   /** Sets the selected thread's model and remembers it for new threads. */
   setModel: (choice: ModelChoice) => Promise<void>
   setAccess: (choice: AccessChoice) => Promise<void>
@@ -270,17 +303,27 @@ export const useAppStore = create<AppState>()((set, get) => ({
   pinThread: async (threadId, pinned) => {
     await dispatch({ type: 'threadPin', threadId, pinned }).catch(reportError)
   },
-  sendMessage: async (text, attachments = []) => {
+  sendMessage: async (text, attachments = [], compactFirst = false) => {
     const threadId = get().selectedThreadId ?? (await get().createThread())
     if (!threadId) return false
+    const messageId = crypto.randomUUID()
     try {
-      await dispatch({
-        type: 'messageSend',
-        threadId,
-        messageId: crypto.randomUUID(),
-        text,
-        attachments
-      })
+      if (compactFirst) {
+        await invoke('compact_then_send', {
+          threadId,
+          messageId,
+          text,
+          attachments
+        })
+      } else {
+        await dispatch({
+          type: 'messageSend',
+          threadId,
+          messageId,
+          text,
+          attachments
+        })
+      }
       set({ composerError: null })
       return true
     } catch (error) {
@@ -305,19 +348,58 @@ export const useAppStore = create<AppState>()((set, get) => ({
       reportError
     )
   },
+  compactContext: async () => {
+    const threadId = get().selectedThreadId
+    if (!threadId) return
+    await dispatch({
+      type: 'messageSend',
+      threadId,
+      messageId: crypto.randomUUID(),
+      text: COMPACT_COMMAND,
+      attachments: []
+    }).catch(reportError)
+  },
   interruptTurn: async () => {
     const threadId = get().selectedThreadId
     if (!threadId) return
-    await dispatch({ type: 'turnInterrupt', threadId }).catch(reportError)
+    useStoppingStore.getState().start(threadId)
+    await dispatch({ type: 'turnInterrupt', threadId }).catch((error) => {
+      useStoppingStore.getState().end(threadId)
+      reportError(error)
+    })
+  },
+  stopSubagent: async (toolUseId) => {
+    const threadId = get().selectedThreadId
+    if (!threadId) return
+    await dispatch({ type: 'subagentStop', threadId, toolUseId }).catch(
+      reportError
+    )
+  },
+  respondToRequest: async (threadId, requestId, response) => {
+    try {
+      await dispatch({ type: 'requestRespond', threadId, requestId, response })
+      set({ composerError: null })
+      return true
+    } catch (error) {
+      reportError(error)
+      set({ composerError: error as CommandError })
+      return false
+    }
   }
 }))
 
 function receive({ sequence, event }: EventEnvelope) {
   if (sequence <= useAppStore.getState().sequence) return
   useTranscriptStore.getState().applyEvent(event)
+  useSubagentStore.getState().applyEvent(event)
+  useRequestStore.getState().applyEvent(event)
+  if (event.type === 'turnCompleted' || event.type === 'threadDeleted') {
+    useStoppingStore.getState().end(event.threadId)
+  }
   if (event.type === 'threadDeleted') {
     useDraftStore.getState().save(event.threadId, null)
   }
+  const threadsBefore = useAppStore.getState().threads
   useAppStore.setState((state) => {
     const next = applyEvent(state, event)
     const selectedProjectId = next.projects.some(
@@ -332,10 +414,32 @@ function receive({ sequence, event }: EventEnvelope) {
       : null
     return { ...next, sequence, selectedProjectId, selectedThreadId }
   })
+  if (event.type === 'threadDeleted' || event.type === 'projectRemoved') {
+    const removed = removedThreadIds(
+      threadsBefore,
+      useAppStore.getState().threads
+    )
+    forgetThreads(
+      removed,
+      event.type === 'projectRemoved'
+        ? [...removed, draftKey(null, event.projectId, false)]
+        : removed
+    )
+  }
   const { selectedThreadId } = useAppStore.getState()
   if (selectedThreadId !== useTranscriptStore.getState().threadId) {
     void useTranscriptStore.getState().load(selectedThreadId)
   }
+}
+
+/** Drops what the app kept on this machine for threads that are gone. */
+function forgetThreads(threadIds: string[], drafts: string[]) {
+  useDraftStore.getState().forget(drafts)
+  if (threadIds.length === 0) return
+  usePanelStore.getState().forget(threadIds)
+  useTerminalStore.getState().forget(threadIds)
+  useDetailsStore.getState().forget(threadIds)
+  useCleanupStore.getState().forget(threadIds)
 }
 
 function receivePullRequest({ threadId, pullRequest }: ThreadPullRequest) {
@@ -387,6 +491,22 @@ async function startSync() {
     'hoshi://provider-version',
     (message) => useProviderUpdateStore.getState().receive(message.payload)
   )
+  const unlistenBrowserFrames = await listen<BrowserFrame>(
+    'hoshi://browser-frame',
+    (message) => useBrowserStore.getState().receiveFrame(message.payload)
+  )
+  const unlistenBrowserPages = await listen<BrowserPage>(
+    'hoshi://browser-page',
+    (message) => useBrowserStore.getState().receivePage(message.payload)
+  )
+  const unlistenWorktreeSetups = await listen<WorktreeSetupRun>(
+    'hoshi://worktree-setup',
+    (message) => useWorktreeSetupStore.getState().receive(message.payload)
+  )
+  const unlistenGitActions = await listen<GitActionProgress>(
+    'hoshi://git-action',
+    (message) => useGitActionStore.getState().receive(message.payload)
+  )
   const stopAppUpdates = watchAppUpdates()
   const unlistenStream = await listen<StreamDelta>(
     'hoshi://stream',
@@ -400,8 +520,13 @@ async function startSync() {
     unlistenContextUsages()
     unlistenUsageLimits()
     unlistenProviderVersion()
+    unlistenGitActions()
+    unlistenBrowserFrames()
+    unlistenBrowserPages()
+    unlistenWorktreeSetups()
     stopAppUpdates()
   })
+  void useWorktreeSetupStore.getState().load()
   const snapshot = await invoke<Snapshot>('get_snapshot')
   const settings = await loadedSettings()
   const start = startupSelection(
@@ -411,6 +536,9 @@ async function startSync() {
     snapshot.threads
   )
   useSidebarStore.getState().setView(start.sidebarView)
+  useRequestStore
+    .getState()
+    .seed(snapshot.pendingRequests, snapshot.pendingTasks)
   useAppStore.setState({
     ready: true,
     sequence: snapshot.sequence,

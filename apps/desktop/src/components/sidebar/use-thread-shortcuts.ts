@@ -2,27 +2,27 @@ import { useEffect } from 'react'
 import { useAppStore } from '@/state/app-store'
 import { useSidebarStore } from '@/state/sidebar-store'
 import { stepThread, visibleOrder } from '@/state/thread-sections'
-import { useAttentionThreads, useSidebarSections } from './use-sidebar-sections'
+import {
+  currentAttentionThreads,
+  currentSidebarSections
+} from './use-sidebar-sections'
 
 /**
  * Alt+↑/↓ moves through the threads the sidebar shows; with Shift it jumps between the
  * threads that need the user, in every project.
  */
 export function useThreadShortcuts() {
-  const sections = useSidebarSections()
-  const attention = useAttentionThreads()
-  const searching = useAppStore((state) => state.search !== '')
-
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey) return
       if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-      const { selectedThreadId, selectThread } = useAppStore.getState()
+      const { selectedThreadId, selectThread, search } = useAppStore.getState()
       const { collapsed } = useSidebarStore.getState()
+      const searching = search !== ''
       const order = event.shiftKey
-        ? attention.map((thread) => thread.id)
+        ? currentAttentionThreads().map((thread) => thread.id)
         : visibleOrder(
-            sections,
+            currentSidebarSections(),
             (section) => searching || collapsed[section] !== true,
             selectedThreadId
           )
@@ -37,5 +37,5 @@ export function useThreadShortcuts() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [sections, attention, searching])
+  }, [])
 }

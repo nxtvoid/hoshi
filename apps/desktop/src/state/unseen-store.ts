@@ -1,8 +1,11 @@
 import { useEffect } from 'react'
 import { create } from 'zustand'
+import { withoutKeys } from '@/lib/records'
 import { persist } from 'zustand/middleware'
 import { useAppStore } from './app-store'
 import { finishedTurns } from './thread-signals'
+import { unlistedTaskIds } from './thread-sections'
+import { removedThreadIds } from './orchestration'
 
 type UnseenState = {
   /** Threads whose last turn finished while the user looked elsewhere. */
@@ -14,6 +17,7 @@ type UnseenState = {
   held: string | null
   mark: (threadIds: string[]) => void
   see: (threadId: string) => void
+  forget: (threadIds: string[]) => void
 }
 
 export const useUnseenStore = create<UnseenState>()(
@@ -35,6 +39,11 @@ export const useUnseenStore = create<UnseenState>()(
           if (!state.unseen[threadId]) return { held }
           const { [threadId]: _, ...unseen } = state.unseen
           return { unseen, held }
+        }),
+      forget: (threadIds) =>
+        set((state) => {
+          const unseen = withoutKeys(state.unseen, threadIds)
+          return unseen === state.unseen ? state : { unseen }
         })
     }),
     {
@@ -44,31 +53,45 @@ export const useUnseenStore = create<UnseenState>()(
   )
 )
 
+/** The open thread shows: the window has focus and no overlay, such as settings, covers it. */
+function onScreen() {
+  return document.hasFocus() && window.location.pathname === '/'
+}
+
 /**
  * Marks a turn that ends while its thread isn't on screen, and unmarks a thread once the
- * user opens it, or comes back to the window with it open.
+ * user opens it, or comes back to the window with it open. Returns how to stop.
  */
+export function trackUnseen(): () => void {
+  const { mark, see, forget } = useUnseenStore.getState()
+  const seeSelected = () => {
+    const { selectedThreadId } = useAppStore.getState()
+    if (selectedThreadId && onScreen()) see(selectedThreadId)
+  }
+  const unsubscribe = useAppStore.subscribe((state, previous) => {
+    if (state.threads !== previous.threads) {
+      const watched = onScreen() ? state.selectedThreadId : null
+      const unlisted = new Set(unlistedTaskIds(state.threads))
+      const finished = finishedTurns(previous.threads, state.threads).filter(
+        (id) => id !== watched && !unlisted.has(id)
+      )
+      if (finished.length > 0) mark(finished)
+      const { unseen } = useUnseenStore.getState()
+      const gone = [
+        ...removedThreadIds(previous.threads, state.threads),
+        ...[...unlisted].filter((id) => unseen[id])
+      ]
+      if (gone.length > 0) forget(gone)
+    }
+    if (state.selectedThreadId !== previous.selectedThreadId) seeSelected()
+  })
+  window.addEventListener('focus', seeSelected)
+  return () => {
+    unsubscribe()
+    window.removeEventListener('focus', seeSelected)
+  }
+}
+
 export function useUnseenTracking() {
-  useEffect(() => {
-    const { mark, see } = useUnseenStore.getState()
-    const seeSelected = () => {
-      const { selectedThreadId } = useAppStore.getState()
-      if (selectedThreadId && document.hasFocus()) see(selectedThreadId)
-    }
-    const unsubscribe = useAppStore.subscribe((state, previous) => {
-      if (state.threads !== previous.threads) {
-        const watched = document.hasFocus() ? state.selectedThreadId : null
-        const finished = finishedTurns(previous.threads, state.threads).filter(
-          (id) => id !== watched
-        )
-        if (finished.length > 0) mark(finished)
-      }
-      if (state.selectedThreadId !== previous.selectedThreadId) seeSelected()
-    })
-    window.addEventListener('focus', seeSelected)
-    return () => {
-      unsubscribe()
-      window.removeEventListener('focus', seeSelected)
-    }
-  }, [])
+  useEffect(() => trackUnseen(), [])
 }

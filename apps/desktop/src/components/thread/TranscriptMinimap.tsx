@@ -49,6 +49,7 @@ export function TranscriptMinimap({
   onJump: (id: string) => void
 }) {
   const items = useMemo(() => minimapItems(rows), [rows])
+  const idsKey = items.map((item) => item.id).join(' ')
   const [active, setActive] = useState<number | null>(null)
   const [current, setCurrent] = useState<number | null>(null)
   const [inView, setInView] = useState<boolean[]>([])
@@ -57,21 +58,23 @@ export function TranscriptMinimap({
   useEffect(() => {
     const scroll = scrollRef.current
     const list = listRef.current
-    if (!scroll || !list || items.length < MINIMAP_MIN_ITEMS) return
+    const ids = idsKey.split(' ')
+    if (!scroll || !list || ids.length < MINIMAP_MIN_ITEMS) return
     let frame: number | null = null
     const measure = () => {
       frame = null
       const view = scroll.getBoundingClientRect()
-      const bounds = items.map(({ id }) => {
+      const bounds = ids.map((id) => {
         const element = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`)
         const rect = element?.getBoundingClientRect()
         return rect
           ? { top: rect.top, bottom: rect.bottom }
           : { top: Number.NaN, bottom: Number.NaN }
       })
-      setInView(
-        bounds.map(({ top, bottom }) => bottom > view.top && top < view.bottom)
+      const seen = bounds.map(
+        ({ top, bottom }) => bottom > view.top && top < view.bottom
       )
+      setInView((previous) => (sameFlags(previous, seen) ? previous : seen))
       setCurrent(minimapCurrentIndex(bounds, view.top, view.bottom))
       setFits((scroll.clientWidth - list.offsetWidth) / 2 >= MIN_GUTTER_PX)
     }
@@ -88,7 +91,7 @@ export function TranscriptMinimap({
       scroll.removeEventListener('scroll', schedule)
       observer.disconnect()
     }
-  }, [items, scrollRef, listRef])
+  }, [idsKey, scrollRef, listRef])
 
   if (items.length < MINIMAP_MIN_ITEMS) return null
 
@@ -203,6 +206,10 @@ export function TranscriptMinimap({
       </div>
     </div>
   )
+}
+
+function sameFlags(a: boolean[], b: boolean[]) {
+  return a.length === b.length && a.every((flag, index) => flag === b[index])
 }
 
 /**

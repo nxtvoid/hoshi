@@ -2,20 +2,25 @@
 //! translates its native protocol into provider-neutral `ProviderOutput`.
 
 mod claude;
+mod claude_account;
 mod claude_commands;
 mod claude_control;
 mod claude_install;
 mod claude_models;
+mod claude_output;
 mod claude_prompt;
+mod claude_requests;
 mod claude_titles;
+mod claude_tools;
 mod claude_usage;
+mod claude_writing;
 mod process;
 mod updater;
 
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
 use hoshi_core::{
-    AccessMode, Effort, MessageAttachment, ProviderModels, ProviderOutput, SlashCommand,
-    TurnFailure, UsageLimits,
+    AccessMode, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderOutput,
+    RequestResponse, SlashCommand, TurnFailure, UsageLimits,
 };
 use std::path::{Path, PathBuf};
 pub use updater::{UpdateFailure, Updater, run as run_update};
@@ -26,6 +31,8 @@ pub struct TurnRequest {
     pub prompt: String,
     pub attachments: Vec<TurnAttachment>,
     pub resume_session_id: Option<String>,
+    /// Resumes the session after this message of it, leaving out the rest, as a rewind asks.
+    pub resume_session_at: Option<String>,
     /// Overrides the adapter's default model.
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -33,7 +40,22 @@ pub struct TurnRequest {
     pub ultracode: bool,
     pub access_mode: AccessMode,
     pub plan_mode: bool,
+    /// hoshi's own MCP server for the agent, whose tools it may call without asking.
+    pub mcp: Option<McpServer>,
+    /// Added to the agent's system prompt.
+    pub instructions: Option<String>,
 }
+
+/// An MCP server reached over HTTP.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServer {
+    pub url: String,
+    /// The `Authorization` header that says which thread calls.
+    pub authorization: String,
+}
+
+/// The name agents know hoshi's MCP server by; its tools are `mcp__hoshi__<tool>`.
+pub const MCP_SERVER_NAME: &str = "hoshi";
 
 /// Something the message carries besides its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +79,50 @@ pub struct TitleRequest {
     pub model: Option<String>,
     /// The user's own guidance for titles.
     pub instructions: String,
+}
+
+/// What a commit message is written from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMessageRequest {
+    pub branch: String,
+    /// `git diff --cached --name-status` of what the commit holds.
+    pub files: String,
+    pub patch: String,
+    /// The repository's latest commit subjects, newest first: the style to follow.
+    pub recent_subjects: Vec<String>,
+    /// Also name a branch for the change, as when it leaves the default branch.
+    pub wants_branch: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitMessage {
+    pub subject: String,
+    /// Empty when the subject says it all.
+    pub body: String,
+    /// Asked for with [`CommitMessageRequest::wants_branch`]; a name without prefix.
+    pub branch: Option<String>,
+}
+
+/// What a pull request's title and description are written from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestTextRequest {
+    pub base: String,
+    pub head: String,
+    /// `git log --oneline base..head`.
+    pub commits: String,
+    /// `git diff --stat base...head`.
+    pub stat: String,
+    pub patch: String,
+    /// The repository's pull request template, to fill in.
+    pub template: Option<String>,
+    pub recent_subjects: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequestText {
+    pub title: String,
+    /// Markdown.
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +176,12 @@ pub trait ProviderAdapter: Send + Sync {
     /// Reads the CLI's version again next time, after an update replaced it.
     fn forget_version(&self) {}
 
+    /// Whether the CLI is installed and signed in. Runs the CLI, so it can take a few
+    /// seconds; `Unknown` when it can't tell.
+    fn account_status(&self) -> ProviderAccountStatus {
+        ProviderAccountStatus::Unknown
+    }
+
     /// What a prompt can start with in `cwd`, which may add its own; `None` when
     /// they can't be read. Can run the CLI.
     fn slash_commands(&self, _cwd: &Path) -> Option<Vec<SlashCommand>> {
@@ -119,6 +191,16 @@ pub trait ProviderAdapter: Send + Sync {
     /// Names a thread. `None` when the provider can't. Runs the CLI, so it takes a
     /// few seconds.
     fn generate_title(&self, _request: &TitleRequest) -> Option<GeneratedTitle> {
+        None
+    }
+
+    /// Writes a commit message for the staged change. `None` when the provider can't.
+    fn write_commit_message(&self, _request: &CommitMessageRequest) -> Option<CommitMessage> {
+        None
+    }
+
+    /// Writes a pull request's title and description. `None` when the provider can't.
+    fn write_pull_request(&self, _request: &PullRequestTextRequest) -> Option<PullRequestText> {
         None
     }
 
@@ -132,6 +214,20 @@ pub trait ProviderAdapter: Send + Sync {
 pub trait RunningTurn: Send {
     /// Stops the turn. The sink still receives a final `TurnCompleted`.
     fn interrupt(&self);
+
+    /// Answers a request the turn reported with `ProviderOutput::RequestOpened`. Ignored
+    /// once the agent no longer waits for it.
+    fn respond(&self, request_id: &str, response: &RequestResponse);
+
+    /// Stops the subagent that call `tool_use_id` started; the turn goes on. Ignored when it
+    /// already ended or the provider can't stop one alone.
+    fn stop_subagent(&self, _tool_use_id: &str) {}
+
+    /// Gives the running turn another message, which the agent reads at its next step.
+    /// `false` when the turn is ending and can't take it: it then needs a turn of its own.
+    fn steer(&self, _message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
+        false
+    }
 }
 
 /// Truncates long tool inputs and outputs so a transcript stays light.

@@ -262,7 +262,9 @@ export const ThreadRow = memo(function ThreadRow({
                 {m.clean_up_thread()}
               </ContextMenuItem>
             ) : null}
-            {!thread.worktreePath || thread.worktreeReleased ? null : (
+            {!thread.worktreePath ||
+            thread.worktreeReleased ||
+            thread.worktreeAdopted ? null : (
               <ContextMenuItem
                 onClick={() => void runCleanupWithDialog('release', thread.id)}
               >

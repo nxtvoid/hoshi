@@ -24,6 +24,7 @@ const thread = (id: string, changes: Partial<Thread> = {}): Thread => ({
   archived: false,
   pinned: false,
   worktreeReleased: false,
+  worktreeAdopted: false,
   createdAt: '2026-11-01T00:00:00.000Z',
   updatedAt: '2026-11-01T00:00:00.000Z',
   ...changes
@@ -68,6 +69,24 @@ describe('projectSignal', () => {
       thread('b', { archived: true, status: 'waitingForInput' })
     ]
     expect(projectSignal(threads, 'p', {})).toBeNull()
+  })
+
+  test('a finished task the sidebar does not list leaves no mark', () => {
+    const threads = [
+      thread('parent'),
+      thread('task', { parentThreadId: 'parent' }),
+      thread('orphan', { parentThreadId: 'gone' })
+    ]
+    expect(projectSignal(threads, 'p', { task: true })).toBeNull()
+    expect(projectSignal(threads, 'p', { orphan: true })).toBe('done')
+  })
+
+  test('a working task lights its project through its parent', () => {
+    const threads = [
+      thread('parent'),
+      thread('task', { parentThreadId: 'parent', status: 'working' })
+    ]
+    expect(projectSignal(threads, 'p', {})).toBe('working')
   })
 })
 
