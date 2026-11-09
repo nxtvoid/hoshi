@@ -348,3 +348,30 @@ export function readableOn(
   )
   return rgbToColor(oklchToRgb(solved))
 }
+
+export type Hsv = { h: number; s: number; v: number }
+
+export function rgbToHsv({ r, g, b }: Rgb): Hsv {
+  const [red, green, blue] = [r / 255, g / 255, b / 255]
+  const max = Math.max(red, green, blue)
+  const delta = max - Math.min(red, green, blue)
+  let h = 0
+  if (delta > 0) {
+    if (max === red) h = ((green - blue) / delta) % 6
+    else if (max === green) h = (blue - red) / delta + 2
+    else h = (red - green) / delta + 4
+  }
+  return {
+    h: (h * 60 + 360) % 360,
+    s: max === 0 ? 0 : delta / max,
+    v: max
+  }
+}
+
+export function hsvToRgb({ h, s, v }: Hsv): Rgb {
+  const f = (n: number) => {
+    const k = (n + h / 60) % 6
+    return (v - v * s * Math.max(0, Math.min(k, 4 - k, 1))) * 255
+  }
+  return { r: f(5), g: f(3), b: f(1) }
+}

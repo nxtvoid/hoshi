@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
   BLACK,
+  colorToRgb,
+  hsvToRgb,
+  rgbToHex,
+  rgbToHsv,
   canonicalColor,
   colorToHex,
   contrastRatio,
@@ -67,5 +71,14 @@ describe('readableOn', () => {
 describe('contrastRatio', () => {
   test('black on white is 21', () => {
     expect(contrastRatio(BLACK, WHITE)).toBeCloseTo(21)
+  })
+})
+
+describe('hsv', () => {
+  test('round-trips through rgb', () => {
+    for (const hex of ['#1b4ed8', '#ff8800', '#000000', '#ffffff', '#7a7a7a']) {
+      const rgb = colorToRgb(hex, BLACK)
+      expect(rgbToHex(hsvToRgb(rgbToHsv(rgb)))).toBe(hex)
+    }
   })
 })
