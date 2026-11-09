@@ -1,3 +1,4 @@
+use crate::claude_account;
 use crate::claude_commands;
 use crate::claude_install;
 use crate::claude_models::{TurnModel, Version, manifest, parse_version};
@@ -15,8 +16,8 @@ use crate::{
     TitleRequest, TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
-    AccessMode, ContextUsage, ProviderModels, ProviderOutput, RequestResponse, SlashCommand,
-    TurnFailure, TurnOutcome, UsageLimits,
+    AccessMode, ContextUsage, ProviderAccountStatus, ProviderModels, ProviderOutput,
+    RequestResponse, SlashCommand, TurnFailure, TurnOutcome, UsageLimits,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -98,6 +99,12 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .version
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    fn account_status(&self) -> ProviderAccountStatus {
+        let status = claude_account::probe(self.binary());
+        self.forget_version();
+        status
     }
 
     fn slash_commands(&self, cwd: &Path) -> Option<Vec<SlashCommand>> {

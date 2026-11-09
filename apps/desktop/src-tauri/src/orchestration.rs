@@ -1,9 +1,10 @@
 use hoshi_core::{
     AppSettings, BrowserInput, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor,
     FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
-    MessageAttachment, ProviderModels, ProviderVersion, PullRequest, PullRequestAction,
-    PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach,
-    TerminalEvent, ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
+    MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderVersion, PullRequest,
+    PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand,
+    Snapshot, TerminalAttach, TerminalEvent, ThreadItem, TranscriptPage, UsageLimits,
+    WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
@@ -155,6 +156,12 @@ pub fn get_provider_version(engine: State<'_, Engine>) -> Option<ProviderVersion
 #[tauri::command(async)]
 pub fn check_provider_version(engine: State<'_, Engine>) -> Option<ProviderVersion> {
     engine.check_provider_version()
+}
+
+/// Runs the CLI, which takes a few seconds.
+#[tauri::command(async)]
+pub fn get_provider_account_status(engine: State<'_, Engine>) -> ProviderAccountStatus {
+    engine.provider_account_status()
 }
 
 /// Returns at once; progress arrives on `hoshi://provider-version`.

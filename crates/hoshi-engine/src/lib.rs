@@ -34,6 +34,7 @@ use attachments::Attachments;
 use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
+use hoshi_core::ProviderAccountStatus;
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, TranscriptPage,
@@ -997,6 +998,14 @@ impl Engine {
     /// runs, answers with what is known.
     pub fn check_provider_version(&self) -> Option<ProviderVersion> {
         check_provider_version(&self.state, &self.maintenance)
+    }
+
+    /// Whether the enabled provider's CLI is installed and signed in. Runs the CLI.
+    pub fn provider_account_status(&self) -> ProviderAccountStatus {
+        let adapter = lock(&self.state).adapter.clone();
+        adapter.map_or(ProviderAccountStatus::Unknown, |adapter| {
+            adapter.account_status()
+        })
     }
 
     /// Updates the provider's CLI in the background; its progress arrives as

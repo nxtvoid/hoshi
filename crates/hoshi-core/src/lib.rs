@@ -7,6 +7,7 @@ mod model;
 mod orchestration;
 mod project;
 mod provider;
+mod provider_account;
 mod provider_update;
 mod pull_request;
 mod request;
@@ -32,6 +33,7 @@ pub use project::{
     FolderListing, Project, RemoteRepository, WorktreeSetup, WorktreeSetupRun, WorktreeSetupStatus,
 };
 pub use provider::ProviderOutput;
+pub use provider_account::ProviderAccountStatus;
 pub use provider_update::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion};
 pub use pull_request::{
     ChecksState, ForgeAccount, ForgeKind, MergeMethod, Mergeability, PullRequest,

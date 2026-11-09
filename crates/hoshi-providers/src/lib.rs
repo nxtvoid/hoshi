@@ -2,6 +2,7 @@
 //! translates its native protocol into provider-neutral `ProviderOutput`.
 
 mod claude;
+mod claude_account;
 mod claude_commands;
 mod claude_control;
 mod claude_install;
@@ -18,8 +19,8 @@ mod updater;
 
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
 use hoshi_core::{
-    AccessMode, Effort, MessageAttachment, ProviderModels, ProviderOutput, RequestResponse,
-    SlashCommand, TurnFailure, UsageLimits,
+    AccessMode, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderOutput,
+    RequestResponse, SlashCommand, TurnFailure, UsageLimits,
 };
 use std::path::{Path, PathBuf};
 pub use updater::{UpdateFailure, Updater, run as run_update};
@@ -174,6 +175,12 @@ pub trait ProviderAdapter: Send + Sync {
 
     /// Reads the CLI's version again next time, after an update replaced it.
     fn forget_version(&self) {}
+
+    /// Whether the CLI is installed and signed in. Runs the CLI, so it can take a few
+    /// seconds; `Unknown` when it can't tell.
+    fn account_status(&self) -> ProviderAccountStatus {
+        ProviderAccountStatus::Unknown
+    }
 
     /// What a prompt can start with in `cwd`, which may add its own; `None` when
     /// they can't be read. Can run the CLI.

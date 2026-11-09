@@ -4,6 +4,7 @@ import { Sidebar } from '@/components/sidebar/Sidebar'
 import { ThreadView } from '@/components/thread/ThreadView'
 import { TooltipProvider } from '@hoshi/ui/components/tooltip'
 import { DialogHost } from '@/components/dialogs/DialogHost'
+import { FirstRunGate } from '@/components/onboarding/FirstRunGate'
 import { CommandPalette } from '@/components/palette/CommandPalette'
 import { useUnseenTracking } from '@/state/unseen-store'
 import { useThreadNotifications } from '@/state/thread-notifications'
@@ -24,6 +25,7 @@ export function App() {
       </div>
       <CommandPalette />
       <DialogHost />
+      <FirstRunGate />
     </TooltipProvider>
   )
 }

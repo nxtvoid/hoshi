@@ -12,6 +12,8 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub thread_titles: ThreadTitleSettings,
     pub general: GeneralSettings,
+    /// When the first-run setup was finished or skipped; `None` until then.
+    pub onboarding_completed_at: Option<String>,
 }
 
 /// What the app shows when it opens.

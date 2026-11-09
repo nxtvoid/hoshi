@@ -147,6 +147,7 @@ mod tests {
                 notifications: false,
                 projects_folder: Some("D:\\code".into()),
             },
+            onboarding_completed_at: Some("2026-11-09T08:00:00.000Z".into()),
         };
 
         save(&path, &settings).unwrap();

@@ -77,6 +77,7 @@ pub fn run() {
             orchestration::get_usage_limits,
             orchestration::get_provider_version,
             orchestration::check_provider_version,
+            orchestration::get_provider_account_status,
             orchestration::update_provider,
             orchestration::get_project_icon,
             orchestration::search_paths,
