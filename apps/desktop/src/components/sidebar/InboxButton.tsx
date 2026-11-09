@@ -20,7 +20,8 @@ function useInbox() {
     count,
     waiting,
     label: count > 0 ? m.inbox_waiting({ count }) : m.inbox(),
-    toggle: () => setView(open ? 'project' : 'inbox')
+    toggle: () => setView(open ? 'project' : 'inbox'),
+    show: () => setView('inbox')
   }
 }
 
@@ -84,7 +85,7 @@ export function FooterInboxButton() {
       label={inbox.label}
       side='top'
       active={inbox.open}
-      onClick={inbox.toggle}
+      onClick={inbox.show}
       className='relative'
     >
       <HugeiconsIcon icon={InboxIcon} strokeWidth={2} />
