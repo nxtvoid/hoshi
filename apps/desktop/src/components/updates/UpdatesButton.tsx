@@ -4,15 +4,20 @@ import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useModelsStore } from '@/state/models-store'
 import { Button } from '@hoshi/ui/components/button'
-import { useAppUpdateStore } from '@/state/app-update-store'
 import { metaOf } from '@/components/brand/provider-meta'
+import { ProgressRing } from '@hoshi/ui/components/progress-ring'
 import { useProviderUpdateStore } from '@/state/provider-update-store'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
 import {
-  appBadge,
+  APP_UPDATES_ENABLED,
+  useAppUpdateStore
+} from '@/state/app-update-store'
+import {
   type AppUpdate,
   providerBadge,
-  strongestBadge
+  type UpdateBadge,
+  type UpdateButton,
+  updateButton
 } from '@/lib/updates'
 import {
   Popover,
@@ -28,7 +33,9 @@ import {
   Alert02Icon,
   CheckmarkCircle02Icon,
   Download04Icon,
-  Loading03Icon
+  Loading03Icon,
+  RefreshIcon,
+  RotateClockwiseIcon
 } from '@hugeicons/core-free-icons'
 import {
   ProviderUpdateStatus,
@@ -37,24 +44,117 @@ import {
 } from './ProviderUpdateStatus'
 import { LogoMark } from '@/components/brand/Logo'
 
-/** Shows only while an update is available, running, or just ended. */
+/** Checks hoshi's release feed, or opens what an update found or is doing. */
 export function UpdatesButton() {
   const version = useProviderUpdateStore((state) => state.version)
   const seen = useProviderUpdateStore((state) => state.seen)
-  const markSeen = useProviderUpdateStore((state) => state.markSeen)
   const appUpdate = useAppUpdateStore((state) => state.update)
-  const badge = strongestBadge(
-    appBadge(appUpdate),
-    providerBadge(version, seen)
+  const button = updateButton(
+    appUpdate,
+    providerBadge(version, seen),
+    APP_UPDATES_ENABLED
   )
-  if (!badge) return null
+  if (button.kind === 'details') {
+    return (
+      <UpdateDetailsButton
+        badge={button.badge}
+        appUpdate={appUpdate}
+        version={version}
+      />
+    )
+  }
+  return <CheckButton button={button} />
+}
 
-  const icon =
-    badge === 'running'
-      ? Loading03Icon
-      : badge === 'done'
-        ? CheckmarkCircle02Icon
-        : Download04Icon
+function CheckButton({
+  button
+}: {
+  button: Exclude<UpdateButton, { kind: 'details' }>
+}) {
+  const check = useAppUpdateStore((state) => state.check)
+  const off = button.kind === 'off'
+  const checking = button.kind === 'check' && button.checking
+  const label =
+    button.kind === 'off'
+      ? m.app_update_off_in_dev()
+      : button.kind === 'upToDate'
+        ? m.app_update_up_to_date({ version: button.version })
+        : button.kind === 'checkFailed'
+          ? m.app_update_check_failed({ error: button.message })
+          : checking
+            ? m.app_update_checking()
+            : m.check_for_updates()
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant='ghost'
+            size='icon-sm'
+            aria-label={label}
+            disabled={off}
+            focusableWhenDisabled
+            onClick={() => {
+              if (!off && !checking) void check(true)
+            }}
+            className='data-disabled:text-muted-foreground relative data-disabled:hover:bg-transparent'
+          />
+        }
+      >
+        <HugeiconsIcon
+          icon={
+            button.kind === 'upToDate' ? CheckmarkCircle02Icon : RefreshIcon
+          }
+          strokeWidth={2}
+          className={cn(
+            checking && 'animate-spin',
+            button.kind === 'upToDate' && 'text-status-done'
+          )}
+        />
+        {button.kind === 'checkFailed' ? (
+          <Dot className='bg-status-error' />
+        ) : null}
+      </TooltipTrigger>
+      <TooltipContent side='top' className='max-w-72'>
+        {label}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+function Dot({ className }: { className: string }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        'ring-sidebar absolute top-1 right-1 size-1.5 rounded-full ring-2',
+        className
+      )}
+    />
+  )
+}
+
+function UpdateDetailsButton({
+  badge,
+  appUpdate,
+  version
+}: {
+  badge: NonNullable<UpdateBadge>
+  appUpdate: AppUpdate
+  version: ProviderVersion | null
+}) {
+  const markSeen = useProviderUpdateStore((state) => state.markSeen)
+  const downloading = appUpdate.status === 'downloading' ? appUpdate : null
+  const label = downloading
+    ? downloading.percent === null
+      ? m.app_update_downloading()
+      : m.app_update_downloading_percent({ percent: downloading.percent })
+    : appUpdate.status === 'ready'
+      ? m.app_update_restart()
+      : badge === 'available' && appUpdate.status === 'available'
+        ? m.app_update_to({ version: appUpdate.version })
+        : m.updates()
 
   return (
     <Popover
@@ -70,47 +170,64 @@ export function UpdatesButton() {
                 <Button
                   variant='ghost'
                   size='icon-sm'
-                  aria-label={m.updates()}
+                  aria-label={label}
                   className='relative'
                 />
               }
             />
           }
         >
-          <HugeiconsIcon
-            icon={icon}
-            strokeWidth={2}
-            className={cn(
-              badge === 'running' && 'animate-spin',
-              badge === 'done' && 'text-status-done'
-            )}
-          />
-          {badge === 'available' || badge === 'failed' ? (
-            <span
-              aria-hidden
+          {downloading ? (
+            <ProgressRing value={downloading.percent} />
+          ) : (
+            <HugeiconsIcon
+              icon={BADGE_ICON[badge]}
+              strokeWidth={2}
               className={cn(
-                'ring-sidebar absolute top-1 right-1 size-1.5 rounded-full ring-2',
-                badge === 'failed' ? 'bg-status-error' : 'bg-foreground'
+                badge === 'running' && 'animate-spin',
+                badge === 'done' && 'text-status-done'
               )}
             />
+          )}
+          {badge === 'available' || badge === 'ready' ? (
+            <Dot className='bg-foreground' />
+          ) : badge === 'failed' ? (
+            <Dot className='bg-status-error' />
           ) : null}
         </TooltipTrigger>
-        <TooltipContent side='top'>{m.updates()}</TooltipContent>
+        <TooltipContent side='top'>{label}</TooltipContent>
       </Tooltip>
       <PopoverContent side='top' align='end' className='w-80 gap-3'>
-        {appUpdate.status === 'idle' ? null : (
+        {appUpdateShown(appUpdate) ? (
           <AppUpdateDetails update={appUpdate} />
-        )}
+        ) : null}
         {version ? <ProviderUpdateDetails version={version} /> : null}
       </PopoverContent>
     </Popover>
   )
 }
 
+const BADGE_ICON = {
+  running: Loading03Icon,
+  ready: RotateClockwiseIcon,
+  failed: Download04Icon,
+  done: CheckmarkCircle02Icon,
+  available: Download04Icon
+} satisfies Record<NonNullable<UpdateBadge>, unknown>
+
+function appUpdateShown(update: AppUpdate) {
+  return (
+    update.status === 'available' ||
+    update.status === 'downloading' ||
+    update.status === 'ready' ||
+    update.status === 'failed'
+  )
+}
+
 function AppUpdateDetails({ update }: { update: AppUpdate }) {
   const currentVersion = useAppUpdateStore((state) => state.currentVersion)
-  const install = useAppUpdateStore((state) => state.install)
-  const downloading = update.status === 'downloading'
+  const download = useAppUpdateStore((state) => state.download)
+  const restart = useAppUpdateStore((state) => state.restart)
 
   return (
     <div className='flex flex-col gap-2.5'>
@@ -130,22 +247,22 @@ function AppUpdateDetails({ update }: { update: AppUpdate }) {
             : null
         }
         action={
-          downloading ? null : (
-            <Button size='sm' variant='outline' onClick={() => void install()}>
+          update.status === 'ready' ? (
+            <Button size='sm' variant='outline' onClick={() => void restart()}>
+              {m.app_update_restart()}
+            </Button>
+          ) : update.status === 'available' || update.status === 'failed' ? (
+            <Button size='sm' variant='outline' onClick={() => void download()}>
               {update.status === 'failed'
                 ? m.provider_update_retry()
-                : m.app_update_install()}
+                : m.app_update_download()}
             </Button>
-          )
+          ) : null
         }
       />
       {update.status === 'downloading' ? (
         <p className='text-muted-foreground flex items-center gap-1.5 text-xs'>
-          <HugeiconsIcon
-            icon={Loading03Icon}
-            strokeWidth={2}
-            className='size-3.5 shrink-0 animate-spin'
-          />
+          <ProgressRing value={update.percent} className='size-3.5 shrink-0' />
           {update.percent === null
             ? m.app_update_downloading()
             : m.app_update_downloading_percent({ percent: update.percent })}

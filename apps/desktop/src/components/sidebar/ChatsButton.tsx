@@ -24,7 +24,8 @@ function useChats() {
   return {
     open,
     signal,
-    toggle: () => setView(open ? 'project' : 'chats')
+    toggle: () => setView(open ? 'project' : 'chats'),
+    show: () => setView('chats')
   }
 }
 
@@ -75,7 +76,7 @@ export function FooterChatsButton() {
       label={m.chats()}
       side='top'
       active={chats.open}
-      onClick={chats.toggle}
+      onClick={chats.show}
     >
       <HugeiconsIcon icon={BubbleChatIcon} strokeWidth={2} />
     </IconButton>

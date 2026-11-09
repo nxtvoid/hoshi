@@ -1,6 +1,6 @@
-//! Images pasted in ways the webview can't read: an image on the system clipboard, as an
-//! email client copies it, and image files a file manager copied, which reach a Linux
-//! webview as paths only.
+//! What the webview can't read from the clipboard itself: text for the edit menu's Paste,
+//! an image on the system clipboard, as an email client copies it, and image files a file
+//! manager copied, which reach a Linux webview as paths only.
 
 use std::path::Path;
 use tauri::ipc::Response;
@@ -32,6 +32,14 @@ pub fn read_clipboard_image() -> Result<Response, String> {
         .find_map(|path| image_file(path).ok())
         .map(Response::new)
         .ok_or_else(|| "no image on the clipboard".into())
+}
+
+/// The text on the system clipboard, for the edit menu's Paste.
+#[tauri::command(async)]
+pub fn read_clipboard_text() -> Result<String, String> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get_text())
+        .map_err(|error| error.to_string())
 }
 
 fn image_file(path: &Path) -> Result<Vec<u8>, String> {
