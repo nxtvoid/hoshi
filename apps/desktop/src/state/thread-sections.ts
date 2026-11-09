@@ -152,16 +152,28 @@ const ESCALATION: Partial<Record<Thread['status'], number>> = {
   waitingForInput: 2
 }
 
+/** Whether `thread` is a task listed under the thread that delegated it, not on its own. */
+function delegatedTest(threads: Thread[]) {
+  const ids = new Set(threads.map((thread) => thread.id))
+  // A task whose thread is gone is the user's to see.
+  return (thread: Thread) =>
+    thread.parentThreadId !== null && ids.has(thread.parentThreadId)
+}
+
+/** The tasks the sidebar doesn't list, since the threads that delegated them are there. */
+export function unlistedTaskIds(threads: Thread[]): string[] {
+  if (!threads.some((thread) => thread.parentThreadId !== null)) return []
+  const delegated = delegatedTest(threads)
+  return threads.filter(delegated).map((thread) => thread.id)
+}
+
 /**
  * The threads the user started. Tasks their agents delegated aren't listed: a task that
  * works, or waits for the user, shows on the thread that delegated it.
  */
 export function withDelegatedWork(threads: Thread[]): Thread[] {
   if (!threads.some((thread) => thread.parentThreadId !== null)) return threads
-  const ids = new Set(threads.map((thread) => thread.id))
-  // A task whose thread is gone is the user's to see.
-  const delegated = (thread: Thread) =>
-    thread.parentThreadId !== null && ids.has(thread.parentThreadId)
+  const delegated = delegatedTest(threads)
   const byId = new Map(threads.map((thread) => [thread.id, thread]))
   /** The thread the user started that a task, however deep, works for. */
   const root = (thread: Thread) => {

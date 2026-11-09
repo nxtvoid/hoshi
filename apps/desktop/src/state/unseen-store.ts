@@ -4,6 +4,7 @@ import { withoutKeys } from '@/lib/records'
 import { persist } from 'zustand/middleware'
 import { useAppStore } from './app-store'
 import { finishedTurns } from './thread-signals'
+import { unlistedTaskIds } from './thread-sections'
 import { removedThreadIds } from './orchestration'
 
 type UnseenState = {
@@ -70,12 +71,17 @@ export function trackUnseen(): () => void {
   const unsubscribe = useAppStore.subscribe((state, previous) => {
     if (state.threads !== previous.threads) {
       const watched = onScreen() ? state.selectedThreadId : null
+      const unlisted = new Set(unlistedTaskIds(state.threads))
       const finished = finishedTurns(previous.threads, state.threads).filter(
-        (id) => id !== watched
+        (id) => id !== watched && !unlisted.has(id)
       )
       if (finished.length > 0) mark(finished)
-      const removed = removedThreadIds(previous.threads, state.threads)
-      if (removed.length > 0) forget(removed)
+      const { unseen } = useUnseenStore.getState()
+      const gone = [
+        ...removedThreadIds(previous.threads, state.threads),
+        ...[...unlisted].filter((id) => unseen[id])
+      ]
+      if (gone.length > 0) forget(gone)
     }
     if (state.selectedThreadId !== previous.selectedThreadId) seeSelected()
   })
