@@ -54,6 +54,41 @@ pub fn created_by_turn(
     }
 }
 
+const BRANCH_NAME_MAX_CHARS: usize = 40;
+
+/// A branch name from a thread's title, as words joined by `-`: "Fix the login bug" gives
+/// `fix-the-login-bug`. `None` when no word is left, as for a title in another script.
+pub fn branch_name(title: &str) -> Option<String> {
+    let plain: String = title
+        .chars()
+        .map(|c| match c.to_lowercase().next().unwrap_or(c) {
+            'á' | 'à' | 'ä' | 'â' | 'ã' | 'å' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' | 'õ' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            c if c.is_ascii_alphanumeric() => c,
+            _ => ' ',
+        })
+        .collect();
+    let mut name = String::new();
+    for word in plain.split_whitespace() {
+        let next = if name.is_empty() { 0 } else { 1 } + word.len();
+        if !name.is_empty() && name.len() + next > BRANCH_NAME_MAX_CHARS {
+            break;
+        }
+        if !name.is_empty() {
+            name.push('-');
+        }
+        name.push_str(word);
+    }
+    name.truncate(BRANCH_NAME_MAX_CHARS);
+    let name = name.trim_matches('-').to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// The process an agent named when it locked a worktree, as Claude Code does:
 /// `claude session <name> (pid 21452)`.
 pub fn locking_pid(reason: &str) -> Option<u32> {
@@ -103,6 +138,23 @@ fn folder_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_title_becomes_a_short_branch_name() {
+        assert_eq!(
+            branch_name("Fix the login bug").as_deref(),
+            Some("fix-the-login-bug")
+        );
+        assert_eq!(
+            branch_name("Arreglar el diseño: botón \"Guardar\"").as_deref(),
+            Some("arreglar-el-diseno-boton-guardar")
+        );
+        assert_eq!(
+            branch_name("Add CSV export to the reports page with filters and totals").as_deref(),
+            Some("add-csv-export-to-the-reports-page-with")
+        );
+        assert_eq!(branch_name("修正"), None);
+    }
 
     #[test]
     fn reads_the_pid_an_agent_left_in_its_lock() {

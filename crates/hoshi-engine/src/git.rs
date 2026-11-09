@@ -155,6 +155,28 @@ pub fn is_ancestor(repository: &str, ancestor: &str, descendant: &str) -> bool {
     .is_ok()
 }
 
+/// The branch a worktree hoshi made came from, kept in `branch.<branch>.hoshi-base`.
+pub const BASE_CONFIG: &str = "hoshi-base";
+
+/// `branch.<branch>.<key>` in the repository's config; `None` when unset.
+pub fn branch_config(dir: &str, branch: &str, key: &str) -> Option<String> {
+    let name = format!("branch.{branch}.{key}");
+    stdout(dir, &["config", "--get", &name])
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+pub fn set_branch_config(dir: &str, branch: &str, key: &str, value: &str) -> Result<(), String> {
+    let name = format!("branch.{branch}.{key}");
+    stdout(dir, &["config", &name, value]).map(|_| ())
+}
+
+/// Renames a local branch, its config and upstream with it, wherever it is checked out.
+pub fn rename_branch(dir: &str, old: &str, new: &str) -> Result<(), String> {
+    stdout(dir, &["branch", "-m", old, new]).map(|_| ())
+}
+
 /// Deletes a local branch, merged or not. Remote branches are never touched.
 pub fn delete_branch(repository: &str, branch: &str) -> Result<(), String> {
     stdout(repository, &["branch", "-D", "--", branch]).map(|_| ())
@@ -426,6 +448,24 @@ pub(crate) mod tests {
         remove_worktree(&repo_str, &worktree_str).unwrap();
 
         assert!(!worktree.exists());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_renamed_branch_keeps_its_config() {
+        let repo = temp_repository("rename");
+        let dir = repo.to_string_lossy().into_owned();
+        stdout(&dir, &["branch", "hoshi/abc"]).unwrap();
+        set_branch_config(&dir, "hoshi/abc", BASE_CONFIG, "main").unwrap();
+
+        rename_branch(&dir, "hoshi/abc", "hoshi/fix-login").unwrap();
+
+        assert!(branch_tip(&dir, "hoshi/abc").is_none());
+        assert_eq!(
+            branch_config(&dir, "hoshi/fix-login", BASE_CONFIG).as_deref(),
+            Some("main")
+        );
+        assert_eq!(branch_config(&dir, "hoshi/fix-login", "remote"), None);
         let _ = std::fs::remove_dir_all(&repo);
     }
 

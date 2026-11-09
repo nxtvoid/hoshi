@@ -97,11 +97,23 @@ fn base(dir: &str, scope: DiffScope) -> Result<String, String> {
     match scope {
         DiffScope::Uncommitted => Ok(head.trim().to_owned()),
         DiffScope::Branch => {
-            let default = default_branch(dir)?;
+            let default = match recorded_base(dir) {
+                Some(base) => base,
+                None => default_branch(dir)?,
+            };
             let merge_base = git::stdout(dir, &["merge-base", "HEAD", &default])?;
             Ok(merge_base.trim().to_owned())
         }
     }
+}
+
+/// The branch hoshi made the checked-out branch from, as it still exists here.
+fn recorded_base(dir: &str) -> Option<String> {
+    let branch = git::current_branch(dir)?;
+    let base = git::branch_config(dir, &branch, git::BASE_CONFIG)?;
+    [base.clone(), format!("origin/{base}")]
+        .into_iter()
+        .find(|name| git::stdout(dir, &["rev-parse", "--verify", "--quiet", name]).is_ok())
 }
 
 /// The branch a feature branch is compared with: origin's default, else the first that
@@ -338,6 +350,34 @@ mod tests {
         assert!(diff.truncated);
         assert_eq!(diff.text.lines().count(), MAX_DIFF_LINES);
         assert!(!truncate("a\nb\n").truncated);
+    }
+
+    #[test]
+    fn a_branch_compares_with_the_base_it_was_made_from() {
+        let repo = git::tests::temp_repository("diff-base");
+        let dir = repo.to_string_lossy().into_owned();
+        let commit = |name: &str| {
+            std::fs::write(repo.join(name), "x").unwrap();
+            git::stdout(&dir, &["add", name]).unwrap();
+            git::stdout(&dir, &["commit", "-m", name]).unwrap();
+        };
+        git::stdout(&dir, &["switch", "-c", "dev"]).unwrap();
+        commit("dev.txt");
+        git::stdout(&dir, &["switch", "-c", "feature"]).unwrap();
+        commit("feature.txt");
+        let paths = || {
+            files(&dir, DiffScope::Branch)
+                .unwrap()
+                .into_iter()
+                .map(|file| file.path)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(), ["dev.txt", "feature.txt"]);
+
+        git::set_branch_config(&dir, "feature", git::BASE_CONFIG, "dev").unwrap();
+
+        assert_eq!(paths(), ["feature.txt"]);
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     #[test]

@@ -1468,11 +1468,20 @@ impl State {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|error| failed(error.to_string()))?;
         }
+        let base = existing
+            .is_none()
+            .then(|| git::current_branch(root))
+            .flatten();
         match existing {
             Some(_) => git::add_branch_worktree(root, &path, &branch),
             None => git::add_worktree(root, &path, &branch),
         }
         .map_err(failed)?;
+        if let Some(base) = base
+            && let Err(error) = git::set_branch_config(root, &branch, git::BASE_CONFIG, &base)
+        {
+            eprintln!("hoshi: didn't keep the base of {branch}: {error}");
+        }
         Ok(ThreadWorkspace::Worktree {
             path: path.to_string_lossy().into_owned(),
             branch,
@@ -1955,6 +1964,9 @@ impl State {
                     if let Err(error) = state.commit(&events, &now()) {
                         eprintln!("hoshi: failed to record a thread title: {error}");
                     }
+                    if !events.is_empty() && !generated.needs_refinement {
+                        state.name_branch(&thread_id, &generated.title);
+                    }
                     if generated.needs_refinement && request.previous_title.is_none() {
                         state.titles_to_refine.insert(thread_id);
                     }
@@ -1965,6 +1977,45 @@ impl State {
                     delay *= 2;
                 }
             }
+        });
+    }
+
+    /// Names the branch of a worktree hoshi made after the thread's title, as t3code does.
+    /// Only the `hoshi/<id>` it started on, and only before it was ever pushed.
+    fn name_branch(&self, thread_id: &str, title: &str) {
+        let Some(thread) = self.model.thread(thread_id) else {
+            return;
+        };
+        let placeholder = format!("hoshi/{}", thread_id.chars().take(8).collect::<String>());
+        let (Some(path), Some(branch)) = (&thread.worktree_path, &thread.branch) else {
+            return;
+        };
+        if thread.worktree_adopted || thread.worktree_released || *branch != placeholder {
+            return;
+        }
+        let Some(name) = worktree::branch_name(title) else {
+            return;
+        };
+        let (path, state, thread_id) = (path.clone(), self.this.clone(), thread_id.to_owned());
+        thread::spawn(move || {
+            let pushed = git::branch_config(&path, &placeholder, "remote").is_some();
+            if pushed || git::current_branch(&path).as_deref() != Some(placeholder.as_str()) {
+                return;
+            }
+            let Some(free) = (1..=20)
+                .map(|n| match n {
+                    1 => format!("hoshi/{name}"),
+                    _ => format!("hoshi/{name}-{n}"),
+                })
+                .find(|candidate| git::branch_tip(&path, candidate).is_none())
+            else {
+                return;
+            };
+            if let Err(error) = git::rename_branch(&path, &placeholder, &free) {
+                eprintln!("hoshi: kept branch {placeholder}: {error}");
+                return;
+            }
+            read_branches(&state, &[thread_id]);
         });
     }
 
@@ -3908,6 +3959,68 @@ Blue"
             .unwrap_err();
 
         assert!(matches!(error, CommandError::WorkspaceRootNotFound { .. }));
+    }
+
+    #[test]
+    fn a_new_worktree_s_branch_keeps_its_base_and_takes_the_title_s_name() {
+        let repo = git::tests::temp_repository("engine-branch-name");
+        let harness = Harness::new(
+            "branch-name",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        harness.engine.set_adapter(Some(Arc::new(FakeAdapter {
+            requests: Mutex::new(Vec::new()),
+            script: completed_turn(),
+            title: Some("Fix the login bug".into()),
+            responses: Arc::default(),
+            steers: None,
+            finishers: Mutex::default(),
+        })));
+        harness
+            .create_thread("n1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        harness
+            .create_thread("p1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        let pushed = harness.thread("p1234567-rest");
+        git::set_branch_config(&harness.root, "hoshi/p1234567", "remote", "origin").unwrap();
+        assert_eq!(
+            git::branch_config(&harness.root, "hoshi/n1234567", git::BASE_CONFIG).as_deref(),
+            Some("main")
+        );
+
+        harness.send("n1234567-rest", "m1", "the login fails");
+        let renamed = harness.wait_for(|event| match event {
+            Event::ThreadBranchSet { thread_id, branch } if thread_id == "n1234567-rest" => branch,
+            _ => None,
+        });
+        harness.send("p1234567-rest", "m2", "the login fails");
+        harness.wait_for(|event| match event {
+            Event::ThreadTitleSet { thread_id, title }
+                if thread_id == "p1234567-rest" && title == "Fix the login bug" =>
+            {
+                Some(())
+            }
+            _ => None,
+        });
+
+        assert_eq!(renamed, "hoshi/fix-the-login-bug");
+        let worktree = harness.thread("n1234567-rest").worktree_path.unwrap();
+        assert_eq!(
+            git::branch_config(&worktree, "hoshi/fix-the-login-bug", git::BASE_CONFIG).as_deref(),
+            Some("main")
+        );
+        let pushed_path = pushed.worktree_path.unwrap();
+        thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            git::current_branch(&pushed_path).as_deref(),
+            Some("hoshi/p1234567")
+        );
+        for path in [worktree, pushed_path] {
+            let _ = git::remove_worktree(&harness.root, &path);
+        }
     }
 
     #[test]
