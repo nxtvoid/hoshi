@@ -157,6 +157,31 @@ pub struct OpenToolCall {
     pub item_id: String,
 }
 
+/// A command the agent left running in the background, which its turn waits for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct BackgroundTask {
+    pub task_id: String,
+    /// The call that started it, when one did.
+    pub tool_call_id: Option<String>,
+    /// The agent's own words for what it runs.
+    pub description: String,
+    /// Unix milliseconds.
+    pub started_at: u64,
+}
+
+/// The commands a thread's running turn waits for; empty once none is left.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ThreadBackgroundTasks {
+    pub thread_id: String,
+    pub tasks: Vec<BackgroundTask>,
+    /// The agent works on nothing else: the turn only waits for these.
+    pub waiting: bool,
+}
+
 /// One entry in a thread's transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]

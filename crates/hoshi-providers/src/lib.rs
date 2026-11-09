@@ -223,6 +223,10 @@ pub trait RunningTurn: Send {
     /// already ended or the provider can't stop one alone.
     fn stop_subagent(&self, _tool_use_id: &str) {}
 
+    /// Stops a command the turn left running in the background, by the provider's task id.
+    /// Ignored when it already ended.
+    fn stop_background_task(&self, _task_id: &str) {}
+
     /// Gives the running turn another message, which the agent reads at its next step.
     /// `false` when the turn is ending and can't take it: it then needs a turn of its own.
     fn steer(&self, _message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
