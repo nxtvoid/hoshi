@@ -54,7 +54,7 @@ fn a_real_turn_streams_a_reply_and_resumes_its_session() {
                 .any(|o| matches!(o, ProviderOutput::TextDelta { .. }))
         );
         assert!(matches!(
-            outputs.last(),
+            last_output(outputs),
             Some(ProviderOutput::TurnCompleted {
                 outcome: TurnOutcome::Completed
             })
@@ -256,7 +256,7 @@ fn an_approved_tool_call_runs_mid_turn() {
     );
     assert!(cwd.join("approved-folder").is_dir(), "{outputs:#?}");
     assert!(matches!(
-        outputs.last(),
+        last_output(&outputs),
         Some(ProviderOutput::TurnCompleted {
             outcome: TurnOutcome::Completed
         })
@@ -475,7 +475,7 @@ fn a_stopped_subagent_ends_and_the_turn_goes_on() {
         "the turn waited for the subagent: {outputs:#?}"
     );
     assert!(matches!(
-        outputs.last(),
+        last_output(&outputs),
         Some(ProviderOutput::TurnCompleted {
             outcome: TurnOutcome::Completed
         })
@@ -602,7 +602,7 @@ fn an_interrupted_turn_winds_down_on_its_own() {
         });
 
     assert!(matches!(
-        outputs.last(),
+        last_output(&outputs),
         Some(ProviderOutput::TurnCompleted {
             outcome: TurnOutcome::Interrupted
         })
@@ -749,20 +749,12 @@ fn a_turn_waits_for_claude_to_answer_every_background_subagent() {
     assert_eq!(runs.last(), Some(&"message"), "{runs:?}");
 }
 
-/// Starts a turn in `cwd`, hands each output to `act` as it comes, and collects everything
-/// until the turn ends.
-fn run_watching(
-    cwd: &std::path::Path,
-    prompt: &str,
-    mut act: impl FnMut(&ProviderOutput, &dyn hoshi_providers::RunningTurn),
-) -> Vec<ProviderOutput> {
-    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
-    let (sender, receiver) = mpsc::channel();
-    let request = TurnRequest {
+fn watched_request(cwd: &std::path::Path, prompt: &str, session: Option<String>) -> TurnRequest {
+    TurnRequest {
         cwd: cwd.to_string_lossy().into_owned(),
         prompt: prompt.into(),
         attachments: Vec::new(),
-        resume_session_id: None,
+        resume_session_id: session,
         resume_session_at: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
@@ -772,15 +764,32 @@ fn run_watching(
         plan_mode: false,
         mcp: None,
         instructions: None,
-    };
+    }
+}
+
+/// Starts a turn in `cwd`, hands each output to `act` as it comes, and collects everything
+/// until the process is done: its turn completed without keeping it, or it ended.
+fn run_watching(
+    cwd: &std::path::Path,
+    prompt: &str,
+    mut act: impl FnMut(&ProviderOutput, &dyn hoshi_providers::RunningTurn),
+) -> Vec<ProviderOutput> {
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let (sender, receiver) = mpsc::channel();
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
     });
-    let turn = adapter.start_turn(request, sink).unwrap();
+    let turn = adapter
+        .start_turn(watched_request(cwd, prompt, None), sink)
+        .unwrap();
     let mut outputs = Vec::new();
     for output in receiver.iter() {
         act(&output, turn.as_ref());
-        let done = matches!(output, ProviderOutput::TurnCompleted { .. });
+        let done = match output {
+            ProviderOutput::TurnCompleted { .. } => !turn.lingers(),
+            ProviderOutput::ProcessEnded => true,
+            _ => false,
+        };
         outputs.push(output);
         if done {
             break;
@@ -807,6 +816,16 @@ fn completions(outputs: &[ProviderOutput]) -> usize {
         .count()
 }
 
+/// Awaits the first background command as soon as it shows, as the agent would through
+/// hoshi's tool.
+fn await_first_command(output: &ProviderOutput, turn: &dyn hoshi_providers::RunningTurn) {
+    if let ProviderOutput::BackgroundTasks { tasks, .. } = output
+        && let Some(first) = tasks.first()
+    {
+        turn.await_background_tasks(std::slice::from_ref(&first.task_id), true);
+    }
+}
+
 /// Writes `late.txt` unless it is stopped first.
 const LATE_COMMAND: &str = "sleep 12 && echo late > late.txt";
 
@@ -818,7 +837,7 @@ fn start_late_command() -> String {
 
 #[test]
 #[ignore = "spends tokens on a real Claude Code turn"]
-fn a_background_command_wakes_claude_once_it_ends() {
+fn a_command_left_running_wakes_claude_in_a_turn_of_its_own_once_it_ends() {
     let cwd = scratch("background-command");
     let outputs = run_watching(
         &cwd,
@@ -826,14 +845,14 @@ fn a_background_command_wakes_claude_once_it_ends() {
         |_, _| {},
     );
 
-    let held = outputs.iter().position(
-        |output| matches!(output, ProviderOutput::BackgroundTasks { tasks, .. } if tasks.len() == 1),
-    );
-    let held = held.unwrap_or_else(|| panic!("no background command: {outputs:#?}"));
-    let run_ended = outputs
+    let first_end = outputs
         .iter()
-        .position(|output| matches!(output, ProviderOutput::RunEnded { .. }))
-        .unwrap_or_else(|| panic!("the turn ended with its first run: {outputs:#?}"));
+        .position(|output| matches!(output, ProviderOutput::TurnCompleted { .. }))
+        .unwrap_or_else(|| panic!("the turn never ended: {outputs:#?}"));
+    let woke = outputs
+        .iter()
+        .position(|output| *output == ProviderOutput::Woke)
+        .unwrap_or_else(|| panic!("Claude never woke: {outputs:#?}"));
     let task_ended = outputs
         .iter()
         .position(|output| {
@@ -843,24 +862,41 @@ fn a_background_command_wakes_claude_once_it_ends() {
             )
         })
         .unwrap_or_else(|| panic!("the command never ended: {outputs:#?}"));
-    assert!(held < run_ended && run_ended < task_ended, "{outputs:#?}");
+    assert!(first_end < woke && woke < task_ended, "{outputs:#?}");
     assert!(last_roster_is_empty(&outputs), "{outputs:#?}");
     let answered = outputs[task_ended..].iter().any(|output| {
         matches!(output, ProviderOutput::AssistantMessage { text, .. } if text.contains("done"))
     });
     assert!(answered, "Claude never answered the command: {outputs:#?}");
-    assert_eq!(completions(&outputs), 1, "{outputs:#?}");
-    assert!(matches!(
-        outputs.last(),
-        Some(ProviderOutput::TurnCompleted {
-            outcome: TurnOutcome::Completed
-        })
-    ));
+    assert_eq!(completions(&outputs), 2, "{outputs:#?}");
 }
 
 #[test]
 #[ignore = "spends tokens on a real Claude Code turn"]
-fn a_stopped_background_command_ends_the_waiting_turn() {
+fn an_awaited_background_command_holds_the_turn_until_claude_answers_it() {
+    let cwd = scratch("awaited-background-command");
+    let outputs = run_watching(
+        &cwd,
+        "Run the shell command `sleep 3 && echo done` with the Bash tool using run_in_background: true. Then reply 'started' and end your turn. When it finishes, tell me what it printed.",
+        await_first_command,
+    );
+
+    let run_ended = outputs
+        .iter()
+        .position(|output| matches!(output, ProviderOutput::RunEnded { .. }))
+        .unwrap_or_else(|| panic!("the turn ended with its first run: {outputs:#?}"));
+    let task_ended = outputs
+        .iter()
+        .position(|output| matches!(output, ProviderOutput::BackgroundTaskEnded { .. }))
+        .unwrap_or_else(|| panic!("the command never ended: {outputs:#?}"));
+    assert!(run_ended < task_ended, "{outputs:#?}");
+    assert!(!outputs.contains(&ProviderOutput::Woke), "{outputs:#?}");
+    assert_eq!(completions(&outputs), 1, "{outputs:#?}");
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_stopped_command_left_running_ends_its_process() {
     let cwd = scratch("stop-background-command");
     let mut task: Option<String> = None;
     let mut stopped_at = None;
@@ -870,24 +906,21 @@ fn a_stopped_background_command_ends_the_waiting_turn() {
         {
             task = Some(first.task_id.clone());
         }
-        if let (ProviderOutput::RunEnded { .. }, Some(task), None) = (output, &task, stopped_at) {
+        if let (ProviderOutput::TurnCompleted { .. }, Some(task), None) =
+            (output, &task, stopped_at)
+        {
             turn.stop_background_task(task);
             stopped_at = Some(std::time::Instant::now());
         }
     });
 
     let since = stopped_at
-        .unwrap_or_else(|| panic!("the turn never waited on its command: {outputs:#?}"))
+        .unwrap_or_else(|| panic!("the turn kept nothing running: {outputs:#?}"))
         .elapsed();
     println!("ended {since:?} after the stop");
     assert!(since < std::time::Duration::from_secs(4), "{since:?}");
     assert!(last_roster_is_empty(&outputs), "{outputs:#?}");
-    assert!(matches!(
-        outputs.last(),
-        Some(ProviderOutput::TurnCompleted {
-            outcome: TurnOutcome::Completed
-        })
-    ));
+    assert_eq!(outputs.last(), Some(&ProviderOutput::ProcessEnded));
     std::thread::sleep(std::time::Duration::from_secs(14));
     assert!(!cwd.join("late.txt").exists(), "the command kept running");
 }
@@ -898,6 +931,7 @@ fn an_interrupt_ends_a_turn_that_waits_on_a_background_command() {
     let cwd = scratch("interrupt-background-command");
     let mut interrupted_at = None;
     let outputs = run_watching(&cwd, &start_late_command(), |output, turn| {
+        await_first_command(output, turn);
         if matches!(output, ProviderOutput::RunEnded { .. }) && interrupted_at.is_none() {
             turn.interrupt();
             interrupted_at = Some(std::time::Instant::now());
@@ -909,7 +943,7 @@ fn an_interrupt_ends_a_turn_that_waits_on_a_background_command() {
         .elapsed();
     println!("ended {since:?} after the interrupt");
     assert!(matches!(
-        outputs.last(),
+        last_output(&outputs),
         Some(ProviderOutput::TurnCompleted {
             outcome: TurnOutcome::Interrupted
         })
@@ -927,6 +961,7 @@ fn a_message_sent_while_a_background_command_runs_joins_the_turn() {
         &cwd,
         "Run the shell command `sleep 15 && echo done` with the Bash tool using run_in_background: true. Then reply 'started' and end your turn. When it finishes, tell me what it printed.",
         |output, turn| {
+            await_first_command(output, turn);
             if matches!(output, ProviderOutput::RunEnded { .. }) && !steered {
                 assert!(turn.steer(
                     "0f8d6a3c-2b1e-4c5d-9e7f-1a2b3c4d5e6f",
@@ -952,9 +987,51 @@ fn a_message_sent_while_a_background_command_runs_joins_the_turn() {
     );
     assert_eq!(completions(&outputs), 1, "{outputs:#?}");
     assert!(matches!(
-        outputs.last(),
+        last_output(&outputs),
         Some(ProviderOutput::TurnCompleted {
             outcome: TurnOutcome::Completed
         })
     ));
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn the_next_message_runs_in_the_process_a_command_kept() {
+    let cwd = scratch("continue-background-command");
+    let mut session = None;
+    let mut continued = false;
+    let outputs = run_watching(
+        &cwd,
+        "Run the shell command `sleep 15 && echo done` with the Bash tool using run_in_background: true. Then reply 'started' and end your turn. When it finishes, tell me what it printed.",
+        |output, turn| {
+            if let ProviderOutput::SessionStarted { session_id } = output {
+                session = Some(session_id.clone());
+            }
+            if matches!(output, ProviderOutput::TurnCompleted { .. }) && !continued {
+                let request =
+                    watched_request(&cwd, "While it runs, just say HOLA.", session.clone());
+                assert!(turn.continue_with(&request));
+                continued = true;
+            }
+        },
+    );
+
+    let hola = outputs.iter().position(|output| {
+        matches!(output, ProviderOutput::AssistantMessage { text, .. } if text.contains("HOLA"))
+    });
+    let hola = hola.unwrap_or_else(|| panic!("never said HOLA: {outputs:#?}"));
+    let task_ended = outputs
+        .iter()
+        .position(|output| matches!(output, ProviderOutput::BackgroundTaskEnded { .. }))
+        .unwrap_or_else(|| panic!("the command never ended: {outputs:#?}"));
+    assert!(hola < task_ended, "{outputs:#?}");
+    assert!(completions(&outputs) >= 3, "{outputs:#?}");
+}
+
+/// The last thing the turn reported, before its process ended.
+fn last_output(outputs: &[ProviderOutput]) -> Option<&ProviderOutput> {
+    outputs
+        .iter()
+        .rev()
+        .find(|output| !matches!(output, ProviderOutput::ProcessEnded))
 }

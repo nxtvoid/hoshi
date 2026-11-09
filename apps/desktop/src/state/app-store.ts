@@ -407,6 +407,8 @@ function receive({ sequence, event }: EventEnvelope) {
   useRequestStore.getState().applyEvent(event)
   if (event.type === 'turnCompleted' || event.type === 'threadDeleted') {
     useStoppingStore.getState().end(event.threadId)
+  }
+  if (event.type === 'threadDeleted') {
     useBackgroundTaskStore.getState().forget(event.threadId)
   }
   if (event.type === 'threadDeleted') {

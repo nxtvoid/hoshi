@@ -155,7 +155,10 @@ impl Installation {
     }
 }
 
-/// Receives everything a turn reports, ending with `ProviderOutput::TurnCompleted`.
+/// Receives everything a turn reports, ending with `ProviderOutput::TurnCompleted`. When the
+/// turn's process outlives it ([`RunningTurn::lingers`]), it goes on with what that process
+/// reports later: the turns [`RunningTurn::continue_with`] or `ProviderOutput::Woke` start in
+/// it, and `ProviderOutput::ProcessEnded` once it is gone.
 pub type OutputSink = Box<dyn FnMut(ProviderOutput) + Send>;
 
 pub trait ProviderAdapter: Send + Sync {
@@ -231,6 +234,31 @@ pub trait RunningTurn: Send {
     /// `false` when the turn is ending and can't take it: it then needs a turn of its own.
     fn steer(&self, _message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
         false
+    }
+
+    /// Makes the turn wait for background commands it started, or stop waiting with
+    /// `awaited` false. Returns the ids among `task_ids` that run; `None` when the provider
+    /// can't wait for them.
+    fn await_background_tasks(&self, _task_ids: &[String], _awaited: bool) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Whether the process stays once its turn completed, keeping the commands the turn left
+    /// running in the background.
+    fn lingers(&self) -> bool {
+        false
+    }
+
+    /// Runs the thread's next turn in the process a completed turn left running, reporting to
+    /// that turn's sink. `false` when it can't, as when the request changed what the process
+    /// was started with: the caller then closes it and starts a turn of its own.
+    fn continue_with(&self, _request: &TurnRequest) -> bool {
+        false
+    }
+
+    /// Ends the process and everything it started.
+    fn close(&self) {
+        self.interrupt();
     }
 }
 

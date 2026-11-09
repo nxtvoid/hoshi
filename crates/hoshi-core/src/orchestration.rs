@@ -98,7 +98,8 @@ pub enum Command {
         thread_id: String,
         tool_use_id: String,
     },
-    /// Stops one command the running turn left in the background.
+    /// Stops one command the thread's agent left running in the background, during its turn
+    /// or after it.
     BackgroundTaskStop {
         thread_id: String,
         task_id: String,
@@ -1065,12 +1066,18 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             Ok(Vec::new())
         }
-        Command::SubagentStop { thread_id, .. } | Command::BackgroundTaskStop { thread_id, .. } => {
+        Command::SubagentStop { thread_id, .. } => {
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
             if thread.active_turn_id.is_none() {
                 return Err(CommandError::ThreadNotWorking { thread_id });
+            }
+            Ok(Vec::new())
+        }
+        Command::BackgroundTaskStop { thread_id, .. } => {
+            if !model.threads.contains_key(&thread_id) {
+                return Err(CommandError::ThreadNotFound { thread_id });
             }
             Ok(Vec::new())
         }
@@ -1534,7 +1541,9 @@ pub fn record_output(
         | ProviderOutput::UsageLimits(_)
         | ProviderOutput::WorkingDirectory { .. }
         | ProviderOutput::BackgroundTasks { .. }
-        | ProviderOutput::ConversationCursor { .. } => Vec::new(),
+        | ProviderOutput::ConversationCursor { .. }
+        | ProviderOutput::Woke
+        | ProviderOutput::ProcessEnded => Vec::new(),
         ProviderOutput::Subagent {
             tool_use_id,
             output,
@@ -1791,6 +1800,21 @@ pub fn start_queued_turn(
     message_id: &str,
     now: &str,
 ) -> Vec<Event> {
+    start_idle_turn(model, thread_id, message_id, now)
+}
+
+/// Starts a turn the agent began by itself after its own turn completed, as a command it
+/// left running in the background ended. Nothing when the thread is gone or busy.
+pub fn start_woken_turn(
+    model: &ReadModel,
+    thread_id: &str,
+    turn_id: &str,
+    now: &str,
+) -> Vec<Event> {
+    start_idle_turn(model, thread_id, turn_id, now)
+}
+
+fn start_idle_turn(model: &ReadModel, thread_id: &str, message_id: &str, now: &str) -> Vec<Event> {
     match model.threads.get(thread_id) {
         Some(thread) if thread.active_turn_id.is_none() => vec![Event::TurnStarted {
             thread_id: thread_id.to_owned(),
@@ -2312,6 +2336,36 @@ const a = 1
                 thread_id: "t".into()
             }
         );
+    }
+
+    #[test]
+    fn a_command_left_running_can_be_stopped_once_the_turn_ended_but_a_subagent_cannot() {
+        let mut model = model_with_thread();
+        let stop_command = Command::BackgroundTaskStop {
+            thread_id: "t".into(),
+            task_id: "b1".into(),
+        };
+        let stop_subagent = Command::SubagentStop {
+            thread_id: "t".into(),
+            tool_use_id: "toolu_1".into(),
+        };
+
+        assert_eq!(run(&mut model, stop_command), Ok(Vec::new()));
+        assert!(run(&mut model, stop_subagent).is_err());
+    }
+
+    #[test]
+    fn the_agent_wakes_into_a_turn_of_its_own_only_on_an_idle_thread() {
+        let mut model = model_with_thread();
+
+        let woken = start_woken_turn(&model, "t", "w1", NOW);
+        assert!(matches!(
+            woken.as_slice(),
+            [Event::TurnStarted { turn_id, .. }] if turn_id == "w1"
+        ));
+        apply_all(&mut model, &woken);
+        assert!(start_woken_turn(&model, "t", "w2", NOW).is_empty());
+        assert!(start_woken_turn(&model, "gone", "w3", NOW).is_empty());
     }
 
     #[test]

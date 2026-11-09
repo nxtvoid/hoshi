@@ -118,6 +118,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event
                 && let Some(engine) = app.try_state::<hoshi_engine::Engine>()
             {
+                engine.close_lingering_agents();
                 engine.close_browser();
             }
         });

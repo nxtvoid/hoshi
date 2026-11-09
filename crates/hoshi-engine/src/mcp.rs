@@ -320,6 +320,23 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
+            "name": "await_background_tasks",
+            "description": "Keep this turn going until background commands you started finish, such as tests or a build: pass their task ids right after starting them, then end your turn. Never for work left running, such as a dev server or a watcher: your turn ends without it and it keeps running. waiting false stops waiting. It doesn't stop a command.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "taskIds": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "The task ids the background commands reported.",
+                    },
+                    "waiting": { "type": "boolean", "description": "true (default) waits for them; false stops waiting." },
+                },
+                "required": ["taskIds"],
+            },
+        },
+        {
             "name": "preview_open",
             "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. Use it to check web work instead of a browser, Playwright or screenshot tool of your own; then preview_snapshot reads the page and preview_act uses it.",
             "inputSchema": {
@@ -493,6 +510,7 @@ mod tests {
                 "create_pull_request",
                 "watch_pull_request",
                 "unwatch_pull_request",
+                "await_background_tasks",
                 "preview_open",
                 "preview_navigate",
                 "preview_snapshot",

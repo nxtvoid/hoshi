@@ -3,6 +3,7 @@
 //! (provider turns, git). Provider output comes back through the same path.
 
 mod attachments;
+mod background;
 mod browser;
 mod checkpoint;
 mod delegation;
@@ -32,6 +33,7 @@ mod worktree;
 mod worktree_setup;
 
 use attachments::Attachments;
+use background::Lingering;
 use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
@@ -85,7 +87,8 @@ pub enum Notification {
     PullRequestDetail(ThreadPullRequestDetail),
     /// Cached, not part of the event log: it changes on every model call.
     ContextUsage(ThreadContextUsage),
-    /// The commands a thread's running turn waits for; empty once none is left.
+    /// The commands a thread's agent runs in the background, during its turn or after it;
+    /// empty once none is left.
     BackgroundTasks(ThreadBackgroundTasks),
     /// The provider plan's limits, as a running turn last reported them.
     UsageLimits(UsageLimits),
@@ -148,6 +151,11 @@ struct State {
     sequence: u64,
     /// Running turns by thread id.
     turns: HashMap<String, Turn>,
+    /// Agent processes kept after their turn for the commands it left running in the
+    /// background, by thread id.
+    lingering: HashMap<String, Lingering>,
+    /// How many agent processes the engine started, which numbers each one.
+    processes: u64,
     /// `None` when the provider is disabled.
     adapter: Option<Arc<dyn ProviderAdapter>>,
     notify: Notify,
@@ -363,6 +371,8 @@ struct PullRequestJob {
 
 struct Turn {
     id: String,
+    /// The agent process it runs in, by number.
+    process: u64,
     running: Box<dyn RunningTurn>,
     /// `None` outside a git repository.
     workspace: Option<TurnWorkspace>,
@@ -373,7 +383,7 @@ struct Turn {
     arrivals: usize,
     /// The provider's latest message of the conversation so far.
     cursor: Option<String>,
-    /// The commands the turn waits for in the background, once it reported any.
+    /// The commands running in the background, once the turn reported any.
     background: Option<ThreadBackgroundTasks>,
 }
 
@@ -422,6 +432,8 @@ impl Engine {
             sequence: snapshot.sequence,
             store,
             turns: HashMap::new(),
+            lingering: HashMap::new(),
+            processes: 0,
             adapter: None,
             notify,
             worktrees_dir: data_dir.join("worktrees"),
@@ -995,6 +1007,7 @@ impl Engine {
             if thread.worktree_released {
                 return state.decide_and_commit(release);
             }
+            state.close_lingering(thread_id);
             let op = state.begin_op(thread_id, &[&path])?;
             (op, root, path, state.checkpoints.clone())
         };
@@ -1062,6 +1075,7 @@ impl Engine {
                 folders.push(&root);
             }
             let op = state.begin_op(thread_id, &folders)?;
+            state.close_lingering(thread_id);
             let plan = CleanUpPlan {
                 root,
                 pull_request,
@@ -1364,6 +1378,12 @@ impl Engine {
                 .turns
                 .values()
                 .filter_map(|turn| turn.background.clone())
+                .chain(
+                    state
+                        .lingering
+                        .values()
+                        .filter_map(|lingering| lingering.background.clone()),
+                )
                 .filter(|background| !background.tasks.is_empty())
                 .collect(),
         }
@@ -1608,6 +1628,12 @@ impl Engine {
     }
 
     /// Closes every page and the headless browser, as when the app quits.
+    /// Ends the agent processes kept between turns, and the commands running in them, as
+    /// when the app quits.
+    pub fn close_lingering_agents(&self) {
+        lock(&self.state).close_all_lingering();
+    }
+
     pub fn close_browser(&self) {
         self.browsing().close();
     }
@@ -2131,6 +2157,7 @@ impl State {
                 event: event.clone(),
             }));
         }
+        self.close_lingering_after(events);
         Ok(())
     }
 
@@ -2240,18 +2267,11 @@ impl State {
                 Some(turn) if turn.id == turn_id => self.turns.remove(thread_id),
                 _ => None,
             };
-            if ended_turn
-                .as_ref()
-                .and_then(|turn| turn.background.as_ref())
-                .is_some_and(|background| !background.tasks.is_empty())
-            {
-                (self.notify)(Notification::BackgroundTasks(ThreadBackgroundTasks {
-                    thread_id: thread_id.to_owned(),
-                    tasks: Vec::new(),
-                    waiting: false,
-                }));
-            }
-            let workspace = ended_turn.and_then(|turn| turn.workspace);
+            let workspace = ended_turn.and_then(|mut turn| {
+                let workspace = turn.workspace.take();
+                self.keep_between_turns(thread_id, turn);
+                workspace
+            });
             // The agent may have created a worktree or switched branches.
             let check = workspace
                 .filter(|workspace| !workspace.moved)
@@ -2537,10 +2557,17 @@ impl State {
         {
             turn.running.stop_subagent(&tool_use_id);
         }
-        if let Some((thread_id, task_id)) = stop_background
-            && let Some(turn) = self.turns.get(&thread_id)
-        {
-            turn.running.stop_background_task(&task_id);
+        if let Some((thread_id, task_id)) = stop_background {
+            let running = match self.turns.get(&thread_id) {
+                Some(turn) => Some(&turn.running),
+                None => self
+                    .lingering
+                    .get(&thread_id)
+                    .map(|lingering| &lingering.running),
+            };
+            if let Some(running) = running {
+                running.stop_background_task(&task_id);
+            }
         }
         // A deleted thread (or a removed project's threads) must not keep an agent running.
         let orphaned: Vec<_> = self
@@ -2553,6 +2580,15 @@ impl State {
             if let Some(turn) = self.turns.remove(&thread_id) {
                 turn.running.interrupt();
             }
+        }
+        let orphaned: Vec<_> = self
+            .lingering
+            .keys()
+            .filter(|thread_id| self.model.thread(thread_id).is_none())
+            .cloned()
+            .collect();
+        for thread_id in orphaned {
+            self.close_lingering(&thread_id);
         }
         let State {
             model,
@@ -3582,20 +3618,6 @@ fn start_turn(
     let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
-    let project = thread
-        .project_id
-        .as_deref()
-        .and_then(|project_id| state.model.project(project_id));
-    let workspace = project.and_then(|project| {
-        let repository = project.workspace_root.clone();
-        let worktrees_before = git::worktrees(&repository)?;
-        Some(TurnWorkspace {
-            repository,
-            worktrees_before,
-            tool_inputs: Vec::new(),
-            moved: false,
-        })
-    });
     let attachments = state.turn_attachments(attachments);
     let depth = state.depth(thread_id);
     let mcp = state
@@ -3636,29 +3658,38 @@ fn start_turn(
         mcp,
         instructions,
     };
-    let checkpointed = workspace.as_ref().map(|_| cwd.to_owned());
-    if let Some(dir) = &checkpointed {
-        let (dir, reference) = (
-            dir.clone(),
-            checkpoint::reference(thread_id, turn_id, Moment::Before),
-        );
-        state.checkpoints.queue(&dir.clone(), move || {
-            if let Err(error) = checkpoint::capture(&dir, &reference) {
-                eprintln!("hoshi: no checkpoint before the turn in {dir}: {error}");
-            }
-        });
+    let (workspace, checkpointed) = state.turn_workspace(thread_id, turn_id, &cwd);
+    if let Some(lingering) = state.lingering.remove(thread_id) {
+        if lingering.running.continue_with(&request) {
+            let turn = Turn {
+                id: turn_id.to_owned(),
+                process: lingering.process,
+                running: lingering.running,
+                workspace,
+                checkpointed,
+                arrivals: 0,
+                cursor: None,
+                background: lingering.background,
+            };
+            state.turns.insert(thread_id.to_owned(), turn);
+            return;
+        }
+        state.end_lingering(thread_id, lingering);
     }
+    state.processes += 1;
+    let process = state.processes;
     let weak: Weak<Mutex<State>> = state.this.clone();
-    let (sink_thread, sink_turn) = (thread_id.to_owned(), turn_id.to_owned());
+    let sink_thread = thread_id.to_owned();
     let sink = Box::new(move |output| {
         if let Some(shared) = weak.upgrade() {
-            lock(&shared).receive(&sink_thread, &sink_turn, output);
+            lock(&shared).receive_from(&sink_thread, process, output);
         }
     });
     match adapter.start_turn(request, sink) {
         Ok(running) => {
             let turn = Turn {
                 id: turn_id.to_owned(),
+                process,
                 running,
                 workspace,
                 checkpointed,
@@ -3669,6 +3700,46 @@ fn start_turn(
             state.turns.insert(thread_id.to_owned(), turn);
         }
         Err(failure) => state.receive(thread_id, turn_id, turn_failed(failure)),
+    }
+}
+
+impl State {
+    /// What a turn starting now in `cwd` reads its changes against: the project's worktrees
+    /// before it, and a checkpoint of the folder, queued now.
+    fn turn_workspace(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        cwd: &str,
+    ) -> (Option<TurnWorkspace>, Option<String>) {
+        let project = self
+            .model
+            .thread(thread_id)
+            .and_then(|thread| thread.project_id.as_deref())
+            .and_then(|project_id| self.model.project(project_id));
+        let workspace = project.and_then(|project| {
+            let repository = project.workspace_root.clone();
+            let worktrees_before = git::worktrees(&repository)?;
+            Some(TurnWorkspace {
+                repository,
+                worktrees_before,
+                tool_inputs: Vec::new(),
+                moved: false,
+            })
+        });
+        let checkpointed = workspace.as_ref().map(|_| cwd.to_owned());
+        if let Some(dir) = &checkpointed {
+            let (dir, reference) = (
+                dir.clone(),
+                checkpoint::reference(thread_id, turn_id, Moment::Before),
+            );
+            self.checkpoints.queue(&dir.clone(), move || {
+                if let Err(error) = checkpoint::capture(&dir, &reference) {
+                    eprintln!("hoshi: no checkpoint before the turn in {dir}: {error}");
+                }
+            });
+        }
+        (workspace, checkpointed)
     }
 }
 
@@ -6999,5 +7070,285 @@ Blue"
             .unwrap_err();
 
         assert!(matches!(error, CommandError::NotAGitRepository { .. }));
+    }
+
+    /// One agent process the test speaks for, kept after its turns while it says so.
+    #[derive(Default)]
+    struct KeptProcess {
+        sink: Mutex<Option<OutputSink>>,
+        spawned: Mutex<usize>,
+        lingers: Mutex<bool>,
+        /// Whether a next turn may run in it.
+        takes_turns: Mutex<bool>,
+        continued: Mutex<Vec<String>>,
+        stopped: Mutex<Vec<String>>,
+        closed: Mutex<bool>,
+    }
+
+    impl KeptProcess {
+        fn report(&self, output: ProviderOutput) {
+            let mut sink = self.sink.lock().unwrap().take().unwrap();
+            sink(output);
+            *self.sink.lock().unwrap() = Some(sink);
+        }
+    }
+
+    struct KeptAdapter(Arc<KeptProcess>);
+
+    struct KeptTurn(Arc<KeptProcess>);
+
+    impl RunningTurn for KeptTurn {
+        fn interrupt(&self) {}
+
+        fn respond(&self, _request_id: &str, _response: &RequestResponse) {}
+
+        fn stop_background_task(&self, task_id: &str) {
+            self.0.stopped.lock().unwrap().push(task_id.to_owned());
+        }
+
+        fn await_background_tasks(
+            &self,
+            task_ids: &[String],
+            _awaited: bool,
+        ) -> Option<Vec<String>> {
+            Some(
+                task_ids
+                    .iter()
+                    .filter(|task_id| *task_id == "b1")
+                    .cloned()
+                    .collect(),
+            )
+        }
+
+        fn lingers(&self) -> bool {
+            *self.0.lingers.lock().unwrap()
+        }
+
+        fn continue_with(&self, request: &TurnRequest) -> bool {
+            if !*self.0.takes_turns.lock().unwrap() {
+                return false;
+            }
+            self.0
+                .continued
+                .lock()
+                .unwrap()
+                .push(request.prompt.clone());
+            true
+        }
+
+        fn close(&self) {
+            *self.0.closed.lock().unwrap() = true;
+        }
+    }
+
+    impl ProviderAdapter for KeptAdapter {
+        fn models(&self) -> hoshi_core::ProviderModels {
+            hoshi_core::ProviderModels::default()
+        }
+
+        fn start_turn(
+            &self,
+            _request: TurnRequest,
+            sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            *self.0.spawned.lock().unwrap() += 1;
+            *self.0.sink.lock().unwrap() = Some(sink);
+            Ok(Box::new(KeptTurn(self.0.clone())))
+        }
+    }
+
+    fn dev_server() -> BackgroundTask {
+        BackgroundTask {
+            task_id: "b1".into(),
+            tool_call_id: Some("toolu_1".into()),
+            description: "Start the dev server".into(),
+            started_at: 1,
+        }
+    }
+
+    /// Thread `t`'s first turn starts the dev server and completes, leaving it running.
+    fn leave_dev_server_running(name: &str) -> (Harness, Arc<KeptProcess>) {
+        let harness = Harness::in_memory(name, Vec::new());
+        let process = Arc::new(KeptProcess {
+            takes_turns: Mutex::new(true),
+            ..KeptProcess::default()
+        });
+        harness
+            .engine
+            .set_adapter(Some(Arc::new(KeptAdapter(process.clone()))));
+        harness.send("t", "m1", "start the dev server");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        process.report(ProviderOutput::SessionStarted {
+            session_id: "s1".into(),
+        });
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: vec![dev_server()],
+            waiting: false,
+        });
+        *process.lingers.lock().unwrap() = true;
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+        (harness, process)
+    }
+
+    fn running_in_background(harness: &Harness) -> Vec<ThreadBackgroundTasks> {
+        harness.engine.snapshot().background_tasks
+    }
+
+    #[test]
+    fn a_turn_that_leaves_a_command_running_ends_and_its_process_takes_the_next_message() {
+        let (harness, process) = leave_dev_server_running("kept-process");
+
+        assert_eq!(harness.thread("t").status, ThreadStatus::Idle);
+        assert_eq!(
+            running_in_background(&harness),
+            [ThreadBackgroundTasks {
+                thread_id: "t".into(),
+                tasks: vec![dev_server()],
+                waiting: false,
+            }]
+        );
+
+        harness.send("t", "m2", "is it up?");
+        let started = harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } => Some(turn_id),
+            _ => None,
+        });
+        assert_eq!(started, "m2");
+        assert_eq!(*process.spawned.lock().unwrap(), 1);
+        assert_eq!(*process.continued.lock().unwrap(), ["is it up?"]);
+
+        process.report(ProviderOutput::AssistantMessage {
+            item_id: "a2".into(),
+            text: "It is.".into(),
+        });
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+        assert_eq!(running_in_background(&harness).len(), 1);
+    }
+
+    #[test]
+    fn a_command_left_running_that_ends_wakes_the_agent_in_a_turn_of_its_own() {
+        let (harness, process) = leave_dev_server_running("kept-process-wake");
+
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false,
+        });
+        process.report(ProviderOutput::Woke);
+        let woken = harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } => Some(turn_id),
+            _ => None,
+        });
+        assert_ne!(woken, "m1");
+        assert_eq!(harness.thread("t").status, ThreadStatus::Working);
+        process.report(ProviderOutput::BackgroundTaskEnded {
+            task_id: "b1".into(),
+            tool_use_id: Some("toolu_1".into()),
+            failed: true,
+        });
+        *process.lingers.lock().unwrap() = false;
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+
+        let items = harness.engine.transcript("t", None).unwrap().items;
+        assert!(
+            items
+                .iter()
+                .any(|item| item.id == format!("{woken}:ended:b1"))
+        );
+        assert!(running_in_background(&harness).is_empty());
+        assert!(lock(&harness.engine.state).lingering.is_empty());
+    }
+
+    #[test]
+    fn a_process_kept_between_turns_is_forgotten_once_it_ends() {
+        let (harness, process) = leave_dev_server_running("kept-process-ends");
+
+        process.report(ProviderOutput::ProcessEnded);
+
+        assert!(running_in_background(&harness).is_empty());
+        assert!(lock(&harness.engine.state).lingering.is_empty());
+        harness.send("t", "m2", "again");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        assert_eq!(*process.spawned.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_command_left_running_can_be_stopped_between_turns() {
+        let (harness, process) = leave_dev_server_running("kept-process-stop");
+
+        harness
+            .engine
+            .dispatch(Command::BackgroundTaskStop {
+                thread_id: "t".into(),
+                task_id: "b1".into(),
+            })
+            .unwrap();
+
+        assert_eq!(*process.stopped.lock().unwrap(), ["b1"]);
+    }
+
+    #[test]
+    fn a_next_message_the_kept_process_cannot_take_starts_a_fresh_one() {
+        let (harness, process) = leave_dev_server_running("kept-process-refuses");
+        *process.takes_turns.lock().unwrap() = false;
+
+        harness.send("t", "m2", "now with another model");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+
+        assert!(*process.closed.lock().unwrap());
+        assert_eq!(*process.spawned.lock().unwrap(), 2);
+        assert!(running_in_background(&harness).is_empty());
+    }
+
+    #[test]
+    fn archiving_or_deleting_a_thread_ends_the_process_its_turn_kept() {
+        let (harness, process) = leave_dev_server_running("kept-process-archive");
+        harness
+            .engine
+            .dispatch(Command::ThreadArchive {
+                thread_id: "t".into(),
+                archived: true,
+            })
+            .unwrap();
+        assert!(*process.closed.lock().unwrap());
+        assert!(running_in_background(&harness).is_empty());
+
+        let (harness, process) = leave_dev_server_running("kept-process-delete");
+        harness
+            .engine
+            .dispatch(Command::ThreadDelete {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert!(*process.closed.lock().unwrap());
+        assert!(lock(&harness.engine.state).lingering.is_empty());
+    }
+
+    #[test]
+    fn the_agent_awaits_its_background_commands_while_its_turn_runs() {
+        let (harness, _process) = leave_dev_server_running("kept-process-await");
+        let call = |harness: &Harness| {
+            lock(&harness.engine.state).call_tool(
+                "t",
+                background::TOOL,
+                &serde_json::json!({ "taskIds": ["b1", "b9"] }),
+            )
+        };
+        assert!(call(&harness).is_err(), "no turn runs");
+
+        harness.send("t", "m2", "run the tests");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let answer = call(&harness).unwrap();
+
+        assert_eq!(answer["taskIds"], serde_json::json!(["b1"]));
+        assert_eq!(answer["notRunning"], serde_json::json!(["b9"]));
     }
 }

@@ -216,11 +216,7 @@ export const Transcript = memo(function Transcript({
           <ApprovalsContext.Provider value={approvals}>
             <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
           </ApprovalsContext.Provider>
-          {working ? (
-            <li>
-              <BackgroundWork status={<TurnStatus />} />
-            </li>
-          ) : null}
+          <BackgroundWork status={working ? <TurnStatus /> : null} />
         </ol>
       </div>
       <TranscriptMinimap

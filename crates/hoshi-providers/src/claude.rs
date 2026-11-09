@@ -128,16 +128,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         request: TurnRequest,
         sink: OutputSink,
     ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
-        let turn_model = manifest().resolve(
-            request.model.as_deref().or(self.model.as_deref()),
-            request.effort,
-            request.fast_mode,
-            request.ultracode,
-        );
-        let access = Access {
-            mode: request.access_mode,
-            plan_mode: request.plan_mode,
-        };
+        let turn_model = turn_model(&request, self.model.as_deref());
+        let access = access(&request);
         let mut command = Command::new(self.binary());
         command
             .current_dir(&request.cwd)
@@ -178,62 +170,127 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 command.args(["--add-dir", &directory]);
             }
         }
-        let message = json!({
-            "type": "user",
-            "message": {
-                "role": "user",
-                "content": claude_prompt::message_content(&request.prompt, &request.attachments),
-            },
-        });
+        let message = user_message(&request.prompt, &request.attachments);
         // Over stdin rather than argv, which keeps the token out of the process list. The CLI
         // connects before it reads the message, so the first turn has the tools.
         let input = match &request.mcp {
             Some(server) => format!("{}\n{message}", mcp_servers(server)),
-            None => message.to_string(),
+            None => message,
         };
         let requests = Requests::default();
         let live_output = LiveOutput::default();
         let queue = Queue::default();
+        queue.state().access = access;
         let mut parser = ClaudeParser {
-            access,
             requests: requests.clone(),
             live_output: live_output.clone(),
             queue: queue.clone(),
             ..ClaudeParser::new(manifest().context_window(&turn_model.slug))
         };
-        let process = spawn_turn(command, input.to_string(), sink, move |line, stdin| {
-            let outputs = parser.parse_line(line);
-            for reply in parser.take_replies() {
-                stdin.write_line(&reply);
-            }
-            outputs
-        })?;
+        let (ending, in_turn) = (queue.clone(), queue.clone());
+        let process = spawn_turn(
+            command,
+            input,
+            sink,
+            move |line, stdin| {
+                let outputs = parser.parse_line(line);
+                for reply in parser.take_replies() {
+                    stdin.write_line(&reply);
+                }
+                if ending.state().closing {
+                    stdin.close();
+                }
+                outputs
+            },
+            move || in_turn.state().turn_open,
+        )?;
         live_output.poll(process.stdin().clone());
         Ok(Box::new(ClaudeTurn {
             process,
             requests,
             grants: self.grants.clone(),
-            access,
             live_output,
             queue,
+            launch: Launch {
+                cwd: request.cwd,
+                model: turn_model,
+                instructions: request.instructions,
+                mcp: request.mcp,
+                full_access: request.access_mode == AccessMode::FullAccess,
+            },
+            default_model: self.model.clone(),
         }))
     }
 }
 
+fn turn_model(request: &TurnRequest, default_model: Option<&str>) -> TurnModel {
+    manifest().resolve(
+        request.model.as_deref().or(default_model),
+        request.effort,
+        request.fast_mode,
+        request.ultracode,
+    )
+}
+
+fn access(request: &TurnRequest) -> Access {
+    Access {
+        mode: request.access_mode,
+        plan_mode: request.plan_mode,
+    }
+}
+
+fn user_message(prompt: &str, attachments: &[TurnAttachment]) -> String {
+    json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": claude_prompt::message_content(prompt, attachments),
+        },
+    })
+    .to_string()
+}
+
 const INTERRUPT_REQUEST_ID: &str = "hoshi-interrupt";
+const MODE_REQUEST_ID: &str = "hoshi-mode";
 
 /// How long a turn asked to stop may take to wind down before its process is killed.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 
-/// Messages sent to a running turn, and whether it may still take them.
-#[derive(Debug, Default)]
+/// The process's turn, the messages sent to it, and the background commands it may wait for.
+#[derive(Debug)]
 struct QueueState {
     /// Sent, but not yet taken in by the agent, by message id.
     waiting: HashSet<String>,
-    /// The turn reported its end: its stdin closes, so nothing more can join.
+    /// The process is to end: its stdin closes, so nothing more can join.
     closing: bool,
     /// The user asked the turn to stop.
     interrupted: bool,
+    /// A turn runs. Between turns, the process only keeps the commands the last one left
+    /// running in the background.
+    turn_open: bool,
+    /// The background commands running, by task id.
+    commands: HashSet<String>,
+    /// The commands among them the agent said its turn waits for.
+    awaited: HashSet<String>,
+    /// What the agent may do, as the latest turn asked.
+    access: Access,
+    /// Where the session works, as last reported.
+    cwd: Option<String>,
+}
+
+impl Default for QueueState {
+    fn default() -> Self {
+        Self {
+            waiting: HashSet::new(),
+            closing: false,
+            interrupted: false,
+            turn_open: true,
+            commands: HashSet::new(),
+            awaited: HashSet::new(),
+            access: Access::default(),
+            cwd: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -245,15 +302,102 @@ impl Queue {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    /// Marks the running commands among `task_ids` as awaited, or no longer; returns them.
+    fn await_tasks(&self, task_ids: &[String], awaited: bool) -> Vec<String> {
+        let mut state = self.state();
+        let running: Vec<String> = task_ids
+            .iter()
+            .filter(|task_id| state.commands.contains(*task_id))
+            .cloned()
+            .collect();
+        for task_id in &running {
+            if awaited {
+                state.awaited.insert(task_id.clone());
+            } else {
+                state.awaited.remove(task_id);
+            }
+        }
+        running
+    }
+}
+
+/// What a process was started with, which a later turn must share to run in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Launch {
+    cwd: String,
+    model: TurnModel,
+    instructions: Option<String>,
+    mcp: Option<McpServer>,
+    /// Allowed to bypass permissions, which a later turn can only switch to if so.
+    full_access: bool,
+}
+
+/// The lines that start `request` as the next turn of a process started as `launch`, whose
+/// session is `session`, and open that turn. `None` when the request asks for what the
+/// process can't change: another model, folder or point of the conversation.
+fn next_turn(
+    launch: &Launch,
+    default_model: Option<&str>,
+    session: Option<&str>,
+    queue: &mut QueueState,
+    request: &TurnRequest,
+) -> Option<Vec<String>> {
+    let access = access(request);
+    let here = same_folder(&request.cwd, &launch.cwd)
+        || queue
+            .cwd
+            .as_deref()
+            .is_some_and(|cwd| same_folder(&request.cwd, cwd));
+    let fits = here
+        && session.is_some()
+        && request.resume_session_id.as_deref() == session
+        && request.resume_session_at.is_none()
+        && turn_model(request, default_model) == launch.model
+        && request.instructions == launch.instructions
+        && request.mcp == launch.mcp
+        && (access.mode != AccessMode::FullAccess || launch.full_access);
+    if !fits || queue.closing || queue.turn_open {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(2);
+    if access != queue.access {
+        let mode = json!({
+            "type": "control_request",
+            "request_id": MODE_REQUEST_ID,
+            "request": { "subtype": "set_permission_mode", "mode": access.permission_mode() },
+        });
+        lines.push(mode.to_string());
+        queue.access = access;
+    }
+    lines.push(user_message(&request.prompt, &request.attachments));
+    queue.turn_open = true;
+    queue.interrupted = false;
+    Some(lines)
+}
+
+fn same_folder(one: &str, other: &str) -> bool {
+    let normal = |path: &str| {
+        let path = path.replace('\\', "/");
+        let path = path.trim_end_matches('/');
+        if cfg!(windows) {
+            path.to_lowercase()
+        } else {
+            path.to_owned()
+        }
+    };
+    normal(one) == normal(other)
 }
 
 struct ClaudeTurn {
     process: ProcessTurn,
     requests: Requests,
     grants: Grants,
-    access: Access,
     live_output: LiveOutput,
     queue: Queue,
+    launch: Launch,
+    /// The adapter's model, for requests that name none.
+    default_model: Option<String>,
 }
 
 impl RunningTurn for ClaudeTurn {
@@ -284,7 +428,7 @@ impl RunningTurn for ClaudeTurn {
     /// background first and keeps running, rather than being cut by the message.
     fn steer(&self, message_id: &str, prompt: &str, attachments: &[TurnAttachment]) -> bool {
         let mut queue = self.queue.state();
-        if queue.closing || queue.interrupted {
+        if queue.closing || queue.interrupted || !queue.turn_open {
             return false;
         }
         let stdin = self.process.stdin();
@@ -321,7 +465,8 @@ impl RunningTurn for ClaudeTurn {
         let session = session
             .as_deref()
             .map(|session_id| (session_id, &self.grants));
-        let line = claude_requests::reply(request_id, &pending, response, self.access, session);
+        let access = self.queue.state().access;
+        let line = claude_requests::reply(request_id, &pending, response, access, session);
         self.process.stdin().write_line(&line);
     }
 
@@ -333,6 +478,39 @@ impl RunningTurn for ClaudeTurn {
 
     fn stop_background_task(&self, task_id: &str) {
         self.stop_task(task_id);
+    }
+
+    fn await_background_tasks(&self, task_ids: &[String], awaited: bool) -> Option<Vec<String>> {
+        Some(self.queue.await_tasks(task_ids, awaited))
+    }
+
+    fn lingers(&self) -> bool {
+        self.process.stdin().is_open()
+    }
+
+    fn continue_with(&self, request: &TurnRequest) -> bool {
+        let session = self.requests.session();
+        let mut queue = self.queue.state();
+        let Some(lines) = next_turn(
+            &self.launch,
+            self.default_model.as_deref(),
+            session.as_deref(),
+            &mut queue,
+            request,
+        ) else {
+            return false;
+        };
+        let stdin = self.process.stdin();
+        if lines.iter().all(|line| stdin.write_line(line)) {
+            return true;
+        }
+        queue.turn_open = false;
+        false
+    }
+
+    fn close(&self) {
+        self.queue.state().closing = true;
+        self.process.interrupt();
     }
 }
 
@@ -403,7 +581,6 @@ pub struct ClaudeParser {
     moves: HashMap<String, WorktreeMove>,
     /// Where the session works, as last reported.
     session_cwd: Option<String>,
-    access: Access,
     requests: Requests,
     /// Lines to write back to the agent, such as answers it does not need the user for.
     replies: Vec<String>,
@@ -412,11 +589,15 @@ pub struct ClaudeParser {
     task_calls: HashSet<String>,
     live_output: LiveOutput,
     queue: Queue,
-    /// Subagents and commands running in the background, by task id. A turn that ends while
-    /// they run is not over: Claude Code goes on once they finish, in a turn of its own.
+    /// Subagents running in the background, by task id. A turn that ends while they run is
+    /// not over: Claude Code goes on once they finish, in a run of its own.
     background_agents: HashSet<String>,
-    /// The commands among them, as the user sees them.
+    /// Commands running in the background, as the user sees them. Only those the agent
+    /// awaits hold the turn; the others keep the process once the turn completed.
     background_commands: Vec<BackgroundTask>,
+    /// Commands that left the list before their end was told, which Claude Code answers
+    /// once it is.
+    ending: HashSet<String>,
     /// The call that started each task, by task id.
     task_calls_by_task: HashMap<String, String>,
     /// A run ended and the turn only waits on its background work: no run goes on.
@@ -466,8 +647,8 @@ impl ClaudeParser {
         };
         match value["type"].as_str() {
             Some("control_request") => {
-                let (outputs, reply) =
-                    claude_requests::receive(&value, self.access, &self.requests);
+                let access = self.queue.state().access;
+                let (outputs, reply) = claude_requests::receive(&value, access, &self.requests);
                 self.replies.extend(reply);
                 return outputs;
             }
@@ -476,7 +657,7 @@ impl ClaudeParser {
             }
             Some("control_response") => {
                 if value["response"]["request_id"] == INTERRUPT_REQUEST_ID {
-                    return self.end_between_runs().into_iter().collect();
+                    return self.end_between_runs();
                 }
                 return self.live_output.answer(&value).into_iter().collect();
             }
@@ -490,6 +671,7 @@ impl ClaudeParser {
                     let task = value["task_id"].as_str().unwrap_or_default();
                     let mut outputs = self.background_agent_ended(&value);
                     self.background_agents.remove(task);
+                    self.ending.remove(task);
                     outputs.extend(self.background_command_ended(task));
                     if self.ever_background.contains(task)
                         && value["status"] != "stopped"
@@ -508,12 +690,14 @@ impl ClaudeParser {
                         }
                     }
                     outputs.extend(self.end_between_runs());
+                    self.close_when_idle();
                     return outputs;
                 }
                 Some("background_tasks_changed") => {
                     let mut outputs: Vec<_> =
                         self.background_tasks_changed(&value).into_iter().collect();
                     outputs.extend(self.end_between_runs());
+                    self.close_when_idle();
                     return outputs;
                 }
                 Some("task_progress") => {
@@ -561,6 +745,9 @@ impl ClaudeParser {
             _ => false,
         };
         let mut outputs = Vec::new();
+        if run_going || value["type"] == "result" {
+            outputs.extend(self.wake());
+        }
         if run_going && std::mem::take(&mut self.idle) {
             outputs.extend(self.waiting_changed());
         }
@@ -589,6 +776,7 @@ impl ClaudeParser {
                     .filter(|path| self.session_cwd.as_deref() != Some(*path))
                     .map(|path| {
                         self.session_cwd = Some(path.to_owned());
+                        self.queue.state().cwd = Some(path.to_owned());
                         ProviderOutput::WorkingDirectory {
                             path: path.to_owned(),
                         }
@@ -624,33 +812,32 @@ impl ClaudeParser {
                 {
                     self.pending_wakes.remove(run);
                 }
-                let mut queue = self.queue.state();
-                // A message not yet taken in, or a subagent still working, gets another run.
+                let shared = self.queue.clone();
+                let mut queue = shared.state();
+                // A message not yet taken in, or background work the turn waits for, gets
+                // another run.
                 let over = queue.interrupted
                     || (queue.waiting.is_empty()
-                        && self.background_agents.is_empty()
+                        && !self.holds(&queue)
                         && self.pending_wakes.is_empty());
                 self.runs += 1;
-                self.last_outcome = Some(parse_result(value));
-                self.idle = !over;
-                if !over {
-                    outputs.push(ProviderOutput::RunEnded { run: self.runs });
-                    match self.ended_tasks.pop_front() {
-                        Some(ended) => outputs.push(ended),
-                        None => self.between_runs = true,
-                    }
-                    outputs.extend(self.waiting_changed());
-                }
                 if over {
-                    queue.closing = true;
-                    outputs.push(ProviderOutput::TurnCompleted {
-                        outcome: if queue.interrupted {
-                            TurnOutcome::Interrupted
-                        } else {
-                            parse_result(value)
-                        },
-                    });
+                    let outcome = if queue.interrupted {
+                        TurnOutcome::Interrupted
+                    } else {
+                        parse_result(value)
+                    };
+                    outputs.extend(self.complete(&mut queue, outcome));
+                    return outputs;
                 }
+                self.last_outcome = Some(parse_result(value));
+                self.idle = true;
+                outputs.push(ProviderOutput::RunEnded { run: self.runs });
+                match self.ended_tasks.pop_front() {
+                    Some(ended) => outputs.push(ended),
+                    None => self.between_runs = true,
+                }
+                outputs.extend(self.waiting_changed());
                 outputs
             }
             Some("command_lifecycle") => {
@@ -845,18 +1032,14 @@ impl ClaudeParser {
         Some(self.background_roster())
     }
 
-    /// Claude Code lists what runs in the background whenever that changes. Shell commands
-    /// (`Bash` sent to the background, `Monitor`) and subagents hold the turn.
+    /// Claude Code lists what runs in the background whenever that changes. Subagents hold
+    /// the turn; shell commands (`Bash` sent to the background, `Monitor`) only when the agent
+    /// awaits them.
     fn background_tasks_changed(&mut self, value: &Value) -> Option<ProviderOutput> {
         let tasks: Vec<&Value> = value["tasks"].as_array().into_iter().flatten().collect();
         self.background_agents = tasks
             .iter()
-            .filter(|task| {
-                matches!(
-                    task["task_type"].as_str(),
-                    Some("local_agent" | "local_bash")
-                )
-            })
+            .filter(|task| task["task_type"] == "local_agent")
             .filter_map(|task| task["task_id"].as_str().map(str::to_owned))
             .collect();
         self.ever_background
@@ -879,18 +1062,105 @@ impl ClaudeParser {
                 }))
             })
             .collect();
+        self.ever_background
+            .extend(commands.iter().map(|command| command.task_id.clone()));
+        for gone in &self.background_commands {
+            if !commands
+                .iter()
+                .any(|command| command.task_id == gone.task_id)
+            {
+                self.ending.insert(gone.task_id.clone());
+            }
+        }
         if commands == self.background_commands {
             return None;
         }
-        self.background_commands = commands;
+        self.set_commands(commands);
         Some(self.background_roster())
     }
 
     fn background_command_ended(&mut self, task_id: &str) -> Option<ProviderOutput> {
-        let before = self.background_commands.len();
-        self.background_commands
-            .retain(|command| command.task_id != task_id);
-        (self.background_commands.len() != before).then(|| self.background_roster())
+        if !self
+            .background_commands
+            .iter()
+            .any(|command| command.task_id == task_id)
+        {
+            return None;
+        }
+        let left = self
+            .background_commands
+            .iter()
+            .filter(|command| command.task_id != task_id)
+            .cloned()
+            .collect();
+        self.set_commands(left);
+        Some(self.background_roster())
+    }
+
+    /// Also forgets that the agent awaited commands no longer running.
+    fn set_commands(&mut self, commands: Vec<BackgroundTask>) {
+        self.background_commands = commands;
+        let running: HashSet<String> = self
+            .background_commands
+            .iter()
+            .map(|command| command.task_id.clone())
+            .collect();
+        let mut queue = self.queue.state();
+        queue.awaited.retain(|task_id| running.contains(task_id));
+        queue.commands = running;
+    }
+
+    /// Whether the turn waits for background work: its subagents, and the commands the
+    /// agent awaits.
+    fn holds(&self, queue: &QueueState) -> bool {
+        !self.background_agents.is_empty() || !queue.awaited.is_empty()
+    }
+
+    /// Ends the turn. Its process stays for the commands still running in the background,
+    /// unless the user stopped the turn.
+    fn complete(&mut self, queue: &mut QueueState, outcome: TurnOutcome) -> Vec<ProviderOutput> {
+        let lingers =
+            !queue.interrupted && (!self.background_commands.is_empty() || !self.ending.is_empty());
+        queue.turn_open = false;
+        queue.closing = !lingers;
+        self.runs = 0;
+        self.idle = false;
+        self.between_runs = false;
+        self.last_outcome = None;
+        let mut outputs = Vec::new();
+        if lingers && !self.background_commands.is_empty() {
+            outputs.push(self.background_roster());
+        }
+        outputs.push(ProviderOutput::TurnCompleted { outcome });
+        outputs
+    }
+
+    /// A run that starts between turns is the agent going on by itself, as a command left
+    /// running ended: a turn of its own, which first tells what ended.
+    fn wake(&mut self) -> Vec<ProviderOutput> {
+        {
+            let mut queue = self.queue.state();
+            if queue.turn_open || queue.closing {
+                return Vec::new();
+            }
+            queue.turn_open = true;
+        }
+        let mut outputs = vec![ProviderOutput::Woke];
+        outputs.extend(self.ended_tasks.pop_front());
+        outputs
+    }
+
+    /// Between turns, the process ends once nothing it kept runs or waits for an answer.
+    fn close_when_idle(&self) {
+        let mut queue = self.queue.state();
+        if !queue.turn_open
+            && self.background_commands.is_empty()
+            && self.ending.is_empty()
+            && self.background_agents.is_empty()
+            && self.pending_wakes.is_empty()
+        {
+            queue.closing = true;
+        }
     }
 
     fn background_roster(&self) -> ProviderOutput {
@@ -908,24 +1178,23 @@ impl ClaudeParser {
     /// A turn that waits between runs ends on its own once nothing is left to wait for, or
     /// once the user asked it to stop: Claude Code answers no stopped task, and an interrupt
     /// with no run going ends none.
-    fn end_between_runs(&mut self) -> Option<ProviderOutput> {
+    fn end_between_runs(&mut self) -> Vec<ProviderOutput> {
         if !self.idle {
-            return None;
+            return Vec::new();
         }
-        let mut queue = self.queue.state();
-        let waits = !self.background_agents.is_empty()
-            || !self.pending_wakes.is_empty()
-            || !queue.waiting.is_empty();
-        if queue.closing || (waits && !queue.interrupted) {
-            return None;
+        let shared = self.queue.clone();
+        let mut queue = shared.state();
+        let waits =
+            self.holds(&queue) || !self.pending_wakes.is_empty() || !queue.waiting.is_empty();
+        if queue.closing || !queue.turn_open || (waits && !queue.interrupted) {
+            return Vec::new();
         }
-        queue.closing = true;
         let outcome = if queue.interrupted {
             TurnOutcome::Interrupted
         } else {
             self.last_outcome.clone().unwrap_or(TurnOutcome::Completed)
         };
-        Some(ProviderOutput::TurnCompleted { outcome })
+        self.complete(&mut queue, outcome)
     }
 
     /// A subagent's own messages and tool calls, which go to its transcript. Its prompt, sent
@@ -1013,6 +1282,7 @@ impl ClaudeParser {
             WorktreeMove::Exit => result["restoredCwd"].as_str(),
         }?;
         self.session_cwd = Some(path.to_owned());
+        self.queue.state().cwd = Some(path.to_owned());
         Some(ProviderOutput::WorkingDirectory {
             path: path.to_owned(),
         })
@@ -1378,6 +1648,7 @@ mod tests {
         json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks })
     }
 
+    /// The agent starts `sleep` in the background; its run has not ended yet.
     fn sleep_in_background() -> Vec<Value> {
         vec![
             json!({ "type": "assistant", "parent_tool_use_id": null, "message": { "id": "msg_1",
@@ -1397,8 +1668,47 @@ mod tests {
                 "message": { "role": "user", "content": [{ "type": "tool_result",
                     "tool_use_id": "toolu_bg",
                     "content": "Command running in background with ID: b1." }] } }),
+        ]
+    }
+
+    fn run_result() -> Value {
+        json!({ "type": "result", "subtype": "success", "is_error": false, "result": "started" })
+    }
+
+    /// The agent starts `sleep` in the background, says its turn waits for it, and ends its
+    /// run.
+    fn await_sleep(parser: &mut ClaudeParser) -> Vec<ProviderOutput> {
+        let mut outputs = feed(parser, &sleep_in_background());
+        assert_eq!(parser.queue.await_tasks(&["b1".into()], true), ["b1"]);
+        outputs.extend(feed(parser, &[run_result()]));
+        outputs
+    }
+
+    /// The agent starts `sleep` in the background and ends its turn, leaving it running.
+    fn leave_sleep_running(parser: &mut ClaudeParser) -> Vec<ProviderOutput> {
+        let mut lines = sleep_in_background();
+        lines.push(run_result());
+        feed(parser, &lines)
+    }
+
+    fn sleep_ended() -> Vec<Value> {
+        vec![
+            json!({ "type": "system", "subtype": "task_updated", "task_id": "b1",
+                "patch": { "status": "completed" } }),
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
+                "run_id": "run-b1", "tool_use_id": "toolu_bg", "status": "completed",
+                "summary": "Background command \"Sleep then echo done\" completed (exit code 0)" }),
+            roster(json!([])),
+        ]
+    }
+
+    fn answer_to_sleep() -> Vec<Value> {
+        vec![
+            json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+            json!({ "type": "assistant", "parent_tool_use_id": null, "message": {
+                "id": "msg_2", "content": [{ "type": "text", "text": "It printed done." }] } }),
             json!({ "type": "result", "subtype": "success", "is_error": false,
-                "result": "started" }),
+                "origin": { "kind": "task-notification", "runId": "run-b1" } }),
         ]
     }
 
@@ -1430,10 +1740,18 @@ mod tests {
             .collect()
     }
 
+    fn sleep_ended_output() -> ProviderOutput {
+        ProviderOutput::BackgroundTaskEnded {
+            task_id: "b1".into(),
+            tool_use_id: Some("toolu_bg".into()),
+            failed: false,
+        }
+    }
+
     #[test]
-    fn a_background_command_holds_the_turn_until_claude_answers_it() {
+    fn an_awaited_background_command_holds_the_turn_until_claude_answers_it() {
         let mut parser = ClaudeParser::new(None);
-        let started = feed(&mut parser, &sleep_in_background());
+        let started = await_sleep(&mut parser);
 
         let description = "Sleep then echo done".to_owned();
         let called = (description.clone(), Some("toolu_bg".to_owned()));
@@ -1448,17 +1766,7 @@ mod tests {
         assert!(started.contains(&ProviderOutput::RunEnded { run: 1 }));
         assert!(completions(&started).is_empty(), "{started:#?}");
 
-        let ended = feed(
-            &mut parser,
-            &[
-                json!({ "type": "system", "subtype": "task_updated", "task_id": "b1",
-                    "patch": { "status": "completed" } }),
-                json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
-                    "run_id": "run-b1", "tool_use_id": "toolu_bg", "status": "completed",
-                    "summary": "Background command \"Sleep then echo done\" completed (exit code 0)" }),
-                roster(json!([])),
-            ],
-        );
+        let ended = feed(&mut parser, &sleep_ended());
         assert_eq!(
             ended,
             [
@@ -1466,32 +1774,299 @@ mod tests {
                     tasks: Vec::new(),
                     waiting: true
                 },
-                ProviderOutput::BackgroundTaskEnded {
-                    task_id: "b1".into(),
-                    tool_use_id: Some("toolu_bg".into()),
-                    failed: false,
-                },
+                sleep_ended_output(),
             ]
         );
+
+        let answered = feed(&mut parser, &answer_to_sleep());
+        assert!(rosters(&answered).is_empty(), "{answered:#?}");
+        assert!(!answered.contains(&ProviderOutput::Woke));
+        assert_eq!(completions(&answered), [TurnOutcome::Completed]);
+        assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn a_command_left_running_ends_the_turn_and_keeps_the_process() {
+        let mut parser = ClaudeParser::new(None);
+        let outputs = leave_sleep_running(&mut parser);
+
+        assert!(!outputs.contains(&ProviderOutput::RunEnded { run: 1 }));
+        assert_eq!(completions(&outputs), [TurnOutcome::Completed]);
+        let called = vec![(
+            "Sleep then echo done".to_owned(),
+            Some("toolu_bg".to_owned()),
+        )];
+        assert_eq!(rosters(&outputs).last(), Some(&(called, false)));
+        let queue = parser.queue.state();
+        assert!(!queue.closing && !queue.turn_open);
+    }
+
+    #[test]
+    fn a_command_left_running_that_ends_wakes_the_agent_in_a_turn_of_its_own() {
+        let mut parser = ClaudeParser::new(None);
+        leave_sleep_running(&mut parser);
+
+        let ended = feed(&mut parser, &sleep_ended());
+        assert_eq!(
+            ended,
+            [ProviderOutput::BackgroundTasks {
+                tasks: Vec::new(),
+                waiting: false
+            }]
+        );
+        assert!(!parser.queue.state().closing, "Claude still answers it");
+
+        let woke = feed(&mut parser, &answer_to_sleep());
+        assert_eq!(woke[..2], [ProviderOutput::Woke, sleep_ended_output()]);
+        assert!(woke.contains(&ProviderOutput::AssistantMessage {
+            item_id: "msg_2:0".into(),
+            text: "It printed done.".into()
+        }));
+        assert_eq!(completions(&woke), [TurnOutcome::Completed]);
+        assert!(parser.queue.state().closing, "nothing is left running");
+    }
+
+    #[test]
+    fn a_wake_that_ends_with_commands_still_running_keeps_the_process() {
+        let mut parser = ClaudeParser::new(None);
+        leave_sleep_running(&mut parser);
+        let server = json!({ "task_id": "s1", "task_type": "local_bash",
+            "description": "Start the dev server" });
+        feed(
+            &mut parser,
+            &[roster(json!([
+                { "task_id": "b1", "task_type": "local_bash", "description": "Sleep then echo done" },
+                server.clone(),
+            ]))],
+        );
+
+        let mut lines = sleep_ended();
+        lines.pop();
+        lines.push(roster(json!([server])));
+        lines.extend(answer_to_sleep());
+        let woke = feed(&mut parser, &lines);
+
+        assert_eq!(
+            woke.iter().filter(|o| **o == ProviderOutput::Woke).count(),
+            1
+        );
+        assert_eq!(completions(&woke), [TurnOutcome::Completed]);
+        let queue = parser.queue.state();
+        assert!(!queue.closing && !queue.turn_open);
+    }
+
+    #[test]
+    fn the_next_message_runs_in_the_process_left_running() {
+        let mut parser = ClaudeParser::new(None);
+        feed(
+            &mut parser,
+            &[json!({ "type": "system", "subtype": "init", "session_id": "s1", "cwd": "/repo" })],
+        );
+        leave_sleep_running(&mut parser);
+        let launch = launch("/repo");
+
+        let lines = next_turn(
+            &launch,
+            None,
+            Some("s1"),
+            &mut parser.queue.state(),
+            &request("/repo", "and now?"),
+        )
+        .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("and now?"), "{lines:?}");
 
         let answered = feed(
             &mut parser,
             &[
-                json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+                json!({ "type": "system", "subtype": "init", "session_id": "s1", "cwd": "/repo" }),
                 json!({ "type": "assistant", "parent_tool_use_id": null, "message": {
-                    "id": "msg_2", "content": [{ "type": "text", "text": "It printed done." }] } }),
-                json!({ "type": "result", "subtype": "success", "is_error": false,
-                    "origin": { "kind": "task-notification", "runId": "run-b1" } }),
+                    "id": "msg_3", "content": [{ "type": "text", "text": "Still sleeping." }] } }),
+                run_result(),
             ],
         );
-        assert!(rosters(&answered).is_empty(), "{answered:#?}");
+        assert!(!answered.contains(&ProviderOutput::Woke), "{answered:#?}");
         assert_eq!(completions(&answered), [TurnOutcome::Completed]);
+        assert!(!parser.queue.state().closing, "the command still runs");
+    }
+
+    fn launch(cwd: &str) -> Launch {
+        Launch {
+            cwd: cwd.into(),
+            model: turn_model(&request(cwd, ""), None),
+            instructions: None,
+            mcp: None,
+            full_access: false,
+        }
+    }
+
+    fn request(cwd: &str, prompt: &str) -> TurnRequest {
+        TurnRequest {
+            cwd: cwd.into(),
+            prompt: prompt.into(),
+            attachments: Vec::new(),
+            resume_session_id: Some("s1".into()),
+            resume_session_at: None,
+            model: Some("claude-opus-5-5".into()),
+            effort: None,
+            fast_mode: false,
+            ultracode: false,
+            access_mode: AccessMode::AcceptEdits,
+            plan_mode: false,
+            mcp: None,
+            instructions: None,
+        }
     }
 
     #[test]
-    fn a_run_beside_a_background_command_is_not_waiting() {
+    fn a_turn_that_changes_how_the_process_started_needs_a_process_of_its_own() {
+        let launch = launch("/repo");
+        let next = |request: TurnRequest, cwd: Option<&str>| {
+            let mut queue = QueueState {
+                turn_open: false,
+                access: Access {
+                    mode: AccessMode::AcceptEdits,
+                    plan_mode: false,
+                },
+                cwd: cwd.map(str::to_owned),
+                ..QueueState::default()
+            };
+            next_turn(&launch, None, Some("s1"), &mut queue, &request)
+        };
+
+        assert!(next(request("/repo/", "hi"), None).is_some());
+        assert!(next(request("/repo/.claude/worktrees/w", "hi"), None).is_none());
+        assert!(
+            next(
+                request("/repo/.claude/worktrees/w", "hi"),
+                Some("/repo/.claude/worktrees/w")
+            )
+            .is_some()
+        );
+        let rewound = TurnRequest {
+            resume_session_at: Some("u1".into()),
+            ..request("/repo", "hi")
+        };
+        assert!(next(rewound, None).is_none());
+        let other_model = TurnRequest {
+            model: Some("claude-haiku-5-5".into()),
+            ..request("/repo", "hi")
+        };
+        assert!(next(other_model, None).is_none());
+        let full_access = TurnRequest {
+            access_mode: AccessMode::FullAccess,
+            ..request("/repo", "hi")
+        };
+        assert!(next(full_access, None).is_none());
+
+        let planning = TurnRequest {
+            plan_mode: true,
+            ..request("/repo", "plan it")
+        };
+        let lines = next(planning, None).unwrap();
+        assert_eq!(lines.len(), 2);
+        let mode: Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(mode["request"]["subtype"], "set_permission_mode");
+        assert_eq!(mode["request"]["mode"], "plan");
+    }
+
+    #[test]
+    fn a_process_with_a_turn_or_closing_takes_no_other_turn() {
+        let launch = launch("/repo");
+        let mut queue = QueueState::default();
+        assert!(
+            next_turn(
+                &launch,
+                None,
+                Some("s1"),
+                &mut queue,
+                &request("/repo", "a")
+            )
+            .is_none()
+        );
+        queue.turn_open = false;
+        queue.closing = true;
+        assert!(
+            next_turn(
+                &launch,
+                None,
+                Some("s1"),
+                &mut queue,
+                &request("/repo", "a")
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn only_running_commands_can_be_awaited() {
         let mut parser = ClaudeParser::new(None);
         feed(&mut parser, &sleep_in_background());
+
+        assert_eq!(
+            parser
+                .queue
+                .await_tasks(&["b1".into(), "nope".into()], true),
+            ["b1"]
+        );
+        assert_eq!(parser.queue.await_tasks(&["b1".into()], false), ["b1"]);
+        assert!(parser.queue.state().awaited.is_empty());
+    }
+
+    #[test]
+    fn a_process_left_running_ends_once_its_commands_were_stopped() {
+        let mut parser = ClaudeParser::new(None);
+        leave_sleep_running(&mut parser);
+
+        let stopped = feed(
+            &mut parser,
+            &[
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
+                    "run_id": "run-b1", "tool_use_id": "toolu_bg", "status": "stopped" }),
+                roster(json!([])),
+            ],
+        );
+
+        assert!(completions(&stopped).is_empty());
+        assert!(!stopped.contains(&ProviderOutput::Woke));
+        assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn a_process_waits_for_the_end_of_a_command_that_left_the_list_first() {
+        let mut parser = ClaudeParser::new(None);
+        leave_sleep_running(&mut parser);
+
+        feed(&mut parser, &[roster(json!([]))]);
+        assert!(!parser.queue.state().closing);
+
+        let mut lines = sleep_ended();
+        lines.pop();
+        lines.extend(answer_to_sleep());
+        let woke = feed(&mut parser, &lines);
+        assert_eq!(woke[..2], [ProviderOutput::Woke, sleep_ended_output()]);
+        assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn an_interrupted_turn_ends_its_process_with_the_commands_it_left() {
+        let mut parser = ClaudeParser::new(None);
+        feed(&mut parser, &sleep_in_background());
+        parser.queue.state().interrupted = true;
+
+        let stopped = feed(
+            &mut parser,
+            &[json!({ "type": "result", "subtype": "error_during_execution", "is_error": true })],
+        );
+
+        assert_eq!(completions(&stopped), [TurnOutcome::Interrupted]);
+        assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn a_run_beside_an_awaited_background_command_is_not_waiting() {
+        let mut parser = ClaudeParser::new(None);
+        await_sleep(&mut parser);
         parser.queue.state().waiting.insert("m2".into());
 
         let steered = feed(
@@ -1507,9 +2082,9 @@ mod tests {
     }
 
     #[test]
-    fn a_stopped_background_command_ends_a_turn_with_nothing_left_to_wait_for() {
+    fn a_stopped_awaited_command_ends_a_turn_with_nothing_left_to_wait_for() {
         let mut parser = ClaudeParser::new(None);
-        feed(&mut parser, &sleep_in_background());
+        await_sleep(&mut parser);
 
         let stopped = feed(
             &mut parser,
@@ -1539,7 +2114,7 @@ mod tests {
     #[test]
     fn a_turn_asked_to_stop_while_it_waits_ends_once_the_agent_agrees() {
         let mut parser = ClaudeParser::new(None);
-        feed(&mut parser, &sleep_in_background());
+        await_sleep(&mut parser);
         parser.queue.state().interrupted = true;
 
         let answer = json!({ "type": "control_response", "response": {
@@ -1549,12 +2124,13 @@ mod tests {
             completions(&feed(&mut parser, &[answer])),
             [TurnOutcome::Interrupted]
         );
+        assert!(parser.queue.state().closing);
     }
 
     #[test]
     fn a_stop_while_a_message_runs_waits_for_that_run_to_end() {
         let mut parser = ClaudeParser::new(None);
-        feed(&mut parser, &sleep_in_background());
+        await_sleep(&mut parser);
         parser.queue.state().waiting.insert("m2".into());
 
         let during = feed(

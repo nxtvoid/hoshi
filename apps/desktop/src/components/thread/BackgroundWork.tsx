@@ -10,9 +10,9 @@ import type { BackgroundTask } from '@/bindings/BackgroundTask'
 import { useBackgroundTaskStore } from '@/state/background-task-store'
 
 /**
- * The commands the running turn left in the background, at the end of the transcript. While
- * the agent only waits for them they replace `status`; while it works beside them they
- * follow it.
+ * The commands the agent left running in the background, at the end of the transcript, also
+ * once its turn completed. While the agent only waits for them they replace `status`, the
+ * running turn's; while it works beside them they follow it.
  */
 export function BackgroundWork({ status }: { status: ReactNode }) {
   const threadId = useAppStore((state) => state.selectedThreadId)
@@ -22,9 +22,9 @@ export function BackgroundWork({ status }: { status: ReactNode }) {
   const stopping = useStoppingStore((state) =>
     threadId ? threadId in state.since : false
   )
-  if (!background || stopping) return status
+  if (!background || stopping) return status ? <li>{status}</li> : null
   return (
-    <div className='flex flex-col gap-2'>
+    <li className='flex flex-col gap-2'>
       {background.waiting ? null : status}
       {background.tasks.map((task) => (
         <BackgroundTaskLine
@@ -33,7 +33,7 @@ export function BackgroundWork({ status }: { status: ReactNode }) {
           waiting={background.waiting}
         />
       ))}
-    </div>
+    </li>
   )
 }
 

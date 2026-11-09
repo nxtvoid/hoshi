@@ -114,7 +114,7 @@ struct Traits {
 }
 
 /// The model and options a turn runs with, in Claude Code's terms.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TurnModel {
     pub slug: String,
     pub effort: Option<String>,
