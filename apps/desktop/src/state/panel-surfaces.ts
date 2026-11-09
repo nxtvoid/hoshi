@@ -17,13 +17,16 @@ export type Surface =
   | { id: string; kind: 'pullRequest' }
   /** Its id is also its terminal's id. */
   | { id: string; kind: 'terminal' }
+  /** The thread's headless browser page. */
+  | { id: string; kind: 'browser' }
 
 export type SurfaceKind = Surface['kind']
 
 /** Kinds a thread shows at most once; opening another one focuses it. */
 const SINGLE_INSTANCE: ReadonlySet<SurfaceKind> = new Set([
   'diff',
-  'pullRequest'
+  'pullRequest',
+  'browser'
 ])
 
 /** The surfaces a thread has open, in tab order. */
@@ -37,6 +40,7 @@ export function newSurface(kind: SurfaceKind, id: string): Surface {
       return { id, kind, scope: 'uncommitted' }
     case 'pullRequest':
     case 'terminal':
+    case 'browser':
       return { id, kind }
   }
 }

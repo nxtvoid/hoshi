@@ -34,6 +34,10 @@ use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
 use hoshi_core::{
+    BrowserFrame, BrowserInput, BrowserPage, GitActionProgress, ProviderUpdate,
+    ProviderUpdateFailure, ProviderVersion, TranscriptPage,
+};
+use hoshi_core::{
     ChangesSummary, Command, CommandError, ContextUsage, DiffFile, DiffScope, Editor, Event,
     EventEnvelope, FileDiff, FolderListing, ForgeAccount, ForgeKind, ItemContent,
     MessageAttachment, ProviderModels, ProviderOutput, PullRequest, PullRequestAction,
@@ -43,9 +47,6 @@ use hoshi_core::{
     TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn, decide,
     record_branch, record_conversation_cursor, record_output, record_title, record_turn_changes,
     record_worktree, record_worktree_left, start_queued_turn, turn_failed,
-};
-use hoshi_core::{
-    GitActionProgress, ProviderUpdate, ProviderUpdateFailure, ProviderVersion, TranscriptPage,
 };
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
@@ -86,6 +87,10 @@ pub enum Notification {
     ProviderVersion(Option<ProviderVersion>),
     /// The step a running git action reached.
     GitActionProgress(GitActionProgress),
+    /// What a thread's browser page painted, while the panel shows it.
+    BrowserFrame(BrowserFrame),
+    /// Where a thread's browser page is, and whether the agent just acted on it.
+    BrowserPage(BrowserPage),
 }
 
 pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
@@ -319,7 +324,10 @@ impl Engine {
         });
         refresh_branches(Arc::downgrade(&shared), thread_ids);
         let weak = Arc::downgrade(&shared);
-        let browsing = Arc::new(Mutex::new(Browsing::new(data_dir.join("browser"))));
+        let browsing = Arc::new(Mutex::new(Browsing::new(
+            data_dir.join("browser"),
+            lock(&shared).notify.clone(),
+        )));
         let pages = browsing.clone();
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
             if tool.starts_with("preview_") {
@@ -1182,12 +1190,68 @@ impl Engine {
             .retain_threads(|thread_id| model.thread(thread_id).is_some());
         drop(state);
         if let Some(thread_id) = deleted {
-            self.browsing
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .forget(&thread_id);
+            self.browsing().forget(&thread_id);
         }
         Ok(())
+    }
+
+    fn browsing(&self) -> std::sync::MutexGuard<'_, Browsing> {
+        self.browsing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The panel shows the thread's browser page, which then streams to it, or stopped.
+    pub fn browser_view(&self, thread_id: &str, viewing: bool) -> Result<(), CommandError> {
+        self.browsing()
+            .view(thread_id, viewing)
+            .map_err(|detail| CommandError::Internal { detail })
+    }
+
+    pub fn browser_open(&self, thread_id: &str, url: &str) -> Result<(), CommandError> {
+        self.browsing()
+            .user_open(thread_id, url)
+            .map_err(|detail| CommandError::BrowserFailed { detail })
+    }
+
+    /// Back (`-1`), forward (`1`) or reload (`0`).
+    pub fn browser_go(&self, thread_id: &str, delta: i32) -> Result<(), CommandError> {
+        self.browsing()
+            .user_go(thread_id, delta)
+            .map_err(|detail| CommandError::BrowserFailed { detail })
+    }
+
+    pub fn browser_resize(
+        &self,
+        thread_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CommandError> {
+        self.browsing()
+            .user_resize(thread_id, (width, height))
+            .map_err(|detail| CommandError::BrowserFailed { detail })
+    }
+
+    /// The panel is `width` × `height` and the page fills it.
+    pub fn browser_fit(
+        &self,
+        thread_id: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<(), CommandError> {
+        self.browsing()
+            .user_fit(thread_id, (width, height))
+            .map_err(|detail| CommandError::BrowserFailed { detail })
+    }
+
+    pub fn browser_input(&self, thread_id: &str, input: &BrowserInput) -> Result<(), CommandError> {
+        self.browsing()
+            .user_input(thread_id, input)
+            .map_err(|detail| CommandError::BrowserFailed { detail })
+    }
+
+    pub fn browser_close(&self, thread_id: &str) {
+        self.browsing().forget(thread_id);
     }
 
     /// Saves an image the user is about to send. `base64` holds its bytes.

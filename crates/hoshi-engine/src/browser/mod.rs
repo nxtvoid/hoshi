@@ -36,8 +36,8 @@ impl Browser {
         })
     }
 
-    /// A new blank page of `size` CSS pixels.
-    pub fn open_page(&self, size: (u32, u32)) -> Result<Page, String> {
+    /// A new blank page of `size` CSS pixels; `observer` hears what it shows.
+    pub fn open_page(&self, size: (u32, u32), observer: Observer) -> Result<Page, String> {
         let target =
             self.connection
                 .call("Target.createTarget", json!({ "url": "about:blank" }), None)?;
@@ -55,7 +55,12 @@ impl Browser {
             .ok_or("the browser gave no session")?
             .to_owned();
         let console = Arc::new(Mutex::new(VecDeque::new()));
-        listen_to_console(&self.connection, &session_id, Arc::downgrade(&console));
+        listen(
+            &self.connection,
+            &session_id,
+            Arc::downgrade(&console),
+            observer,
+        );
         let mut page = Page {
             connection: self.connection.clone(),
             target_id,
@@ -85,56 +90,126 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Keeps the page's console messages and uncaught errors, the latest last.
-fn listen_to_console(
-    connection: &Connection,
+/// What a page shows or became, for whoever displays it.
+pub enum PageEvent {
+    /// A JPEG of the page as it paints, base64, while it is screencast.
+    Frame {
+        data: String,
+        width: u32,
+        height: u32,
+    },
+    /// It went somewhere else, finished loading, or logged an error.
+    Changed {
+        url: String,
+        title: String,
+        errors: u32,
+    },
+}
+
+pub type Observer = Arc<dyn Fn(PageEvent) + Send + Sync>;
+
+fn is_error(line: &str) -> bool {
+    line.starts_with("error:")
+}
+
+/// Follows the page's events: keeps its console, answers screencast frames, and tells
+/// `observer` what it shows and where it went. Ends once the page is gone.
+fn listen(
+    connection: &Arc<Connection>,
     session: &str,
     console: Weak<Mutex<VecDeque<String>>>,
+    observer: Observer,
 ) {
     let events = connection.subscribe();
+    let connection = Arc::downgrade(connection);
     let session = session.to_owned();
     thread::spawn(move || {
         for event in events {
             if event.session_id.as_deref() != Some(session.as_str()) {
                 continue;
             }
-            let line = match event.method.as_str() {
-                "Runtime.consoleAPICalled" => {
-                    let kind = event.params["type"].as_str().unwrap_or("log");
-                    let args: Vec<String> = event.params["args"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .map(|arg| match &arg["value"] {
-                            Value::String(text) => text.clone(),
-                            Value::Null => {
-                                arg["description"].as_str().unwrap_or_default().to_owned()
-                            }
-                            value => value.to_string(),
-                        })
-                        .collect();
-                    format!("{kind}: {}", args.join(" "))
-                }
-                "Runtime.exceptionThrown" => {
-                    let details = &event.params["exceptionDetails"];
-                    let description = details["exception"]["description"]
-                        .as_str()
-                        .or_else(|| details["text"].as_str())
-                        .unwrap_or_default();
-                    format!("error: {description}")
-                }
-                _ => continue,
+            let Some(connection) = connection.upgrade() else {
+                return;
             };
             let Some(console) = console.upgrade() else {
                 return;
             };
-            let mut console = lock(&console);
-            if console.len() >= CONSOLE_KEPT {
-                console.pop_front();
+            let changed = match event.method.as_str() {
+                "Page.screencastFrame" => {
+                    let _ = connection.call(
+                        "Page.screencastFrameAck",
+                        json!({ "sessionId": event.params["sessionId"] }),
+                        Some(&session),
+                    );
+                    let metadata = &event.params["metadata"];
+                    observer(PageEvent::Frame {
+                        data: event.params["data"].as_str().unwrap_or_default().to_owned(),
+                        width: metadata["deviceWidth"].as_f64().unwrap_or_default() as u32,
+                        height: metadata["deviceHeight"].as_f64().unwrap_or_default() as u32,
+                    });
+                    false
+                }
+                "Page.frameNavigated" => event.params["frame"]["parentId"].is_null(),
+                "Page.loadEventFired" | "Page.navigatedWithinDocument" => true,
+                "Runtime.consoleAPICalled" | "Runtime.exceptionThrown" => {
+                    let line = console_line(&event.method, &event.params);
+                    let error = is_error(&line);
+                    let mut kept = lock(&console);
+                    if kept.len() >= CONSOLE_KEPT {
+                        kept.pop_front();
+                    }
+                    kept.push_back(line);
+                    error
+                }
+                _ => false,
+            };
+            if changed {
+                let errors = lock(&console).iter().filter(|line| is_error(line)).count() as u32;
+                let place = connection
+                    .call(
+                        "Runtime.evaluate",
+                        json!({ "expression": "[location.href, document.title]", "returnByValue": true }),
+                        Some(&session),
+                    )
+                    .ok();
+                let value = place.as_ref().map(|place| &place["result"]["value"]);
+                let text = |index: usize| {
+                    value
+                        .and_then(|value| value[index].as_str())
+                        .unwrap_or_default()
+                        .to_owned()
+                };
+                observer(PageEvent::Changed {
+                    url: text(0),
+                    title: text(1),
+                    errors,
+                });
             }
-            console.push_back(line);
         }
     });
+}
+
+fn console_line(method: &str, params: &Value) -> String {
+    if method == "Runtime.exceptionThrown" {
+        let details = &params["exceptionDetails"];
+        let description = details["exception"]["description"]
+            .as_str()
+            .or_else(|| details["text"].as_str())
+            .unwrap_or_default();
+        return format!("error: {description}");
+    }
+    let kind = params["type"].as_str().unwrap_or("log");
+    let args: Vec<String> = params["args"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|arg| match &arg["value"] {
+            Value::String(text) => text.clone(),
+            Value::Null => arg["description"].as_str().unwrap_or_default().to_owned(),
+            value => value.to_string(),
+        })
+        .collect();
+    format!("{kind}: {}", args.join(" "))
 }
 
 pub struct Page {
@@ -166,14 +241,7 @@ impl Page {
             return Err(format!("couldn't open {url}: {error}"));
         }
         self.refs.clear();
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if self.evaluate("document.readyState")? == json!("complete") {
-                return Ok(());
-            }
-            thread::sleep(READY_POLL);
-        }
-        Ok(())
+        self.wait_ready(timeout)
     }
 
     /// The page's address and title.
@@ -411,6 +479,72 @@ impl Page {
             .collect()
     }
 
+    /// Streams what the page paints to its observer, at most `max` pixels.
+    pub fn start_screencast(&self, max: (u32, u32)) -> Result<(), String> {
+        self.call(
+            "Page.startScreencast",
+            json!({ "format": "jpeg", "quality": 70, "maxWidth": max.0, "maxHeight": max.1, "everyNthFrame": 1 }),
+        )
+        .map(|_| ())
+    }
+
+    pub fn stop_screencast(&self) {
+        let _ = self.call("Page.stopScreencast", json!({}));
+    }
+
+    /// Where an element is, scrolled into view: to show what the agent acts on.
+    pub fn point_of(&self, reference: &str) -> Result<(f64, f64), String> {
+        self.center(reference)
+    }
+
+    /// Back (`-1`) or forward (`1`) in the page's history.
+    pub fn go(&mut self, delta: i32, timeout: Duration) -> Result<(), String> {
+        self.evaluate(&format!("history.go({delta})"))?;
+        self.refs.clear();
+        thread::sleep(READY_POLL);
+        self.wait_ready(timeout)
+    }
+
+    pub fn reload(&mut self, timeout: Duration) -> Result<(), String> {
+        self.call("Page.reload", json!({}))?;
+        self.refs.clear();
+        thread::sleep(READY_POLL);
+        self.wait_ready(timeout)
+    }
+
+    fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            if self.evaluate("document.readyState")? == json!("complete") {
+                break;
+            }
+            thread::sleep(READY_POLL);
+        }
+        Ok(())
+    }
+
+    /// Types `text` where the focus is.
+    pub fn insert_text(&self, text: &str) -> Result<(), String> {
+        self.call("Input.insertText", json!({ "text": text }))
+            .map(|_| ())
+    }
+
+    pub fn scroll_at(&self, point: (f64, f64), delta: (f64, f64)) -> Result<(), String> {
+        self.mouse(
+            "mouseWheel",
+            point,
+            json!({ "deltaX": delta.0, "deltaY": delta.1 }),
+        )
+    }
+
+    /// Console errors kept so far.
+    pub fn errors(&self) -> u32 {
+        lock(&self.console)
+            .iter()
+            .filter(|line| is_error(line))
+            .count() as u32
+    }
+
     pub fn close(&self) {
         let _ = self.connection.call(
             "Target.closeTarget",
@@ -570,7 +704,7 @@ mod tests {
         };
         let profile = std::env::temp_dir().join(format!("hoshi-browser-{}", std::process::id()));
         let browser = Browser::start(&executable, &profile).unwrap();
-        let mut page = browser.open_page(DEFAULT_SIZE).unwrap();
+        let mut page = browser.open_page(DEFAULT_SIZE, Arc::new(|_| {})).unwrap();
         let html = "<h1>Hi</h1><input aria-label='Name'><button onclick=\"document.querySelector('h1').textContent = 'Clicked ' + document.querySelector('input').value; console.log('done')\">Go</button>";
         let url = format!(
             "data:text/html,{}",

@@ -31,6 +31,32 @@
   "resize_panel": "Resize side panel",
   "surface_diff": "Diff",
   "surface_terminal": "Terminal",
+  "surface_browser": "Browser",
+  "browser_back": "Back",
+  "browser_forward": "Forward",
+  "browser_reload": "Reload",
+  "browser_address": "Address",
+  "browser_address_placeholder": "localhost:5173",
+  "browser_size": "Size",
+  "browser_size_fill": "Fill panel",
+  "browser_size_desktop": "Desktop",
+  "browser_size_tablet": "Tablet",
+  "browser_size_phone": "Phone",
+  "browser_open_external": "Open in your browser",
+  "browser_empty": "No page open",
+  "browser_empty_hint": "Type an address above, or ask the agent to open one.",
+  "browser_failed": "Couldn't open the page",
+  "browser_agent_using": "Agent is using this page",
+  "browser_console_errors": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} console error",
+        "countPlural=*": "{count} console errors"
+      }
+    }
+  ],
   "toggle_terminal": "Toggle terminal",
   "terminal_tab": "Terminal {number}",
   "new_terminal": "New terminal",

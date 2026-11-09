@@ -1,5 +1,6 @@
 //! Domain model and orchestrator. Pure: no I/O, no async runtime, no SQLite.
 
+mod browser;
 mod composer;
 mod diff;
 mod model;
@@ -16,6 +17,7 @@ mod thread;
 mod usage;
 mod workspace;
 
+pub use browser::{BrowserFrame, BrowserInput, BrowserPage, BrowserPoint};
 pub use composer::{EntryKind, MessageAttachment, SlashCommand, WorkspaceEntry};
 pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
 pub use model::{ModelInfo, ProviderModels};

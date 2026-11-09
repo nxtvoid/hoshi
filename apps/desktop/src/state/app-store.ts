@@ -28,6 +28,9 @@ import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
 import { useGitActionStore } from './git-action-store'
+import { useBrowserStore } from './browser-store'
+import type { BrowserPage } from '@/bindings/BrowserPage'
+import type { BrowserFrame } from '@/bindings/BrowserFrame'
 import type { GitActionProgress } from '@/bindings/GitActionProgress'
 import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
@@ -428,6 +431,14 @@ async function startSync() {
     'hoshi://provider-version',
     (message) => useProviderUpdateStore.getState().receive(message.payload)
   )
+  const unlistenBrowserFrames = await listen<BrowserFrame>(
+    'hoshi://browser-frame',
+    (message) => useBrowserStore.getState().receiveFrame(message.payload)
+  )
+  const unlistenBrowserPages = await listen<BrowserPage>(
+    'hoshi://browser-page',
+    (message) => useBrowserStore.getState().receivePage(message.payload)
+  )
   const unlistenGitActions = await listen<GitActionProgress>(
     'hoshi://git-action',
     (message) => useGitActionStore.getState().receive(message.payload)
@@ -446,6 +457,8 @@ async function startSync() {
     unlistenUsageLimits()
     unlistenProviderVersion()
     unlistenGitActions()
+    unlistenBrowserFrames()
+    unlistenBrowserPages()
     stopAppUpdates()
   })
   const snapshot = await invoke<Snapshot>('get_snapshot')

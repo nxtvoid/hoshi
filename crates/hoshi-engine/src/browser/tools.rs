@@ -1,10 +1,13 @@
 //! The `preview_*` tools: each thread's agent drives a page of its own in the headless
 //! browser, started on first use.
 
-use super::{Browser, DEFAULT_SIZE, Page, find_browser};
+use super::{Browser, DEFAULT_SIZE, Observer, Page, PageEvent, find_browser};
+use crate::{Notification, Notify};
+use hoshi_core::{BrowserFrame, BrowserInput, BrowserPage, BrowserPoint};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -21,6 +24,11 @@ pub(crate) struct Browsing {
     profile: PathBuf,
     browser: Option<Browser>,
     pages: HashMap<String, Page>,
+    notify: Notify,
+    /// Threads whose page the panel shows, which it streams to.
+    viewing: HashSet<String>,
+    /// The panel's size for threads whose page fills it, until a size is picked.
+    fits: HashMap<String, (u32, u32)>,
 }
 
 fn text<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
@@ -54,11 +62,189 @@ fn address(url: &str) -> String {
 }
 
 impl Browsing {
-    pub(crate) fn new(profile: PathBuf) -> Self {
+    pub(crate) fn new(profile: PathBuf, notify: Notify) -> Self {
         Self {
             profile,
             browser: None,
             pages: HashMap::new(),
+            notify,
+            viewing: HashSet::new(),
+            fits: HashMap::new(),
+        }
+    }
+
+    /// The size a new page of the thread opens at: the panel's while it fills it.
+    fn opening_size(&self, thread_id: &str) -> (u32, u32) {
+        self.fits.get(thread_id).copied().unwrap_or(DEFAULT_SIZE)
+    }
+
+    /// The panel is `size` and the page fills it.
+    pub(crate) fn user_fit(&mut self, thread_id: &str, wanted: (u32, u32)) -> Result<(), String> {
+        let wanted = (
+            wanted.0.clamp(MIN_SIZE as u32, MAX_SIZE as u32),
+            wanted.1.clamp(MIN_SIZE as u32, MAX_SIZE as u32),
+        );
+        self.fits.insert(thread_id.to_owned(), wanted);
+        if self.pages.contains_key(thread_id) {
+            self.resize_page(thread_id, wanted)?;
+        }
+        self.announce(thread_id, false, None, false);
+        Ok(())
+    }
+
+    fn resize_page(&mut self, thread_id: &str, wanted: (u32, u32)) -> Result<(), String> {
+        let viewing = self.viewing.contains(thread_id);
+        let page = self.page(thread_id)?;
+        if page.size() == wanted {
+            return Ok(());
+        }
+        page.resize(wanted)?;
+        if viewing {
+            page.start_screencast(wanted)?;
+        }
+        Ok(())
+    }
+
+    /// What the page shows and where it went reach the UI as notifications.
+    fn observer(&self, thread_id: &str) -> Observer {
+        let (notify, thread_id) = (self.notify.clone(), thread_id.to_owned());
+        Arc::new(move |event| {
+            let notification = match event {
+                PageEvent::Frame {
+                    data,
+                    width,
+                    height,
+                } => Notification::BrowserFrame(BrowserFrame {
+                    thread_id: thread_id.clone(),
+                    data,
+                    width,
+                    height,
+                }),
+                PageEvent::Changed { url, title, errors } => {
+                    Notification::BrowserPage(BrowserPage {
+                        thread_id: thread_id.clone(),
+                        open: true,
+                        url,
+                        title,
+                        errors,
+                        by_agent: false,
+                        agent_point: None,
+                        opened: false,
+                        fitted: None,
+                    })
+                }
+            };
+            notify(notification);
+        })
+    }
+
+    /// Opens the thread's page if it has none, streaming it when the panel shows it.
+    fn ensure_page(&mut self, thread_id: &str, wanted: (u32, u32)) -> Result<bool, String> {
+        if self.pages.contains_key(thread_id) {
+            return Ok(false);
+        }
+        let observer = self.observer(thread_id);
+        let page = self.browser()?.open_page(wanted, observer)?;
+        if self.viewing.contains(thread_id) {
+            page.start_screencast(page.size())?;
+        }
+        self.pages.insert(thread_id.to_owned(), page);
+        Ok(true)
+    }
+
+    /// Tells the UI where the page is now; `by_agent` when the agent touched it.
+    fn announce(
+        &self,
+        thread_id: &str,
+        by_agent: bool,
+        agent_point: Option<(f64, f64)>,
+        opened: bool,
+    ) {
+        let page = self.pages.get(thread_id);
+        let (url, title) = page
+            .and_then(|page| page.location().ok())
+            .unwrap_or_default();
+        (self.notify)(Notification::BrowserPage(BrowserPage {
+            thread_id: thread_id.to_owned(),
+            open: page.is_some(),
+            url,
+            title,
+            errors: page.map_or(0, Page::errors),
+            by_agent,
+            agent_point: agent_point.map(|(x, y)| BrowserPoint { x, y }),
+            opened,
+            fitted: Some(self.fits.contains_key(thread_id)),
+        }));
+    }
+
+    /// The panel shows the thread's page, or stopped showing it.
+    pub(crate) fn view(&mut self, thread_id: &str, viewing: bool) -> Result<(), String> {
+        if viewing {
+            self.viewing.insert(thread_id.to_owned());
+        } else {
+            self.viewing.remove(thread_id);
+        }
+        if let Some(page) = self.pages.get(thread_id) {
+            if viewing {
+                page.start_screencast(page.size())?;
+            } else {
+                page.stop_screencast();
+            }
+        }
+        self.announce(thread_id, false, None, false);
+        Ok(())
+    }
+
+    /// The user opens an address from the panel, with a page of their own when the thread
+    /// had none.
+    pub(crate) fn user_open(&mut self, thread_id: &str, url: &str) -> Result<(), String> {
+        self.ensure_page(thread_id, self.opening_size(thread_id))?;
+        self.page(thread_id)?
+            .navigate(&address(url), LOAD_TIMEOUT)?;
+        self.announce(thread_id, false, None, false);
+        Ok(())
+    }
+
+    /// Back (`-1`), forward (`1`) or reload (`0`).
+    pub(crate) fn user_go(&mut self, thread_id: &str, delta: i32) -> Result<(), String> {
+        let page = self.page(thread_id)?;
+        if delta == 0 {
+            page.reload(LOAD_TIMEOUT)?;
+        } else {
+            page.go(delta, LOAD_TIMEOUT)?;
+        }
+        self.announce(thread_id, false, None, false);
+        Ok(())
+    }
+
+    /// The user picked a size, which stops the page filling the panel.
+    pub(crate) fn user_resize(
+        &mut self,
+        thread_id: &str,
+        wanted: (u32, u32),
+    ) -> Result<(), String> {
+        self.fits.remove(thread_id);
+        self.resize_page(thread_id, wanted)?;
+        self.announce(thread_id, false, None, false);
+        Ok(())
+    }
+
+    pub(crate) fn user_input(
+        &mut self,
+        thread_id: &str,
+        input: &BrowserInput,
+    ) -> Result<(), String> {
+        let page = self.page(thread_id)?;
+        match input {
+            BrowserInput::Click { x, y } => page.click_at((*x, *y)),
+            BrowserInput::Scroll {
+                x,
+                y,
+                delta_x,
+                delta_y,
+            } => page.scroll_at((*x, *y), (*delta_x, *delta_y)),
+            BrowserInput::Key { key } => page.press(key),
+            BrowserInput::Text { text } => page.insert_text(text),
         }
     }
 
@@ -83,9 +269,12 @@ impl Browsing {
         if let Some(page) = self.pages.remove(thread_id) {
             page.close();
         }
+        self.viewing.remove(thread_id);
+        self.fits.remove(thread_id);
         if self.pages.is_empty() {
             self.browser = None;
         }
+        self.announce(thread_id, false, None, false);
     }
 
     pub(crate) fn call(
@@ -94,6 +283,29 @@ impl Browsing {
         tool: &str,
         arguments: &Value,
     ) -> Result<Value, String> {
+        let point = self.agent_point(caller, tool, arguments);
+        let result = self.dispatch(caller, tool, arguments);
+        if result.is_ok() && !matches!(tool, "preview_close" | "preview_status") {
+            let opened = tool == "preview_open"
+                && result.as_ref().is_ok_and(|value| value["opened"] == true);
+            self.announce(caller, true, point, opened);
+        }
+        result
+    }
+
+    /// Where an action is about to happen, to show the user what the agent acts on.
+    fn agent_point(&self, caller: &str, tool: &str, arguments: &Value) -> Option<(f64, f64)> {
+        if tool != "preview_act" {
+            return None;
+        }
+        if let (Some(x), Some(y)) = (arguments["x"].as_f64(), arguments["y"].as_f64()) {
+            return Some((x, y));
+        }
+        let page = self.pages.get(caller)?;
+        page.point_of(text(arguments, "ref")?).ok()
+    }
+
+    fn dispatch(&mut self, caller: &str, tool: &str, arguments: &Value) -> Result<Value, String> {
         match tool {
             "preview_open" => self.open(caller, arguments),
             "preview_close" => {
@@ -108,17 +320,21 @@ impl Browsing {
 
     fn open(&mut self, caller: &str, arguments: &Value) -> Result<Value, String> {
         let url = address(text(arguments, "url").ok_or("`url` is required")?);
-        if !self.pages.contains_key(caller) {
-            let page = self.browser()?.open_page(size(arguments, DEFAULT_SIZE))?;
-            self.pages.insert(caller.to_owned(), page);
+        // A size the agent asks for wins over the panel's.
+        let sized = !arguments["width"].is_null() || !arguments["height"].is_null();
+        if sized {
+            self.fits.remove(caller);
+        }
+        let opened = self.ensure_page(caller, size(arguments, self.opening_size(caller)))?;
+        if sized {
+            let wanted = size(arguments, self.page(caller)?.size());
+            self.resize_page(caller, wanted)?;
         }
         let page = self.page(caller)?;
-        let wanted = size(arguments, page.size());
-        if wanted != page.size() {
-            page.resize(wanted)?;
-        }
         page.navigate(&url, LOAD_TIMEOUT)?;
-        describe(page)
+        let mut result = describe(page)?;
+        result["opened"] = json!(opened);
+        Ok(result)
     }
 
     fn status(&mut self, caller: &str) -> Result<Value, String> {
@@ -211,7 +427,8 @@ impl Browsing {
             }
             "preview_resize" => {
                 let wanted = size(arguments, page.size());
-                page.resize(wanted)?;
+                self.fits.remove(caller);
+                self.resize_page(caller, wanted)?;
                 Ok(json!({ "width": wanted.0, "height": wanted.1 }))
             }
             "preview_set_appearance" => {
@@ -245,7 +462,8 @@ mod tests {
             return;
         }
         let profile = std::env::temp_dir().join(format!("hoshi-preview-{}", std::process::id()));
-        let mut browsing = Browsing::new(profile.clone());
+        let notify: Notify = Arc::new(|_| {});
+        let mut browsing = Browsing::new(profile.clone(), notify);
         let page = "data:text/html,<button onclick=\"console.error('boom');this.textContent='Done'\">Run</button>";
 
         let opened = browsing
@@ -302,6 +520,61 @@ mod tests {
             browsing.call("t", "preview_status", &json!({})).unwrap()["open"],
             false
         );
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[test]
+    fn the_panel_sees_the_page_live_and_the_user_can_use_it() {
+        if find_browser().is_none() {
+            eprintln!("no Chromium-based browser here; skipping");
+            return;
+        }
+        let profile = std::env::temp_dir().join(format!("hoshi-view-{}", std::process::id()));
+        let (sender, received) = std::sync::mpsc::channel();
+        let sender = std::sync::Mutex::new(sender);
+        let notify: Notify = Arc::new(move |notification| {
+            let _ = sender.lock().unwrap().send(notification);
+        });
+        let mut browsing = Browsing::new(profile.clone(), notify);
+        let page = "data:text/html,<button style=\"width:400px;height:200px\" onclick=\"this.textContent='Clicked'\">Press</button>";
+
+        let opened = browsing
+            .call("t", "preview_open", &json!({ "url": page }))
+            .unwrap();
+        browsing.view("t", true).unwrap();
+        let frame = received
+            .iter()
+            .find_map(|notification| match notification {
+                Notification::BrowserFrame(frame) => Some(frame),
+                _ => None,
+            })
+            .unwrap();
+        browsing
+            .user_input("t", &BrowserInput::Click { x: 100.0, y: 100.0 })
+            .unwrap();
+        let label = browsing
+            .call(
+                "t",
+                "preview_evaluate",
+                &json!({ "expression": "document.querySelector('button').textContent" }),
+            )
+            .unwrap();
+        browsing.view("t", false).unwrap();
+        browsing.forget("t");
+
+        assert_eq!(opened["opened"], true);
+        assert_eq!((frame.thread_id.as_str(), frame.width), ("t", 1280));
+        assert!(!frame.data.is_empty());
+        assert_eq!(label["value"], "Clicked");
+        let pages: Vec<BrowserPage> = received
+            .try_iter()
+            .filter_map(|notification| match notification {
+                Notification::BrowserPage(page) => Some(page),
+                _ => None,
+            })
+            .collect();
+        assert!(pages.iter().any(|page| page.by_agent));
+        assert!(pages.last().is_some_and(|page| !page.open));
         let _ = std::fs::remove_dir_all(&profile);
     }
 

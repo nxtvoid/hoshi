@@ -292,6 +292,9 @@ pub enum CommandError {
     /// `origin` is not configured.
     #[error("thread {thread_id}'s repository has no remote")]
     NoRemote { thread_id: String },
+    /// The browser couldn't start or do what was asked; `detail` is why, shown as is.
+    #[error("the browser failed: {detail}")]
+    BrowserFailed { detail: String },
     /// Neither a recorded base nor a default branch to open a pull request on.
     #[error("thread {thread_id}'s branch has no base to open a pull request on")]
     NoBaseBranch { thread_id: String },

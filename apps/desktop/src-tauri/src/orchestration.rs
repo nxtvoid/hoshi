@@ -1,6 +1,6 @@
 use hoshi_core::{
-    AppSettings, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor, FileDiff,
-    FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
+    AppSettings, BrowserInput, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor,
+    FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
     MessageAttachment, ProviderModels, ProviderVersion, PullRequest, PullRequestAction,
     PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach,
     TerminalEvent, ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
@@ -27,6 +27,10 @@ const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 const PROVIDER_VERSION_CHANNEL: &str = "hoshi://provider-version";
 /// The step a running commit, push or pull request action reached.
 const GIT_ACTION_CHANNEL: &str = "hoshi://git-action";
+/// What a thread's browser page painted, while the panel shows it.
+const BROWSER_FRAME_CHANNEL: &str = "hoshi://browser-frame";
+/// Where a thread's browser page is, and what the agent just did on it.
+const BROWSER_PAGE_CHANNEL: &str = "hoshi://browser-page";
 
 pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
@@ -44,6 +48,8 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
                 handle.emit(PROVIDER_VERSION_CHANNEL, version)
             }
             Notification::GitActionProgress(progress) => handle.emit(GIT_ACTION_CHANNEL, progress),
+            Notification::BrowserFrame(frame) => handle.emit(BROWSER_FRAME_CHANNEL, frame),
+            Notification::BrowserPage(page) => handle.emit(BROWSER_PAGE_CHANNEL, page),
         };
         if let Err(error) = result {
             eprintln!("hoshi: failed to emit to the UI: {error}");
@@ -456,6 +462,68 @@ pub fn get_thread_file_diff(
     file: DiffFile,
 ) -> Result<FileDiff, CommandError> {
     engine.thread_file_diff(&thread_id, scope, &file)
+}
+
+#[tauri::command(async)]
+pub fn browser_view(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    viewing: bool,
+) -> Result<(), CommandError> {
+    engine.browser_view(&thread_id, viewing)
+}
+
+#[tauri::command(async)]
+pub fn browser_open(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    url: String,
+) -> Result<(), CommandError> {
+    engine.browser_open(&thread_id, &url)
+}
+
+/// Back (`-1`), forward (`1`) or reload (`0`).
+#[tauri::command(async)]
+pub fn browser_go(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    delta: i32,
+) -> Result<(), CommandError> {
+    engine.browser_go(&thread_id, delta)
+}
+
+#[tauri::command(async)]
+pub fn browser_resize(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    width: u32,
+    height: u32,
+) -> Result<(), CommandError> {
+    engine.browser_resize(&thread_id, width, height)
+}
+
+#[tauri::command(async)]
+pub fn browser_fit(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    width: u32,
+    height: u32,
+) -> Result<(), CommandError> {
+    engine.browser_fit(&thread_id, width, height)
+}
+
+#[tauri::command(async)]
+pub fn browser_input(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    input: BrowserInput,
+) -> Result<(), CommandError> {
+    engine.browser_input(&thread_id, &input)
+}
+
+#[tauri::command(async)]
+pub fn browser_close(engine: State<'_, Engine>, thread_id: String) {
+    engine.browser_close(&thread_id);
 }
 
 /// The user's answer to an agent's secret request; `None` declines. The value only reaches
