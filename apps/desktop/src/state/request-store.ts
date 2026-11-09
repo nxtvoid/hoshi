@@ -83,6 +83,14 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
       }
       return
     }
+    if (event.type === 'threadRewound') {
+      const rewound = (item: RequestItem) =>
+        item.threadId.split(':')[0] === event.threadId
+      if (pending.some(rewound)) {
+        set({ pending: pending.filter((item) => !rewound(item)) })
+      }
+      return
+    }
     if (event.type !== 'itemAdded' || !isRequest(event.item)) return
     const { item } = event
     const rest = pending.filter((request) => request.id !== item.id)

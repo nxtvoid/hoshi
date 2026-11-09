@@ -764,6 +764,10 @@ impl ReadModel {
                     thread.conversation_cursor.clone_from(resume_at);
                     thread.resume_at.clone_from(resume_at);
                 }
+                self.requests
+                    .retain(|_, item| root_thread(&item.thread_id) != thread_id);
+                self.open_calls
+                    .retain(|call| root_thread(&call.thread_id) != thread_id);
             }
         }
     }
@@ -2878,6 +2882,44 @@ const a = 1
 Blue"
             )
         );
+    }
+
+    #[test]
+    fn a_rewind_drops_the_questions_it_takes_out_of_the_transcript() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+        let asked = ItemContent::Questions {
+            questions: vec![Question {
+                header: "Color".into(),
+                question: "Which color?".into(),
+                options: Vec::new(),
+                multi_select: false,
+            }],
+            status: RequestStatus::Pending,
+            answers: None,
+        };
+        open(&mut model, "r1", asked);
+        for event in close_stale_turn(&model, "t", "m1", NOW) {
+            model.apply(&event);
+        }
+        assert_eq!(model.pending_requests("t").len(), 1);
+
+        run(
+            &mut model,
+            Command::ThreadRewind {
+                thread_id: "t".into(),
+                message_id: "m1".into(),
+                rewind: Rewind::Start,
+            },
+        )
+        .unwrap();
+
+        assert!(model.pending_requests("t").is_empty());
+        assert!(model.pending_request("r1").is_none());
+        let answers = RequestResponse::Answers {
+            answers: vec!["Blue".into()],
+        };
+        assert!(run(&mut model, respond("r1", answers)).is_err());
     }
 
     #[test]

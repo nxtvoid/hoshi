@@ -73,3 +73,26 @@ test('keeps the tasks that still owe their thread an answer', () => {
   store.applyEvent({ type: 'taskCancelled', threadId: 'task' })
   expect(useRequestStore.getState().pendingTasks).toEqual({})
 })
+
+test('drops the requests of a thread that went back before them', () => {
+  const store = useRequestStore.getState()
+  store.seed(
+    [
+      approval('a', 't', 'pending'),
+      approval('b', 't:agent', 'pending'),
+      approval('c', 'other', 'pending')
+    ],
+    []
+  )
+
+  store.applyEvent({
+    type: 'threadRewound',
+    threadId: 't',
+    messageId: 'm1',
+    resumeAt: null
+  })
+
+  expect(useRequestStore.getState().pending.map((item) => item.id)).toEqual([
+    'c'
+  ])
+})
