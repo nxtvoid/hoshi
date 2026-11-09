@@ -1,6 +1,7 @@
 import type * as React from 'react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { cn } from '@hoshi/utils'
+import { useShallow } from 'zustand/react/shallow'
 import { Composer } from './Composer'
 import { CHAT_LANE } from '@/lib/chat-lane'
 import {
@@ -16,6 +17,7 @@ import { Transcript } from './Transcript'
 import { DelegatedBanner } from './DelegationRows'
 import { ThreadGitChip } from './ThreadGitChip'
 import { useAppStore } from '@/state/app-store'
+import type { Thread } from '@/bindings/Thread'
 import { useSidebarStore } from '@/state/sidebar-store'
 import { useInChat, useScopeProjectId } from '@/state/use-scope'
 import { draftKey } from '@/state/draft-store'
@@ -42,9 +44,7 @@ import {
 export function ThreadView() {
   const sidebarOpen = useAppStore((state) => state.sidebarOpen)
   const toggleSidebar = useAppStore((state) => state.toggleSidebar)
-  const thread = useAppStore((state) =>
-    state.threads.find((candidate) => candidate.id === state.selectedThreadId)
-  )
+  const thread = useAppStore(useShallow(selectedThreadFields))
   const fromInbox = useSidebarStore((state) => state.view === 'inbox')
   const chat = useInChat()
   const scopeProjectId = useScopeProjectId()
@@ -211,7 +211,7 @@ export function ThreadView() {
                   <div
                     className={cn(
                       CHAT_LANE,
-                      'bg-background h-8 [mask-image:linear-gradient(to_top,black,transparent)] backdrop-blur-sm'
+                      'from-background h-8 bg-linear-to-t to-transparent'
                     )}
                   />
                 </div>
@@ -242,13 +242,38 @@ const DETAILS_CARD_ROOM =
 const DETAILS_INLINE_MIN_WIDTH =
   DETAILS_CARD_ROOM + DETAILS_CARD_CLEARANCE + 560
 
+/** The fields of the open thread this view shows, so other changes to it do not render it. */
+function selectedThreadFields(state: {
+  threads: Thread[]
+  selectedThreadId: string | null
+}) {
+  const thread = state.threads.find(
+    (candidate) => candidate.id === state.selectedThreadId
+  )
+  return thread
+    ? {
+        id: thread.id,
+        title: thread.title,
+        projectId: thread.projectId,
+        status: thread.status,
+        parentThreadId: thread.parentThreadId,
+        worktreePath: thread.worktreePath
+      }
+    : undefined
+}
+
+/** The element's width; a hidden element keeps the last width it had. */
 function useElementWidth(ref: React.RefObject<HTMLElement | null>) {
   const [width, setWidth] = useState(0)
-  useEffect(() => {
+  useLayoutEffect(() => {
     const element = ref.current
     if (!element) return
+    const update = (next: number) => {
+      if (next > 0) setWidth(next)
+    }
+    update(element.getBoundingClientRect().width)
     const observer = new ResizeObserver(([entry]) => {
-      if (entry) setWidth(entry.contentRect.width)
+      if (entry) update(entry.contentRect.width)
     })
     observer.observe(element)
     return () => observer.disconnect()
