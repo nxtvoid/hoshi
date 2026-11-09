@@ -1,3 +1,4 @@
+mod appearance;
 mod clipboard;
 mod home;
 mod orchestration;
@@ -92,7 +93,8 @@ pub fn run() {
             orchestration::search_pull_requests,
             orchestration::regenerate_thread_title,
             settings::get_settings,
-            settings::update_settings
+            settings::update_settings,
+            appearance::set_appearance
         ])
         .build(tauri::generate_context!())
         .expect("error while building hoshi")
@@ -133,8 +135,15 @@ fn setup(app: &mut App) -> Result<(), Box<dyn std::error::Error>> {
         .first()
         .cloned()
         .ok_or("tauri.conf.json declares no window")?;
-    WebviewWindowBuilder::from_config(app.handle(), &window)?
+    let dark = appearance::saved(&home);
+    let window = WebviewWindowBuilder::from_config(app.handle(), &window)?
         .data_directory(home.join(home::WEBVIEW_DIR))
+        .background_color(appearance::background(dark.unwrap_or(false)))
+        .visible(false)
         .build()?;
+    if dark.is_none() {
+        appearance::follow_system(&window);
+    }
+    appearance::show_at_the_latest(window);
     Ok(())
 }
