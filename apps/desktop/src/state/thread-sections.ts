@@ -195,6 +195,11 @@ export function withDelegatedWork(threads: Thread[]): Thread[] {
     })
 }
 
+/** Orders RFC 3339 UTC timestamps newest first; they sort as plain strings. */
+export function newestFirst(a: string, b: string): number {
+  return a < b ? 1 : a > b ? -1 : 0
+}
+
 /** The sections the sidebar shows for a view, search and filter. */
 export function sidebarSections(
   threads: Thread[],
@@ -211,7 +216,7 @@ export function sidebarSections(
         matchesSearch(thread, pullRequests[thread.id], query.search) &&
         matchesFilter(thread, pullRequests[thread.id], query.filter)
     )
-    .sort((a, b) => b[key].localeCompare(a[key]))
+    .sort((a, b) => newestFirst(a[key], b[key]))
   return query.view === 'inbox'
     ? inboxSections(visible, pullRequests, now, unseen)
     : groupThreads(visible, pullRequests, now, query.inactiveAfterMs)

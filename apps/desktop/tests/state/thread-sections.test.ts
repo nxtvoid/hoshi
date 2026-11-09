@@ -8,6 +8,7 @@ import {
   inboxCount,
   inboxSections,
   matchesSearch,
+  newestFirst,
   type SidebarQuery,
   sectionOf,
   sidebarSections,
@@ -370,5 +371,22 @@ describe('withDelegatedWork', () => {
     ])
 
     expect(listed.map((each) => each.status)).toEqual(['error'])
+  })
+})
+
+describe('newestFirst', () => {
+  test('orders timestamps from the latest to the oldest', () => {
+    const times = [
+      '2026-11-07T09:00:00.000Z',
+      '2026-11-07T12:00:00.000Z',
+      '2025-12-31T23:59:59.999Z',
+      '2026-11-07T12:00:00.000Z'
+    ]
+    expect([...times].sort(newestFirst)).toEqual([
+      '2026-11-07T12:00:00.000Z',
+      '2026-11-07T12:00:00.000Z',
+      '2026-11-07T09:00:00.000Z',
+      '2025-12-31T23:59:59.999Z'
+    ])
   })
 })

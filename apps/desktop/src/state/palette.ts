@@ -1,4 +1,5 @@
 import type { Thread } from '@/bindings/Thread'
+import { newestFirst } from './thread-sections'
 import type { Project } from '@/bindings/Project'
 import type { PullRequest } from '@/bindings/PullRequest'
 
@@ -71,7 +72,7 @@ function ranked<T>(
 
 const newest = (a: Thread, b: Thread) =>
   Number(a.archived) - Number(b.archived) ||
-  b.updatedAt.localeCompare(a.updatedAt)
+  newestFirst(a.updatedAt, b.updatedAt)
 
 /**
  * Threads match their title, branch, pull request (`#12` or its title) and project; with no

@@ -3,14 +3,52 @@ import { useAppStore } from '@/state/app-store'
 import type { Thread } from '@/bindings/Thread'
 import { useUnseenStore } from '@/state/unseen-store'
 import { useSidebarStore } from '@/state/sidebar-store'
+import type { PullRequest } from '@/bindings/PullRequest'
 import { useSettingsStore } from '@/state/settings-store'
 import {
   inactiveAfterMs,
   inboxCount,
   inboxSections,
+  newestFirst,
+  type SidebarQuery,
   sidebarSections,
   withDelegatedWork
 } from '@/state/thread-sections'
+
+type SidebarInputs = {
+  threads: Thread[]
+  pullRequests: Record<string, PullRequest>
+  query: SidebarQuery
+  unseen: Record<string, true>
+  held: string | null
+}
+
+function sectionsOf({
+  threads,
+  pullRequests,
+  query,
+  unseen,
+  held
+}: SidebarInputs) {
+  return sidebarSections(
+    threads,
+    pullRequests,
+    query,
+    Date.now(),
+    held ? { ...unseen, [held]: true } : unseen
+  )
+}
+
+function inboxOf(
+  threads: Thread[],
+  pullRequests: Record<string, PullRequest>,
+  unseen: Record<string, true>
+) {
+  const sorted = withDelegatedWork(threads).sort((a, b) =>
+    newestFirst(a.updatedAt, b.updatedAt)
+  )
+  return inboxSections(sorted, pullRequests, Date.now(), unseen)
+}
 
 /** The sections the sidebar lists right now, for its view, search, filter and sort. */
 export function useSidebarSections() {
@@ -29,10 +67,10 @@ export function useSidebarSections() {
 
   return useMemo(
     () =>
-      sidebarSections(
+      sectionsOf({
         threads,
         pullRequests,
-        {
+        query: {
           view,
           projectId,
           search,
@@ -40,9 +78,9 @@ export function useSidebarSections() {
           sort,
           inactiveAfterMs: inactiveAfterMs(inactiveDays)
         },
-        Date.now(),
-        held ? { ...unseen, [held]: true } : unseen
-      ),
+        unseen,
+        held
+      }),
     [
       threads,
       pullRequests,
@@ -58,28 +96,50 @@ export function useSidebarSections() {
   )
 }
 
+/** The sidebar's sections as they are now, for a handler that runs outside rendering. */
+export function currentSidebarSections() {
+  const { threads, pullRequests, search, selectedProjectId } =
+    useAppStore.getState()
+  const { unseen, held } = useUnseenStore.getState()
+  const { view, filter, threadSort } = useSidebarStore.getState()
+  const inactiveDays =
+    useSettingsStore.getState().settings?.general.inactiveAfterDays
+  return sectionsOf({
+    threads,
+    pullRequests,
+    query: {
+      view,
+      projectId: selectedProjectId,
+      search,
+      filter,
+      sort: threadSort,
+      inactiveAfterMs: inactiveAfterMs(inactiveDays)
+    },
+    unseen,
+    held
+  })
+}
+
 /** The inbox across every project, newest first, whatever the sidebar shows. */
 function useInboxSections() {
   const threads = useAppStore((state) => state.threads)
   const pullRequests = useAppStore((state) => state.pullRequests)
   const unseen = useUnseenStore((state) => state.unseen)
 
-  return useMemo(() => {
-    const sorted = withDelegatedWork(threads).sort((a, b) =>
-      b.updatedAt.localeCompare(a.updatedAt)
-    )
-    return inboxSections(sorted, pullRequests, Date.now(), unseen)
-  }, [threads, pullRequests, unseen])
+  return useMemo(
+    () => inboxOf(threads, pullRequests, unseen),
+    [threads, pullRequests, unseen]
+  )
 }
 
-const NO_THREADS: Thread[] = []
-
-/** Threads waiting on the user in every project, for the jump shortcut. */
-export function useAttentionThreads() {
-  const sections = useInboxSections()
+/** Threads waiting on the user in every project, as they are now, for the jump shortcut. */
+export function currentAttentionThreads(): Thread[] {
+  const { threads, pullRequests } = useAppStore.getState()
+  const { unseen } = useUnseenStore.getState()
   return (
-    sections.find((section) => section.id === 'attention')?.threads ??
-    NO_THREADS
+    inboxOf(threads, pullRequests, unseen).find(
+      (section) => section.id === 'attention'
+    )?.threads ?? []
   )
 }
 
