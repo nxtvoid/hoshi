@@ -362,18 +362,78 @@ describe('foldTurns', () => {
       answer('a1', '2026-11-08T10:00:50Z')
     ]
 
-    expect(shape(foldTurns(groupTranscript(items), false))).toEqual([
+    const settled = foldTurns(groupTranscript(items), false)
+    expect(shape(settled)).toEqual([
       'u1',
       'steered:start:2',
       's',
       'answered:steer:1',
       'a1'
     ])
+    const durations = settled.map((row) =>
+      row.kind === 'fold' ? row.durationMs : null
+    )
+    expect(durations).toEqual([null, 50_000, null, 30_000, null])
     expect(shape(foldTurns(groupTranscript(items.slice(0, 5)), true))).toEqual([
       'u1',
       'work',
       'partial',
       's',
+      'work'
+    ])
+  })
+
+  test('a run a steer ended folds nothing while the turn still works', () => {
+    const steer = marker('s', '2026-11-08T10:00:20Z', {
+      kind: 'userMessage',
+      text: 's',
+      attachments: [],
+      steer: true,
+      taskResult: null
+    })
+    const items = [
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      steer,
+      marker('run1', '2026-11-08T10:00:21Z', { kind: 'runEnded' }),
+      tool('e', 'Edit')
+    ]
+
+    expect(shape(foldTurns(groupTranscript(items), true))).toEqual([
+      'u1',
+      'work',
+      's',
+      'work'
+    ])
+    expect(
+      shape(
+        foldTurns(
+          groupTranscript([...items, answer('a1', '2026-11-08T10:00:50Z')]),
+          false
+        )
+      )
+    ).toEqual(['u1', 'steered:start:1', 's', 'answered:steer:1', 'a1'])
+  })
+
+  test('a run that ended before the latest response still folds while working', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:10Z'),
+      marker('run1', '2026-11-08T10:00:11Z', { kind: 'runEnded' }),
+      marker('ended', '2026-11-08T10:00:20Z', {
+        kind: 'backgroundTaskEnded',
+        toolCallId: 'agent',
+        failed: false
+      }),
+      tool('g', 'Grep')
+    ])
+
+    expect(shape(foldTurns(rows, true))).toEqual([
+      'u1',
+      'answered:start:1',
+      'a1',
+      'ended',
       'work'
     ])
   })
