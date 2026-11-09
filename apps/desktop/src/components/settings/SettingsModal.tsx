@@ -8,6 +8,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { ProvidersSection } from './ProvidersSection'
 import { SourceControlSection } from './SourceControlSection'
 import { AppearanceSection } from './AppearanceSection'
+import { ThemeEditorHost } from './ThemeEditorPanel'
 import { ArrowRight01Icon } from '@hugeicons/core-free-icons'
 import { SECTION_META, type SettingsSection } from './sections'
 import { PageModal, PageModalClose } from '@hoshi/ui/components/page-modal'
@@ -55,6 +56,7 @@ export function SettingsModal({ section }: { section: SettingsSection }) {
           <Content />
         </div>
       </div>
+      <ThemeEditorHost />
     </PageModal>
   )
 }

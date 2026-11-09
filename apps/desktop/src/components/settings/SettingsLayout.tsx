@@ -1,5 +1,7 @@
 import { cn } from '@hoshi/utils'
-import type { ReactNode } from 'react'
+import { HugeiconsIcon } from '@hugeicons/react'
+import { type ReactNode, useState } from 'react'
+import { ArrowRight01Icon } from '@hugeicons/core-free-icons'
 
 export function SettingsPage({ children }: { children: ReactNode }) {
   return (
@@ -41,6 +43,8 @@ type SettingsRowProps = {
   description?: ReactNode
   /** Links the title to the control for screen readers and clicks. */
   htmlFor?: string
+  /** Beside the title, such as a reset button. */
+  action?: ReactNode
   control?: ReactNode
   children?: ReactNode
 }
@@ -49,6 +53,7 @@ export function SettingsRow({
   title,
   description,
   htmlFor,
+  action,
   control,
   children
 }: SettingsRowProps) {
@@ -56,9 +61,12 @@ export function SettingsRow({
     <div className='@container/settings-row px-4 py-3'>
       <div className='flex flex-col gap-3 @min-[32rem]/settings-row:grid @min-[32rem]/settings-row:grid-cols-[minmax(0,1fr)_auto] @min-[32rem]/settings-row:items-center @min-[32rem]/settings-row:gap-8'>
         <div className='flex min-w-0 flex-col gap-1'>
-          <label htmlFor={htmlFor} className='text-sm font-medium'>
-            {title}
-          </label>
+          <div className='flex min-h-5 items-center gap-1'>
+            <label htmlFor={htmlFor} className='text-sm font-medium'>
+              {title}
+            </label>
+            {action}
+          </div>
           {description ? (
             <p className='text-muted-foreground max-w-2xl text-xs text-pretty'>
               {description}
@@ -72,6 +80,42 @@ export function SettingsRow({
         ) : null}
       </div>
       {children}
+    </div>
+  )
+}
+
+/** Folds rows few people need at the end of a section. */
+export function SettingsAdvanced({
+  label,
+  children
+}: {
+  label: string
+  children: ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div>
+      <button
+        type='button'
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className='text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-10 w-full items-center gap-1.5 rounded-b-xl px-4 text-left text-xs font-medium transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset'
+      >
+        <HugeiconsIcon
+          icon={ArrowRight01Icon}
+          strokeWidth={2}
+          className={cn(
+            'size-3.5 shrink-0 transition-transform duration-150 motion-reduce:transition-none',
+            open && 'rotate-90'
+          )}
+        />
+        {label}
+      </button>
+      {open ? (
+        <div className='border-border/50 [&>*+*]:border-border/50 border-t [&>*+*]:border-t'>
+          {children}
+        </div>
+      ) : null}
     </div>
   )
 }

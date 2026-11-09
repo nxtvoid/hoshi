@@ -3,6 +3,7 @@
 mod browser;
 mod composer;
 mod diff;
+mod fonts;
 mod model;
 mod orchestration;
 mod project;
@@ -14,6 +15,7 @@ mod request;
 mod settings;
 mod source_control;
 mod terminal;
+mod theme_import;
 mod thread;
 mod usage;
 mod workspace;
@@ -21,6 +23,7 @@ mod workspace;
 pub use browser::{BrowserFrame, BrowserInput, BrowserPage, BrowserPoint};
 pub use composer::{EntryKind, MessageAttachment, SlashCommand, WorkspaceEntry};
 pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
+pub use fonts::{SystemFont, group_font_families};
 pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
@@ -51,6 +54,7 @@ pub use source_control::{
     GitActionResult, GitStatus,
 };
 pub use terminal::{TerminalAttach, TerminalEvent, TerminalExit};
+pub use theme_import::{ExtensionTheme, ThemeExtension, ThemeExtensionSort};
 pub use thread::{
     AccessMode, CompactionStatus, Effort, ItemContent, OpenToolCall, Rewind, Task, TaskStatus,
     Thread, ThreadItem, ThreadStatus, ThreadWorkspace, ToolDetail, TranscriptPage, TurnFailure,

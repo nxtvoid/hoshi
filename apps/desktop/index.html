@@ -13,6 +13,24 @@
         background: #0a0a0a;
         color: #a1a1a1;
       }
+      html[data-palette="grove"] {
+        --palette-hue: 158;
+      }
+      html[data-palette="ocean"] {
+        --palette-hue: 245;
+      }
+      html[data-palette="ember"] {
+        --palette-hue: 48;
+      }
+      html[data-palette="iris"] {
+        --palette-hue: 294;
+      }
+      html[data-palette] {
+        background: oklch(0.988 0.004 var(--palette-hue));
+      }
+      html.dark[data-palette] {
+        background: oklch(0.16 0.01 var(--palette-hue));
+      }
       #boot-shell {
         position: fixed;
         inset: 0;
@@ -28,16 +46,141 @@
     <script>
       ;(() => {
         const root = document.documentElement
-        let preference = 'system'
+        let saved = {}
         try {
-          const saved = JSON.parse(localStorage.getItem('hoshi-theme'))
-          preference = saved?.state?.preference ?? preference
+          saved = JSON.parse(localStorage.getItem('hoshi-theme'))?.state ?? {}
         } catch (_) {}
-        const dark =
-          preference === 'dark' ||
-          (preference === 'system' &&
-            window.matchMedia('(prefers-color-scheme: dark)').matches)
-        root.classList.toggle('dark', dark)
+        const mode = ['light', 'dark'].includes(saved.preference)
+          ? saved.preference
+          : 'system'
+        const palettes = ['grove', 'ocean', 'ember', 'iris']
+        const builtIn = ['hoshi', ...palettes]
+        const customs = Array.isArray(saved.customThemes)
+          ? saved.customThemes.filter(
+              (theme) =>
+                theme &&
+                typeof theme.id === 'string' &&
+                theme.colors &&
+                typeof theme.colors === 'object'
+            )
+          : []
+        const find = (id) =>
+          typeof id !== 'string'
+            ? undefined
+            : builtIn.includes(id)
+              ? { id, builtIn: true }
+              : customs.find((theme) => theme.id === id)
+        const colorsFor = (theme, appearance) =>
+          theme.builtIn ||
+          (theme.appearance === appearance
+            ? theme.colors
+            : theme.variants?.[appearance]) ||
+          null
+        const half = (appearance) => {
+          const theme = find(saved.halves?.[appearance])
+          return theme && colorsFor(theme, appearance) ? theme : undefined
+        }
+        const base = find(saved.theme) ?? find(saved.palette) ?? find('hoshi')
+        const wanted =
+          mode === 'system'
+            ? window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light'
+            : mode
+        const appearance =
+          half(wanted) || colorsFor(base, wanted) ? wanted : base.appearance
+        const theme = half(appearance) ?? base
+        root.classList.toggle('dark', appearance === 'dark')
+        if (palettes.includes(theme.id)) root.dataset.palette = theme.id
+        if (!theme.builtIn) {
+          const colors = colorsFor(theme, appearance) || theme.colors
+          for (const [role, value] of Object.entries(colors)) {
+            if (/^[a-z][a-zA-Z]*$/.test(role) && /^[^;{}]+$/.test(value)) {
+              const name = role.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)
+              root.style.setProperty(`--${name}`, value)
+            }
+          }
+          if (typeof colors.background === 'string') {
+            root.style.backgroundColor = colors.background
+          }
+        }
+        const interfacePresets = ['geist', 'inter', 'system']
+        const codePresets = ['jetbrains', 'cascadia', 'system']
+        const composerPresets = [
+          'interface',
+          ...interfacePresets,
+          'jetbrains',
+          'cascadia',
+          'system-mono'
+        ]
+        const font = (key, variable, value, presets, fallback, unchanged) => {
+          if (typeof value !== 'string') return
+          const family = value.trim()
+          if (!family || family.length > 200 || family === unchanged) return
+          if (presets.includes(family)) {
+            root.dataset[key] = family
+            return
+          }
+          const name = family
+            .replace(/[\n\r\f]/g, ' ')
+            .replace(/["\\]/g, '\\$&')
+          root.style.setProperty(variable, `"${name}", ${fallback}`)
+        }
+        font(
+          'font',
+          '--font-sans',
+          saved.interfaceFont,
+          interfacePresets,
+          'var(--stack-geist)',
+          'geist'
+        )
+        font(
+          'codeFont',
+          '--font-mono',
+          saved.codeFont,
+          codePresets,
+          'var(--stack-jetbrains)',
+          'jetbrains'
+        )
+        if (saved.lighterText === false) root.dataset.textWeight = 'regular'
+        if (saved.fontSmoothing === false) root.dataset.fontSmoothing = 'off'
+        const size = (value, min, max) =>
+          typeof value === 'number' && Number.isFinite(value)
+            ? `${Math.min(max, Math.max(min, Math.round(value)))}px`
+            : null
+        const interfaceSize = size(saved.interfaceSize, 12, 20)
+        if (interfaceSize && interfaceSize !== '16px') {
+          root.style.fontSize = interfaceSize
+        }
+        const codeSize = size(saved.codeSize, 10, 18)
+        if (codeSize && codeSize !== '13px') {
+          root.style.setProperty('--code-font-size', codeSize)
+        }
+        if (saved.separateFonts === true) {
+          font(
+            'composerFont',
+            '--font-composer',
+            saved.composerFont,
+            composerPresets,
+            'var(--font-sans)',
+            'interface'
+          )
+          font(
+            'terminalFont',
+            '--font-terminal',
+            saved.terminalFont,
+            codePresets,
+            'var(--stack-jetbrains)'
+          )
+          root.style.setProperty(
+            '--composer-font-size',
+            size(saved.composerSize, 12, 20) ?? '14px'
+          )
+          root.style.setProperty(
+            '--terminal-font-size',
+            size(saved.terminalSize, 8, 20) ?? '12px'
+          )
+        }
         const agent = navigator.userAgent
         root.dataset.platform = /Windows/.test(agent)
           ? 'windows'
