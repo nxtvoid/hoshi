@@ -24,6 +24,7 @@ mod pull_requests;
 mod refreshing;
 mod secret_requests;
 mod secrets;
+mod setup_files;
 mod source_control;
 mod terminal;
 mod thread_tools;
@@ -1787,7 +1788,8 @@ impl Engine {
             .ok_or_else(|| CommandError::ThreadNotFound {
                 thread_id: thread_id.to_owned(),
             })?;
-        state.run_worktree_setup(launch)
+        state.run_worktree_setup(launch);
+        Ok(())
     }
 
     /// Lets the agent start without the thread's setup, sending what it held.
@@ -2428,13 +2430,10 @@ impl State {
         })
     }
 
-    /// Runs the project's setup command in the thread's worktree, if it has one.
+    /// Runs the project's setup in the thread's worktree, if it has one.
     fn start_worktree_setup(&self, thread_id: &str) {
-        let Some(launch) = self.setup_launch(thread_id) else {
-            return;
-        };
-        if let Err(error) = self.run_worktree_setup(launch) {
-            eprintln!("hoshi: the setup of thread {thread_id} didn't start: {error}");
+        if let Some(launch) = self.setup_launch(thread_id) {
+            self.run_worktree_setup(launch);
         }
     }
 
@@ -2447,13 +2446,14 @@ impl State {
             thread_id: thread_id.to_owned(),
             project_root: project.workspace_root.clone(),
             worktree_path,
+            files: setup.files,
             command: setup.command,
             wait: setup.wait,
         })
     }
 
     /// The messages a setup held are sent apart from its terminal, whose lock it ends under.
-    fn run_worktree_setup(&self, launch: SetupLaunch) -> Result<(), CommandError> {
+    fn run_worktree_setup(&self, launch: SetupLaunch) {
         let this = self.this.clone();
         self.setups.start(launch, move |held| {
             let this = this.clone();
@@ -5228,6 +5228,7 @@ Blue"
             .dispatch(Command::ProjectWorktreeSetupSet {
                 project_id: "p".into(),
                 setup: Some(hoshi_core::WorktreeSetup {
+                    files: Vec::new(),
                     command: format!("  {marker}  "),
                     wait: true,
                 }),
@@ -5262,6 +5263,7 @@ Blue"
             .dispatch(Command::ProjectWorktreeSetupSet {
                 project_id: "p".into(),
                 setup: Some(hoshi_core::WorktreeSetup {
+                    files: Vec::new(),
                     command: "exit 3".into(),
                     wait: true,
                 }),
@@ -5288,6 +5290,148 @@ Blue"
         harness.engine.skip_worktree_setup("f1234567-rest").unwrap();
         harness.wait_for_turn_end();
         assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    fn wait_for_setup_end(harness: &Harness) -> hoshi_core::WorktreeSetupRun {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let runs = harness.engine.worktree_setups();
+            if let Some(run) = runs
+                .into_iter()
+                .find(|run| run.status != hoshi_core::WorktreeSetupStatus::Running)
+            {
+                return run;
+            }
+            assert!(Instant::now() < deadline, "the setup never ended");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_new_worktree_gets_the_project_s_files_before_its_command_runs() {
+        let repo = git::tests::temp_repository("engine-setup-files");
+        std::fs::write(repo.join(".env"), "KEY=1").unwrap();
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        std::fs::write(repo.join("secrets/a.env"), "a").unwrap();
+        std::fs::write(repo.join("secrets/b.env"), "b").unwrap();
+        std::fs::write(repo.join("secrets/notes.txt"), "n").unwrap();
+        let harness = Harness::new(
+            "setup-files",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        let check = if cfg!(windows) {
+            "if (Test-Path secrets/b.env) { Copy-Item .env ready.txt } else { exit 4 }"
+        } else {
+            "test -f secrets/b.env && cp .env ready.txt"
+        };
+        harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    files: vec![
+                        ".env".into(),
+                        "secrets/*.env".into(),
+                        "local.properties".into(),
+                    ],
+                    command: check.into(),
+                    wait: true,
+                }),
+            })
+            .unwrap();
+        harness
+            .create_thread("c1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        harness.send("c1234567-rest", "m1", "go");
+
+        harness.wait_for_turn_end();
+        let worktree = PathBuf::from(harness.thread("c1234567-rest").worktree_path.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("ready.txt"))
+                .unwrap()
+                .trim(),
+            "KEY=1"
+        );
+        assert!(worktree.join("secrets/a.env").is_file());
+        assert!(!worktree.join("secrets/notes.txt").exists());
+        let run = wait_for_setup_end(&harness);
+        assert_eq!(run.status, hoshi_core::WorktreeSetupStatus::Succeeded);
+        assert_eq!(run.copied_files, 3);
+        assert_eq!(run.missing_files, ["local.properties"]);
+        assert!(run.failed_files.is_empty());
+        assert!(run.terminal_id.is_some());
+    }
+
+    #[test]
+    fn a_setup_of_files_only_releases_the_held_message_once_copied() {
+        let repo = git::tests::temp_repository("engine-setup-files-only");
+        std::fs::write(repo.join(".env"), "KEY=1").unwrap();
+        let harness = Harness::new(
+            "setup-files-only",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    files: vec!["missing/*.env".into(), ".env".into()],
+                    command: " ".into(),
+                    wait: true,
+                }),
+            })
+            .unwrap();
+        harness
+            .create_thread("o1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        harness.send("o1234567-rest", "m1", "go");
+
+        harness.wait_for_turn_end();
+        let worktree = PathBuf::from(harness.thread("o1234567-rest").worktree_path.unwrap());
+        assert!(worktree.join(".env").is_file());
+        let run = wait_for_setup_end(&harness);
+        assert_eq!(run.status, hoshi_core::WorktreeSetupStatus::Succeeded);
+        assert_eq!(run.terminal_id, None);
+        assert_eq!(run.exit_code, None);
+        assert_eq!(run.copied_files, 1);
+        assert_eq!(run.missing_files, ["missing/*.env"]);
+        assert_eq!(run.held_messages, 0);
+        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_setup_refuses_files_outside_the_project() {
+        let repo = git::tests::temp_repository("engine-setup-escape");
+        let harness = Harness::new(
+            "setup-escape",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+
+        let error = harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    files: vec![".env".into(), "../outside/.env".into()],
+                    command: String::new(),
+                    wait: false,
+                }),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            CommandError::SetupFileInvalid {
+                path: "../outside/.env".into()
+            }
+        );
+        assert_eq!(harness.engine.snapshot().projects[0].worktree_setup, None);
     }
 
     #[test]

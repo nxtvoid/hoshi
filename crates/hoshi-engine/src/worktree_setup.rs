@@ -1,10 +1,13 @@
-//! The project's setup command, run in a terminal of its own in each worktree hoshi makes,
-//! with the thread's messages held meanwhile when the project asks to wait for it.
+//! The project's setup, run in each worktree hoshi makes: its files copied from the root,
+//! then its command in a terminal of its own, with the thread's messages held meanwhile when
+//! the project asks to wait for it.
 
-use crate::terminal::{Launch, Terminals};
+use crate::setup_files::{CopyReport, copy_setup_files};
+use crate::terminal::{Launch, TerminalSink, Terminals};
 use crate::{Notification, Notify};
-use hoshi_core::{Command, CommandError, TerminalEvent, WorktreeSetupRun, WorktreeSetupStatus};
+use hoshi_core::{Command, TerminalEvent, WorktreeSetupRun, WorktreeSetupStatus};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -21,14 +24,20 @@ pub struct SetupLaunch {
     pub thread_id: String,
     pub project_root: String,
     pub worktree_path: String,
+    pub files: Vec<String>,
     pub command: String,
     pub wait: bool,
 }
+
+type Finished = Arc<dyn Fn(Vec<Command>) + Send + Sync>;
 
 struct Run {
     launch: SetupLaunch,
     status: WorktreeSetupStatus,
     exit_code: Option<u32>,
+    copied: CopyReport,
+    /// Whether the command started in its terminal.
+    terminal: bool,
     output: Vec<String>,
     /// The line being written, until its newline comes.
     partial: String,
@@ -48,9 +57,12 @@ impl Run {
         let skip = output.len().saturating_sub(OUTPUT_LINES);
         WorktreeSetupRun {
             thread_id: self.launch.thread_id.clone(),
-            terminal_id: terminal_id(&self.launch.thread_id),
+            terminal_id: self.terminal.then(|| terminal_id(&self.launch.thread_id)),
             status: self.status,
             exit_code: self.exit_code,
+            copied_files: self.copied.copied,
+            missing_files: self.copied.missing.clone(),
+            failed_files: self.copied.failed.clone(),
             output: output.split_off(skip),
             held_messages: u32::try_from(self.held.len()).unwrap_or(u32::MAX),
         }
@@ -70,6 +82,17 @@ impl Run {
         }
         if self.partial.len() > 64 * 1024 {
             self.partial.clear();
+        }
+    }
+
+    /// Ends the run, handing back what it held when it succeeded.
+    fn end(&mut self, succeeded: bool) -> Vec<Command> {
+        if succeeded {
+            self.status = WorktreeSetupStatus::Succeeded;
+            std::mem::take(&mut self.held)
+        } else {
+            self.status = WorktreeSetupStatus::Failed;
+            Vec::new()
         }
     }
 }
@@ -98,12 +121,13 @@ impl WorktreeSetups {
     }
 
     /// Runs the setup afresh; what an earlier run held stays held. `finished` gets the
-    /// messages to send once it succeeds.
+    /// messages to send once it succeeds. The files are copied and the command started on
+    /// a thread of their own, as both can take a while.
     pub fn start(
         &self,
         launch: SetupLaunch,
         finished: impl Fn(Vec<Command>) + Send + Sync + 'static,
-    ) -> Result<(), CommandError> {
+    ) {
         let thread_id = launch.thread_id.clone();
         let generation = self.generations.fetch_add(1, Ordering::Relaxed);
         let held = guard(&self.runs)
@@ -114,6 +138,8 @@ impl WorktreeSetups {
             launch: launch.clone(),
             status: WorktreeSetupStatus::Running,
             exit_code: None,
+            copied: CopyReport::default(),
+            terminal: false,
             output: Vec::new(),
             partial: String::new(),
             held,
@@ -122,10 +148,72 @@ impl WorktreeSetups {
         };
         guard(&self.runs).insert(thread_id.clone(), run);
         self.send(&thread_id, true);
+        let setups = self.clone();
+        let finished: Finished = Arc::new(finished);
+        std::thread::spawn(move || setups.prepare(&launch, generation, &finished));
+    }
+
+    fn prepare(&self, launch: &SetupLaunch, generation: u64, finished: &Finished) {
+        let thread_id = &launch.thread_id;
+        let report = copy_setup_files(
+            Path::new(&launch.project_root),
+            Path::new(&launch.worktree_path),
+            &launch.files,
+        );
+        let copied = report.failed.is_empty();
+        let command = !launch.command.trim().is_empty();
+        let held = {
+            let mut runs = guard(&self.runs);
+            let Some(run) = runs
+                .get_mut(thread_id)
+                .filter(|run| run.generation == generation)
+            else {
+                return;
+            };
+            run.copied = report;
+            if copied && command {
+                run.terminal = true;
+                Vec::new()
+            } else {
+                run.end(copied)
+            }
+        };
+        self.send(thread_id, true);
+        if !held.is_empty() {
+            finished(held);
+        }
+        if !(copied && command) {
+            return;
+        }
+        let started = self.terminals.run(
+            &terminal_id(thread_id),
+            Launch {
+                thread_id,
+                cwd: &launch.worktree_path,
+                project_root: &launch.project_root,
+                worktree_path: Some(&launch.worktree_path),
+                command: Some(&launch.command),
+            },
+            self.observer(thread_id, generation, finished.clone()),
+        );
+        if let Err(error) = started {
+            if let Some(run) = guard(&self.runs)
+                .get_mut(thread_id)
+                .filter(|run| run.generation == generation)
+            {
+                run.end(false);
+                run.terminal = false;
+                run.output = vec![error.to_string()];
+            }
+            self.send(thread_id, true);
+        }
+    }
+
+    fn observer(&self, thread_id: &str, generation: u64, finished: Finished) -> TerminalSink {
         let runs = self.runs.clone();
         let notify = self.notify.clone();
-        let observed = thread_id.clone();
-        let observer = Box::new(move |event: TerminalEvent| {
+        let observed = thread_id.to_owned();
+        Box::new(move |event: TerminalEvent| {
             let mut all = guard(&runs);
             let Some(run) = all
                 .get_mut(&observed)
@@ -146,17 +234,7 @@ impl WorktreeSetups {
                 }
                 TerminalEvent::Exited { exit } => {
                     run.exit_code = exit.code;
-                    let succeeded = exit.code == Some(0);
-                    run.status = if succeeded {
-                        WorktreeSetupStatus::Succeeded
-                    } else {
-                        WorktreeSetupStatus::Failed
-                    };
-                    let held = if succeeded {
-                        std::mem::take(&mut run.held)
-                    } else {
-                        Vec::new()
-                    };
+                    let held = run.end(exit.code == Some(0));
                     notify(Notification::WorktreeSetup(run.view()));
                     drop(all);
                     if !held.is_empty() {
@@ -164,26 +242,7 @@ impl WorktreeSetups {
                     }
                 }
             }
-        });
-        let started = self.terminals.run(
-            &terminal_id(&thread_id),
-            Launch {
-                thread_id: &launch.thread_id,
-                cwd: &launch.worktree_path,
-                project_root: &launch.project_root,
-                worktree_path: Some(&launch.worktree_path),
-                command: Some(&launch.command),
-            },
-            observer,
-        );
-        if let Err(error) = &started {
-            if let Some(run) = guard(&self.runs).get_mut(&thread_id) {
-                run.status = WorktreeSetupStatus::Failed;
-                run.output = vec![error.to_string()];
-            }
-            self.send(&thread_id, true);
-        }
-        started
+        })
     }
 
     /// Holds a message for the agent while the thread's setup is to be waited for and
@@ -311,11 +370,14 @@ mod tests {
                 thread_id: "t".into(),
                 project_root: String::new(),
                 worktree_path: String::new(),
+                files: Vec::new(),
                 command: String::new(),
                 wait: false,
             },
             status: WorktreeSetupStatus::Running,
             exit_code: None,
+            copied: CopyReport::default(),
+            terminal: false,
             output: Vec::new(),
             partial: String::new(),
             held: Vec::new(),

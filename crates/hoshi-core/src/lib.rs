@@ -37,6 +37,7 @@ pub use orchestration::{
 };
 pub use project::{
     FolderListing, Project, RemoteRepository, WorktreeSetup, WorktreeSetupRun, WorktreeSetupStatus,
+    setup_file_path, setup_file_paths,
 };
 pub use provider::ProviderOutput;
 pub use provider_account::ProviderAccountStatus;

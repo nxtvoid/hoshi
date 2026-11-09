@@ -27,7 +27,7 @@ pub enum Command {
     ProjectRemove {
         project_id: String,
     },
-    /// `None`, or a blank command, stops setting up the project's new worktrees.
+    /// `None`, or no files and a blank command, stops setting up the project's new worktrees.
     ProjectWorktreeSetupSet {
         project_id: String,
         setup: Option<WorktreeSetup>,
@@ -386,6 +386,9 @@ pub enum CommandError {
     /// A new project or a clone would mix with files already there.
     #[error("folder {path} is not empty")]
     FolderNotEmpty { path: String },
+    /// A file for worktrees to copy is absolute, or leads out of the project or into `.git`.
+    #[error("{path} is not a path inside the project")]
+    SetupFileInvalid { path: String },
     /// Not `owner/name` or a link to a repository on the chosen forge.
     #[error("{input} does not name a repository")]
     RepositoryNameInvalid { input: String },
@@ -820,11 +823,15 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 return Err(CommandError::ProjectNotFound { project_id });
             }
             let setup = setup
-                .map(|setup| WorktreeSetup {
-                    command: setup.command.trim().to_owned(),
-                    wait: setup.wait,
+                .map(|setup| {
+                    Ok::<_, CommandError>(WorktreeSetup {
+                        files: crate::setup_file_paths(&setup.files)?,
+                        command: setup.command.trim().to_owned(),
+                        wait: setup.wait,
+                    })
                 })
-                .filter(|setup| !setup.command.is_empty());
+                .transpose()?
+                .filter(|setup| !setup.files.is_empty() || !setup.command.is_empty());
             Ok(vec![Event::ProjectWorktreeSetupSet { project_id, setup }])
         }
         Command::ProjectRemove { project_id } => {
@@ -3143,5 +3150,86 @@ Blue"
     #[test]
     fn windows_paths_compare_case_and_separator_insensitively() {
         assert!(same_path(r"C:\Repo\Hoshi", "c:/repo/hoshi/"));
+    }
+
+    fn set_setup(files: &[&str], command: &str) -> Command {
+        Command::ProjectWorktreeSetupSet {
+            project_id: "p".into(),
+            setup: Some(WorktreeSetup {
+                files: files.iter().map(|&file| file.to_owned()).collect(),
+                command: command.into(),
+                wait: true,
+            }),
+        }
+    }
+
+    fn setup_of(model: &ReadModel) -> Option<WorktreeSetup> {
+        model.project("p").and_then(|p| p.worktree_setup.clone())
+    }
+
+    #[test]
+    fn a_worktree_setup_keeps_its_files_relative_and_once_each() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+
+        run(
+            &mut model,
+            set_setup(
+                &[
+                    " .env ",
+                    "",
+                    r"config\local.properties",
+                    "./.env",
+                    "secrets//*.env/",
+                ],
+                "  ",
+            ),
+        )
+        .unwrap();
+
+        let setup = setup_of(&model).unwrap();
+        assert_eq!(
+            setup.files,
+            [".env", "config/local.properties", "secrets/*.env"]
+        );
+        assert_eq!(setup.command, "");
+    }
+
+    #[test]
+    fn a_worktree_setup_without_files_or_command_is_none() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+        run(&mut model, set_setup(&["x"], "bun install")).unwrap();
+
+        run(&mut model, set_setup(&[" ", ""], " ")).unwrap();
+
+        assert_eq!(setup_of(&model), None);
+    }
+
+    #[test]
+    fn a_worktree_setup_refuses_files_outside_the_project() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+
+        for path in [
+            "/etc/passwd",
+            r"\\server\share",
+            r"C:\Users\nxtvoid\.env",
+            "d:secrets",
+            "../other/.env",
+            "config/../../.env",
+            ".git/config",
+            ".GIT",
+        ] {
+            let error = run(&mut model, set_setup(&[".env", path], "")).unwrap_err();
+            assert_eq!(
+                error,
+                CommandError::SetupFileInvalid {
+                    path: path.to_owned()
+                },
+                "{path}"
+            );
+        }
+        assert_eq!(setup_of(&model), None);
     }
 }

@@ -2,9 +2,26 @@
 import type { WorktreeSetupStatus } from "./WorktreeSetupStatus";
 
 /**
- * A worktree's setup command, running or finished, in its own terminal.
+ * A worktree's setup, running or finished: its files copied, then its command in a
+ * terminal of its own.
  */
-export type WorktreeSetupRun = { threadId: string, terminalId: string, status: WorktreeSetupStatus, exitCode: number | null, 
+export type WorktreeSetupRun = { threadId: string, 
+/**
+ * `None` until the command starts, and when there is none.
+ */
+terminalId: string | null, status: WorktreeSetupStatus, exitCode: number | null, 
+/**
+ * Files copied into the worktree, counting each one inside a copied folder.
+ */
+copiedFiles: number, 
+/**
+ * Files to copy that matched nothing in the project root.
+ */
+missingFiles: Array<string>, 
+/**
+ * Files that couldn't be copied, or that lead outside the root or the worktree.
+ */
+failedFiles: Array<string>, 
 /**
  * Its last lines of output, without terminal styling.
  */

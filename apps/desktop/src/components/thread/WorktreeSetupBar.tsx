@@ -17,12 +17,29 @@ import {
 function headline(run: WorktreeSetupRun) {
   if (run.status === 'running') return m.worktree_setup_running()
   if (run.status === 'succeeded') return m.worktree_setup_succeeded()
+  if (run.failedFiles.length > 0) return m.worktree_setup_files_failed()
   return run.exitCode === null
     ? m.worktree_setup_failed()
     : m.worktree_setup_failed_code({ code: run.exitCode })
 }
 
-/** Above the composer while the project's setup command runs in the thread's worktree. */
+function filesSummary(run: WorktreeSetupRun) {
+  const parts: string[] = []
+  if (run.copiedFiles > 0) {
+    parts.push(m.worktree_setup_copied({ count: run.copiedFiles }))
+  }
+  if (run.missingFiles.length > 0) {
+    parts.push(m.worktree_setup_missing({ paths: run.missingFiles.join(', ') }))
+  }
+  if (run.failedFiles.length > 0) {
+    parts.push(
+      m.worktree_setup_copy_failed({ paths: run.failedFiles.join(', ') })
+    )
+  }
+  return parts.join(' · ')
+}
+
+/** Above the composer while the project's setup runs in the thread's worktree. */
 export function WorktreeSetupBar({ threadId }: { threadId: string }) {
   const run = useWorktreeSetupStore((state) => state.runs[threadId])
   const dismissed = useWorktreeSetupStore(
@@ -33,6 +50,8 @@ export function WorktreeSetupBar({ threadId }: { threadId: string }) {
   if (!run || dismissed) return null
   const failed = run.status === 'failed'
   const running = run.status === 'running'
+  const terminalId = run.terminalId
+  const summary = filesSummary(run)
 
   return (
     <div
@@ -67,13 +86,15 @@ export function WorktreeSetupBar({ threadId }: { threadId: string }) {
             </span>
           ) : null}
         </span>
-        <Button
-          size='xs'
-          variant='ghost'
-          onClick={() => showTerminal(threadId, run.terminalId)}
-        >
-          {m.worktree_setup_open_terminal()}
-        </Button>
+        {terminalId ? (
+          <Button
+            size='xs'
+            variant='ghost'
+            onClick={() => showTerminal(threadId, terminalId)}
+          >
+            {m.worktree_setup_open_terminal()}
+          </Button>
+        ) : null}
         {failed ? (
           <Button
             size='xs'
@@ -106,6 +127,9 @@ export function WorktreeSetupBar({ threadId }: { threadId: string }) {
           </Button>
         )}
       </div>
+      {summary ? (
+        <span className='text-muted-foreground truncate pe-1.5'>{summary}</span>
+      ) : null}
       {running || failed ? (
         run.output.length > 0 ? (
           <pre className='text-muted-foreground overflow-hidden pe-1.5 font-mono text-[0.6875rem] leading-4'>

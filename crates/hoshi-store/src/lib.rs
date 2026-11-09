@@ -1174,9 +1174,32 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_setup_saved_before_files_existed_still_loads() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.append(&[project_created("p")], NOW).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE projects SET worktree_setup = ?1 WHERE id = 'p'",
+                [r#"{"command":"bun install","wait":true}"#],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.snapshot().unwrap().projects[0].worktree_setup,
+            Some(hoshi_core::WorktreeSetup {
+                files: Vec::new(),
+                command: "bun install".into(),
+                wait: true,
+            })
+        );
+    }
+
+    #[test]
     fn a_project_keeps_its_worktree_setup() {
         let mut store = Store::open_in_memory().unwrap();
         let setup = hoshi_core::WorktreeSetup {
+            files: vec![".env".into(), "secrets/*.env".into()],
             command: "bun install".into(),
             wait: true,
         };

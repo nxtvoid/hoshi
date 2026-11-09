@@ -34,15 +34,45 @@
   "surface_browser": "Browser",
   "worktree_setup_menu": "Worktree setup…",
   "worktree_setup_title": "Worktree setup",
-  "worktree_setup_description": "A command run in each new worktree of {project}, such as installing its dependencies. It runs in its own terminal, with HOSHI_PROJECT_ROOT and HOSHI_WORKTREE_PATH set.",
+  "worktree_setup_description": "Prepares each new worktree of {project}: copies files the repository doesn't track, then runs a command in its own terminal.",
+  "worktree_setup_files": "Files to copy",
+  "worktree_setup_files_placeholder": ".env\nconfig.properties",
+  "worktree_setup_files_hint": "One path per line, from the project root. Wildcards like * work. Copied before the command runs.",
+  "worktree_setup_file_invalid": "Not a path inside the project: {path}",
   "worktree_setup_command": "Command",
   "worktree_setup_placeholder": "bun install",
+  "worktree_setup_command_hint": "Runs with HOSHI_PROJECT_ROOT and HOSHI_WORKTREE_PATH set.",
   "worktree_setup_wait": "Wait for it before the agent starts",
-  "worktree_setup_wait_hint": "Messages wait until the command succeeds. If it fails, you choose whether to send them anyway.",
+  "worktree_setup_wait_hint": "Messages wait until the setup succeeds. If it fails, you choose whether to send them anyway.",
+  "worktree_setup_share": "Share",
+  "worktree_setup_copy": "Copy setup",
+  "worktree_setup_import_menu": "Import setup…",
+  "worktree_setup_import_title": "Import setup",
+  "worktree_setup_import_description": "Paste a setup someone copied with Share.",
+  "worktree_setup_import_placeholder": "Paste the setup here",
+  "worktree_setup_import_invalid": "This text isn't a shared worktree setup.",
+  "worktree_setup_import_warning_title": "This setup runs a command on your computer",
+  "worktree_setup_import_warning_body": "Read it before importing, and only import setups from people you trust.",
+  "worktree_setup_import_replaces": "It replaces the current setup of {project}. You can still edit it before saving.",
+  "worktree_setup_import_none": "None",
+  "worktree_setup_import": "Import",
   "worktree_setup_running": "Setting up the worktree…",
   "worktree_setup_succeeded": "Worktree ready",
   "worktree_setup_failed": "Worktree ready, setup script failed",
   "worktree_setup_failed_code": "Worktree ready, setup script failed (exit {code})",
+  "worktree_setup_files_failed": "Worktree ready, some files couldn't be copied",
+  "worktree_setup_copied": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "Copied {count} file",
+        "countPlural=*": "Copied {count} files"
+      }
+    }
+  ],
+  "worktree_setup_missing": "Not found: {paths}",
+  "worktree_setup_copy_failed": "Couldn't copy: {paths}",
   "worktree_setup_held": [
     {
       "declarations": ["input count", "local countPlural = count: plural"],
