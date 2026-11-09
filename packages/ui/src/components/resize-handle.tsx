@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { cn } from 'cn'
 
 const KEYBOARD_STEP = 16
@@ -37,6 +37,24 @@ function ResizeHandle({
 }: ResizeHandleProps) {
   const drag = useRef<{ start: number; startValue: number } | null>(null)
   const vertical = edge === 'top' || edge === 'bottom'
+
+  // While dragging, nothing else on the page may start a text selection; WebKit still needs
+  // the prefixed property.
+  const end = useCallback(() => {
+    if (!drag.current) return
+    drag.current = null
+    const style = document.body.style
+    style.userSelect = ''
+    style.webkitUserSelect = ''
+    style.cursor = ''
+  }, [])
+  useEffect(() => {
+    window.addEventListener('blur', end)
+    return () => {
+      window.removeEventListener('blur', end)
+      end()
+    }
+  }, [end])
   const direction = edge === 'right' || edge === 'bottom' ? 1 : -1
   const [less, more] = vertical
     ? ['ArrowUp', 'ArrowDown']
@@ -53,21 +71,29 @@ function ResizeHandle({
       aria-valuenow={value}
       tabIndex={0}
       onPointerDown={(event) => {
+        if (event.button !== 0) return
+        event.preventDefault()
+        window.getSelection()?.removeAllRanges()
         event.currentTarget.setPointerCapture(event.pointerId)
+        const style = document.body.style
+        style.userSelect = 'none'
+        style.webkitUserSelect = 'none'
+        style.cursor = vertical ? 'row-resize' : 'col-resize'
         drag.current = {
           start: vertical ? event.clientY : event.clientX,
           startValue: value
         }
       }}
+      onMouseDown={(event) => event.preventDefault()}
       onPointerMove={(event) => {
         if (!drag.current) return
         const moved =
           (vertical ? event.clientY : event.clientX) - drag.current.start
         onChange(drag.current.startValue + moved * direction)
       }}
-      onPointerUp={() => {
-        drag.current = null
-      }}
+      onPointerUp={end}
+      onPointerCancel={end}
+      onLostPointerCapture={end}
       onDoubleClick={() => onChange(defaultValue)}
       onKeyDown={(event) => {
         if (event.key === less) onChange(value - KEYBOARD_STEP * direction)
@@ -77,7 +103,7 @@ function ResizeHandle({
         event.preventDefault()
       }}
       className={cn(
-        'hover:bg-ring/40 focus-visible:bg-ring/60 active:bg-ring/60 absolute z-10 outline-none',
+        'hover:bg-ring/40 focus-visible:bg-ring/60 active:bg-ring/60 absolute z-10 touch-none outline-none select-none',
         EDGE_CLASS[edge],
         className
       )}
