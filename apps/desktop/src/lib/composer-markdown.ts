@@ -55,6 +55,19 @@ export function withoutImageChips(doc: JSONContent): JSONContent {
   }
 }
 
+/** Two drafts as one, `first` above `second`; `null` stands for an empty draft. */
+export function joinDocuments(
+  first: JSONContent | null,
+  second: JSONContent | null
+): JSONContent | null {
+  if (!first) return second
+  if (!second) return first
+  return {
+    ...first,
+    content: [...(first.content ?? []), ...(second.content ?? [])]
+  }
+}
+
 const DELIMITERS: Record<string, string> = {
   bold: '**',
   italic: '*',

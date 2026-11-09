@@ -3,6 +3,7 @@ import type { JSONContent } from '@tiptap/core'
 import {
   fromText,
   imageChipKeys,
+  joinDocuments,
   numberImageChips,
   toMarkdown,
   withoutImageChips
@@ -175,4 +176,21 @@ test('a saved draft drops its image chips', () => {
   }
 
   expect(toMarkdown(withoutImageChips(draft))).toBe('see @src/a.ts')
+})
+
+test('a failed message goes back above what was typed since', () => {
+  const failed = doc(
+    paragraph(text('look at '), {
+      type: 'mention',
+      attrs: { kind: 'image', value: A }
+    })
+  )
+  const typed = doc(paragraph(text('and this')))
+
+  expect(joinDocuments(failed, typed)).toEqual(
+    doc(...(failed.content ?? []), ...(typed.content ?? []))
+  )
+  expect(joinDocuments(failed, null)).toBe(failed)
+  expect(joinDocuments(null, typed)).toBe(typed)
+  expect(joinDocuments(null, null)).toBeNull()
 })

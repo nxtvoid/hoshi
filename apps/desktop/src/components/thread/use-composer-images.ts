@@ -22,8 +22,7 @@ export function useComposerImages() {
   const [images, setImages] = useState<ComposerImage[]>([])
   const imagesRef = useRef(images)
   imagesRef.current = images
-  /** Being sent: their files stay even if the composer goes away meanwhile. */
-  const sending = useRef(new Set<string>())
+  const mounted = useRef(true)
 
   const update = (key: string, change: Partial<ComposerImage>) =>
     setImages((current) =>
@@ -95,40 +94,50 @@ export function useComposerImages() {
     setImages((current) => current.filter((candidate) => candidate.key !== key))
   }
 
-  /** Keeps the files of the images being sent; the returned function undoes it. */
-  const keep = () => {
-    const keys = imagesRef.current.map((image) => image.key)
-    for (const key of keys) sending.current.add(key)
-    return () => {
-      for (const key of keys) sending.current.delete(key)
+  /** Takes the images out of the draft to send them; their files and previews stay. */
+  const take = () => {
+    const taken = imagesRef.current
+    imagesRef.current = []
+    setImages([])
+    return taken
+  }
+
+  /** Puts back images taken for a send that failed, ahead of any added since. */
+  const putBack = (taken: ComposerImage[]) => {
+    if (mounted.current) {
+      setImages((current) => [...taken, ...current])
+      return
+    }
+    for (const image of taken) {
+      URL.revokeObjectURL(image.previewUrl)
+      if (image.saved) void invoke('discard_image', { image: image.saved })
     }
   }
 
   /** After sending: the files stay, the transcript shows them now. */
-  const clear = () => {
-    for (const image of imagesRef.current) URL.revokeObjectURL(image.previewUrl)
-    setImages([])
+  const release = (taken: ComposerImage[]) => {
+    for (const image of taken) URL.revokeObjectURL(image.previewUrl)
   }
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
       for (const image of imagesRef.current) {
         URL.revokeObjectURL(image.previewUrl)
-        if (image.saved && !sending.current.has(image.key)) {
-          void invoke('discard_image', { image: image.saved })
-        }
+        if (image.saved) void invoke('discard_image', { image: image.saved })
       }
-    },
-    []
-  )
+    }
+  }, [])
 
   return {
     images,
     add,
     restore,
     remove,
-    keep,
-    clear,
+    take,
+    putBack,
+    release,
     saving: images.some((image) => !image.saved && !image.failed),
     saved: images.flatMap((image) => (image.saved ? [image.saved] : []))
   }
