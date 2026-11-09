@@ -3,7 +3,8 @@ import { type ComponentProps, memo, useMemo } from 'react'
 import { useThemeStore } from '@/state/theme-store'
 import { CodeBlock } from './CodeBlock'
 import { MarkdownLink } from './MarkdownLink'
-import { rehypeMentions } from './rehype-mentions'
+import { ImageMention } from './ImageMention'
+import { IMAGE_MENTION_TAG, rehypeMentions } from './rehype-mentions'
 import type { KnownMentions } from '@/lib/prompt-segments'
 import { splitMarkdownBlocks } from '@/lib/markdown-blocks'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
@@ -100,7 +101,8 @@ const COMPONENTS: Components = {
   ),
   input: ({ node: _, ...props }) => (
     <input className='me-1.5 align-middle' disabled {...props} />
-  )
+  ),
+  ...({ [IMAGE_MENTION_TAG]: ImageMention } as Components)
 }
 
 /** The code and language of a fenced block; `null` for a `pre` written as raw HTML. */

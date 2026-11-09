@@ -8,8 +8,8 @@ import { ArrowTurnForwardIcon, Copy01Icon } from '@hugeicons/core-free-icons'
 import { knownMentions } from '@/lib/prompt-segments'
 import { useImageStore } from '@/state/image-store'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
-import { Dialog, DialogContent, DialogTitle } from '@hoshi/ui/components/dialog'
 import { Markdown } from '@/components/markdown/Markdown'
+import { ImageDialog } from '@/components/markdown/ImageMention'
 
 type Image = Extract<MessageAttachment, { type: 'image' }>
 
@@ -113,18 +113,12 @@ function MessageImage({ image }: { image: Image }) {
           />
         ) : null}
       </button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className='w-auto max-w-[90vw] p-2 sm:max-w-[90vw]'>
-          <DialogTitle className='sr-only'>{image.name}</DialogTitle>
-          {url ? (
-            <img
-              src={url}
-              alt={image.name}
-              className='max-h-[85vh] max-w-full rounded-lg object-contain'
-            />
-          ) : null}
-        </DialogContent>
-      </Dialog>
+      <ImageDialog
+        name={image.name}
+        url={url}
+        open={open}
+        onOpenChange={setOpen}
+      />
     </>
   )
 }
