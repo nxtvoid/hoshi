@@ -13,10 +13,11 @@ mod git;
 mod git_actions;
 mod mcp;
 use delegation::Delegation;
-use mcp::{McpServer, ToolHandler};
+use mcp::{McpServer, ToolFilter, ToolHandler};
 mod paths;
 mod project_icon;
 mod pull_request_cache;
+mod pull_request_tool;
 mod pull_request_watch;
 mod pull_requests;
 mod refreshing;
@@ -497,12 +498,22 @@ impl Engine {
                 }
                 "thread_wait" => return thread_tools::wait_for_thread(&weak, caller, arguments),
                 "delegate_task" => return delegation::delegate_task(&weak, caller, arguments),
+                pull_request_tool::TOOL => {
+                    return pull_request_tool::create_pull_request(&weak, caller, arguments);
+                }
                 _ => {}
             }
             let shared = weak.upgrade().ok_or("hoshi is closing")?;
             lock(&shared).call_tool(caller, tool, arguments)
         });
-        match McpServer::start(tools) {
+        let weak = Arc::downgrade(&shared);
+        let offered: Arc<ToolFilter> = Arc::new(move |caller, tool| {
+            tool != pull_request_tool::TOOL
+                || weak
+                    .upgrade()
+                    .is_some_and(|shared| lock(&shared).opens_pull_requests(caller))
+        });
+        match McpServer::start(tools, offered) {
             Ok(server) => lock(&shared).mcp = Some(server),
             Err(error) => eprintln!("hoshi: MCP server unavailable: {error}"),
         }
@@ -3497,13 +3508,18 @@ fn start_turn(
                 authorization: format!("Bearer {}", server.token_for(thread_id)?),
             })
         });
-    let instructions = mcp.as_ref().map(|_| match depth {
-        0 => delegation::INSTRUCTIONS.to_owned(),
-        _ => format!(
-            "{}\n{}",
-            delegation::INSTRUCTIONS,
-            delegation::TASK_INSTRUCTIONS
-        ),
+    let bitbucket = state.opens_pull_requests(thread_id);
+    let instructions = mcp.as_ref().map(|_| {
+        let mut instructions = delegation::INSTRUCTIONS.to_owned();
+        if bitbucket {
+            instructions.push('\n');
+            instructions.push_str(delegation::BITBUCKET_INSTRUCTIONS);
+        }
+        if depth > 0 {
+            instructions.push('\n');
+            instructions.push_str(delegation::TASK_INSTRUCTIONS);
+        }
+        instructions
     });
     let request = TurnRequest {
         cwd: cwd.to_owned(),
@@ -5663,6 +5679,182 @@ Blue"
         assert!(!after.has_changes && after.has_upstream);
         assert_eq!(after.branch.as_deref(), Some(branch));
         assert!(git::branch_tip(&origin_dir, branch).is_some());
+        let _ = std::fs::remove_dir_all(&origin);
+    }
+
+    /// Bitbucket as far as opening pull requests goes.
+    #[derive(Default)]
+    struct FakeBitbucket {
+        opened: Mutex<Vec<hoshi_forge::NewPullRequest>>,
+    }
+
+    impl FakeBitbucket {
+        fn pull_request(opened: &hoshi_forge::NewPullRequest) -> PullRequest {
+            PullRequest {
+                forge: ForgeKind::Bitbucket,
+                number: 12,
+                title: opened.title.clone(),
+                url: "https://bitbucket.org/acme/shop/pull-requests/12".into(),
+                author: Some("ana".into()),
+                head_branch: opened.head.clone(),
+                head_sha: None,
+                base_branch: opened.base.clone(),
+                state: hoshi_core::PullRequestState::Open,
+                checks: None,
+                unresolved_comments: 0,
+                additions: 0,
+                deletions: 0,
+                updated_at: "2026-11-09T12:00:00Z".into(),
+            }
+        }
+    }
+
+    impl Forge for FakeBitbucket {
+        fn kind(&self) -> ForgeKind {
+            ForgeKind::Bitbucket
+        }
+        fn viewer(&self) -> Result<String, ForgeError> {
+            Ok("ana".into())
+        }
+        fn pull_request_for_branch(
+            &self,
+            _: &RepositoryRef,
+            branch: &str,
+        ) -> Result<Option<PullRequest>, ForgeError> {
+            Ok(self
+                .opened
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|opened| opened.head == branch)
+                .map(Self::pull_request))
+        }
+        fn pull_request(&self, _: &RepositoryRef, _: u32) -> Result<PullRequest, ForgeError> {
+            Err(ForgeError::NotFound)
+        }
+        fn search_pull_requests(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+        ) -> Result<Vec<PullRequest>, ForgeError> {
+            Ok(Vec::new())
+        }
+        fn pull_request_detail(
+            &self,
+            _: &RepositoryRef,
+            _: u32,
+        ) -> Result<PullRequestDetail, ForgeError> {
+            Err(ForgeError::NotFound)
+        }
+        fn pull_request_files(
+            &self,
+            _: &RepositoryRef,
+            _: u32,
+        ) -> Result<Vec<hoshi_forge::PullRequestFile>, ForgeError> {
+            Ok(Vec::new())
+        }
+        fn act(
+            &self,
+            _: &RepositoryRef,
+            _: u32,
+            _: &str,
+            _: &PullRequestAction,
+        ) -> Result<(), ForgeError> {
+            Err(ForgeError::NotFound)
+        }
+        fn create_pull_request(
+            &self,
+            _: &RepositoryRef,
+            pull_request: &hoshi_forge::NewPullRequest,
+        ) -> Result<PullRequest, ForgeError> {
+            self.opened.lock().unwrap().push(pull_request.clone());
+            Ok(Self::pull_request(pull_request))
+        }
+        fn reviewer_candidates(
+            &self,
+            _: &RepositoryRef,
+            _: &str,
+        ) -> Result<Vec<String>, ForgeError> {
+            Ok(Vec::new())
+        }
+        fn labels(&self, _: &RepositoryRef) -> Result<Vec<PullRequestLabel>, ForgeError> {
+            Ok(Vec::new())
+        }
+        fn repository(&self, _: &RepositoryRef) -> Result<RemoteRepository, ForgeError> {
+            Err(ForgeError::NotFound)
+        }
+    }
+
+    #[test]
+    fn an_agent_on_bitbucket_pushes_its_branch_and_opens_its_pull_request() {
+        let origin = git::tests::temp_repository("engine-pr-origin");
+        let origin_dir = origin.to_string_lossy().into_owned();
+        git_in(
+            &origin_dir,
+            &["config", "receive.denyCurrentBranch", "ignore"],
+        );
+        let repo = git::tests::temp_repository("engine-pr-tool");
+        let harness = Harness::new(
+            "pr-tool",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        git_in(&harness.root, &["remote", "add", "origin", &origin_dir]);
+        git_in(&harness.root, &["fetch", "origin"]);
+        git_in(&harness.root, &["switch", "-c", "fix/login"]);
+        git_in(
+            &harness.root,
+            &["commit", "--allow-empty", "-m", "fix: login"],
+        );
+        let state = Arc::downgrade(&harness.engine.state);
+        let open = |arguments: serde_json::Value| {
+            pull_request_tool::create_pull_request(&state, "t", &arguments)
+        };
+        let arguments = serde_json::json!({ "title": "Fix the login", "description": "Done." });
+
+        assert!(
+            open(arguments.clone())
+                .unwrap_err()
+                .contains("isn't on Bitbucket")
+        );
+        let forge = Arc::new(FakeBitbucket::default());
+        harness.engine.set_forges(vec![forge.clone()]);
+        lock(&harness.engine.state).repositories.insert(
+            "p".into(),
+            RepositoryRef {
+                forge: ForgeKind::Bitbucket,
+                host: "bitbucket.org".into(),
+                owner: "acme".into(),
+                name: "shop".into(),
+            },
+        );
+        assert!(lock(&harness.engine.state).opens_pull_requests("t"));
+
+        let opened = open(arguments.clone()).unwrap();
+
+        assert_eq!(opened["number"], 12);
+        assert_eq!(opened["state"], "open");
+        assert_eq!(opened["base"], "main");
+        assert_eq!(opened["pushed"], true);
+        assert!(git::branch_tip(&origin_dir, "fix/login").is_some());
+        let sent = forge.opened.lock().unwrap()[0].clone();
+        assert_eq!(
+            (sent.head.as_str(), sent.body.as_str()),
+            ("fix/login", "Done.")
+        );
+        assert_eq!(
+            lock(&harness.engine.state)
+                .pull_requests
+                .get("t")
+                .map(|pull_request| pull_request.number),
+            Some(12)
+        );
+        let again = open(arguments).unwrap_err();
+        assert!(
+            again.contains("already open") && again.contains("pull-requests/12"),
+            "{again}"
+        );
         let _ = std::fs::remove_dir_all(&origin);
     }
 

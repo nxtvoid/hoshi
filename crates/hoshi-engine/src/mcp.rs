@@ -13,6 +13,12 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// Answers a tool call made by the agent of a thread: its result, or why it failed.
 pub(crate) type ToolHandler = dyn Fn(&str, &str, &Value) -> Result<Value, String> + Send + Sync;
+/// Whether the agent of a thread is offered a tool, by its name. Only
+/// [`CONDITIONAL_TOOLS`] are asked about.
+pub(crate) type ToolFilter = dyn Fn(&str, &str) -> bool + Send + Sync;
+
+/// Tools only some threads' agents see.
+const CONDITIONAL_TOOLS: [&str; 1] = ["create_pull_request"];
 
 pub(crate) struct McpServer {
     pub url: String,
@@ -21,7 +27,7 @@ pub(crate) struct McpServer {
 }
 
 impl McpServer {
-    pub fn start(handler: Arc<ToolHandler>) -> std::io::Result<Self> {
+    pub fn start(handler: Arc<ToolHandler>, offered: Arc<ToolFilter>) -> std::io::Result<Self> {
         let server = Server::http("127.0.0.1:0").map_err(std::io::Error::other)?;
         let port = server
             .server_addr()
@@ -32,8 +38,8 @@ impl McpServer {
         let known = tokens.clone();
         thread::spawn(move || {
             for request in server.incoming_requests() {
-                let (handler, known) = (handler.clone(), known.clone());
-                thread::spawn(move || answer(request, &known, handler.as_ref()));
+                let (handler, offered, known) = (handler.clone(), offered.clone(), known.clone());
+                thread::spawn(move || answer(request, &known, handler.as_ref(), offered.as_ref()));
             }
         });
         Ok(Self {
@@ -67,7 +73,12 @@ impl McpServer {
     }
 }
 
-fn answer(mut request: Request, tokens: &Mutex<HashMap<String, String>>, handler: &ToolHandler) {
+fn answer(
+    mut request: Request,
+    tokens: &Mutex<HashMap<String, String>>,
+    handler: &ToolHandler,
+    offered: &ToolFilter,
+) {
     if *request.method() != Method::Post {
         let _ = request.respond(Response::empty(405));
         return;
@@ -101,7 +112,7 @@ fn answer(mut request: Request, tokens: &Mutex<HashMap<String, String>>, handler
         )));
         return;
     };
-    match reply(&caller, &message, handler) {
+    match reply(&caller, &message, handler, offered) {
         Some(reply) => {
             let _ = request.respond(json_response(&reply));
         }
@@ -118,7 +129,12 @@ fn json_response(body: &Value) -> Response<std::io::Cursor<Vec<u8>>> {
 }
 
 /// The answer to one JSON-RPC message; `None` for a notification.
-pub(crate) fn reply(caller: &str, message: &Value, handler: &ToolHandler) -> Option<Value> {
+pub(crate) fn reply(
+    caller: &str,
+    message: &Value,
+    handler: &ToolHandler,
+    offered: &ToolFilter,
+) -> Option<Value> {
     let id = message.get("id")?.clone();
     let result = match message["method"].as_str() {
         Some("initialize") => json!({
@@ -127,7 +143,7 @@ pub(crate) fn reply(caller: &str, message: &Value, handler: &ToolHandler) -> Opt
             "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") },
         }),
         Some("ping") => json!({}),
-        Some("tools/list") => json!({ "tools": tools() }),
+        Some("tools/list") => json!({ "tools": tools_for(caller, offered) }),
         Some("tools/call") => {
             let name = message["params"]["name"].as_str().unwrap_or_default();
             let arguments = &message["params"]["arguments"];
@@ -160,6 +176,19 @@ fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+fn tools_for(caller: &str, offered: &ToolFilter) -> Vec<Value> {
+    let Value::Array(tools) = tools() else {
+        return Vec::new();
+    };
+    tools
+        .into_iter()
+        .filter(|tool| {
+            let name = tool["name"].as_str().unwrap_or_default();
+            !CONDITIONAL_TOOLS.contains(&name) || offered(caller, name)
+        })
+        .collect()
+}
+
 fn tools() -> Value {
     let task_id = json!({
         "type": "object",
@@ -169,7 +198,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "delegate_task",
-            "description": "Start a child agent in a thread of its own, with only `task` and none of this conversation. Returns at once; the child's answer arrives later as a message in this thread, so end your turn instead of waiting or polling. Use isolation \"worktree\" for work that needs its own checkout and branch.",
+            "description": "Start a child agent in a thread of its own the user can open, for work that should go on in the background or needs its own checkout and branch (isolation \"worktree\"). For help within this turn, use your own Agent tool instead. The child sees only `task`, none of this conversation. Returns at once; the answer arrives later as a message in this thread, so end your turn instead of waiting or polling.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -203,7 +232,7 @@ fn tools() -> Value {
         },
         {
             "name": "request_secret",
-            "description": "Ask the user for one secret, such as a token, password, PIN or pairing code, in a card they type it into; one secret per call, never several in one. Call it instead of asking in chat. Waits for the answer and returns a file holding the value: read it only inside the command that needs it, such as `curl -H \"Authorization: Bearer $(cat <file>)\"`, and never print it. A secret the user already pasted in this thread goes in `value`, with no card.",
+            "description": "Ask the user for one secret only they can give, such as a token, password, PIN or pairing code, in a card they type it into; one secret per call. Use it when a command needs a credential you lack, instead of asking in chat or searching files and the environment for one; not for access you already have. Waits for the answer and returns a file holding the value: read it only inside the command that needs it, such as `curl -H \"Authorization: Bearer $(cat <file>)\"`, and never print it. A secret the user already pasted in this thread goes in `value`, with no card.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -219,7 +248,7 @@ fn tools() -> Value {
         },
         {
             "name": "thread_list",
-            "description": "List the user's hoshi threads, newest first: in this thread's project, or every project with allProjects. Each has its threadId, title, status, project and branch.",
+            "description": "List the user's hoshi threads, newest first, as when the user mentions another thread: in this thread's project, or every project with allProjects. Each has its threadId, title, status, project and branch.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -267,8 +296,22 @@ fn tools() -> Value {
             },
         },
         {
+            "name": "create_pull_request",
+            "description": "Open the pull request of this thread's branch on Bitbucket, signed in as the user through hoshi: never look for, ask for or use a Bitbucket token, nor call Bitbucket's API yourself. Commit first; it pushes the branch when origin lacks its commits, and the pull request then shows in the thread. Returns its number, url and state. If one is already open from the branch, the error gives its URL.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "description": { "type": "string", "description": "Markdown." },
+                    "base": { "type": "string", "description": "The branch to merge into; by default the one this branch started from, else the repository's default branch." },
+                    "draft": { "type": "boolean" },
+                },
+                "required": ["title"],
+            },
+        },
+        {
             "name": "watch_pull_request",
-            "description": "Watch this thread's open pull request: hoshi wakes you with a message when checks fail, all checks pass, someone comments or reviews, or the branch conflicts. Handle what is already there first; only later news wakes you. After this call, end your turn. The watch stays on after each wake, so don't call this again on a wake. A wake is not a merge decision: check readiness yourself.",
+            "description": "Watch this thread's open pull request, when asked to monitor or babysit it or when your work waits on its checks or reviews: hoshi wakes you with a message when checks fail, all checks pass, someone comments or reviews, or the branch conflicts. Handle what is already there first; only later news wakes you. After this call, end your turn. The watch stays on after each wake, so don't call this again on a wake. A wake is not a merge decision: check readiness yourself.",
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
@@ -278,7 +321,7 @@ fn tools() -> Value {
         },
         {
             "name": "preview_open",
-            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. Use it to check web work: then preview_snapshot to read the page and preview_act to use it.",
+            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. Use it to check web work instead of a browser, Playwright or screenshot tool of your own; then preview_snapshot reads the page and preview_act uses it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -389,12 +432,16 @@ mod tests {
         Ok(json!({ "caller": caller, "tool": tool, "arguments": arguments }))
     }
 
+    fn everything(_: &str, _: &str) -> bool {
+        true
+    }
+
     #[test]
     fn a_tool_call_reaches_the_handler_as_its_caller() {
         let call = json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": { "name": "task_status", "arguments": { "taskId": "c1" } } });
 
-        let reply = reply("t1", &call, &echo).unwrap();
+        let reply = reply("t1", &call, &echo, &everything).unwrap();
 
         assert_eq!(reply["id"], 7);
         assert_eq!(reply["result"]["structuredContent"]["caller"], "t1");
@@ -409,23 +456,29 @@ mod tests {
         let call = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call",
             "params": { "name": "fail", "arguments": {} } });
         assert_eq!(
-            reply("t1", &call, &echo).unwrap()["result"]["isError"],
+            reply("t1", &call, &echo, &everything).unwrap()["result"]["isError"],
             true
         );
 
         let note = json!({ "jsonrpc": "2.0", "method": "notifications/initialized" });
-        assert_eq!(reply("t1", &note, &echo), None);
+        assert_eq!(reply("t1", &note, &echo, &everything), None);
     }
 
     #[test]
     fn the_server_lists_its_tools_and_turns_away_unknown_tokens() {
         let list = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" });
-        let names: Vec<_> = reply("t1", &list, &echo).unwrap()["result"]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|tool| tool["name"].as_str().unwrap().to_owned())
-            .collect();
+        let names = |offered: &ToolFilter| -> Vec<String> {
+            reply("t1", &list, &echo, offered).unwrap()["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let on_github = names(&|_, tool| tool != "create_pull_request");
+        assert!(!on_github.iter().any(|name| name == "create_pull_request"));
+        assert_eq!(on_github.len() + 1, names(&everything).len());
+        let names = names(&everything);
         assert_eq!(
             names,
             [
@@ -437,6 +490,7 @@ mod tests {
                 "thread_read",
                 "thread_send",
                 "thread_wait",
+                "create_pull_request",
                 "watch_pull_request",
                 "unwatch_pull_request",
                 "preview_open",
@@ -452,7 +506,7 @@ mod tests {
             ]
         );
 
-        let server = McpServer::start(Arc::new(echo)).unwrap();
+        let server = McpServer::start(Arc::new(echo), Arc::new(everything)).unwrap();
         let token = server.token_for("t1").unwrap();
         assert_eq!(server.token_for("t1"), Some(token.clone()));
         let agent = ureq_like_post(&server.url, Some(&token), &list);
