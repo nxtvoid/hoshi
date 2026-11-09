@@ -84,12 +84,45 @@ impl Browsing {
             wanted.0.clamp(MIN_SIZE as u32, MAX_SIZE as u32),
             wanted.1.clamp(MIN_SIZE as u32, MAX_SIZE as u32),
         );
-        self.fits.insert(thread_id.to_owned(), wanted);
-        if self.pages.contains_key(thread_id) {
-            self.resize_page(thread_id, wanted)?;
+        self.guarded(|this| {
+            this.fits.insert(thread_id.to_owned(), wanted);
+            if this.pages.contains_key(thread_id) {
+                this.resize_page(thread_id, wanted)?;
+            }
+            this.announce(thread_id, false, None, false);
+            Ok(())
+        })
+    }
+
+    /// Runs `act`, dropping a browser that died before it and after a failure.
+    fn guarded<T>(
+        &mut self,
+        act: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.drop_dead_browser();
+        let result = act(self);
+        if result.is_err() {
+            self.drop_dead_browser();
         }
-        self.announce(thread_id, false, None, false);
-        Ok(())
+        result
+    }
+
+    /// A browser that quit or crashed goes with its pages, so the next page starts a new one.
+    fn drop_dead_browser(&mut self) {
+        if self.browser.as_ref().is_none_or(Browser::is_connected) {
+            return;
+        }
+        self.browser = None;
+        let closed: Vec<String> = self.pages.drain().map(|(thread_id, _)| thread_id).collect();
+        for thread_id in closed {
+            self.announce(&thread_id, false, None, false);
+        }
+    }
+
+    /// Closes every page and the browser, as when the app quits.
+    pub(crate) fn close(&mut self) {
+        self.pages.clear();
+        self.browser = None;
     }
 
     fn resize_page(&mut self, thread_id: &str, wanted: (u32, u32)) -> Result<(), String> {
@@ -179,42 +212,48 @@ impl Browsing {
 
     /// The panel shows the thread's page, or stopped showing it.
     pub(crate) fn view(&mut self, thread_id: &str, viewing: bool) -> Result<(), String> {
-        if viewing {
-            self.viewing.insert(thread_id.to_owned());
-        } else {
-            self.viewing.remove(thread_id);
-        }
-        if let Some(page) = self.pages.get(thread_id) {
+        self.guarded(|this| {
             if viewing {
-                page.start_screencast(page.size())?;
+                this.viewing.insert(thread_id.to_owned());
             } else {
-                page.stop_screencast();
+                this.viewing.remove(thread_id);
             }
-        }
-        self.announce(thread_id, false, None, false);
-        Ok(())
+            if let Some(page) = this.pages.get(thread_id) {
+                if viewing {
+                    page.start_screencast(page.size())?;
+                } else {
+                    page.stop_screencast();
+                }
+            }
+            this.announce(thread_id, false, None, false);
+            Ok(())
+        })
     }
 
     /// The user opens an address from the panel, with a page of their own when the thread
     /// had none.
     pub(crate) fn user_open(&mut self, thread_id: &str, url: &str) -> Result<(), String> {
-        self.ensure_page(thread_id, self.opening_size(thread_id))?;
-        self.page(thread_id)?
-            .navigate(&address(url), LOAD_TIMEOUT)?;
-        self.announce(thread_id, false, None, false);
-        Ok(())
+        self.guarded(|this| {
+            this.ensure_page(thread_id, this.opening_size(thread_id))?;
+            this.page(thread_id)?
+                .navigate(&address(url), LOAD_TIMEOUT)?;
+            this.announce(thread_id, false, None, false);
+            Ok(())
+        })
     }
 
     /// Back (`-1`), forward (`1`) or reload (`0`).
     pub(crate) fn user_go(&mut self, thread_id: &str, delta: i32) -> Result<(), String> {
-        let page = self.page(thread_id)?;
-        if delta == 0 {
-            page.reload(LOAD_TIMEOUT)?;
-        } else {
-            page.go(delta, LOAD_TIMEOUT)?;
-        }
-        self.announce(thread_id, false, None, false);
-        Ok(())
+        self.guarded(|this| {
+            let page = this.page(thread_id)?;
+            if delta == 0 {
+                page.reload(LOAD_TIMEOUT)?;
+            } else {
+                page.go(delta, LOAD_TIMEOUT)?;
+            }
+            this.announce(thread_id, false, None, false);
+            Ok(())
+        })
     }
 
     /// The user picked a size, which stops the page filling the panel.
@@ -223,10 +262,12 @@ impl Browsing {
         thread_id: &str,
         wanted: (u32, u32),
     ) -> Result<(), String> {
-        self.fits.remove(thread_id);
-        self.resize_page(thread_id, wanted)?;
-        self.announce(thread_id, false, None, false);
-        Ok(())
+        self.guarded(|this| {
+            this.fits.remove(thread_id);
+            this.resize_page(thread_id, wanted)?;
+            this.announce(thread_id, false, None, false);
+            Ok(())
+        })
     }
 
     pub(crate) fn user_input(
@@ -234,18 +275,20 @@ impl Browsing {
         thread_id: &str,
         input: &BrowserInput,
     ) -> Result<(), String> {
-        let page = self.page(thread_id)?;
-        match input {
-            BrowserInput::Click { x, y } => page.click_at((*x, *y)),
-            BrowserInput::Scroll {
-                x,
-                y,
-                delta_x,
-                delta_y,
-            } => page.scroll_at((*x, *y), (*delta_x, *delta_y)),
-            BrowserInput::Key { key } => page.press(key),
-            BrowserInput::Text { text } => page.insert_text(text),
-        }
+        self.guarded(|this| {
+            let page = this.page(thread_id)?;
+            match input {
+                BrowserInput::Click { x, y } => page.click_at((*x, *y)),
+                BrowserInput::Scroll {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                } => page.scroll_at((*x, *y), (*delta_x, *delta_y)),
+                BrowserInput::Key { key } => page.press(key),
+                BrowserInput::Text { text } => page.insert_text(text),
+            }
+        })
     }
 
     fn browser(&mut self) -> Result<&Browser, String> {
@@ -283,8 +326,12 @@ impl Browsing {
         tool: &str,
         arguments: &Value,
     ) -> Result<Value, String> {
+        self.drop_dead_browser();
         let point = self.agent_point(caller, tool, arguments);
         let result = self.dispatch(caller, tool, arguments);
+        if result.is_err() {
+            self.drop_dead_browser();
+        }
         if result.is_ok() && !matches!(tool, "preview_close" | "preview_status") {
             let opened = tool == "preview_open"
                 && result.as_ref().is_ok_and(|value| value["opened"] == true);
@@ -575,6 +622,38 @@ mod tests {
             .collect();
         assert!(pages.iter().any(|page| page.by_agent));
         assert!(pages.last().is_some_and(|page| !page.open));
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[test]
+    fn a_browser_that_went_away_starts_again_on_the_next_open() {
+        if find_browser().is_none() {
+            eprintln!("no Chromium-based browser here; skipping");
+            return;
+        }
+        let profile = std::env::temp_dir().join(format!("hoshi-relaunch-{}", std::process::id()));
+        let mut browsing = Browsing::new(profile.clone(), Arc::new(|_| {}));
+        let page = json!({ "url": "about:blank" });
+        browsing.call("t", "preview_open", &page).unwrap();
+        let browser = browsing.browser.as_ref().unwrap();
+        let _ = browser
+            .connection
+            .call_within("Browser.close", json!({}), None, Duration::from_secs(5));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while browser.is_connected() {
+            assert!(std::time::Instant::now() < deadline, "the browser stayed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let lost = browsing.call("t", "preview_status", &json!({})).unwrap();
+        let reopened = browsing.call("t", "preview_open", &page).unwrap();
+        let status = browsing.call("t", "preview_status", &json!({})).unwrap();
+        browsing.close();
+
+        assert_eq!(lost["open"], false);
+        assert_eq!(reopened["opened"], true);
+        assert_eq!(status["open"], true);
+        assert!(browsing.browser.is_none());
         let _ = std::fs::remove_dir_all(&profile);
     }
 

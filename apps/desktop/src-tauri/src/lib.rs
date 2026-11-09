@@ -90,8 +90,15 @@ pub fn run() {
             settings::get_settings,
             settings::update_settings
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running hoshi");
+        .build(tauri::generate_context!())
+        .expect("error while building hoshi")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event
+                && let Some(engine) = app.try_state::<hoshi_engine::Engine>()
+            {
+                engine.close_browser();
+            }
+        });
 }
 
 /// Everything lives under one folder, the webview's storage included, so the window is

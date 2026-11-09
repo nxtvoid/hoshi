@@ -1287,6 +1287,11 @@ impl Engine {
         self.browsing().forget(thread_id);
     }
 
+    /// Closes every page and the headless browser, as when the app quits.
+    pub fn close_browser(&self) {
+        self.browsing().close();
+    }
+
     /// Compacts the thread's conversation with `/compact`, then sends the message, as when
     /// the user comes back to a long thread whose prompt cache ran out. A thread whose turn
     /// runs takes the message at once instead.

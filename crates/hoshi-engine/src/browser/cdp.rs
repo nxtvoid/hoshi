@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::TcpStream;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -31,6 +31,8 @@ pub struct Connection {
     pending: Arc<Mutex<HashMap<u64, Reply>>>,
     listeners: Arc<Mutex<Vec<mpsc::Sender<CdpEvent>>>>,
     next_id: AtomicU64,
+    /// Until the socket closes, as when the browser quits or crashes.
+    open: Arc<AtomicBool>,
 }
 
 impl Connection {
@@ -49,14 +51,27 @@ impl Connection {
         let (outgoing, queued) = mpsc::channel::<String>();
         let pending = Arc::<Mutex<HashMap<u64, Reply>>>::default();
         let listeners = Arc::<Mutex<Vec<mpsc::Sender<CdpEvent>>>>::default();
-        let (waiting, listening) = (pending.clone(), listeners.clone());
-        thread::spawn(move || run(socket, &queued, &waiting, &listening));
+        let open = Arc::new(AtomicBool::new(true));
+        let (waiting, listening, running) = (pending.clone(), listeners.clone(), open.clone());
+        thread::spawn(move || {
+            run(socket, &queued, &waiting, &listening);
+            drop(queued);
+            running.store(false, Ordering::Release);
+            for (_, reply) in lock(&waiting).drain() {
+                let _ = reply.send(Err("the browser closed".into()));
+            }
+        });
         Ok(Self {
             outgoing,
             pending,
             listeners,
             next_id: AtomicU64::new(1),
+            open,
         })
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open.load(Ordering::Acquire)
     }
 
     /// Calls `method` on the browser, or on a page when `session` names its session.
@@ -114,6 +129,7 @@ impl Connection {
             pending: Arc::default(),
             listeners: Arc::default(),
             next_id: AtomicU64::new(1),
+            open: Arc::default(),
         }
     }
 
@@ -156,9 +172,6 @@ fn run(
                 if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(_) => break,
         }
-    }
-    for (_, reply) in lock(pending).drain() {
-        let _ = reply.send(Err("the browser closed".into()));
     }
 }
 

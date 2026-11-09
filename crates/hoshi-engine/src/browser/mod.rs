@@ -75,6 +75,11 @@ impl Browser {
         page.resize(size)?;
         Ok(page)
     }
+
+    /// `false` once the browser quit or crashed: nothing it had answers any more.
+    pub fn is_connected(&self) -> bool {
+        self.connection.is_open()
+    }
 }
 
 impl Drop for Browser {
