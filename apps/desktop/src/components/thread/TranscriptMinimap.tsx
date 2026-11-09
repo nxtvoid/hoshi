@@ -60,30 +60,52 @@ export function TranscriptMinimap({
     const list = listRef.current
     const ids = idsKey.split(' ')
     if (!scroll || !list || ids.length < MINIMAP_MIN_ITEMS) return
+    let elements: (Element | null)[] = []
+    /** Each message's top and bottom within the scrolled content. */
+    let bounds: { top: number; bottom: number }[] = []
+    let viewHeight = 0
+    let stale = true
     let frame: number | null = null
-    const measure = () => {
-      frame = null
-      const view = scroll.getBoundingClientRect()
-      const bounds = ids.map((id) => {
-        const element = list.querySelector(`[data-item-id="${CSS.escape(id)}"]`)
+    const find = () => {
+      elements = ids.map((id) =>
+        list.querySelector(`[data-item-id="${CSS.escape(id)}"]`)
+      )
+    }
+    const layout = () => {
+      if (elements.some((element) => !element?.isConnected)) find()
+      const origin = scroll.getBoundingClientRect().top - scroll.scrollTop
+      bounds = elements.map((element) => {
         const rect = element?.getBoundingClientRect()
         return rect
-          ? { top: rect.top, bottom: rect.bottom }
+          ? { top: rect.top - origin, bottom: rect.bottom - origin }
           : { top: Number.NaN, bottom: Number.NaN }
       })
+      viewHeight = scroll.clientHeight
+      setFits((scroll.clientWidth - list.offsetWidth) / 2 >= MIN_GUTTER_PX)
+      stale = false
+    }
+    const measure = () => {
+      frame = null
+      if (stale) layout()
+      const top = scroll.scrollTop
+      const bottom = top + viewHeight
       const seen = bounds.map(
-        ({ top, bottom }) => bottom > view.top && top < view.bottom
+        (bound) => bound.bottom > top && bound.top < bottom
       )
       setInView((previous) => (sameFlags(previous, seen) ? previous : seen))
-      setCurrent(minimapCurrentIndex(bounds, view.top, view.bottom))
-      setFits((scroll.clientWidth - list.offsetWidth) / 2 >= MIN_GUTTER_PX)
+      setCurrent(minimapCurrentIndex(bounds, top, bottom))
     }
     const schedule = () => {
       if (frame === null) frame = requestAnimationFrame(measure)
     }
+    const relayout = () => {
+      stale = true
+      schedule()
+    }
+    find()
     schedule()
     scroll.addEventListener('scroll', schedule, { passive: true })
-    const observer = new ResizeObserver(schedule)
+    const observer = new ResizeObserver(relayout)
     observer.observe(scroll)
     observer.observe(list)
     return () => {
