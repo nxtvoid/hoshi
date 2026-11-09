@@ -622,6 +622,9 @@ impl Engine {
                 .ok_or_else(|| CommandError::ThreadNotFound {
                     thread_id: thread_id.to_owned(),
                 })?;
+            if let Some(busy) = state.working_in(&cwd, thread_id) {
+                return Err(CommandError::ThreadBusy { thread_id: busy });
+            }
             state.checkpoints.settle(&cwd);
             let before = checkpoint::reference(thread_id, message_id, Moment::Before);
             if !checkpoint::exists(&cwd, &before) {
@@ -1613,6 +1616,20 @@ impl State {
             ids.push(other.id.clone());
         }
         Ok(ids)
+    }
+
+    /// A thread other than `thread_id` whose turn runs in `folder`.
+    fn working_in(&self, folder: &str, thread_id: &str) -> Option<String> {
+        let folder = git::normalize(folder);
+        self.model
+            .threads()
+            .filter(|other| other.id != thread_id && other.active_turn_id.is_some())
+            .find(|other| {
+                self.model
+                    .thread_cwd(&other.id)
+                    .is_some_and(|cwd| git::normalize(cwd) == folder)
+            })
+            .map(|other| other.id.clone())
     }
 
     /// The root of the thread's project; a chat has none, so it has no worktree either.
@@ -5203,6 +5220,42 @@ Blue"
                 message_id: "m1b".into()
             }
         );
+    }
+
+    fn waiting_adapter() -> Arc<FakeAdapter> {
+        Arc::new(FakeAdapter {
+            requests: Mutex::new(Vec::new()),
+            script: Vec::new(),
+            title: None,
+            responses: Arc::default(),
+            steers: None,
+            finishers: Mutex::default(),
+        })
+    }
+
+    #[test]
+    fn files_are_not_reverted_while_another_thread_works_in_the_same_folder() {
+        let harness = Harness::in_memory("rewind-shared", completed_turn());
+        harness.create_thread("o", ThreadWorkspace::Local).unwrap();
+        harness.send("t", "m1", "one");
+        harness.wait_for_turn_end();
+        harness.engine.set_adapter(Some(waiting_adapter()));
+        harness.send("o", "m2", "long task");
+
+        assert_eq!(
+            harness.engine.rewind_thread("t", "m1", true).unwrap_err(),
+            CommandError::ThreadBusy {
+                thread_id: "o".into()
+            }
+        );
+        harness.engine.rewind_thread("t", "m1", false).unwrap();
+        harness
+            .engine
+            .dispatch(Command::TurnInterrupt {
+                thread_id: "o".into(),
+            })
+            .unwrap();
+        harness.wait_for_turn_end();
     }
 
     fn wait_until(mut done: impl FnMut() -> bool) {

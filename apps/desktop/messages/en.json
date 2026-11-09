@@ -295,6 +295,7 @@
   "rewind_failed_detail": "The conversation couldn't go back to this message.",
   "rewind_no_checkpoint": "No copy of the files was kept from before this message, so they can't be put back. Try again keeping the changes.",
   "rewind_busy": "Stop the agent before going back.",
+  "rewind_folder_busy": "Another thread is working in this folder. Wait for it to finish, or go back keeping the changes.",
   "refresh": "Refresh",
   "no_changes": "No changes",
   "diff_load_failed": "Couldn't read the changes",

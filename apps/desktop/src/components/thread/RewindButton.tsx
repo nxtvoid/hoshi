@@ -54,7 +54,7 @@ export function RewindButton({
     } catch (error) {
       await notify({
         title: m.rewind_failed(),
-        description: rewindFailure(error as CommandError),
+        description: rewindFailure(error as CommandError, threadId),
         confirmLabel: m.dialog_ok(),
         tone: 'warning'
       })
@@ -80,12 +80,14 @@ export function RewindButton({
   )
 }
 
-function rewindFailure(error: CommandError | null) {
+function rewindFailure(error: CommandError | null, threadId: string) {
   switch (error?.code) {
     case 'noCheckpoint':
       return m.rewind_no_checkpoint()
     case 'threadBusy':
-      return m.rewind_busy()
+      return error.threadId === threadId
+        ? m.rewind_busy()
+        : m.rewind_folder_busy()
     case 'gitFailed':
       return error.detail
     default:
