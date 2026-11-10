@@ -8,6 +8,7 @@ use hoshi_providers::RunningTurn;
 use serde_json::{Value, json};
 
 pub(crate) const TOOL: &str = "await_background_tasks";
+const WAITING_NEXT: &str = "End your turn; it stays open until they finish.";
 
 /// A process whose turn completed, kept for the commands it left running.
 pub(crate) struct Lingering {
@@ -179,7 +180,7 @@ impl State {
         caller: &str,
         arguments: &Value,
     ) -> Result<Value, String> {
-        let task_ids: Vec<String> = arguments["taskIds"]
+        let task_ids: Vec<String> = arguments["backgroundTaskIds"]
             .as_array()
             .into_iter()
             .flatten()
@@ -189,7 +190,10 @@ impl State {
             .map(str::to_owned)
             .collect();
         if task_ids.is_empty() {
-            return Err("`taskIds` is empty: pass the id each background command reported".into());
+            return Err(
+                "`backgroundTaskIds` is empty: pass the id each background Bash or Monitor command reported"
+                    .into(),
+            );
         }
         let waiting = arguments["waiting"].as_bool().unwrap_or(true);
         let turn = self
@@ -204,6 +208,13 @@ impl State {
             .iter()
             .filter(|task_id| !running.contains(task_id))
             .collect();
-        Ok(json!({ "waiting": waiting, "taskIds": running, "notRunning": not_running }))
+        let mut result = json!({ "waiting": waiting, "backgroundTaskIds": running });
+        if !not_running.is_empty() {
+            result["notRunning"] = json!(not_running);
+        }
+        if waiting && !running.is_empty() {
+            result["next"] = json!(WAITING_NEXT);
+        }
+        Ok(result)
     }
 }

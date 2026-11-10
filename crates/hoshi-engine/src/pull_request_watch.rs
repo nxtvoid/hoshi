@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 const COMMENT_WAKE_LIMIT: u32 = 10;
 const LISTED_CHECKS: usize = 10;
 const SNIPPET_CHARS: usize = 200;
+const WATCH_NEXT: &str = "End your turn; hoshi wakes you on news.";
 
 /// A message for the agent, and what it says for the UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -530,6 +531,7 @@ impl State {
             "url": pull_request.url,
             "watching": true,
             "wasWatching": was_watching,
+            "next": WATCH_NEXT,
         }))
     }
 

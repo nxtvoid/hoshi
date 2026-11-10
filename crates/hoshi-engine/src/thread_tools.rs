@@ -9,14 +9,16 @@ use std::time::{Duration, Instant};
 
 const LIST_LIMIT: u64 = 20;
 const MAX_LIST_LIMIT: u64 = 100;
-const READ_LIMIT: u64 = 20;
+const READ_LIMIT: u64 = 10;
 const MAX_READ_LIMIT: u64 = 100;
-const ITEM_CHARS: u64 = 2_000;
+const ITEM_CHARS: u64 = 1_500;
 const MAX_ITEM_CHARS: u64 = 50_000;
 const ANSWER_CHARS: usize = 4_000;
 const DEFAULT_WAIT: Duration = Duration::from_secs(5 * 60);
 const MAX_WAIT: Duration = Duration::from_secs(60 * 60);
 const CHECK_EVERY: Duration = Duration::from_millis(500);
+const SENT_NEXT: &str = "Its answer stays in that thread; read it later with thread_read.";
+const WAIT_NEXT: &str = "Still running. End your turn unless you need its answer now.";
 
 fn number(arguments: &Value, key: &str, default: u64, max: u64) -> usize {
     arguments[key].as_u64().unwrap_or(default).clamp(1, max) as usize
@@ -49,16 +51,26 @@ fn summary(state: &State, thread: &Thread) -> Value {
         .as_deref()
         .and_then(|project_id| state.model.project(project_id))
         .map(|project| project.title.clone());
-    json!({
+    let mut summary = json!({
         "threadId": thread.id,
         "title": thread.title,
         "status": status(thread),
-        "project": project,
-        "branch": thread.branch,
-        "archived": thread.archived,
-        "parentThreadId": thread.parent_thread_id,
-        "updatedAt": thread.updated_at,
-    })
+    });
+    let optional = [
+        ("project", project),
+        ("branch", thread.branch.clone()),
+        ("parentThreadId", thread.parent_thread_id.clone()),
+    ];
+    for (key, value) in optional {
+        if let Some(value) = value.filter(|value| !value.is_empty()) {
+            summary[key] = json!(value);
+        }
+    }
+    if thread.archived {
+        summary["archived"] = json!(true);
+    }
+    summary["updatedAt"] = json!(thread.updated_at);
+    summary
 }
 
 fn cut(text: &str, max_chars: usize) -> (String, bool) {
@@ -128,12 +140,18 @@ impl State {
             .filter_map(|item| Some((item, readable(item)?)))
             .map(|(item, (role, text))| {
                 let (text, truncated) = cut(text, max_chars);
-                json!({ "id": item.id, "role": role, "text": text, "truncated": truncated })
+                let mut message = json!({ "id": item.id, "role": role, "text": text });
+                if truncated {
+                    message["truncated"] = json!(true);
+                }
+                message
             })
             .collect();
         let mut detail = summary(self, thread);
         detail["messages"] = Value::Array(read);
-        detail["earlierMessages"] = json!(earlier);
+        if earlier > 0 {
+            detail["earlierMessages"] = json!(earlier);
+        }
         Ok(detail)
     }
 
@@ -167,6 +185,7 @@ impl State {
             "threadId": thread_id,
             "messageId": message_id,
             "delivery": if steered { "steered" } else { "started" },
+            "next": SENT_NEXT,
         }))
     }
 }
@@ -200,8 +219,12 @@ pub(crate) fn wait_for_thread(
                 .flatten()
                 .map(|text| cut(&text, ANSWER_CHARS).0);
             let mut result = summary(&state, thread);
-            result["timedOut"] = json!(!done);
-            result["lastAnswer"] = json!(answer);
+            if done {
+                result["lastAnswer"] = json!(answer);
+            } else {
+                result["timedOut"] = json!(true);
+                result["next"] = json!(WAIT_NEXT);
+            }
             return Ok(result);
         }
         drop(state);

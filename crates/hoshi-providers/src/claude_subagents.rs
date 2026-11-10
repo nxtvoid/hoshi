@@ -143,11 +143,11 @@ pub(crate) fn instructions(
         None => format!("{name} ({slug})"),
     };
     Some(format!(
-        "Subagents and delegated tasks: you run on {yours}, the most any of them may use. You are asked to set `model` and `effort` on {tools} by the work it does:\n\
-         - Finding, reading or searching code or the web, summarizing: model \"haiku\" (or \"sonnet\"), effort \"low\".\n\
-         - A focused, well-defined change: model \"sonnet\" or yours, effort \"medium\".\n\
-         - Hard design, debugging, review, or anything ambiguous: omit both, to inherit yours.\n\
-         Never pick a more capable model or a higher effort than yours. A model or effort the user asks for always wins. Forks (subagent_type \"fork\") always inherit yours."
+        "Subagents and delegated tasks: you run on {yours}, their ceiling. These instructions ask you to set `model` and `effort` on {tools} by the work:\n\
+         - Searching, reading or summarizing: model \"haiku\", effort \"low\".\n\
+         - A focused, well-defined change: model \"sonnet\", effort \"medium\".\n\
+         - Hard design, debugging, review or anything ambiguous: omit both to inherit yours.\n\
+         Never above yours; the user's choice wins. Forks inherit yours."
     ))
 }
 
@@ -275,6 +275,18 @@ mod tests {
     fn without_a_turn_model_nothing_is_known() {
         let mut subagents = Subagents::default();
         assert_eq!(subagents.started(None, "toolu_1", &json!({})), None);
+    }
+
+    #[test]
+    fn the_subagent_instructions_stay_within_their_budget() {
+        let told = instructions(
+            SubagentEffort::AgentDecides,
+            Some("opus"),
+            Some(Effort::Medium),
+            true,
+        )
+        .unwrap();
+        assert!(told.len() <= 550, "{} bytes", told.len());
     }
 
     #[test]

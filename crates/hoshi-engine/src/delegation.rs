@@ -14,7 +14,8 @@ use std::thread;
 /// What the agent reads with every running task: its answer comes on its own.
 /// Kept short: a page of the transcript keeps only the start of a tool's output, which must
 /// still hold the task id.
-const NEXT: &str = "End your turn now; the answer arrives here as a message.";
+pub(crate) const NEXT: &str =
+    "Its answer arrives here as a message, so end your turn. Don't wait on it or poll it.";
 /// What the agent reads of a task whose plan the user is still changing.
 const PLANNING: &str =
     "The user is changing its plan in the task's thread; the answer arrives here as a message.";
@@ -51,15 +52,46 @@ pub(crate) fn delegate_task(
 /// more.
 pub(crate) const MAX_DEPTH: usize = 2;
 
-/// Added to the system prompt of a delegated task's agent, after [`INSTRUCTIONS`].
+/// Added to the system prompt of a delegated task's agent, after the rest of [`instructions`].
 pub(crate) const TASK_INSTRUCTIONS: &str =
     "You are a delegated task: do the work yourself. Delegate only what your task asks you to.";
 
-/// Added to the system prompt of agents that can delegate.
-pub(crate) const INSTRUCTIONS: &str = "hoshi, the app running you, gives you tools on its MCP server (load one with ToolSearch, \"select:mcp__hoshi__<name>\"). Ordinary coding needs none. Before you improvise around a missing credential, CLI or browser, check whether one of them covers it.\n- Subagents: your own Agent tool with run_in_background: false, and wait; start several in one message to run them in parallel. Never a background Agent: work that should go on in the background, as a thread of its own or in its own checkout and branch (isolation: \"worktree\"), goes to delegate_task.\n- delegate_task gives the child only `task`: include everything it needs. It returns at once and the answer arrives later as a message here, so end your turn; don't wait, sleep or poll task_status. task_cancel stops a task.\n- A token, password, PIN or pairing code only the user can give: request_secret, never a chat ask, and never search files or the environment for one. Use the file it returns only inside commands; never print it.\n- The user's other threads: thread_list finds them, thread_read reads one (always before you answer about it), thread_send messages one, thread_wait waits for its turn.\n- Asked to monitor or babysit a pull request, or when your work still waits on its checks or reviews: push, call watch_pull_request, end your turn; never sleep, loop or poll. Call unwatch_pull_request before you hand the work back. Delegated tasks never watch.\n- To check web work: preview_open in your thread's own browser, which the user sees in hoshi; preview_snapshot reads it, preview_act uses it. Don't start another browser.\n- Your turn ends without waiting for commands you run in the background (Bash run_in_background, Monitor), which keep running after it. To wait for one you started, such as tests or a build, call await_background_tasks with its task id before you end your turn; never for work you leave running, such as a dev server or a watcher.";
+/// When to use each of hoshi's tools; their descriptions say how.
+const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. Work that should go on in the background, or needs its own checkout and branch: delegate_task, never a background Agent. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
+- A credential only the user has: request_secret.\n\
+- The user's other hoshi threads: thread_list, thread_read (before you answer about one), thread_send. Not ListAgents or SendMessage.";
 
-/// Added after [`INSTRUCTIONS`] for agents of threads on Bitbucket.
-pub(crate) const BITBUCKET_INSTRUCTIONS: &str = "- This repository is on Bitbucket: open its pull requests with create_pull_request, which signs in as the user. Never look for, ask for or use Bitbucket tokens, nor call its API yourself. If it fails, tell the user what it says.";
+/// For threads the user started, which own their pull request.
+const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.";
+
+const BROWSER_AND_BACKGROUND: &str = "- Web previews only when the user asks for browser work: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
+- Background Bash or Monitor commands don't hold your turn. To wait for tests or a build you started: await_background_tasks with its id, then end your turn. Never for dev servers or watchers.";
+
+/// Added after the rest of [`instructions`] for agents of threads on Bitbucket.
+pub(crate) const BITBUCKET_INSTRUCTIONS: &str = "- On Bitbucket, open pull requests with create_pull_request, signed in as the user. Never look for or use a Bitbucket token, nor call its API yourself. If it fails, tell the user what it says.";
+
+/// Added to the system prompt of agents that have hoshi's tools, of a thread `depth`
+/// delegations deep.
+pub(crate) fn instructions(depth: usize, bitbucket: bool) -> String {
+    let mut parts = vec![
+        format!(
+            "hoshi, the app running you, has tools on its MCP server{}. Ordinary coding needs none.",
+            hoshi_providers::DEFERRED_TOOLS
+        ),
+        TOOLS.to_owned(),
+    ];
+    if depth == 0 {
+        parts.push(PULL_REQUESTS.to_owned());
+    }
+    parts.push(BROWSER_AND_BACKGROUND.to_owned());
+    if bitbucket {
+        parts.push(BITBUCKET_INSTRUCTIONS.to_owned());
+    }
+    if depth > 0 {
+        parts.push(TASK_INSTRUCTIONS.to_owned());
+    }
+    parts.join("\n")
+}
 
 /// A task a thread delegated, until its answer goes back.
 pub(crate) struct Delegation {
@@ -171,6 +203,18 @@ impl State {
         match &self.adapter {
             Some(adapter) => pick_model(&adapter.models().models, wanted),
             None => Ok(wanted.to_owned()),
+        }
+    }
+
+    /// Whether the agent of thread `caller` is offered a tool only some threads have.
+    pub(crate) fn offers_tool(&self, caller: &str, tool: &str) -> bool {
+        match tool {
+            crate::pull_request_tool::TOOL => self.opens_pull_requests(caller),
+            "watch_pull_request" | "unwatch_pull_request" => self
+                .model
+                .thread(caller)
+                .is_some_and(|thread| thread.parent_thread_id.is_none()),
+            _ => true,
         }
     }
 
@@ -527,6 +571,19 @@ mod tests {
             fast_mode: false,
             ultracode: false,
         }
+    }
+
+    #[test]
+    fn the_instructions_stay_within_their_budget() {
+        let worst = [instructions(0, true), instructions(1, true)]
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap();
+        assert!(worst <= 1_350, "{worst} bytes");
+        assert!(instructions(0, false).contains("watch_pull_request"));
+        assert!(!instructions(1, false).contains("watch_pull_request"));
+        assert!(instructions(1, false).ends_with(TASK_INSTRUCTIONS));
     }
 
     #[test]

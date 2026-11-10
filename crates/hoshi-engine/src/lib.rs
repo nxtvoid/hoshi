@@ -533,10 +533,8 @@ impl Engine {
         });
         let weak = Arc::downgrade(&shared);
         let offered: Arc<ToolFilter> = Arc::new(move |caller, tool| {
-            tool != pull_request_tool::TOOL
-                || weak
-                    .upgrade()
-                    .is_some_and(|shared| lock(&shared).opens_pull_requests(caller))
+            weak.upgrade()
+                .is_some_and(|shared| lock(&shared).offers_tool(caller, tool))
         });
         match McpServer::start(tools, offered) {
             Ok(server) => lock(&shared).mcp = Some(server),
@@ -3684,18 +3682,9 @@ fn start_turn(
             })
         });
     let bitbucket = state.opens_pull_requests(thread_id);
-    let instructions = mcp.as_ref().map(|_| {
-        let mut instructions = delegation::INSTRUCTIONS.to_owned();
-        if bitbucket {
-            instructions.push('\n');
-            instructions.push_str(delegation::BITBUCKET_INSTRUCTIONS);
-        }
-        if depth > 0 {
-            instructions.push('\n');
-            instructions.push_str(delegation::TASK_INSTRUCTIONS);
-        }
-        instructions
-    });
+    let instructions = mcp
+        .as_ref()
+        .map(|_| delegation::instructions(depth, bitbucket));
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
@@ -4514,7 +4503,7 @@ mod tests {
             resume_at: None,
             model: Some("haiku".into()),
             attachments: Vec::new(),
-            instructions: Some(delegation::INSTRUCTIONS.into()),
+            instructions: Some(delegation::instructions(0, false)),
             subagent_effort: SubagentEffort::AgentDecides,
         };
         assert_eq!(
@@ -5151,6 +5140,12 @@ Blue"
             )
             .unwrap();
         let grandchild = deeper["taskId"].as_str().unwrap().to_owned();
+        {
+            let state = lock(&harness.engine.state);
+            assert!(state.offers_tool("t", "watch_pull_request"));
+            assert!(!state.offers_tool(&child, "watch_pull_request"));
+            assert!(!state.offers_tool(&child, "unwatch_pull_request"));
+        }
         assert_eq!(
             harness.thread(&grandchild).parent_thread_id.as_deref(),
             Some(child.as_str())
@@ -6022,8 +6017,10 @@ Blue"
         .unwrap();
         let read = call("thread_read", serde_json::json!({ "threadId": "o" })).unwrap();
 
-        assert_eq!(waited["timedOut"], false);
+        assert_eq!(waited.get("timedOut"), None);
         assert_eq!(waited["lastAnswer"], "done");
+        assert_eq!(read.get("archived"), None);
+        assert_eq!(read.get("earlierMessages"), None);
         let roles: Vec<_> = read["messages"]
             .as_array()
             .unwrap()
@@ -7630,7 +7627,7 @@ Blue"
             lock(&harness.engine.state).call_tool(
                 "t",
                 background::TOOL,
-                &serde_json::json!({ "taskIds": ["b1", "b9"] }),
+                &serde_json::json!({ "backgroundTaskIds": ["b1", "b9"] }),
             )
         };
         assert!(call(&harness).is_err(), "no turn runs");
@@ -7639,7 +7636,8 @@ Blue"
         harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
         let answer = call(&harness).unwrap();
 
-        assert_eq!(answer["taskIds"], serde_json::json!(["b1"]));
+        assert_eq!(answer["backgroundTaskIds"], serde_json::json!(["b1"]));
         assert_eq!(answer["notRunning"], serde_json::json!(["b9"]));
+        assert!(answer["next"].is_string());
     }
 }
