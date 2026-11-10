@@ -2,8 +2,8 @@
 //! `cargo test -p hoshi-providers --test claude_live -- --ignored`
 
 use hoshi_core::{
-    AccessMode, ApprovalDecision, ItemContent, ProviderOutput, RequestResponse, ToolDetail,
-    TurnOutcome,
+    AccessMode, ApprovalDecision, ItemContent, ProviderOutput, RequestResponse, SubagentEffort,
+    ToolDetail, TurnOutcome,
 };
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter, TurnRequest};
 use std::sync::mpsc;
@@ -29,6 +29,7 @@ fn a_real_turn_streams_a_reply_and_resumes_its_session() {
             plan_mode: false,
             mcp: None,
             instructions: None,
+            subagent_effort: SubagentEffort::Thread,
         };
         let sink = Box::new(move |output| {
             let _ = sender.send(output);
@@ -140,6 +141,7 @@ fn a_real_turn_sees_an_attached_image() {
         plan_mode: false,
         mcp: None,
         instructions: None,
+        subagent_effort: SubagentEffort::Thread,
     };
     let _turn = adapter
         .start_turn(
@@ -202,6 +204,7 @@ fn run_answering(
         plan_mode: false,
         mcp: None,
         instructions: None,
+        subagent_effort: SubagentEffort::Thread,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
@@ -431,6 +434,7 @@ fn a_stopped_subagent_ends_and_the_turn_goes_on() {
         plan_mode: false,
         mcp: None,
         instructions: None,
+        subagent_effort: SubagentEffort::Thread,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
@@ -543,6 +547,7 @@ fn run_acting(
         plan_mode: false,
         mcp: None,
         instructions: None,
+        subagent_effort: SubagentEffort::Thread,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
@@ -648,6 +653,7 @@ fn a_message_is_answered_at_once_while_a_subagent_keeps_working() {
         plan_mode: false,
         mcp: None,
         instructions: None,
+        subagent_effort: SubagentEffort::Thread,
     };
     let sink = Box::new(move |output| {
         let _ = sender.send(output);
@@ -764,6 +770,7 @@ fn watched_request(cwd: &std::path::Path, prompt: &str, session: Option<String>)
         plan_mode: false,
         mcp: None,
         instructions: None,
+        subagent_effort: SubagentEffort::Thread,
     }
 }
 

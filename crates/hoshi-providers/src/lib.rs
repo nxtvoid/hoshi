@@ -10,6 +10,7 @@ mod claude_models;
 mod claude_output;
 mod claude_prompt;
 mod claude_requests;
+mod claude_subagents;
 mod claude_titles;
 mod claude_tools;
 mod claude_usage;
@@ -20,7 +21,7 @@ mod updater;
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
 use hoshi_core::{
     AccessMode, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderOutput,
-    RequestResponse, SlashCommand, TurnFailure, UsageLimits,
+    RequestResponse, SlashCommand, SubagentEffort, TurnFailure, UsageLimits,
 };
 use std::path::{Path, PathBuf};
 pub use updater::{UpdateFailure, Updater, run as run_update};
@@ -44,6 +45,8 @@ pub struct TurnRequest {
     pub mcp: Option<McpServer>,
     /// Added to the agent's system prompt.
     pub instructions: Option<String>,
+    /// How the agent chooses the model and effort of the subagents and tasks it starts.
+    pub subagent_effort: SubagentEffort,
 }
 
 /// An MCP server reached over HTTP.

@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
+import { subagentRun } from '@/lib/model-runs'
+import { ModelRunLabel } from './ModelRunLabel'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Markdown } from '@/components/markdown/Markdown'
 import { useAppStore } from '@/state/app-store'
+import { useModelsStore } from '@/state/models-store'
 import { useSubagentStore } from '@/state/subagent-store'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import { useTranscriptStore } from '@/state/transcript-store'
@@ -110,9 +113,11 @@ export function SubagentRow({
   renderRows: (rows: TranscriptRow[]) => React.ReactNode
 }) {
   const [open, setOpen] = useState(false)
-  const { output, isError, input, interrupted } = item.content
+  const { output, isError, input, interrupted, detail } = item.content
   const running = output === null && !interrupted
   const { description, kind, prompt } = subagentInput(input)
+  const catalog = useModelsStore((state) => state.catalog)
+  const run = subagentRun(catalog, detail)
   const progress = useTranscriptStore((state) =>
     running ? state.toolOutput[item.id] : undefined
   )
@@ -169,6 +174,7 @@ export function SubagentRow({
               </span>
             ) : null}
           </span>
+          <ModelRunLabel run={run} />
           <HugeiconsIcon
             icon={ArrowRight01Icon}
             strokeWidth={2}

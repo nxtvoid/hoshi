@@ -238,6 +238,30 @@ impl Manifest {
         }
     }
 
+    /// The model `model` names, `None` for the default one, and the effort it runs at when
+    /// asked for `effort`: one it doesn't support gives way to its default. A model the
+    /// manifest doesn't know passes through unchanged.
+    pub(crate) fn run(
+        &self,
+        model: Option<&str>,
+        effort: Option<Effort>,
+    ) -> (String, Option<Effort>) {
+        let id = model.unwrap_or(&self.defaults.chat);
+        let Some(entry) = self.find(id) else {
+            return (id.to_owned(), effort);
+        };
+        let traits = self.traits(entry);
+        let effort = effort
+            .filter(|effort| traits.efforts.contains(effort))
+            .or(traits.default_effort);
+        (entry.slug.clone(), effort)
+    }
+
+    /// The full name of the model `id` names, such as "Claude Opus 5.5".
+    pub(crate) fn name(&self, id: &str) -> Option<&str> {
+        self.find(id).map(|model| model.name.as_str())
+    }
+
     /// `version` is the installed Claude Code; when unknown, every model is offered.
     /// `today` counts days since the Unix epoch.
     pub(crate) fn catalog(&self, version: Option<Version>, today: i64) -> ProviderModels {
@@ -301,7 +325,7 @@ impl Manifest {
     }
 }
 
-fn parse_effort(id: &str) -> Option<Effort> {
+pub(crate) fn parse_effort(id: &str) -> Option<Effort> {
     serde_json::from_value(id.into()).ok()
 }
 

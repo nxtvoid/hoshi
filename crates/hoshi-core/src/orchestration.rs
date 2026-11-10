@@ -218,6 +218,12 @@ pub enum Event {
         #[serde(default)]
         detail: Option<ToolDetail>,
     },
+    /// What a running call did so far replaces what it reported before.
+    ToolCallDetailSet {
+        thread_id: String,
+        item_id: String,
+        detail: ToolDetail,
+    },
     TurnCompleted {
         thread_id: String,
         turn_id: String,
@@ -713,6 +719,7 @@ impl ReadModel {
                     item_id: item_id.clone(),
                 });
             }
+            Event::ToolCallDetailSet { .. } => {}
             Event::TurnCompleted {
                 thread_id,
                 outcome,
@@ -1639,6 +1646,11 @@ pub fn record_output(
             is_error,
             detail,
         }],
+        ProviderOutput::ToolCallDetail { item_id, detail } => vec![Event::ToolCallDetailSet {
+            thread_id: thread_id.to_owned(),
+            item_id,
+            detail,
+        }],
         ProviderOutput::ToolCallStopped { item_id } => vec![Event::ToolCallInterrupted {
             thread_id: thread_id.to_owned(),
             item_id,
@@ -1738,6 +1750,11 @@ fn record_subagent(transcript: &str, output: ProviderOutput, now: &str) -> Vec<E
             item_id,
             output,
             is_error,
+            detail,
+        }],
+        ProviderOutput::ToolCallDetail { item_id, detail } => vec![Event::ToolCallDetailSet {
+            thread_id: transcript.to_owned(),
+            item_id,
             detail,
         }],
         ProviderOutput::ToolCallStopped { item_id } => vec![Event::ToolCallInterrupted {

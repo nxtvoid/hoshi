@@ -20,6 +20,7 @@ pub fn update_settings(app: AppHandle, settings: AppSettings) -> Result<AppSetti
         engine.set_adapter(crate::orchestration::adapter_for(&settings));
     }
     engine.set_thread_titles(settings.thread_titles.clone());
+    engine.set_subagent_effort(settings.providers.claude_code.subagent_effort);
     Ok(settings)
 }
 
@@ -68,7 +69,7 @@ mod tests {
     use super::*;
     use hoshi_core::{
         ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
-        ThreadTitleSettings,
+        SubagentEffort, ThreadTitleSettings,
     };
 
     fn settings_file(name: &str) -> PathBuf {
@@ -87,6 +88,10 @@ mod tests {
         assert_eq!(settings, AppSettings::default());
         assert!(settings.providers.claude_code.enabled);
         assert_eq!(settings.providers.claude_code.binary_path, None);
+        assert_eq!(
+            settings.providers.claude_code.subagent_effort,
+            SubagentEffort::AgentDecides
+        );
         assert!(path.exists());
     }
 
@@ -106,6 +111,10 @@ mod tests {
         assert_eq!(
             settings.providers.claude_code.binary_path.as_deref(),
             Some("/bin/claude")
+        );
+        assert_eq!(
+            settings.providers.claude_code.subagent_effort,
+            SubagentEffort::AgentDecides
         );
 
         fs::write(&path, "{}").unwrap();
@@ -129,6 +138,7 @@ mod tests {
                 claude_code: ClaudeCodeSettings {
                     enabled: false,
                     binary_path: Some("C:\\tools\\claude.exe".into()),
+                    subagent_effort: SubagentEffort::Thread,
                 },
             },
             plan_mode_enabled: true,

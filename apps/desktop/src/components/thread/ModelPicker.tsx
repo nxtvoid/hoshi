@@ -5,6 +5,7 @@ import type { Effort } from '@/bindings/Effort'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Kbd } from '@hoshi/ui/components/kbd'
 import { useRef, useState } from 'react'
+import { effectiveEffort } from '@/lib/model-runs'
 import { useModelsStore } from '@/state/models-store'
 import type { ModelInfo } from '@/bindings/ModelInfo'
 import { Button } from '@hoshi/ui/components/button'
@@ -13,6 +14,7 @@ import { useModelPickerStore } from '@/state/model-picker-store'
 import type { FavoriteModel } from '@/bindings/FavoriteModel'
 import type { ProviderModels } from '@/bindings/ProviderModels'
 import { metaOf } from '@/components/brand/provider-meta'
+import { EFFORT_LABELS, EFFORT_SHORT_LABELS } from './effort-labels'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { type ModelChoice, useComposerStore } from '@/state/composer-store'
 import {
@@ -34,22 +36,6 @@ import {
   WorkflowSquare03Icon
 } from '@hugeicons/core-free-icons'
 
-const EFFORT_LABELS: Record<Effort, () => string> = {
-  low: m.effort_low,
-  medium: m.effort_medium,
-  high: m.effort_high,
-  xhigh: m.effort_xhigh,
-  max: m.effort_max
-}
-
-const EFFORT_SHORT_LABELS: Record<Effort, () => string> = {
-  low: m.effort_low,
-  medium: m.effort_medium_short,
-  high: m.effort_high,
-  xhigh: m.effort_xhigh_short,
-  max: m.effort_max
-}
-
 const EFFORT_COLUMNS: Record<number, string> = {
   1: 'grid-cols-1',
   2: 'grid-cols-2',
@@ -69,14 +55,6 @@ const isFavorite = (favorites: readonly FavoriteModel[], row: Row) =>
     (favorite) =>
       favorite.provider === row.provider && favorite.model === row.model.slug
   )
-
-const effectiveEffort = (
-  model: ModelInfo | undefined,
-  effort: Effort | null
-) =>
-  effort && model?.efforts.includes(effort)
-    ? effort
-    : (model?.defaultEffort ?? null)
 
 function matches(model: ModelInfo, query: string) {
   const haystack = `${model.name} ${model.shortName}`.toLowerCase()

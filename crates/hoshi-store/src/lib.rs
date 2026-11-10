@@ -1072,6 +1072,18 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 params![thread_id, enum_text(status)?, at],
             )?;
         }
+        Event::ToolCallDetailSet {
+            thread_id,
+            item_id,
+            detail,
+        } => {
+            execute(
+                tx,
+                "UPDATE thread_items SET content_json = json_set(content_json, '$.detail', json(?3))
+                 WHERE thread_id = ?1 AND id = ?2",
+                params![thread_id, item_id, serde_json::to_string(detail)?],
+            )?;
+        }
         Event::ToolCallInterrupted { thread_id, item_id } => {
             execute(
                 tx,
@@ -1711,6 +1723,57 @@ mod tests {
                 output_omitted: false,
                 interrupted: false,
             }
+        );
+    }
+
+    #[test]
+    fn a_subagent_call_keeps_its_model_and_effort_as_they_are_corrected() {
+        let (mut store, mut model) = store_with_thread();
+        let events = send(&model);
+        commit(&mut store, &mut model, events);
+        let subagent = |model: &str, effort| ToolDetail::Subagent {
+            model: model.into(),
+            effort,
+        };
+        let outputs = [
+            ProviderOutput::ToolCallStarted {
+                item_id: "toolu_agent".into(),
+                name: "Agent".into(),
+                input: "{}".into(),
+            },
+            ProviderOutput::ToolCallDetail {
+                item_id: "toolu_agent".into(),
+                detail: subagent("claude-opus-5-5", Some(Effort::Max)),
+            },
+            ProviderOutput::ToolCallDetail {
+                item_id: "toolu_agent".into(),
+                detail: subagent("claude-haiku-5-5", Some(Effort::Low)),
+            },
+        ];
+        for output in outputs {
+            let events = record_output(&model, "t", "m1", output, NOW);
+            commit(&mut store, &mut model, events);
+        }
+        let detail = |store: &Store| match &store.thread_items("t").unwrap()[1].content {
+            ItemContent::ToolCall { detail, .. } => detail.clone(),
+            _ => None,
+        };
+        assert_eq!(
+            detail(&store),
+            Some(subagent("claude-haiku-5-5", Some(Effort::Low)))
+        );
+
+        let done = ProviderOutput::ToolCallCompleted {
+            item_id: "toolu_agent".into(),
+            output: "found it".into(),
+            is_error: false,
+            detail: Some(subagent("claude-haiku-5-5", Some(Effort::Low))),
+        };
+        let events = record_output(&model, "t", "m1", done, NOW);
+        commit(&mut store, &mut model, events);
+        assert_eq!(
+            detail(&store),
+            Some(subagent("claude-haiku-5-5", Some(Effort::Low)))
         );
     }
 

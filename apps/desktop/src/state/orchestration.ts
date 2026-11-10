@@ -106,6 +106,7 @@ export function applyEvent(
         updatedAt: event.item.createdAt
       })
     case 'toolCallCompleted':
+    case 'toolCallDetailSet':
     case 'toolCallInterrupted':
       return state
     case 'turnCompleted':
@@ -168,6 +169,13 @@ export function applyItemEvent(
               detail: event.detail
             }
           }
+        : item
+    )
+  }
+  if (event.type === 'toolCallDetailSet' && event.threadId === threadId) {
+    return items.map((item) =>
+      item.id === event.itemId && item.content.kind === 'toolCall'
+        ? { ...item, content: { ...item.content, detail: event.detail } }
         : item
     )
   }

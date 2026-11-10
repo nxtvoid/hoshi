@@ -428,6 +428,12 @@ pub enum ToolDetail {
         /// transcript, which leaves diffs out; the item alone carries it.
         diff: Option<String>,
     },
+    /// A call that started a subagent: the model it runs on and the effort it runs at, as
+    /// far as known. `effort` is `None` for a model without effort levels.
+    Subagent {
+        model: String,
+        effort: Option<Effort>,
+    },
 }
 
 impl ToolDetail {
@@ -445,6 +451,7 @@ impl ToolDetail {
                 deletions: *deletions,
                 diff: None,
             },
+            Self::Subagent { .. } => self.clone(),
         }
     }
 }

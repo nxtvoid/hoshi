@@ -97,6 +97,7 @@ pub struct ProviderSettings {
 pub struct ClaudeCodeSettings {
     pub enabled: bool,
     pub binary_path: Option<String>,
+    pub subagent_effort: SubagentEffort,
 }
 
 impl Default for ClaudeCodeSettings {
@@ -104,6 +105,19 @@ impl Default for ClaudeCodeSettings {
         Self {
             enabled: true,
             binary_path: None,
+            subagent_effort: SubagentEffort::default(),
         }
     }
+}
+
+/// The model and effort of the subagents and delegated tasks an agent starts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum SubagentEffort {
+    /// The thread's own, unless the user asks for others.
+    Thread,
+    /// Cheaper ones for simple work, never above the thread's own.
+    #[default]
+    AgentDecides,
 }

@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
+import { modelRun } from '@/lib/model-runs'
+import { ModelRunLabel } from './ModelRunLabel'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
 import { isPlanningWithUser } from '@/lib/agents'
+import { useModelsStore } from '@/state/models-store'
 import { useRequestStore } from '@/state/request-store'
 import { confirm } from '@/state/dialog-store'
 import { Button } from '@hoshi/ui/components/button'
@@ -94,6 +97,8 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
   const child = useThread(taskId)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
   const planning = child ? isPlanningWithUser(child, pendingTasks) : false
+  const catalog = useModelsStore((state) => state.catalog)
+  const run = child ? modelRun(catalog, child.model, child.effort) : null
   const card = (
     <div
       className={cn(
@@ -114,6 +119,7 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
           {error ?? m.delegation_task()}
         </span>
       </span>
+      <ModelRunLabel run={run} />
       {planning ? null : <TaskStatus child={child} />}
       {child ? <OpenButton threadId={child.id} /> : null}
     </div>

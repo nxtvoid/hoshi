@@ -5,6 +5,7 @@ use crate::claude_models::{TurnModel, Version, manifest, parse_version};
 use crate::claude_output::LiveOutput;
 use crate::claude_prompt;
 use crate::claude_requests::{self, Access, Grants, Requests};
+use crate::claude_subagents::{self, Subagents};
 use crate::claude_titles;
 use crate::claude_tools;
 use crate::claude_usage;
@@ -16,7 +17,7 @@ use crate::{
     TitleRequest, TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
-    AccessMode, BackgroundTask, ContextUsage, ProviderAccountStatus, ProviderModels,
+    AccessMode, BackgroundTask, ContextUsage, Effort, ProviderAccountStatus, ProviderModels,
     ProviderOutput, RequestResponse, SlashCommand, TurnFailure, TurnOutcome, UsageLimits,
 };
 use serde_json::{Value, json};
@@ -129,6 +130,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         sink: OutputSink,
     ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
         let turn_model = turn_model(&request, self.model.as_deref());
+        let instructions = system_prompt(&request, self.model.as_deref());
         let access = access(&request);
         let mut command = Command::new(self.binary());
         command
@@ -154,7 +156,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         if let Some(settings) = session_settings(&turn_model) {
             command.args(["--settings", &settings.to_string()]);
         }
-        if let Some(instructions) = &request.instructions {
+        if let Some(instructions) = &instructions {
             command.args(["--append-system-prompt", instructions]);
         }
         if let Some(session_id) = &request.resume_session_id {
@@ -185,7 +187,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             requests: requests.clone(),
             live_output: live_output.clone(),
             queue: queue.clone(),
-            ..ClaudeParser::new(manifest().context_window(&turn_model.slug))
+            ..ClaudeParser::for_turn(
+                request.model.as_deref().or(self.model.as_deref()),
+                request.effort,
+            )
         };
         let (ending, in_turn) = (queue.clone(), queue.clone());
         let process = spawn_turn(
@@ -214,7 +219,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             launch: Launch {
                 cwd: request.cwd,
                 model: turn_model,
-                instructions: request.instructions,
+                instructions,
                 mcp: request.mcp,
                 full_access: request.access_mode == AccessMode::FullAccess,
             },
@@ -230,6 +235,21 @@ fn turn_model(request: &TurnRequest, default_model: Option<&str>) -> TurnModel {
         request.fast_mode,
         request.ultracode,
     )
+}
+
+/// What the turn adds to the agent's system prompt: hoshi's instructions, then how to choose
+/// the model and effort of subagents.
+fn system_prompt(request: &TurnRequest, default_model: Option<&str>) -> Option<String> {
+    let subagents = claude_subagents::instructions(
+        request.subagent_effort,
+        request.model.as_deref().or(default_model),
+        request.effort,
+        request.mcp.is_some(),
+    );
+    match (&request.instructions, subagents) {
+        (Some(own), Some(subagents)) => Some(format!("{own}\n{subagents}")),
+        (own, subagents) => own.clone().or(subagents),
+    }
 }
 
 fn access(request: &TurnRequest) -> Access {
@@ -327,6 +347,7 @@ impl Queue {
 struct Launch {
     cwd: String,
     model: TurnModel,
+    /// Added to the system prompt.
     instructions: Option<String>,
     mcp: Option<McpServer>,
     /// Allowed to bypass permissions, which a later turn can only switch to if so.
@@ -354,7 +375,7 @@ fn next_turn(
         && request.resume_session_id.as_deref() == session
         && request.resume_session_at.is_none()
         && turn_model(request, default_model) == launch.model
-        && request.instructions == launch.instructions
+        && system_prompt(request, default_model) == launch.instructions
         && request.mcp == launch.mcp
         && (access.mode != AccessMode::FullAccess || launch.full_access);
     if !fits || queue.closing || queue.turn_open {
@@ -619,6 +640,7 @@ pub struct ClaudeParser {
     /// Background tasks that ended while a run went on, each told as the run that answers
     /// it starts.
     ended_tasks: VecDeque<ProviderOutput>,
+    subagents: Subagents,
 }
 
 #[derive(Clone, Copy)]
@@ -636,6 +658,16 @@ impl ClaudeParser {
         }
     }
 
+    /// For a turn on `model`, `None` for the default one, at `effort`.
+    pub fn for_turn(model: Option<&str>, effort: Option<Effort>) -> Self {
+        let (slug, _) = manifest().run(model, None);
+        Self {
+            context_window: manifest().context_window(&slug),
+            subagents: Subagents::for_turn(model, effort),
+            ..Self::default()
+        }
+    }
+
     /// What to write back to the agent after the last lines, oldest first.
     pub fn take_replies(&mut self) -> Vec<String> {
         std::mem::take(&mut self.replies)
@@ -645,6 +677,42 @@ impl ClaudeParser {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
+        let outputs = self.parse_value(value);
+        outputs
+            .into_iter()
+            .map(|output| self.with_subagent_detail(output))
+            .collect()
+    }
+
+    /// A call that started a subagent completes with what the subagent ran on.
+    fn with_subagent_detail(&self, output: ProviderOutput) -> ProviderOutput {
+        match output {
+            ProviderOutput::ToolCallCompleted {
+                item_id,
+                output,
+                is_error,
+                detail,
+            } => {
+                let detail = detail.or_else(|| self.subagents.detail(&item_id));
+                ProviderOutput::ToolCallCompleted {
+                    item_id,
+                    output,
+                    is_error,
+                    detail,
+                }
+            }
+            ProviderOutput::Subagent {
+                tool_use_id,
+                output,
+            } => ProviderOutput::Subagent {
+                tool_use_id,
+                output: Box::new(self.with_subagent_detail(*output)),
+            },
+            other => other,
+        }
+    }
+
+    fn parse_value(&mut self, value: Value) -> Vec<ProviderOutput> {
         match value["type"].as_str() {
             Some("control_request") => {
                 let access = self.queue.state().access;
@@ -785,7 +853,7 @@ impl ClaudeParser {
             }
             Some("stream_event") => self.parse_stream_event(value),
             Some("assistant") => {
-                let mut outputs = self.parse_assistant(&value["message"]);
+                let mut outputs = self.parse_assistant(None, &value["message"]);
                 if let Some(uuid) = value["uuid"].as_str() {
                     outputs.push(ProviderOutput::ConversationCursor {
                         cursor: uuid.to_owned(),
@@ -906,7 +974,8 @@ impl ClaudeParser {
         }
     }
 
-    fn parse_assistant(&mut self, message: &Value) -> Vec<ProviderOutput> {
+    /// A message of the turn's agent, or of the subagent the call `owner` started.
+    fn parse_assistant(&mut self, owner: Option<&str>, message: &Value) -> Vec<ProviderOutput> {
         let Some(message_id) = message["id"].as_str() else {
             return Vec::new();
         };
@@ -955,11 +1024,19 @@ impl ClaudeParser {
                     let todos = (name == "TodoWrite")
                         .then(|| claude_tools::todo_list(&block["input"]))
                         .flatten();
+                    let call_id = block["id"].as_str().unwrap_or(&item_id).to_owned();
+                    let subagent = matches!(name, "Agent" | "Task")
+                        .then(|| self.subagents.started(owner, &call_id, &block["input"]))
+                        .flatten();
                     outputs.push(ProviderOutput::ToolCallStarted {
-                        item_id: block["id"].as_str().unwrap_or(&item_id).to_owned(),
+                        item_id: call_id.clone(),
                         name: name.to_owned(),
                         input: truncate(&block["input"].to_string(), TOOL_INPUT_MAX_CHARS),
                     });
+                    outputs.extend(subagent.map(|detail| ProviderOutput::ToolCallDetail {
+                        item_id: call_id,
+                        detail,
+                    }));
                     outputs.extend(todos.map(|tasks| ProviderOutput::TaskList { tasks }));
                 }
                 _ => {}
@@ -1200,12 +1277,17 @@ impl ClaudeParser {
     /// A subagent's own messages and tool calls, which go to its transcript. Its prompt, sent
     /// as a user message, is already the input of the call that started it.
     fn parse_subagent(&mut self, parent: &str, value: &Value) -> Vec<ProviderOutput> {
+        let mut seen = Vec::new();
         let outputs = match value["type"].as_str() {
-            Some("assistant") => self.parse_assistant(&value["message"]),
+            Some("assistant") => {
+                let model = value["message"]["model"].as_str();
+                seen.extend(self.subagents.model_seen(parent, model));
+                self.parse_assistant(Some(parent), &value["message"])
+            }
             Some("user") => parse_tool_results(value, self.queue.state().interrupted),
             _ => Vec::new(),
         };
-        outputs
+        let own = outputs
             .into_iter()
             .filter(|output| {
                 matches!(
@@ -1213,6 +1295,7 @@ impl ClaudeParser {
                     ProviderOutput::AssistantMessage { .. }
                         | ProviderOutput::Reasoning { .. }
                         | ProviderOutput::ToolCallStarted { .. }
+                        | ProviderOutput::ToolCallDetail { .. }
                         | ProviderOutput::ToolCallCompleted { .. }
                         | ProviderOutput::ToolCallStopped { .. }
                 )
@@ -1220,8 +1303,8 @@ impl ClaudeParser {
             .map(|output| ProviderOutput::Subagent {
                 tool_use_id: parent.to_owned(),
                 output: Box::new(output),
-            })
-            .collect()
+            });
+        seen.into_iter().chain(own).collect()
     }
 
     /// What a running subagent is doing, as a line that replaces the previous one.
@@ -1411,6 +1494,7 @@ fn parse_result(value: &Value) -> TurnOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hoshi_core::{SubagentEffort, ToolDetail};
 
     fn model(fast_mode: bool, ultracode: bool) -> TurnModel {
         TurnModel {
@@ -1483,6 +1567,160 @@ mod tests {
                 error: "Not enough messages to compact.".into()
             }]
         );
+    }
+
+    fn agent_call(id: &str, parent: Option<&str>, input: Value) -> String {
+        json!({ "type": "assistant", "parent_tool_use_id": parent, "message": {
+            "id": format!("msg_{id}"), "model": "claude-opus-5-5",
+            "content": [{ "type": "tool_use", "id": id, "name": "Agent", "input": input }] } })
+        .to_string()
+    }
+
+    fn subagent_frame(parent: &str, model: &str) -> String {
+        json!({ "type": "assistant", "parent_tool_use_id": parent, "message": {
+            "id": format!("msg_in_{parent}"), "model": model,
+            "content": [{ "type": "text", "text": "Looking." }] } })
+        .to_string()
+    }
+
+    fn details(outputs: &[ProviderOutput]) -> Vec<(Option<String>, String, ToolDetail)> {
+        outputs
+            .iter()
+            .filter_map(|output| match output {
+                ProviderOutput::ToolCallDetail { item_id, detail } => {
+                    Some((None, item_id.clone(), detail.clone()))
+                }
+                ProviderOutput::Subagent {
+                    tool_use_id,
+                    output,
+                } => match &**output {
+                    ProviderOutput::ToolCallDetail { item_id, detail } => {
+                        Some((Some(tool_use_id.clone()), item_id.clone(), detail.clone()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn runs(model: &str, effort: Option<Effort>) -> ToolDetail {
+        ToolDetail::Subagent {
+            model: model.into(),
+            effort,
+        }
+    }
+
+    #[test]
+    fn a_subagent_s_call_says_what_it_runs_on() {
+        let mut parser = ClaudeParser::for_turn(Some("opus"), Some(Effort::Max));
+        let asked = parser.parse_line(&agent_call(
+            "toolu_1",
+            None,
+            json!({ "description": "Search", "model": "haiku", "effort": "low" }),
+        ));
+        assert!(
+            matches!(&asked[0], ProviderOutput::ToolCallStarted { name, .. } if name == "Agent")
+        );
+        assert_eq!(
+            details(&asked),
+            [(
+                None,
+                "toolu_1".into(),
+                runs("claude-haiku-5-5", Some(Effort::Low))
+            )]
+        );
+
+        let inherited = parser.parse_line(&agent_call("toolu_2", None, json!({ "prompt": "Fix" })));
+        assert_eq!(
+            details(&inherited),
+            [(
+                None,
+                "toolu_2".into(),
+                runs("claude-opus-5-5", Some(Effort::Max))
+            )]
+        );
+
+        let fork = json!({ "subagent_type": "fork", "model": "haiku", "effort": "low" });
+        let forked = parser.parse_line(&agent_call("toolu_3", None, fork));
+        assert_eq!(
+            details(&forked),
+            [(
+                None,
+                "toolu_3".into(),
+                runs("claude-opus-5-5", Some(Effort::Max))
+            )]
+        );
+    }
+
+    #[test]
+    fn a_subagent_s_own_messages_correct_its_model_and_its_call_completes_with_it() {
+        let mut parser = ClaudeParser::for_turn(Some("opus"), Some(Effort::Max));
+        let explore = json!({ "subagent_type": "Explore", "effort": "low" });
+        parser.parse_line(&agent_call("toolu_1", None, explore));
+
+        let corrected = parser.parse_line(&subagent_frame("toolu_1", "claude-haiku-4-5-20251001"));
+        assert_eq!(
+            details(&corrected),
+            [(None, "toolu_1".into(), runs("claude-haiku-4-5", None))]
+        );
+        assert!(
+            details(&parser.parse_line(&subagent_frame("toolu_1", "claude-haiku-4-5"))).is_empty()
+        );
+
+        let nested = parser.parse_line(&agent_call("toolu_2", Some("toolu_1"), json!({})));
+        assert_eq!(
+            details(&nested),
+            [(
+                Some("toolu_1".into()),
+                "toolu_2".into(),
+                runs("claude-haiku-4-5", None)
+            )]
+        );
+
+        let result = json!({ "type": "user", "parent_tool_use_id": null, "message": { "role": "user",
+            "content": [{ "type": "tool_result", "tool_use_id": "toolu_1", "content": "Found it" }] } });
+        assert!(matches!(
+            parser.parse_line(&result.to_string()).as_slice(),
+            [ProviderOutput::ToolCallCompleted { detail: Some(detail), .. }]
+                if *detail == runs("claude-haiku-4-5", None)
+        ));
+    }
+
+    #[test]
+    fn a_parser_without_a_turn_model_tells_nothing_of_subagents() {
+        let mut parser = ClaudeParser::new(None);
+        let outputs = parser.parse_line(&agent_call("toolu_1", None, json!({ "model": "haiku" })));
+        assert!(details(&outputs).is_empty());
+    }
+
+    #[test]
+    fn the_agent_is_told_how_to_choose_its_subagents_only_when_it_decides() {
+        let thread = request("/repo", "hi");
+        assert_eq!(system_prompt(&thread, None), None);
+        let decides = TurnRequest {
+            effort: Some(Effort::High),
+            instructions: Some("hoshi's own".into()),
+            subagent_effort: SubagentEffort::AgentDecides,
+            ..request("/repo", "hi")
+        };
+        let told = system_prompt(&decides, None).unwrap();
+        assert!(told.starts_with("hoshi's own\n"), "{told}");
+        assert!(
+            told.contains("Claude Opus 5.5 (claude-opus-5-5) at high effort"),
+            "{told}"
+        );
+        assert!(!told.contains("delegate_task"));
+        let launch = Launch {
+            model: turn_model(&decides, None),
+            instructions: Some(told),
+            ..launch("/repo")
+        };
+        let mut queue = QueueState {
+            turn_open: false,
+            ..QueueState::default()
+        };
+        assert!(next_turn(&launch, None, Some("s1"), &mut queue, &decides).is_some());
     }
 
     #[test]
@@ -1915,6 +2153,7 @@ mod tests {
             plan_mode: false,
             mcp: None,
             instructions: None,
+            subagent_effort: SubagentEffort::Thread,
         }
     }
 

@@ -261,6 +261,20 @@ describe('applyItemEvent', () => {
     expect(items[0]?.content).toMatchObject({ output: null, interrupted: true })
   })
 
+  test('replaces what a running tool call said it runs on', () => {
+    const items = applyItemEvent('t', [tool], {
+      type: 'toolCallDetailSet',
+      threadId: 't',
+      itemId: 'tool',
+      detail: { kind: 'subagent', model: 'claude-haiku-5-5', effort: 'low' }
+    })
+
+    expect(items[0]?.content).toMatchObject({
+      output: null,
+      detail: { kind: 'subagent', model: 'claude-haiku-5-5', effort: 'low' }
+    })
+  })
+
   test('replaces an item that arrives twice and ignores other threads', () => {
     const again = { ...tool, content: { ...tool.content, input: '{"a":1}' } }
 

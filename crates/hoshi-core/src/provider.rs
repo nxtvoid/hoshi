@@ -49,6 +49,12 @@ pub enum ProviderOutput {
         is_error: bool,
         detail: Option<ToolDetail>,
     },
+    /// What a running call did so far, such as the model a subagent runs on; replaces what
+    /// was reported before.
+    ToolCallDetail {
+        item_id: String,
+        detail: ToolDetail,
+    },
     /// What a subagent did, which the agent's `tool_use_id` call started. Only its messages,
     /// reasoning and tool calls are kept.
     Subagent {

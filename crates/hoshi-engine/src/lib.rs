@@ -48,11 +48,12 @@ use hoshi_core::{
     EventEnvelope, FileDiff, FolderListing, ForgeAccount, ForgeKind, ItemContent,
     MessageAttachment, ProviderModels, ProviderOutput, PullRequest, PullRequestAction,
     PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository, SlashCommand, Snapshot,
-    StreamDelta, StreamKind, TerminalAttach, ThreadBackgroundTasks, ThreadContextUsage, ThreadItem,
-    ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace,
-    TurnFailure, TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn,
-    decide, record_branch, record_conversation_cursor, record_output, record_title,
-    record_turn_changes, record_worktree, record_worktree_left, start_queued_turn, turn_failed,
+    StreamDelta, StreamKind, SubagentEffort, TerminalAttach, ThreadBackgroundTasks,
+    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus,
+    ThreadTitleSettings, ThreadWorkspace, TurnFailure, TurnOutcome, UsageLimits, WorkspaceEntry,
+    answers_message, close_stale_turn, decide, record_branch, record_conversation_cursor,
+    record_output, record_title, record_turn_changes, record_worktree, record_worktree_left,
+    start_queued_turn, turn_failed,
 };
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
@@ -183,6 +184,7 @@ struct State {
     linked_pull_requests: HashMap<(RepositoryRef, u32), (Instant, PullRequest)>,
     context_usages: HashMap<String, ContextUsage>,
     thread_titles: ThreadTitleSettings,
+    subagent_effort: SubagentEffort,
     /// Threads whose generated title missed the subject; named again after their turn.
     titles_to_refine: HashSet<String>,
     /// `None` until the provider reports or is asked for them; kept across restarts.
@@ -469,6 +471,7 @@ impl Engine {
             pending_wakes: HashMap::new(),
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
+            subagent_effort: SubagentEffort::default(),
             titles_to_refine: HashSet::new(),
         };
         let stale: Vec<_> = state
@@ -1232,6 +1235,11 @@ impl Engine {
 
     pub fn set_thread_titles(&self, settings: ThreadTitleSettings) {
         lock(&self.state).thread_titles = settings;
+    }
+
+    /// How agents choose the model and effort of their subagents, from their next turn on.
+    pub fn set_subagent_effort(&self, policy: SubagentEffort) {
+        lock(&self.state).subagent_effort = policy;
     }
 
     /// Names the thread again from its whole conversation, in the background. The
@@ -3657,6 +3665,7 @@ fn start_turn(
         plan_mode: thread.plan_mode,
         mcp,
         instructions,
+        subagent_effort: state.subagent_effort,
     };
     let (workspace, checkpointed) = state.turn_workspace(thread_id, turn_id, &cwd);
     if let Some(lingering) = state.lingering.remove(thread_id) {
@@ -3920,6 +3929,7 @@ mod tests {
         model: Option<String>,
         attachments: Vec<TurnAttachment>,
         instructions: Option<String>,
+        subagent_effort: SubagentEffort,
     }
 
     /// Records each request and replays a script; a turn whose script does not
@@ -3998,6 +4008,7 @@ mod tests {
                 model: request.model,
                 attachments: request.attachments,
                 instructions: request.instructions,
+                subagent_effort: request.subagent_effort,
             });
             let script: Vec<_> = self
                 .script
@@ -4385,6 +4396,7 @@ mod tests {
             model: Some("haiku".into()),
             attachments: Vec::new(),
             instructions: Some(delegation::INSTRUCTIONS.into()),
+            subagent_effort: SubagentEffort::AgentDecides,
         };
         assert_eq!(
             *harness.adapter.requests.lock().unwrap(),
@@ -5042,6 +5054,22 @@ Blue"
         assert!(told(0).is_some_and(|told| !told.contains(delegation::TASK_INSTRUCTIONS)));
         assert!(told(1).is_some_and(|told| told.contains(delegation::TASK_INSTRUCTIONS)));
         assert_eq!(told(2), None);
+    }
+
+    #[test]
+    fn turns_carry_how_the_agent_chooses_its_subagents_effort() {
+        let harness = Harness::in_memory("subagent-effort", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "look it up");
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        harness.engine.set_subagent_effort(SubagentEffort::Thread);
+        harness.send("t", "m2", "again");
+
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests[0].subagent_effort, SubagentEffort::AgentDecides);
+        assert_eq!(requests[1].subagent_effort, SubagentEffort::Thread);
     }
 
     /// A task whose plan the user sent back to planning, its turn over, and its parent at rest.
