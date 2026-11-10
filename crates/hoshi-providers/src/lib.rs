@@ -14,6 +14,7 @@ mod claude_requests;
 mod claude_resets;
 mod claude_subagents;
 mod claude_titles;
+mod claude_tool_search;
 mod claude_tools;
 mod claude_usage;
 mod claude_writing;
@@ -61,6 +62,10 @@ pub struct McpServer {
 
 /// The name agents know hoshi's MCP server by; its tools are `mcp__hoshi__<tool>`.
 pub const MCP_SERVER_NAME: &str = "hoshi";
+
+/// Where hoshi's instructions say its tools are deferred, which the adapter leaves out when
+/// the user turned Claude Code's tool search off.
+pub const DEFERRED_TOOLS: &str = ", deferred: load them with ToolSearch, several at once (\"select:mcp__hoshi__<a>,mcp__hoshi__<b>\")";
 
 /// Something the message carries besides its text.
 #[derive(Debug, Clone, PartialEq, Eq)]

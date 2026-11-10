@@ -9,14 +9,15 @@ use crate::claude_requests::{self, Access, Grants, Requests};
 use crate::claude_resets;
 use crate::claude_subagents::{self, Subagents};
 use crate::claude_titles;
+use crate::claude_tool_search::{self, ToolSearch};
 use crate::claude_tools;
 use crate::claude_usage;
 use crate::claude_writing;
 use crate::process::{ProcessTurn, hide_console, spawn_turn};
 use crate::{
-    CommitMessage, CommitMessageRequest, GeneratedTitle, Installation, MCP_SERVER_NAME, McpServer,
-    OutputSink, ProviderAdapter, PullRequestText, PullRequestTextRequest, RunningTurn,
-    TitleRequest, TurnAttachment, TurnRequest, truncate,
+    CommitMessage, CommitMessageRequest, DEFERRED_TOOLS, GeneratedTitle, Installation,
+    MCP_SERVER_NAME, McpServer, OutputSink, ProviderAdapter, PullRequestText,
+    PullRequestTextRequest, RunningTurn, TitleRequest, TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
     AccessMode, BackgroundTask, BankedResetSpend, ContextUsage, Effort, ProviderAccountStatus,
@@ -152,7 +153,11 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         sink: OutputSink,
     ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
         let turn_model = turn_model(&request, self.model.as_deref());
-        let instructions = system_prompt(&request, self.model.as_deref());
+        let tool_search = match &request.mcp {
+            Some(_) => claude_tool_search::effective(Path::new(&request.cwd)),
+            None => ToolSearch::Deferred,
+        };
+        let instructions = system_prompt(&request, self.model.as_deref(), tool_search);
         let access = access(&request);
         let mut command = Command::new(self.binary());
         command
@@ -175,7 +180,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         if let Some(effort) = &turn_model.effort {
             command.args(["--effort", effort]);
         }
-        if let Some(settings) = session_settings(&turn_model) {
+        if let Some(settings) = session_settings(&turn_model, tool_search) {
             command.args(["--settings", &settings.to_string()]);
         }
         if let Some(instructions) = &instructions {
@@ -242,6 +247,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 cwd: request.cwd,
                 model: turn_model,
                 instructions,
+                tool_search,
                 mcp: request.mcp,
                 full_access: request.access_mode == AccessMode::FullAccess,
             },
@@ -261,16 +267,24 @@ fn turn_model(request: &TurnRequest, default_model: Option<&str>) -> TurnModel {
 
 /// What the turn adds to the agent's system prompt: hoshi's instructions, then how to choose
 /// the model and effort of subagents.
-fn system_prompt(request: &TurnRequest, default_model: Option<&str>) -> Option<String> {
+fn system_prompt(
+    request: &TurnRequest,
+    default_model: Option<&str>,
+    tool_search: ToolSearch,
+) -> Option<String> {
+    let own = request.instructions.as_ref().map(|own| match tool_search {
+        ToolSearch::Off => own.replacen(DEFERRED_TOOLS, "", 1),
+        _ => own.clone(),
+    });
     let subagents = claude_subagents::instructions(
         request.subagent_effort,
         request.model.as_deref().or(default_model),
         request.effort,
         request.mcp.is_some(),
     );
-    match (&request.instructions, subagents) {
+    match (own, subagents) {
         (Some(own), Some(subagents)) => Some(format!("{own}\n{subagents}")),
-        (own, subagents) => own.clone().or(subagents),
+        (own, subagents) => own.or(subagents),
     }
 }
 
@@ -371,6 +385,7 @@ struct Launch {
     model: TurnModel,
     /// Added to the system prompt.
     instructions: Option<String>,
+    tool_search: ToolSearch,
     mcp: Option<McpServer>,
     /// Allowed to bypass permissions, which a later turn can only switch to if so.
     full_access: bool,
@@ -397,7 +412,7 @@ fn next_turn(
         && request.resume_session_id.as_deref() == session
         && request.resume_session_at.is_none()
         && turn_model(request, default_model) == launch.model
-        && system_prompt(request, default_model) == launch.instructions
+        && system_prompt(request, default_model, launch.tool_search) == launch.instructions
         && request.mcp == launch.mcp
         && (access.mode != AccessMode::FullAccess || launch.full_access);
     if !fits || queue.closing || queue.turn_open {
@@ -591,12 +606,16 @@ fn mcp_servers(server: &McpServer) -> Value {
 }
 
 /// Ultracode runs through the `Workflow` tool, which `-p` would refuse
-/// without an allow rule since it never prompts.
-fn session_settings(model: &TurnModel) -> Option<Value> {
-    if !model.fast_mode && !model.ultracode {
+/// without an allow rule since it never prompts. A settings `env` beats the process's own.
+fn session_settings(model: &TurnModel, tool_search: ToolSearch) -> Option<Value> {
+    let defer = tool_search == ToolSearch::Auto;
+    if !model.fast_mode && !model.ultracode && !defer {
         return None;
     }
     let mut settings = json!({});
+    if defer {
+        settings["env"] = json!({ "ENABLE_TOOL_SEARCH": "true" });
+    }
     if model.fast_mode {
         settings["fastMode"] = json!(true);
     }
@@ -1719,14 +1738,14 @@ mod tests {
     #[test]
     fn the_agent_is_told_how_to_choose_its_subagents_only_when_it_decides() {
         let thread = request("/repo", "hi");
-        assert_eq!(system_prompt(&thread, None), None);
+        assert_eq!(system_prompt(&thread, None, ToolSearch::Deferred), None);
         let decides = TurnRequest {
             effort: Some(Effort::High),
             instructions: Some("hoshi's own".into()),
             subagent_effort: SubagentEffort::AgentDecides,
             ..request("/repo", "hi")
         };
-        let told = system_prompt(&decides, None).unwrap();
+        let told = system_prompt(&decides, None, ToolSearch::Deferred).unwrap();
         assert!(told.starts_with("hoshi's own\n"), "{told}");
         assert!(
             told.contains("Claude Opus 5.5 (claude-opus-5-5) at high effort"),
@@ -2155,6 +2174,7 @@ mod tests {
             cwd: cwd.into(),
             model: turn_model(&request(cwd, ""), None),
             instructions: None,
+            tool_search: ToolSearch::Deferred,
             mcp: None,
             full_access: false,
         }
@@ -2508,17 +2528,46 @@ mod tests {
 
     #[test]
     fn no_settings_are_passed_when_both_modes_are_off() {
-        assert_eq!(session_settings(&model(false, false)), None);
+        assert_eq!(
+            session_settings(&model(false, false), ToolSearch::Deferred),
+            None
+        );
+        assert_eq!(
+            session_settings(&model(false, false), ToolSearch::Off),
+            None
+        );
+    }
+
+    #[test]
+    fn tool_search_on_auto_is_forced_on_so_hoshi_s_tools_stay_deferred() {
+        assert_eq!(
+            session_settings(&model(true, false), ToolSearch::Auto),
+            Some(json!({ "env": { "ENABLE_TOOL_SEARCH": "true" }, "fastMode": true }))
+        );
+    }
+
+    #[test]
+    fn with_tool_search_off_the_instructions_don_t_say_to_load_tools() {
+        let own = format!("hoshi has tools{DEFERRED_TOOLS}. More.");
+        let thread = TurnRequest {
+            instructions: Some(own.clone()),
+            ..request("/repo", "hi")
+        };
+        assert_eq!(
+            system_prompt(&thread, None, ToolSearch::Off).as_deref(),
+            Some("hoshi has tools. More.")
+        );
+        assert_eq!(system_prompt(&thread, None, ToolSearch::Auto), Some(own));
     }
 
     #[test]
     fn fast_mode_and_ultracode_go_through_settings() {
         assert_eq!(
-            session_settings(&model(true, false)),
+            session_settings(&model(true, false), ToolSearch::Deferred),
             Some(json!({ "fastMode": true }))
         );
         assert_eq!(
-            session_settings(&model(false, true)),
+            session_settings(&model(false, true), ToolSearch::Deferred),
             Some(json!({ "ultracode": true, "permissions": { "allow": ["Workflow"] } }))
         );
     }
