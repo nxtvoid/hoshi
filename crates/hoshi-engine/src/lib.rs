@@ -160,9 +160,6 @@ struct State {
     /// Agent processes kept after their turn for the commands it left running in the
     /// background, by thread id.
     lingering: HashMap<String, Lingering>,
-    /// Delegated tasks whose turn ended with commands still running: their answer waits for
-    /// the turn those commands wake, or for the process to end.
-    held_answers: HashSet<String>,
     /// How many agent processes the engine started, which numbers each one.
     processes: u64,
     /// `None` when the provider is disabled.
@@ -240,6 +237,9 @@ struct QueuedMessage {
     id: String,
     text: String,
     attachments: Vec<MessageAttachment>,
+    /// The user sent it, so a running turn reads it at once. News hoshi brings, such as a
+    /// task's answer, waits for the agent to finish its step.
+    from_user: bool,
 }
 
 /// A thread whose pull request is due to be read.
@@ -443,7 +443,6 @@ impl Engine {
             store,
             turns: HashMap::new(),
             lingering: HashMap::new(),
-            held_answers: HashSet::new(),
             processes: 0,
             adapter: None,
             notify,
@@ -1400,9 +1399,10 @@ impl Engine {
         lock(&self.state).hand_back(thread_id, &TurnOutcome::Completed);
     }
 
-    /// Cancels a delegated task: it stops if it runs, and its answer never goes back.
+    /// The user cancels a delegated task: it stops if it runs, its answer never goes back,
+    /// and the thread that still waited for it hears it was stopped.
     pub fn cancel_task(&self, thread_id: &str) {
-        lock(&self.state).cancel_task(thread_id);
+        lock(&self.state).stop_task(thread_id);
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -1412,7 +1412,12 @@ impl Engine {
             projects: state.model.projects().cloned().collect(),
             threads: state.model.threads().cloned().collect(),
             pending_requests: state.model.all_pending_requests(),
-            pending_tasks: state.delegations.keys().cloned().collect(),
+            pending_tasks: state
+                .delegations
+                .keys()
+                .filter(|task| state.awaited(task))
+                .cloned()
+                .collect(),
             open_tool_calls: state.model.open_tool_calls().cloned().collect(),
             pull_requests: state
                 .pull_requests
@@ -1729,6 +1734,7 @@ impl Engine {
                 id: message_id.to_owned(),
                 text,
                 attachments,
+                from_user: true,
             },
         );
         let compacted = state.run_command(Command::MessageSend {
@@ -2700,7 +2706,11 @@ impl State {
                             thread_id,
                             content:
                                 ItemContent::UserMessage {
-                                    text, attachments, ..
+                                    text,
+                                    attachments,
+                                    task_result,
+                                    pull_request_update,
+                                    ..
                                 },
                             ..
                         },
@@ -2709,6 +2719,7 @@ impl State {
                         id: id.clone(),
                         text: text.clone(),
                         attachments: attachments.clone(),
+                        from_user: task_result.is_none() && pull_request_update.is_none(),
                     });
                     joining = Some(thread_id.clone());
                     if let Some((thread_id, provisional)) = titled.first() {
@@ -2867,10 +2878,10 @@ impl State {
     /// of its own when the turn is ending.
     fn join_turn(&mut self, thread_id: &str, message: QueuedMessage) {
         let attachments = self.turn_attachments(message.attachments.clone());
-        let joined = self
-            .turns
-            .get(thread_id)
-            .is_some_and(|turn| turn.running.steer(&message.id, &message.text, &attachments));
+        let joined = self.turns.get(thread_id).is_some_and(|turn| {
+            turn.running
+                .steer(&message.id, &message.text, &attachments, message.from_user)
+        });
         if joined {
             return;
         }
@@ -4001,7 +4012,13 @@ mod tests {
             let _ = self.stop.send(TurnOutcome::Completed);
         }
 
-        fn steer(&self, message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
+        fn steer(
+            &self,
+            message_id: &str,
+            _prompt: &str,
+            _attachments: &[TurnAttachment],
+            _at_once: bool,
+        ) -> bool {
             let Some(steers) = &self.steers else {
                 return false;
             };
@@ -4607,6 +4624,7 @@ mod tests {
                 id: "m1".into(),
                 text: "later".into(),
                 attachments: Vec::new(),
+                from_user: true,
             };
             state
                 .queued
@@ -5087,8 +5105,8 @@ Blue"
     }
 
     #[test]
-    fn a_task_that_leaves_a_command_running_answers_once_its_process_ends() {
-        let harness = Harness::in_memory("delegate-held", Vec::new());
+    fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
+        let harness = Harness::in_memory("delegate-woken", Vec::new());
         let adapter = adapter(None);
         harness.engine.set_adapter(Some(adapter.clone()));
         harness.send("t", "m1", "split the work");
@@ -5102,18 +5120,253 @@ Blue"
                 process: 99,
                 running: Box::new(KeptTurn(Arc::default())),
                 background: None,
+                owes_answer: true,
+                ended: false,
             },
         );
 
         child_turn_ends(&harness, &adapter, 1);
-        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
-        assert!(lock(&harness.engine.state).delegations.contains_key(&child));
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let first = adapter.requests.lock().unwrap()[2].prompt.clone();
+        assert!(first.starts_with("Delegated task"));
+        assert!(first.contains(delegation::ANSWERS_AGAIN));
+        assert!(harness.thread(&child).task_answered);
+        finish(&adapter, 2, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
 
-        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::ProcessEnded);
+        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::Woke);
+        assert!(!harness.thread(&child).task_answered);
+        assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+        let state = &harness.engine.state;
+        lock(state).receive_from(
+            &child,
+            99,
+            ProviderOutput::AssistantMessage {
+                item_id: "woken".into(),
+                text: "The minute is up.".into(),
+            },
+        );
+        lock(state).receive_from(
+            &child,
+            99,
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
         harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
         let requests = adapter.requests.lock().unwrap();
-        assert_eq!(requests.len(), 3);
-        assert!(requests[2].prompt.starts_with("Delegated task"));
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].prompt.contains("The minute is up."));
+        assert!(harness.thread(&child).task_answered);
+    }
+
+    /// Thread `t` delegated a task whose turn said `answer` and ended leaving a command
+    /// running in process 99, its answer owed to `t` when `owes_answer`.
+    fn task_left_a_command_running(
+        name: &str,
+        answer: &str,
+        owes_answer: bool,
+    ) -> (Harness, Arc<FakeAdapter>, String) {
+        let harness = Harness::in_memory(name, Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "wait a minute" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        let process = lock(&harness.engine.state).turns[&child].process;
+        lock(&harness.engine.state).receive_from(
+            &child,
+            process,
+            ProviderOutput::AssistantMessage {
+                item_id: "first".into(),
+                text: answer.into(),
+            },
+        );
+        lock(&harness.engine.state).lingering.insert(
+            child.clone(),
+            Lingering {
+                process: 99,
+                running: Box::new(KeptTurn(Arc::default())),
+                background: None,
+                owes_answer,
+                ended: false,
+            },
+        );
+        child_turn_ends(&harness, &adapter, 1);
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        finish(&adapter, 2, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        (harness, adapter, child)
+    }
+
+    fn woken_turn_ends(harness: &Harness, child: &str) {
+        let state = &harness.engine.state;
+        lock(state).receive_from(child, 99, ProviderOutput::Woke);
+        lock(state).receive_from(
+            child,
+            99,
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+        harness.wait_for_turn_end();
+        harness.thread("t");
+    }
+
+    #[test]
+    fn a_task_that_wakes_without_saying_anything_new_leaves_its_parent_alone() {
+        let (harness, adapter, child) =
+            task_left_a_command_running("delegate-woken-silent", "Started the wait.", true);
+
+        woken_turn_ends(&harness, &child);
+
+        assert_eq!(adapter.requests.lock().unwrap().len(), 3);
+        assert!(harness.thread(&child).task_answered);
+        assert!(lock(&harness.engine.state).delegations.is_empty());
+    }
+
+    #[test]
+    fn a_task_woken_by_what_the_user_left_running_doesnt_answer_its_parent() {
+        let (harness, adapter, child) =
+            task_left_a_command_running("delegate-woken-user", "Started the tests.", false);
+
+        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::Woke);
+
+        assert!(harness.thread(&child).task_answered);
+        assert!(lock(&harness.engine.state).delegations.is_empty());
+        assert_eq!(adapter.requests.lock().unwrap().len(), 3);
+    }
+
+    fn says(harness: &Harness, thread_id: &str, item_id: &str, text: &str) {
+        let process = lock(&harness.engine.state).turns[thread_id].process;
+        lock(&harness.engine.state).receive_from(
+            thread_id,
+            process,
+            ProviderOutput::AssistantMessage {
+                item_id: item_id.into(),
+                text: text.into(),
+            },
+        );
+    }
+
+    /// Thread `t` delegated a task, which delegated one of its own; `t`'s turn ended.
+    fn task_with_a_task_of_its_own(name: &str) -> (Harness, Arc<FakeAdapter>, String, String) {
+        let harness = Harness::in_memory(name, Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "delegate the wait" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        let own = lock(&harness.engine.state)
+            .call_tool(
+                &child,
+                "delegate_task",
+                &serde_json::json!({ "task": "wait" }),
+            )
+            .unwrap();
+        let grandchild = own["taskId"].as_str().unwrap().to_owned();
+        (harness, adapter, child, grandchild)
+    }
+
+    #[test]
+    fn a_task_waiting_on_a_task_of_its_own_says_so_and_answers_again() {
+        let (harness, adapter, child, grandchild) = task_with_a_task_of_its_own("delegate-nested");
+        let turn_started = |event: Event| matches!(event, Event::TurnStarted { .. }).then_some(());
+
+        says(&harness, &child, "first", "Started my task.");
+        child_turn_ends(&harness, &adapter, 1);
+        harness.wait_for(turn_started);
+        let first = adapter.requests.lock().unwrap()[3].prompt.clone();
+        assert!(first.contains("Started my task."));
+        assert!(first.contains(delegation::ANSWERS_AGAIN));
+        assert!(harness.thread(&child).task_answered);
+        finish(&adapter, 3, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+
+        says(&harness, &grandchild, "waited", "Waited.");
+        child_turn_ends(&harness, &adapter, 2);
+        harness.wait_for(turn_started);
+        assert!(!harness.thread(&child).task_answered);
+        assert!(
+            adapter.requests.lock().unwrap()[4]
+                .prompt
+                .contains("Waited.")
+        );
+
+        says(&harness, &child, "second", "My task said: Waited.");
+        child_turn_ends(&harness, &adapter, 4);
+        harness.wait_for(turn_started);
+        let last = adapter.requests.lock().unwrap()[5].prompt.clone();
+        assert!(last.contains("My task said: Waited."));
+        assert!(last.contains(delegation::ALL_ANSWERED));
+        assert!(harness.thread(&child).task_answered);
+    }
+
+    #[test]
+    fn cancelling_a_task_cancels_the_tasks_of_its_own() {
+        let (harness, adapter, child, grandchild) =
+            task_with_a_task_of_its_own("delegate-nested-cancel");
+        says(&harness, &child, "first", "Started my task.");
+        child_turn_ends(&harness, &adapter, 1);
+
+        assert!(lock(&harness.engine.state).cancel_task(&child));
+
+        assert!(harness.thread(&child).task_cancelled);
+        assert!(harness.thread(&grandchild).task_cancelled);
+        assert!(lock(&harness.engine.state).delegations.is_empty());
+    }
+
+    #[test]
+    fn a_task_a_restart_cut_short_is_awaited_again_only_once_it_runs() {
+        let harness = Harness::in_memory("delegate-restored", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "count the files" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+
+        let restored = lock(&harness.engine.state).pending_delegations();
+        lock(&harness.engine.state).delegations = restored;
+        assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+
+        lock(&harness.engine.state).turns.remove(&child);
+        assert!(harness.engine.snapshot().pending_tasks.is_empty());
+        assert!(lock(&harness.engine.state).delegations.contains_key(&child));
+    }
+
+    #[test]
+    fn cancelling_a_task_that_answered_stops_the_commands_it_left_running() {
+        let harness = Harness::in_memory("delegate-cancel-kept", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "wait a minute" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        let process = Arc::new(KeptProcess::default());
+        lock(&harness.engine.state).lingering.insert(
+            child.clone(),
+            Lingering {
+                process: 99,
+                running: Box::new(KeptTurn(process.clone())),
+                background: None,
+                owes_answer: true,
+                ended: false,
+            },
+        );
+        child_turn_ends(&harness, &adapter, 1);
+
+        assert!(lock(&harness.engine.state).cancel_task(&child));
+
+        assert!(*process.closed.lock().unwrap());
+        assert!(!lock(&harness.engine.state).lingering.contains_key(&child));
+        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::Woke);
+        assert!(harness.thread(&child).task_answered);
+        assert!(harness.thread(&child).task_cancelled);
     }
 
     #[test]
@@ -5155,12 +5408,17 @@ Blue"
         let child = planning_task(&harness, &adapter);
 
         harness.engine.cancel_task(&child);
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let told = adapter.requests.lock().unwrap()[2].prompt.clone();
+        assert!(told.contains("[stopped]") && told.contains(delegation::STOPPED_BY_USER));
+        assert!(told.contains(delegation::ALL_ANSWERED));
+
         harness.send(&child, "m5", "one more thing");
-        child_turn_ends(&harness, &adapter, 2);
+        child_turn_ends(&harness, &adapter, 3);
 
         assert!(harness.thread(&child).task_cancelled);
         assert!(harness.engine.snapshot().pending_tasks.is_empty());
-        assert_eq!(adapter.requests.lock().unwrap().len(), 3);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 4);
     }
 
     #[test]

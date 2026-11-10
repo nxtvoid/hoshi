@@ -23,9 +23,9 @@ export function BackgroundWork({ status }: { status: ReactNode }) {
   const stopping = useStoppingStore((state) =>
     threadId ? threadId in state.since : false
   )
-  if (!background || stopping) return status ? <li>{status}</li> : null
+  if (!background || stopping) return status ? <div>{status}</div> : null
   return (
-    <li className='flex flex-col gap-2'>
+    <div className='flex flex-col gap-2'>
       {background.waiting ? null : status}
       {background.tasks.map((task) => (
         <BackgroundTaskLine
@@ -34,7 +34,7 @@ export function BackgroundWork({ status }: { status: ReactNode }) {
           waiting={background.waiting}
         />
       ))}
-    </li>
+    </div>
   )
 }
 

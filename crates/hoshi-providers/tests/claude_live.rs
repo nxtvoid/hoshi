@@ -72,6 +72,54 @@ fn a_real_turn_streams_a_reply_and_resumes_its_session() {
 }
 
 #[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_message_sent_as_the_turn_starts_doesnt_take_the_place_of_its_prompt() {
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let (sender, receiver) = mpsc::channel();
+    let request = TurnRequest {
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        prompt: "The first word is ALPHA. Wait for the second word.".into(),
+        attachments: Vec::new(),
+        resume_session_id: None,
+        resume_session_at: None,
+        model: None,
+        effort: Some(hoshi_core::Effort::Low),
+        fast_mode: false,
+        ultracode: false,
+        access_mode: hoshi_core::AccessMode::AcceptEdits,
+        plan_mode: false,
+        mcp: None,
+        instructions: None,
+        subagent_effort: SubagentEffort::Thread,
+    };
+    let sink = Box::new(move |output| {
+        let _ = sender.send(output);
+    });
+    let turn = adapter.start_turn(request, sink).unwrap();
+
+    let mut said = String::new();
+    let mut sent = false;
+    loop {
+        match receiver.recv_timeout(std::time::Duration::from_secs(90)) {
+            Ok(ProviderOutput::SessionStarted { .. }) if !sent => {
+                sent = true;
+                assert!(turn.steer(
+                    "7c1e4a2b-3d5f-4a6b-8c9d-0e1f2a3b4c5d",
+                    "The second word is BETA. Reply with both words I gave you, and nothing else.",
+                    &[],
+                    true
+                ));
+            }
+            Ok(ProviderOutput::AssistantMessage { text, .. }) => said.push_str(&text),
+            Ok(ProviderOutput::TurnCompleted { .. }) => break,
+            Ok(_) => {}
+            Err(_) => panic!("the turn never ended; it said: {said}"),
+        }
+    }
+    assert!(said.contains("ALPHA") && said.contains("BETA"), "{said}");
+}
+
+#[test]
 #[ignore = "runs the real Claude Code CLI"]
 fn the_cli_reports_the_plan_limits() {
     let adapter = ClaudeCodeAdapter::new(None, None);
@@ -583,7 +631,8 @@ fn a_message_sent_mid_turn_reaches_the_agent() {
         assert!(turn.steer(
             "5b8f3c2e-1d4a-4e6b-9f70-2a1c3d4e5f60",
             "Also: end your reply with the word BANANA.",
-            &[]
+            &[],
+            true
         ));
     });
 
@@ -670,7 +719,8 @@ fn a_message_is_answered_at_once_while_a_subagent_keeps_working() {
                 assert!(turn.steer(
                     "7c9e6679-7425-40de-944b-e07fc1f90ae7",
                     "Now just say HOLA.",
-                    &[]
+                    &[],
+                    true
                 ));
                 steered = true;
             }
@@ -973,7 +1023,8 @@ fn a_message_sent_while_a_background_command_runs_joins_the_turn() {
                 assert!(turn.steer(
                     "0f8d6a3c-2b1e-4c5d-9e7f-1a2b3c4d5e6f",
                     "While it runs, just say HOLA.",
-                    &[]
+                    &[],
+                    true
                 ));
                 steered = true;
             }
@@ -1083,7 +1134,12 @@ fn a_background_command_of_a_background_subagent_never_leaves_the_turn_waiting()
         std::time::Duration::from_secs(150),
         |output, turn| {
             if matches!(output, ProviderOutput::RunEnded { .. }) && !asked {
-                asked = turn.steer("2d7c4b1a-9e3f-4a6b-8c5d-0f1e2a3b4c5d", "how are you?", &[]);
+                asked = turn.steer(
+                    "2d7c4b1a-9e3f-4a6b-8c5d-0f1e2a3b4c5d",
+                    "how are you?",
+                    &[],
+                    true,
+                );
             }
         },
     );

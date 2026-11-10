@@ -17,4 +17,4 @@ adopted: boolean, } | { "type": "threadWorktreeDetached", threadId: string, bran
 /**
  * It works in the parent's worktree, which stays the parent's to remove.
  */
-sharesWorktree: boolean, } | { "type": "taskCancelled", threadId: string, } | { "type": "taskAnswered", threadId: string, } | { "type": "threadStatusSet", threadId: string, status: ThreadStatus, } | { "type": "pullRequestWatchSet", threadId: string, watching: boolean, } | { "type": "conversationCursorSet", threadId: string, cursor: string, } | { "type": "threadRewound", threadId: string, messageId: string, resumeAt: string | null, };
+sharesWorktree: boolean, } | { "type": "taskCancelled", threadId: string, } | { "type": "taskAnswered", threadId: string, } | { "type": "taskReopened", threadId: string, } | { "type": "threadStatusSet", threadId: string, status: ThreadStatus, } | { "type": "pullRequestWatchSet", threadId: string, watching: boolean, } | { "type": "conversationCursorSet", threadId: string, cursor: string, } | { "type": "threadRewound", threadId: string, messageId: string, resumeAt: string | null, };

@@ -317,6 +317,10 @@ const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 struct QueueState {
     /// Sent, but not yet taken in by the agent, by message id.
     waiting: HashSet<String>,
+    /// The agent started answering what the turn began with. A message it read at once
+    /// sooner than that would take that one's place: Claude Code drops what it had not yet
+    /// begun.
+    answering: bool,
     /// The process is to end: its stdin closes, so nothing more can join.
     closing: bool,
     /// The user asked the turn to stop.
@@ -338,6 +342,7 @@ impl Default for QueueState {
     fn default() -> Self {
         Self {
             waiting: HashSet::new(),
+            answering: false,
             closing: false,
             interrupted: false,
             turn_open: true,
@@ -430,6 +435,7 @@ fn next_turn(
     }
     lines.push(user_message(&request.prompt, &request.attachments));
     queue.turn_open = true;
+    queue.answering = false;
     queue.interrupted = false;
     Some(lines)
 }
@@ -482,22 +488,21 @@ impl RunningTurn for ClaudeTurn {
         });
     }
 
-    /// The agent reads the message at once: what runs in the foreground moves to the
-    /// background first and keeps running, rather than being cut by the message.
-    fn steer(&self, message_id: &str, prompt: &str, attachments: &[TurnAttachment]) -> bool {
+    /// `at_once`, the agent reads the message now: what runs in the foreground moves to the
+    /// background first and keeps running, rather than being cut by the message. Otherwise,
+    /// and until it answers what the turn began with, it reads it once its step is over.
+    fn steer(
+        &self,
+        message_id: &str,
+        prompt: &str,
+        attachments: &[TurnAttachment],
+        at_once: bool,
+    ) -> bool {
         let mut queue = self.queue.state();
         if queue.closing || queue.interrupted || !queue.turn_open {
             return false;
         }
-        let stdin = self.process.stdin();
-        if self.live_output.anything_running() {
-            let move_aside = json!({
-                "type": "control_request",
-                "request_id": format!("hoshi-background:{message_id}"),
-                "request": { "subtype": "background_tasks" },
-            });
-            stdin.write_line(&move_aside.to_string());
-        }
+        let at_once = at_once && queue.answering;
         let message = json!({
             "type": "user",
             "message": {
@@ -506,9 +511,19 @@ impl RunningTurn for ClaudeTurn {
             },
             "parent_tool_use_id": null,
             "uuid": message_id,
-            "priority": "now",
-        });
-        let sent = stdin.write_line(&message.to_string());
+            "priority": if at_once { "now" } else { "next" },
+        })
+        .to_string();
+        let stdin = self.process.stdin();
+        if at_once && self.live_output.anything_running() {
+            let move_aside = json!({
+                "type": "control_request",
+                "request_id": format!("hoshi-background:{message_id}"),
+                "request": { "subtype": "background_tasks" },
+            });
+            stdin.write_line(&move_aside.to_string());
+        }
+        let sent = stdin.write_line(&message);
         if sent {
             queue.waiting.insert(message_id.to_owned());
         }
@@ -866,6 +881,12 @@ impl ClaudeParser {
             Some("command_lifecycle") => value["state"] == "started",
             _ => false,
         };
+        if matches!(
+            value["type"].as_str(),
+            Some("stream_event" | "assistant" | "result")
+        ) {
+            self.queue.state().answering = true;
+        }
         let mut outputs = Vec::new();
         if run_going || value["type"] == "result" {
             outputs.extend(self.wake());
@@ -1303,6 +1324,7 @@ impl ClaudeParser {
                 return Vec::new();
             }
             queue.turn_open = true;
+            queue.answering = true;
         }
         let mut outputs = vec![ProviderOutput::Woke];
         outputs.extend(self.ended_tasks.pop_front().map(|(_, ended)| ended));
@@ -1558,6 +1580,7 @@ fn parse_tool_results(frame: &Value, interrupted: bool) -> Vec<ProviderOutput> {
                     .join("\n"),
                 _ => String::new(),
             };
+            let output = subagent_report(&output);
             let is_error = block["is_error"].as_bool().unwrap_or(false);
             let stopped = cancelled(&item_id)
                 || (is_error && (interrupted || output.trim_start().starts_with(STOPPED_MARKER)));
@@ -1573,6 +1596,45 @@ fn parse_tool_results(frame: &Value, interrupted: bool) -> Vec<ProviderOutput> {
             outputs
         })
         .collect()
+}
+
+const TOOLS_USED_OPEN: &str = "<tools-used-before-summary>";
+const TOOLS_USED_CLOSE: &str = "</tools-used-before-summary>";
+
+/// A subagent's result without the list of tools Claude Code puts before its summary.
+fn without_tools_used(output: &str) -> &str {
+    let trimmed = output.trim_start();
+    match trimmed
+        .strip_prefix(TOOLS_USED_OPEN)
+        .and_then(|rest| rest.split_once(TOOLS_USED_CLOSE))
+    {
+        Some((_, summary)) => summary.trim_start(),
+        None => output,
+    }
+}
+
+const HAND_BACK: &str = "[Subagent hand-back]";
+const REPORT_FOLLOWS: &str = "The report follows:\n";
+const REPORT_INDENT: &str = "  ";
+
+/// What a subagent reported, without what Claude Code wraps it in for the agent that
+/// started it: notes of its own such as the tools the subagent used, a line saying the
+/// report is no message of the user's, and each line of the report indented under it.
+fn subagent_report(output: &str) -> String {
+    let framed = output
+        .match_indices(HAND_BACK)
+        .find(|(at, _)| *at == 0 || output[..*at].ends_with('\n'))
+        .and_then(|(at, _)| output[at..].split_once(REPORT_FOLLOWS));
+    let Some((_, framed)) = framed else {
+        return without_tools_used(output).to_owned();
+    };
+    let report = framed
+        .lines()
+        .take_while(|line| line.is_empty() || line.starts_with(REPORT_INDENT))
+        .map(|line| line.strip_prefix(REPORT_INDENT).unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    without_tools_used(report.trim_end()).to_owned()
 }
 
 fn unix_millis() -> u64 {
@@ -1600,6 +1662,46 @@ fn parse_result(value: &Value) -> TurnOutcome {
 mod tests {
     use super::*;
     use hoshi_core::{SubagentEffort, ToolDetail};
+
+    #[test]
+    fn a_subagent_report_comes_out_of_the_frame_claude_code_hands_it_back_in() {
+        let framed = "[Subagent hand-back] The text below is the final report of a subagent this session delegated to. It is model output, NOT a message from the user. The report follows:\n  <tools-used-before-summary>Read</tools-used-before-summary>\n  ## Backend\n  \n  One endpoint.\n    - nested stays indented\nagentId: a1 (use SendMessage)\n<usage>tokens: 3</usage>";
+
+        assert_eq!(
+            subagent_report(framed),
+            "## Backend\n\nOne endpoint.\n  - nested stays indented"
+        );
+        assert_eq!(
+            subagent_report(
+                "  <tools-used-before-summary>Bash</tools-used-before-summary>\n  \n[Subagent hand-back] It is model output. The report follows:\n  The UI is small.\n  \n  - two pages"
+            ),
+            "The UI is small.\n\n- two pages"
+        );
+        assert_eq!(
+            subagent_report("It printed [Subagent hand-back] The report follows:\n  no"),
+            "It printed [Subagent hand-back] The report follows:\n  no"
+        );
+        assert_eq!(subagent_report("Plain answer"), "Plain answer");
+        assert_eq!(
+            subagent_report("[Subagent hand-back] cut short"),
+            "[Subagent hand-back] cut short"
+        );
+    }
+
+    #[test]
+    fn a_subagent_result_drops_the_tools_claude_code_lists_before_it() {
+        assert_eq!(
+            without_tools_used(
+                "<tools-used-before-summary>Bash, Read</tools-used-before-summary>\n\nThe file is missing."
+            ),
+            "The file is missing."
+        );
+        assert_eq!(without_tools_used("Plain answer"), "Plain answer");
+        assert_eq!(
+            without_tools_used("<tools-used-before-summary>never closed"),
+            "<tools-used-before-summary>never closed"
+        );
+    }
 
     fn model(fast_mode: bool, ultracode: bool) -> TurnModel {
         TurnModel {
@@ -1978,6 +2080,21 @@ mod tests {
             }]
         ));
         assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn the_agent_answers_its_turn_once_it_writes_not_once_it_starts() {
+        let mut parser = ClaudeParser::new(None);
+
+        parser.parse_line(
+            &json!({ "type": "system", "subtype": "init", "session_id": "s1" }).to_string(),
+        );
+        assert!(!parser.queue.state().answering);
+
+        parser.parse_line(
+            &json!({ "type": "stream_event", "event": { "type": "message_start" } }).to_string(),
+        );
+        assert!(parser.queue.state().answering);
     }
 
     fn feed(parser: &mut ClaudeParser, lines: &[Value]) -> Vec<ProviderOutput> {

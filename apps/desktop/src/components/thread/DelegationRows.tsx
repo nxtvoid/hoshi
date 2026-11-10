@@ -1,26 +1,23 @@
 import { useNow } from './use-now'
 import { m } from '@/paraglide/messages'
-import { AGENT_DOT } from './ThreadAgents'
 import { modelRun } from '@/lib/model-runs'
 import { WorkLine } from './BackgroundWork'
 import { confirm } from '@/state/dialog-store'
-import { getLocale } from '@/paraglide/runtime'
-import { ModelRunLabel } from './ModelRunLabel'
+import { AgentLine, AgentStatus } from './AgentLine'
 import { useAppStore } from '@/state/app-store'
-import type { Thread } from '@/bindings/Thread'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useEffect, useRef, useState } from 'react'
 import { Button } from '@hoshi/ui/components/button'
 import { useModelsStore } from '@/state/models-store'
 import { useRequestStore } from '@/state/request-store'
+import { useBusyThreads } from './use-busy-threads'
 import { useWholeToolCall } from './use-whole-tool-call'
 import { Markdown } from '@/components/markdown/Markdown'
-import { ClaudeIcon } from '@/components/brand/ProviderIcon'
 import { IconButton } from '@hoshi/ui/components/icon-button'
-import { cn, formatClockTime, formatElapsed } from '@hoshi/utils'
+import { cn, formatElapsed } from '@hoshi/utils'
 import {
   delegationOf,
-  reasoningPreview,
+  type TaskOutcome,
   type ToolCallItem
 } from '@/lib/tool-calls'
 import {
@@ -33,13 +30,11 @@ import {
 } from '@/lib/agents'
 import {
   Alert02Icon,
-  ArrowRight01Icon,
   CancelCircleIcon,
-  CheckmarkCircle02Icon,
   GitForkIcon,
-  Loading03Icon,
   PencilEdit01Icon,
   SentIcon,
+  Tick02Icon,
   UserQuestion01Icon
 } from '@hugeicons/core-free-icons'
 
@@ -51,164 +46,78 @@ function useThread(threadId: string | null) {
   )
 }
 
-function OpenButton({ threadId }: { threadId: string }) {
-  const selectThread = useAppStore((state) => state.selectThread)
-  return (
-    <Button
-      size='xs'
-      variant='ghost'
-      className='shrink-0'
-      onClick={() => selectThread(threadId)}
-    >
-      {m.delegation_open()}
-      <HugeiconsIcon icon={ArrowRight01Icon} strokeWidth={2} />
-    </Button>
-  )
-}
-
-/** The agent a task runs on, with a dot for how it stands. */
-function TaskAvatar({ state }: { state: AgentState | null }) {
-  return (
-    <span
-      aria-hidden
-      className='border-border/70 bg-muted relative inline-flex size-6 shrink-0 items-center justify-center rounded-full border'
-    >
-      <ClaudeIcon className='text-provider-claude size-3.5' />
-      {state ? (
-        <span
-          className={cn(
-            'ring-background absolute -right-px -bottom-px size-2 rounded-full ring-2',
-            AGENT_DOT[state],
-            state === 'running' && 'animate-pulse'
-          )}
-        />
-      ) : null}
-    </span>
-  )
-}
-
-const STATUS_ICONS = {
-  running: { icon: Loading03Icon, tone: 'animate-spin' },
-  waiting: { icon: UserQuestion01Icon, tone: 'text-status-waiting' },
-  done: { icon: CheckmarkCircle02Icon, tone: '' },
-  stopped: { icon: CancelCircleIcon, tone: '' },
-  failed: { icon: Alert02Icon, tone: 'text-destructive' }
-} as const
-
-function statusLabel(
-  state: AgentState,
-  child: Thread | undefined,
-  now: number
-) {
-  if (!child) return m.tool_failed()
-  const time = taskTime(child, state, now)
-  if (time.kind === 'elapsed') {
-    const elapsed = formatElapsed(time.milliseconds)
-    return state === 'waiting'
-      ? m.delegation_waiting_for({ elapsed })
-      : m.delegation_running_for({ elapsed })
-  }
-  const clock = formatClockTime(time.at, getLocale())
-  return state === 'stopped'
-    ? m.delegation_stopped_at({ time: clock })
-    : state === 'failed'
-      ? m.delegation_failed_at({ time: clock })
-      : m.delegation_finished_at({ time: clock })
-}
-
-/** How the task's thread is doing: how long it has run, or when it ended. */
-function TaskStatus({
-  state,
-  child
-}: {
-  state: AgentState
-  child: Thread | undefined
-}) {
-  const now = useNow(state === 'running' || state === 'waiting')
-  const { icon, tone } = STATUS_ICONS[state]
-  return (
-    <span className='text-muted-foreground flex shrink-0 items-center gap-1 text-xs tabular-nums'>
-      <HugeiconsIcon
-        icon={icon}
-        strokeWidth={2}
-        className={cn('size-3.5', tone)}
-      />
-      {statusLabel(state, child, now)}
-    </span>
-  )
-}
-
-const CARD =
-  'border-border/70 flex w-full items-center gap-2.5 rounded-xl border px-3 py-2 text-left text-sm transition-colors'
-
 /**
  * A task the agent delegated to a child thread, with how the child is doing and what it
  * said last. It opens the child.
  */
-export function DelegationRow({ item }: { item: ToolCallItem }) {
+export function DelegationRow({
+  item,
+  grouped = false
+}: {
+  item: ToolCallItem
+  /** Inside a group's card, which draws the border. */
+  grouped?: boolean
+}) {
   const whole = useWholeToolCall(item, true)
   const { title, taskId, error } = delegationOf(whole)
   const child = useThread(taskId)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const busy = useBusyThreads()
   const preview = useRequestStore((state) =>
     taskId ? state.taskPreviews[taskId] : undefined
   )
   const selectThread = useAppStore((state) => state.selectThread)
+  const cancelTask = useRequestStore((state) => state.cancelTask)
+  const [stopping, setStopping] = useState(false)
   const planning = child ? isPlanningWithUser(child, pendingTasks) : false
   const catalog = useModelsStore((state) => state.catalog)
   const run = child ? modelRun(catalog, child.model, child.effort) : null
   const state: AgentState | null = child
-    ? taskState(child, pendingTasks)
+    ? taskState(child, pendingTasks, busy)
     : error
       ? 'failed'
       : null
   const name = child?.title ?? title
   const detail = error ?? (preview ? plainPreview(preview) : '')
-  const body = (
-    <>
-      <TaskAvatar state={state} />
-      <span className='flex min-w-0 flex-1 flex-col'>
-        <span className='text-foreground truncate font-medium'>{name}</span>
-        <span
-          className={cn(
-            'truncate text-xs',
-            error ? 'text-destructive' : 'text-muted-foreground'
-          )}
-        >
-          {detail || m.delegation_task()}
-        </span>
-      </span>
-      <ModelRunLabel run={run} />
-      {planning || !state ? null : <TaskStatus state={state} child={child} />}
-      {child ? (
-        <HugeiconsIcon
-          icon={ArrowRight01Icon}
-          strokeWidth={2}
-          className='text-muted-foreground/60 group-hover/task:text-foreground size-3.5 shrink-0 transition-colors'
-        />
-      ) : null}
-    </>
-  )
-  const card = child ? (
-    <button
-      type='button'
-      aria-label={m.delegation_open_task({ task: name })}
-      onClick={() => selectThread(child.id)}
+  const line = (
+    <AgentLine
+      grouped={grouped}
+      state={state}
+      title={name}
+      detail={detail || m.delegation_task()}
+      failed={error !== null}
+      tag={m.agent_own_thread()}
+      run={run}
+      status={
+        planning || !state ? null : (
+          <AgentStatus
+            state={state}
+            startedAt={child?.createdAt ?? item.createdAt}
+            endedAt={child?.updatedAt ?? null}
+          />
+        )
+      }
+      label={m.delegation_open_task({ task: name })}
+      onOpen={child ? () => selectThread(child.id) : undefined}
+      onStop={
+        child && state === 'running'
+          ? () => {
+              setStopping(true)
+              void cancelTask(child.id)
+            }
+          : undefined
+      }
+      stopping={stopping}
       className={cn(
-        CARD,
-        'group/task hover:bg-foreground/5 focus-visible:ring-ring cursor-pointer outline-none focus-visible:ring-2',
-        planning && 'bg-background relative'
+        planning && 'bg-background relative',
+        planning && grouped && 'rounded-lg'
       )}
-    >
-      {body}
-    </button>
-  ) : (
-    <div className={CARD}>{body}</div>
+    />
   )
-  if (!child || !planning) return card
+  if (!child || !planning) return line
   return (
     <div>
-      {card}
+      {line}
       <PlanningTray threadId={child.id} />
     </div>
   )
@@ -220,18 +129,19 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
  */
 export function TaskWaits({ threadId }: { threadId: string }) {
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const busy = useBusyThreads()
   const ids = useAppStore((state) =>
-    runningTasks(threadId, state.threads, pendingTasks)
+    runningTasks(threadId, state.threads, pendingTasks, busy)
       .map((thread) => thread.id)
       .join(' ')
   )
   if (!ids) return null
   return (
-    <li className='flex flex-col gap-2'>
+    <div className='flex flex-col gap-2'>
       {ids.split(' ').map((id) => (
         <TaskWaitLine key={id} threadId={id} />
       ))}
-    </li>
+    </div>
   )
 }
 
@@ -350,66 +260,38 @@ function PlanningTray({ threadId }: { threadId: string }) {
   )
 }
 
-/**
- * A delegated task's answer, which hoshi handed back to the thread. It starts folded: the
- * agent's reply that follows usually tells the same.
- */
-export function TaskResultRow({
+const NOTE_ICONS: Record<
+  TaskOutcome,
+  { icon: typeof Tick02Icon; tone: string }
+> = {
+  completed: { icon: Tick02Icon, tone: 'text-status-done' },
+  failed: { icon: Alert02Icon, tone: 'text-destructive' },
+  stopped: { icon: CancelCircleIcon, tone: 'text-muted-foreground' }
+}
+
+/** The agent's reply to a task's answer, while the work on its tasks goes on. */
+export function TaskNote({
   text,
-  childThreadId
+  outcome,
+  streaming
 }: {
   text: string
-  childThreadId: string
+  outcome: TaskOutcome
+  streaming: boolean
 }) {
-  const child = useThread(childThreadId)
-  const [open, setOpen] = useState(false)
-  const answer = text.slice(text.indexOf('\n') + 1).trim()
+  const { icon, tone } = NOTE_ICONS[outcome]
   return (
-    <div
-      className={cn(
-        'border-border/70 flex flex-col gap-2 rounded-xl border px-3 py-2',
-        open && answer && 'pb-3'
-      )}
-    >
-      <div className='flex items-center gap-2.5 text-sm'>
-        <button
-          type='button'
-          aria-expanded={open}
-          disabled={!answer}
-          onClick={() => setOpen((value) => !value)}
-          className='focus-visible:ring-ring flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md text-left outline-none focus-visible:ring-2'
-        >
-          <HugeiconsIcon
-            icon={GitForkIcon}
-            strokeWidth={2}
-            className='text-muted-foreground size-4 shrink-0'
-          />
-          <span className='text-foreground shrink-0 font-medium'>
-            {m.task_result_from({ task: child?.title ?? '' })}
-          </span>
-          {open ? null : (
-            <span className='text-muted-foreground min-w-0 flex-1 truncate'>
-              {reasoningPreview(answer, false)}
-            </span>
-          )}
-          {answer ? (
-            <HugeiconsIcon
-              icon={ArrowRight01Icon}
-              strokeWidth={2}
-              className={cn(
-                'text-muted-foreground ms-auto size-3.5 shrink-0 transition-transform',
-                open && 'rotate-90'
-              )}
-            />
-          ) : null}
-        </button>
-        {child ? <OpenButton threadId={child.id} /> : null}
-      </div>
-      {open && answer ? (
-        <div className='bg-muted/40 max-h-60 overflow-auto rounded-md px-3 py-2'>
-          <Markdown text={answer} className='text-sm' />
-        </div>
-      ) : null}
+    <div className='flex items-start gap-2'>
+      <HugeiconsIcon
+        icon={icon}
+        strokeWidth={2}
+        className={cn('mt-1 size-3.5 shrink-0', tone)}
+      />
+      <Markdown
+        text={text}
+        streaming={streaming}
+        className='text-muted-foreground min-w-0 flex-1 text-sm'
+      />
     </div>
   )
 }

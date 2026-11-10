@@ -1131,6 +1131,13 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 [thread_id],
             )?;
         }
+        Event::TaskReopened { thread_id } => {
+            execute(
+                tx,
+                "UPDATE threads SET task_answered = 0 WHERE id = ?1",
+                [thread_id],
+            )?;
+        }
         Event::ThreadStatusSet { thread_id, status } => {
             execute(
                 tx,

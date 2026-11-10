@@ -1,0 +1,706 @@
+{
+  "name": "two-tasks-that-answer-together",
+  "prompt": "Delegate 2 tasks in parallel with delegate_task, both on the same model and effort: one answers with exactly the word ALPHA, the other with exactly the word BETA. When both have answered, tell me both words.",
+  "steps": [
+    {
+      "at": 6,
+      "event": {
+        "event": {
+          "project": {
+            "createdAt": "2026-11-10T17:12:46.817Z",
+            "id": "p",
+            "title": "Project",
+            "updatedAt": "2026-11-10T17:12:46.817Z",
+            "workspaceRoot": "C:/work\\project",
+            "worktreeSetup": null
+          },
+          "type": "projectCreated"
+        },
+        "sequence": 1
+      }
+    },
+    {
+      "at": 6,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:12:46.817Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "t",
+            "model": null,
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Parent",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:12:46.817Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 2
+      }
+    },
+    {
+      "at": 6,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Delegate 2 tasks in parallel with delegate_task, both on the same model and effort: one answers with exactly the word ALPHA, the other with exactly the word BETA. When both have answered, tell me both words."
+            },
+            "createdAt": "2026-11-10T17:12:46.818Z",
+            "id": "00000001-1111-4111-8111-111111111111",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 3
+      }
+    },
+    {
+      "at": 6,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:46.818Z",
+          "threadId": "t",
+          "turnId": "00000001-1111-4111-8111-111111111111",
+          "type": "turnStarted"
+        },
+        "sequence": 4
+      }
+    },
+    {
+      "at": 2186,
+      "event": {
+        "event": {
+          "sessionId": "6f7807a9-6ee8-47a1-90dc-dfba4c348355",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 5
+      }
+    },
+    {
+      "at": 3475,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"max_results\":1,\"query\":\"select:mcp__hoshi__delegate_task\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "ToolSearch",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:12:50.287Z",
+            "id": "toolu_018NKWWN5GD2NMrQp26X98ym",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 6
+      }
+    },
+    {
+      "at": 3483,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_018NKWWN5GD2NMrQp26X98ym",
+          "output": "",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 7
+      }
+    },
+    {
+      "at": 4998,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"effort\":\"low\",\"model\":\"claude-sonnet-5-5\",\"task\":\"Answer with exactly the word ALPHA and nothing else.\",\"title\":\"Alpha\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "mcp__hoshi__delegate_task",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:12:51.810Z",
+            "id": "toolu_01EYrnhNeW5HvKns8yZiT5Rk",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 8
+      }
+    },
+    {
+      "at": 5003,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:12:51.815Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+            "model": "claude-sonnet-5-5",
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Alpha",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:12:51.815Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 9
+      }
+    },
+    {
+      "at": 5003,
+      "event": {
+        "event": {
+          "parentThreadId": "t",
+          "sharesWorktree": false,
+          "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+          "type": "threadDelegated"
+        },
+        "sequence": 10
+      }
+    },
+    {
+      "at": 5004,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Answer with exactly the word ALPHA and nothing else."
+            },
+            "createdAt": "2026-11-10T17:12:51.815Z",
+            "id": "42e07483-3bd8-47e5-9462-eec8cfa79805",
+            "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 11
+      }
+    },
+    {
+      "at": 5004,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:51.815Z",
+          "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+          "turnId": "42e07483-3bd8-47e5-9462-eec8cfa79805",
+          "type": "turnStarted"
+        },
+        "sequence": 12
+      }
+    },
+    {
+      "at": 5056,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_01EYrnhNeW5HvKns8yZiT5Rk",
+          "output": "{\"next\":\"Its answer arrives here as a message, so end your turn. Don't wait on it or poll it.\",\"status\":\"running\",\"taskId\":\"5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6\"}",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 13
+      }
+    },
+    {
+      "at": 5528,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"effort\":\"low\",\"model\":\"claude-sonnet-5-5\",\"task\":\"Answer with exactly the word BETA and nothing else.\",\"title\":\"Beta\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "mcp__hoshi__delegate_task",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:12:52.339Z",
+            "id": "toolu_01YEk4fNZ6Afx6N1kZhNefeq",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 14
+      }
+    },
+    {
+      "at": 5532,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:12:52.344Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+            "model": "claude-sonnet-5-5",
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Beta",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:12:52.344Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 15
+      }
+    },
+    {
+      "at": 5532,
+      "event": {
+        "event": {
+          "parentThreadId": "t",
+          "sharesWorktree": false,
+          "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+          "type": "threadDelegated"
+        },
+        "sequence": 16
+      }
+    },
+    {
+      "at": 5532,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Answer with exactly the word BETA and nothing else."
+            },
+            "createdAt": "2026-11-10T17:12:52.344Z",
+            "id": "7e076497-7a2a-4a3c-861f-3a6cbe35e686",
+            "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 17
+      }
+    },
+    {
+      "at": 5532,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:52.344Z",
+          "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+          "turnId": "7e076497-7a2a-4a3c-861f-3a6cbe35e686",
+          "type": "turnStarted"
+        },
+        "sequence": 18
+      }
+    },
+    {
+      "at": 5589,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_01YEk4fNZ6Afx6N1kZhNefeq",
+          "output": "{\"next\":\"Its answer arrives here as a message, so end your turn. Don't wait on it or poll it.\",\"status\":\"running\",\"taskId\":\"0aa4531f-3652-4a94-8319-d7d4c1ed57ff\"}",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 19
+      }
+    },
+    {
+      "at": 6819,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "I started both tasks, one to answer ALPHA and one to answer BETA, on Sonnet 5.5 at low effort. Neither has answered yet. I'll give you both words once their answers arrive."
+            },
+            "createdAt": "2026-11-10T17:12:53.631Z",
+            "id": "msg_011Cgud12Js9evT3TYqCzrix:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 20
+      }
+    },
+    {
+      "at": 6840,
+      "event": {
+        "event": {
+          "cursor": "f34189c6-0bcd-4aa1-9a38-e06517ac565b",
+          "threadId": "t",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 21
+      }
+    },
+    {
+      "at": 6840,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:53.651Z",
+          "outcome": { "type": "completed" },
+          "threadId": "t",
+          "turnId": "00000001-1111-4111-8111-111111111111",
+          "type": "turnCompleted"
+        },
+        "sequence": 22
+      }
+    },
+    {
+      "at": 7261,
+      "event": {
+        "event": {
+          "sessionId": "2e354cd2-ed13-4406-aa8a-ec75febc1d9c",
+          "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+          "type": "sessionAttached"
+        },
+        "sequence": 23
+      }
+    },
+    {
+      "at": 7887,
+      "event": {
+        "event": {
+          "sessionId": "4cfb531b-656a-4f94-a522-1acb14b854a5",
+          "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+          "type": "sessionAttached"
+        },
+        "sequence": 24
+      }
+    },
+    {
+      "at": 8405,
+      "event": {
+        "event": {
+          "item": {
+            "content": { "kind": "assistantMessage", "text": "ALPHA" },
+            "createdAt": "2026-11-10T17:12:55.216Z",
+            "id": "msg_011Cgud19jbZcyAVG6kV4RVu:0",
+            "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 25
+      }
+    },
+    {
+      "at": 8446,
+      "event": {
+        "event": {
+          "cursor": "8d0bacdb-13b0-41e7-833c-0a3746602b02",
+          "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 26
+      }
+    },
+    {
+      "at": 8446,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:55.258Z",
+          "outcome": { "type": "completed" },
+          "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+          "turnId": "42e07483-3bd8-47e5-9462-eec8cfa79805",
+          "type": "turnCompleted"
+        },
+        "sequence": 27
+      }
+    },
+    {
+      "at": 8447,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": null,
+              "steer": false,
+              "taskResult": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+              "text": "Delegated task 5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6 (Alpha) [completed]:\nALPHA\n\n1 other task still runs. Reply in one line about this task only, in the user's language; summarize once all have answered."
+            },
+            "createdAt": "2026-11-10T17:12:55.258Z",
+            "id": "cf93ba69-bf00-442f-b263-f2c2423297cd",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 28
+      }
+    },
+    {
+      "at": 8447,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:55.258Z",
+          "threadId": "t",
+          "turnId": "cf93ba69-bf00-442f-b263-f2c2423297cd",
+          "type": "turnStarted"
+        },
+        "sequence": 29
+      }
+    },
+    {
+      "at": 8447,
+      "event": {
+        "event": {
+          "threadId": "5d9f2368-2403-4c5f-9e9d-7d57ee3cb5d6",
+          "type": "taskAnswered"
+        },
+        "sequence": 30
+      }
+    },
+    {
+      "at": 9001,
+      "event": {
+        "event": {
+          "item": {
+            "content": { "kind": "assistantMessage", "text": "BETA" },
+            "createdAt": "2026-11-10T17:12:55.813Z",
+            "id": "msg_011Cgud1CNrGGje9C59bVPt7:0",
+            "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 31
+      }
+    },
+    {
+      "at": 9041,
+      "event": {
+        "event": {
+          "cursor": "eff15bfe-89ac-4471-8b12-1aa208c8bdb5",
+          "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 32
+      }
+    },
+    {
+      "at": 9041,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:55.853Z",
+          "outcome": { "type": "completed" },
+          "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+          "turnId": "7e076497-7a2a-4a3c-861f-3a6cbe35e686",
+          "type": "turnCompleted"
+        },
+        "sequence": 33
+      }
+    },
+    {
+      "at": 9041,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": null,
+              "steer": true,
+              "taskResult": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+              "text": "Delegated task 0aa4531f-3652-4a94-8319-d7d4c1ed57ff (Beta) [completed]:\nBETA\n\nNone of the tasks you delegated is still running."
+            },
+            "createdAt": "2026-11-10T17:12:55.853Z",
+            "id": "f81c8e12-3c18-400a-a457-f9ff97636bb7",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 34
+      }
+    },
+    {
+      "at": 9041,
+      "event": {
+        "event": {
+          "threadId": "0aa4531f-3652-4a94-8319-d7d4c1ed57ff",
+          "type": "taskAnswered"
+        },
+        "sequence": 35
+      }
+    },
+    {
+      "at": 10582,
+      "event": {
+        "event": {
+          "sessionId": "6f7807a9-6ee8-47a1-90dc-dfba4c348355",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 36
+      }
+    },
+    {
+      "at": 11717,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "The Alpha task answered ALPHA, and I'm still waiting on Beta."
+            },
+            "createdAt": "2026-11-10T17:12:58.528Z",
+            "id": "msg_011Cgud1Pv8kDM8QtLTwaP9X:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 37
+      }
+    },
+    {
+      "at": 11741,
+      "event": {
+        "event": {
+          "item": {
+            "content": { "kind": "runEnded" },
+            "createdAt": "2026-11-10T17:12:58.553Z",
+            "id": "cf93ba69-bf00-442f-b263-f2c2423297cd:run1",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 38
+      }
+    },
+    {
+      "at": 11988,
+      "event": {
+        "event": {
+          "sessionId": "6f7807a9-6ee8-47a1-90dc-dfba4c348355",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 39
+      }
+    },
+    {
+      "at": 13160,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "Both delegated tasks have answered. The two words are **ALPHA** and **BETA**."
+            },
+            "createdAt": "2026-11-10T17:12:59.972Z",
+            "id": "msg_011Cgud1Vdg44Vnz78X6BvBa:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 40
+      }
+    },
+    {
+      "at": 13179,
+      "event": {
+        "event": {
+          "cursor": "75f0a47b-b525-4d1d-aa5a-c6917ee0a38b",
+          "threadId": "t",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 41
+      }
+    },
+    {
+      "at": 13179,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:59.991Z",
+          "outcome": { "type": "completed" },
+          "threadId": "t",
+          "turnId": "cf93ba69-bf00-442f-b263-f2c2423297cd",
+          "type": "turnCompleted"
+        },
+        "sequence": 42
+      }
+    }
+  ],
+  "timedOut": false
+}

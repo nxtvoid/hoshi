@@ -7,9 +7,9 @@ import type { TurnFailure } from '@/bindings/TurnFailure'
 import { Markdown } from '@/components/markdown/Markdown'
 import { RequestRow } from './RequestRow'
 import { ApprovalBadge, ApprovalsContext } from './ApprovalBadge'
-import { approvalsByCall } from '@/lib/requests'
-import { SubagentGroup, SubagentRow } from './SubagentRow'
-import { DelegationRow, TaskResultRow, TaskWaits } from './DelegationRows'
+import { type ApprovalContent, approvalsByCall } from '@/lib/requests'
+import { AgentGroup } from './AgentGroup'
+import { SubagentRow } from './SubagentRow'
 import { TaskListRow } from './TaskListRow'
 import { TurnChangesCard } from './TurnChangesCard'
 import { RewindButton } from './RewindButton'
@@ -25,16 +25,33 @@ import { TranscriptMinimap } from './TranscriptMinimap'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
 import { useAppStore } from '@/state/app-store'
 import { useStoppingStore } from '@/state/stopping-store'
+import { inFlight } from '@/lib/agents'
+import { foldTaskRuns } from '@/lib/task-runs'
 import { rowKey, stableRows } from '@/lib/stable-rows'
+import { useRequestStore } from '@/state/request-store'
+import { useBusyThreads } from './use-busy-threads'
+import { DelegationRow, TaskNote, TaskWaits } from './DelegationRows'
 import {
+  createContext,
   memo,
+  type ReactNode,
+  type RefObject,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState
 } from 'react'
-import { Button } from '@hoshi/ui/components/button'
+import {
+  MessageScroller,
+  MessageScrollerButton,
+  MessageScrollerContent,
+  MessageScrollerItem,
+  MessageScrollerProvider,
+  MessageScrollerViewport,
+  useMessageScroller
+} from '@hoshi/ui/components/message-scroller'
 import {
   AiBrain01Icon,
   ArrowDown01Icon,
@@ -66,15 +83,13 @@ import {
   type ToolAction,
   type ToolCallItem,
   type FoldEnding,
+  type TaskOutcome,
   type ToolSummaryPart,
   type TranscriptRow,
   type TranscriptItem,
   type TurnChanges,
   type WorkItem
 } from '@/lib/tool-calls'
-
-/** Within this distance of the bottom, new content keeps the view pinned to it. */
-const STICK_TO_BOTTOM_PX = 80
 
 /** Off-screen rows skip rendering but keep their last height, so scrolling never jumps. */
 const ROW = '[contain-intrinsic-size:auto_2.5rem] [content-visibility:auto]'
@@ -94,19 +109,35 @@ export const Transcript = memo(function Transcript({
   const items = useTranscriptStore((state) => state.items)
   const streaming = useTranscriptStore((state) => state.streaming)
   const threadId = useTranscriptStore((state) => state.threadId)
+  const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const busy = useBusyThreads()
+  const activeTasks = useAppStore((state) =>
+    state.threads
+      .filter(
+        (thread) =>
+          thread.parentThreadId === threadId &&
+          inFlight(thread, pendingTasks, busy)
+      )
+      .map((thread) => thread.id)
+      .join(' ')
+  )
   const shownRows = useRef<TranscriptRow[]>([])
   const rows = useMemo(() => {
+    const active = new Set(activeTasks.split(' '))
     const next = stableRows(
       shownRows.current,
-      foldTurns(
-        groupTranscript(withStreaming(items, streaming)),
-        working,
-        staysInView
+      foldTaskRuns(
+        foldTurns(
+          groupTranscript(withStreaming(items, streaming)),
+          working,
+          staysInView
+        ),
+        (taskId) => active.has(taskId)
       )
     )
     shownRows.current = next
     return next
-  }, [items, streaming, working])
+  }, [items, streaming, working, activeTasks])
   const approvals = useMemo(() => approvalsByCall(items), [items])
   const liveTasks = useMemo(
     () =>
@@ -115,120 +146,188 @@ export const Transcript = memo(function Transcript({
         : undefined,
     [items, working]
   )
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const listRef = useRef<HTMLOListElement>(null)
-  const olderRef = useRef<HTMLLIElement>(null)
-  const pinned = useRef(true)
   const hasOlder = useTranscriptStore((state) => state.hasOlder)
   const loadOlder = useTranscriptStore((state) => state.loadOlder)
-  /** The scroll height before older items went in above, to keep the view where it was. */
-  const heightBeforeOlder = useRef<number | null>(null)
-  const firstId = items[0]?.id
 
-  useLayoutEffect(() => {
-    const element = scrollRef.current
-    const before = heightBeforeOlder.current
-    if (!element || before === null || firstId === undefined) return
-    heightBeforeOlder.current = null
-    element.scrollTop += element.scrollHeight - before
-  }, [firstId])
+  return (
+    <TranscriptFrame
+      rows={rows}
+      approvals={approvals}
+      cwd={cwd}
+      liveTasks={liveTasks}
+      loadOlder={hasOlder ? loadOlder : undefined}
+      firstId={items[0]?.id}
+    >
+      <BackgroundWork status={working ? <TurnStatus /> : null} />
+      {working || !threadId ? null : <TaskWaits threadId={threadId} />}
+    </TranscriptFrame>
+  )
+})
+
+/**
+ * Rows in the scroller every transcript shares, a thread's or a subagent's: it follows the
+ * end while the reader is there, and jumps to a message from the minimap.
+ */
+export function TranscriptFrame({
+  rows,
+  approvals,
+  cwd,
+  liveTasks,
+  loadOlder,
+  firstId,
+  lead,
+  children
+}: {
+  rows: TranscriptRow[]
+  approvals: Map<string, ApprovalContent>
+  cwd: string | null
+  liveTasks?: string
+  /** Loads what came before the first row, while there is more, as the reader nears it. */
+  loadOlder?: () => Promise<void>
+  firstId?: string
+  /** Before the rows. */
+  lead?: ReactNode
+  /** After the rows. */
+  children?: ReactNode
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const olderRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const element = scrollRef.current
     const sentinel = olderRef.current
-    if (!element || !sentinel || !hasOlder) return
+    if (!element || !sentinel || !loadOlder) return
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (!entry?.isIntersecting) return
-        heightBeforeOlder.current = element.scrollHeight
-        void loadOlder()
+        if (entry?.isIntersecting) void loadOlder()
       },
       { root: element, rootMargin: '800px 0px 0px 0px' }
     )
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [hasOlder, loadOlder, firstId])
-  const [atEnd, setAtEnd] = useState(true)
-
-  // Called after layout and before paint, so the view follows new content in the same frame.
-  useEffect(() => {
-    const element = scrollRef.current
-    const list = listRef.current
-    if (!element || !list) return
-    const observer = new ResizeObserver(() => {
-      if (pinned.current) element.scrollTop = element.scrollHeight
-    })
-    observer.observe(element)
-    observer.observe(list)
-    return () => observer.disconnect()
-  }, [])
-
-  const jumpTo = (id: string) => {
-    const target = listRef.current?.querySelector(
-      `[data-item-id="${CSS.escape(id)}"]`
-    )
-    if (!target) return
-    pinned.current = false
-    target.scrollIntoView({ block: 'start', behavior: 'smooth' })
-  }
-
-  const scrollToEnd = () => {
-    const element = scrollRef.current
-    if (!element) return
-    pinned.current = true
-    element.scrollTo({ top: element.scrollHeight, behavior: 'smooth' })
-  }
+  }, [loadOlder, firstId])
 
   return (
-    <div className='relative flex min-h-0 flex-1 flex-col'>
-      <div
-        ref={scrollRef}
-        onScroll={(event) => {
-          const element = event.currentTarget
-          pinned.current =
-            element.scrollHeight - element.scrollTop - element.clientHeight <
-            STICK_TO_BOTTOM_PX
-          setAtEnd(pinned.current)
-        }}
-        className='min-h-0 flex-1 overflow-y-auto'
-      >
-        <ol
-          ref={listRef}
-          className={cn(CHAT_LANE, 'flex flex-col gap-4 px-4 py-6')}
+    <MessageScrollerProvider autoScroll>
+      <MessageScroller className='flex-1'>
+        <MessageScrollerViewport
+          ref={scrollRef}
+          aria-label={m.transcript_label()}
+          onClickCapture={(event) => {
+            const target = event.target as HTMLElement
+            if (target.closest('[aria-expanded="false"]')) {
+              keepInPlace(event.currentTarget)
+            }
+          }}
         >
-          {hasOlder ? <li ref={olderRef} aria-hidden className='h-px' /> : null}
-          <ApprovalsContext.Provider value={approvals}>
-            <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
-          </ApprovalsContext.Provider>
-          <BackgroundWork status={working ? <TurnStatus /> : null} />
-          {working || !threadId ? null : <TaskWaits threadId={threadId} />}
-        </ol>
-      </div>
-      <TranscriptMinimap
-        rows={rows}
-        scrollRef={scrollRef}
-        listRef={listRef}
-        onJump={jumpTo}
-      />
-      {atEnd ? null : (
+          {loadOlder ? <div ref={olderRef} aria-hidden /> : null}
+          <MessageScrollerContent
+            ref={listRef}
+            className={cn(CHAT_LANE, 'gap-4 px-4 pt-6 pb-12')}
+          >
+            {lead}
+            <ApprovalsContext.Provider value={approvals}>
+              <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
+            </ApprovalsContext.Provider>
+            {children}
+          </MessageScrollerContent>
+        </MessageScrollerViewport>
+        <Minimap rows={rows} scrollRef={scrollRef} listRef={listRef} />
         <div className='pointer-events-none absolute inset-x-4 bottom-1 z-10'>
           <div className={cn(CHAT_LANE, 'flex justify-center')}>
-            <Button
+            <MessageScrollerButton
               size='xs'
               variant='outline'
               onPointerDown={(event) => event.preventDefault()}
-              onClick={scrollToEnd}
-              className='bg-background dark:bg-background pointer-events-auto rounded-full shadow-sm'
+              className='bg-background hover:bg-muted dark:bg-background dark:hover:bg-muted pointer-events-auto static translate-x-0 rounded-full shadow-sm'
             >
               <HugeiconsIcon icon={ArrowDown01Icon} strokeWidth={2} />
               {m.scroll_to_end()}
-            </Button>
+            </MessageScrollerButton>
           </div>
         </div>
-      )}
-    </div>
+      </MessageScroller>
+    </MessageScrollerProvider>
   )
-})
+}
+
+/** Where a jump to a message leaves it, below the top of the transcript. */
+const JUMP_MARGIN_PX = 24
+
+function Minimap({
+  rows,
+  scrollRef,
+  listRef
+}: {
+  rows: TranscriptRow[]
+  scrollRef: RefObject<HTMLDivElement | null>
+  listRef: RefObject<HTMLDivElement | null>
+}) {
+  const { scrollToMessage } = useMessageScroller()
+  return (
+    <TranscriptMinimap
+      rows={rows}
+      scrollRef={scrollRef}
+      listRef={listRef}
+      onJump={(id) =>
+        scrollToMessage(id, {
+          behavior: 'smooth',
+          scrollMargin: JUMP_MARGIN_PX
+        })
+      }
+    />
+  )
+}
+
+/** Whether rows render inside another row, as its list items, not as the transcript's own. */
+const InRow = createContext(false)
+
+function RowItem({
+  messageId,
+  itemId,
+  className,
+  children
+}: {
+  messageId: string
+  itemId?: string
+  className: string
+  children: ReactNode
+}) {
+  const inRow = useContext(InRow)
+  if (inRow) {
+    return (
+      <li data-item-id={itemId} className={className}>
+        {children}
+      </li>
+    )
+  }
+  return (
+    <MessageScrollerItem
+      messageId={messageId}
+      data-item-id={itemId}
+      className={className}
+    >
+      <InRow.Provider value={true}>{children}</InRow.Provider>
+    </MessageScrollerItem>
+  )
+}
+
+/**
+ * A row opening grows the transcript below the click, which should stay where it is. The
+ * scroller lets go of the end only on wheel, touch or keys, and the browser's scroll
+ * anchoring would keep the text under the row still instead, so both are told otherwise
+ * until the row has opened.
+ */
+function keepInPlace(viewport: HTMLElement) {
+  viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+  viewport.style.overflowAnchor = 'none'
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      viewport.style.overflowAnchor = ''
+    })
+  )
+}
 
 type RowsProps = {
   rows: TranscriptRow[]
@@ -237,15 +336,19 @@ type RowsProps = {
   liveTasks: string | undefined
 }
 
+function isAgent(row: TranscriptRow) {
+  return (
+    row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
+  )
+}
+
 function Rows({ rows, cwd, liveTasks }: RowsProps) {
   const shown: React.ReactNode[] = []
   let agents: TranscriptRow[] = []
   const flushAgents = () => {
     const [first] = agents
     if (first?.kind === 'item' && agents.length > 1) {
-      shown.push(
-        <AgentsRow key={`agents:${first.item.id}`} rows={agents} cwd={cwd} />
-      )
+      shown.push(<AgentsRow key={`agents:${first.item.id}`} rows={agents} />)
     } else if (first) {
       shown.push(
         <Row key={rowKey(first)} row={first} cwd={cwd} liveTasks={liveTasks} />
@@ -254,7 +357,7 @@ function Rows({ rows, cwd, liveTasks }: RowsProps) {
     agents = []
   }
   for (const row of rows) {
-    if (row.kind === 'item' && isSubagentCall(row.item)) {
+    if (isAgent(row)) {
       agents.push(row)
       continue
     }
@@ -267,28 +370,28 @@ function Rows({ rows, cwd, liveTasks }: RowsProps) {
   return shown
 }
 
-type AgentsRowProps = { rows: TranscriptRow[]; cwd: string | null }
+type AgentsRowProps = { rows: TranscriptRow[] }
 
-/** Subagents started one after another, shown as one group. */
-const AgentsRow = memo(function AgentsRow({ rows, cwd }: AgentsRowProps) {
+/** Subagents and delegated tasks started one after another, shown as one group. */
+const AgentsRow = memo(function AgentsRow({ rows }: AgentsRowProps) {
   const items = rows.flatMap((row) =>
-    row.kind === 'item' && isSubagentCall(row.item) ? [row.item] : []
+    row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
+      ? [row.item]
+      : []
   )
   return (
-    <li data-item-id={items[0]?.id} className={cn(ROW, 'scroll-mt-6')}>
-      <SubagentGroup
-        items={items}
-        renderRows={(inner) => (
-          <Rows rows={inner} cwd={cwd} liveTasks={undefined} />
-        )}
-      />
-    </li>
+    <RowItem
+      messageId={`agents:${items[0]?.id}`}
+      itemId={items[0]?.id}
+      className={cn(ROW, 'scroll-mt-6')}
+    >
+      <AgentGroup items={items} />
+    </RowItem>
   )
 }, sameAgents)
 
 function sameAgents(previous: AgentsRowProps, next: AgentsRowProps) {
   return (
-    previous.cwd === next.cwd &&
     previous.rows.length === next.rows.length &&
     previous.rows.every((row, index) => row === next.rows[index])
   )
@@ -302,8 +405,9 @@ const Row = memo(function Row({
   switch (row.kind) {
     case 'item':
       return (
-        <li
-          data-item-id={row.item.id}
+        <RowItem
+          messageId={row.item.id}
+          itemId={row.item.id}
           className={cn(isMessage(row.item) ? MESSAGE_ROW : ROW, 'scroll-mt-6')}
         >
           <Item
@@ -311,18 +415,19 @@ const Row = memo(function Row({
             cwd={cwd}
             live={row.item.id === liveTasks}
             changes={row.changes}
+            note={row.note}
           />
-        </li>
+        </RowItem>
       )
     case 'work':
       return (
-        <li className={ROW}>
+        <RowItem messageId={row.id} className={ROW}>
           <WorkGroup entries={row.entries} cwd={cwd} />
-        </li>
+        </RowItem>
       )
     default:
       return (
-        <li className={ROW}>
+        <RowItem messageId={row.id} className={ROW}>
           <TurnFold
             rows={row.rows}
             durationMs={row.durationMs}
@@ -331,7 +436,7 @@ const Row = memo(function Row({
             cwd={cwd}
             liveTasks={liveTasks}
           />
-        </li>
+        </RowItem>
       )
   }
 })
@@ -386,7 +491,7 @@ function TurnFold({
         />
       </button>
       {open ? (
-        <ol className='border-border/60 ms-2 mt-2 mb-2 flex flex-col gap-4 border-s ps-4'>
+        <ol className='border-border/60 ms-2 mt-2 mb-2 flex flex-col gap-4 border-s ps-4 [&>li]:[content-visibility:visible]'>
           <Rows {...rows} />
         </ol>
       ) : null}
@@ -398,7 +503,8 @@ const Item = memo(function Item({
   item,
   cwd,
   live,
-  changes
+  changes,
+  note
 }: {
   item: TranscriptItem
   cwd: string | null
@@ -406,6 +512,8 @@ const Item = memo(function Item({
   live: boolean
   /** What the turn changed, on its last answer. */
   changes?: TurnChanges
+  /** A reply to a task's answer, while the work on its tasks goes on. */
+  note?: TaskOutcome
 }) {
   const { content } = item
   switch (content.kind) {
@@ -419,9 +527,7 @@ const Item = memo(function Item({
           />
         )
       }
-      return content.taskResult ? (
-        <TaskResultRow text={content.text} childThreadId={content.taskResult} />
-      ) : (
+      return content.taskResult ? null : (
         <UserMessage
           text={content.text}
           attachments={content.attachments}
@@ -439,6 +545,18 @@ const Item = memo(function Item({
         />
       )
     case 'assistantMessage':
+      if (note) {
+        return (
+          <>
+            <TaskNote
+              text={content.text}
+              outcome={note}
+              streaming={item.streaming === true}
+            />
+            {changes ? <TurnChangesCard changes={changes} /> : null}
+          </>
+        )
+      }
       return (
         <>
           <Markdown text={content.text} streaming={item.streaming === true} />
@@ -452,12 +570,7 @@ const Item = memo(function Item({
     case 'toolCall':
       if (isDelegation(item)) return <DelegationRow item={item} />
       return isSubagentCall(item) ? (
-        <SubagentRow
-          item={item}
-          renderRows={(rows) => (
-            <Rows rows={rows} cwd={cwd} liveTasks={undefined} />
-          )}
-        />
+        <SubagentRow item={item} />
       ) : (
         <ToolCallRow item={{ ...item, content }} cwd={cwd} />
       )

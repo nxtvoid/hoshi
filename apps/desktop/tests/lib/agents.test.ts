@@ -2,6 +2,8 @@ import { expect, test } from 'bun:test'
 import type { Thread } from '../../src/bindings/Thread'
 import type { ThreadItem } from '../../src/bindings/ThreadItem'
 import {
+  busyThreads,
+  inFlight,
   plainPreview,
   runningTasks,
   TASK_PREVIEW_CHARS,
@@ -141,6 +143,7 @@ test('a thread waits on the tasks that still run and owe it an answer', () => {
       createdAt: '2026-11-08T10:05:00Z'
     }),
     thread('first', { parentThreadId: 't', status: 'working' }),
+    thread('owed', { parentThreadId: 't', status: 'idle' }),
     thread('done', { parentThreadId: 't', status: 'idle' }),
     thread('asks', { parentThreadId: 't', status: 'waitingForInput' }),
     thread('cancelled', {
@@ -152,7 +155,7 @@ test('a thread waits on the tasks that still run and owe it an answer', () => {
     thread('elsewhere', { parentThreadId: 'x', status: 'working' })
   ]
   const pending = Object.fromEntries(
-    ['later', 'first', 'done', 'asks', 'cancelled', 'elsewhere'].map((id) => [
+    ['later', 'first', 'owed', 'asks', 'cancelled', 'elsewhere'].map((id) => [
       id,
       true as const
     ])
@@ -160,8 +163,60 @@ test('a thread waits on the tasks that still run and owe it an answer', () => {
 
   expect(runningTasks('t', threads, pending).map(({ id }) => id)).toEqual([
     'first',
+    'owed',
     'later'
   ])
+})
+
+test('a task runs until its own tasks answered, however deep', () => {
+  const task = thread('task', { parentThreadId: 't' })
+  const own = thread('own', { parentThreadId: 'task', status: 'working' })
+  const deeper = thread('deeper', { parentThreadId: 'own' })
+  const pending = { own: true as const }
+
+  const busy = busyThreads([task, own, deeper], pending, {})
+  expect(Object.keys(busy).sort()).toEqual(['t', 'task'])
+  expect(taskState(task, pending, busy)).toBe('running')
+  expect(inFlight(task, pending, busy)).toBe(true)
+  expect(runningTasks('t', [task, own], pending, busy)).toEqual([task])
+
+  const sleeping = busyThreads([task, own, deeper], {}, { deeper: {} })
+  expect(Object.keys(sleeping).sort()).toEqual(['deeper', 'own', 't', 'task'])
+
+  expect(busyThreads([task, own, deeper], {}, {})).toEqual({})
+  expect(taskState(task, {}, {})).toBe('done')
+})
+
+test('a task someone else has working again is no longer awaited', () => {
+  const task = thread('task', { parentThreadId: 't', status: 'working' })
+
+  expect(taskState(task, {}, {})).toBe('running')
+  expect(inFlight(task, {}, {})).toBe(false)
+  expect(runningTasks('t', [task], {}, {})).toEqual([])
+})
+
+test('a cancelled task holds nothing, whatever it left going', () => {
+  const task = thread('task', { parentThreadId: 't', taskCancelled: true })
+  const own = thread('own', { parentThreadId: 'task', taskCancelled: true })
+
+  expect(busyThreads([task, own], { own: true }, {})).toEqual({})
+  expect(inFlight(task, { task: true }, { task: true })).toBe(false)
+})
+
+test('a task that answered but still runs commands in the background runs', () => {
+  const sleeping = thread('sleeping', { parentThreadId: 't', status: 'idle' })
+  const stopped = thread('stopped', {
+    parentThreadId: 't',
+    status: 'idle',
+    taskCancelled: true
+  })
+  const inBackground = { sleeping: true, stopped: true }
+
+  expect(taskState(sleeping, {}, inBackground)).toBe('running')
+  expect(taskState(stopped, {}, inBackground)).toBe('stopped')
+  expect(
+    runningTasks('t', [sleeping, stopped], {}, inBackground).map(({ id }) => id)
+  ).toEqual(['sleeping'])
 })
 
 test('a task preview is one short line, like hoshi-core makes it', () => {

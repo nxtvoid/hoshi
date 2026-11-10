@@ -19,8 +19,17 @@ export type StreamingText = { kind: StreamKind; text: string }
 /** The files a finished turn changed, shown under its last answer. */
 export type TurnChanges = { turnId: string; files: DiffFile[] }
 
+/** How a delegated task ended, as its answer says. */
+export type TaskOutcome = 'completed' | 'failed' | 'stopped'
+
 export type TranscriptRow =
-  | { kind: 'item'; item: TranscriptItem; changes?: TurnChanges }
+  | {
+      kind: 'item'
+      item: TranscriptItem
+      changes?: TurnChanges
+      /** The agent's reply to a task's answer, while the work on its tasks goes on. */
+      note?: TaskOutcome
+    }
   | { kind: 'work'; id: string; entries: WorkItem[] }
   | {
       kind: 'fold'

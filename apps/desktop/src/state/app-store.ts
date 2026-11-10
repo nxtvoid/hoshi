@@ -154,9 +154,11 @@ export const useAppStore = create<AppState>()((set, get) => ({
   clearComposerError: () => set({ composerError: null }),
   selectProject: (projectId) => {
     set({ selectedProjectId: projectId, selectedThreadId: null, search: '' })
+    useSubagentStore.getState().leaveAll()
     void useTranscriptStore.getState().load(null)
   },
   selectThread: (threadId) => {
+    useSubagentStore.getState().leaveAll()
     if (get().selectedThreadId === threadId) return
     const projectId = get().threads.find(
       (thread) => thread.id === threadId
@@ -169,6 +171,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
   },
   openDraft: () => {
     set({ selectedThreadId: null, search: '', composerError: null })
+    useSubagentStore.getState().leaveAll()
     void useTranscriptStore.getState().load(null)
   },
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),

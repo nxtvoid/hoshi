@@ -30,7 +30,9 @@ function stableRow(
 ): TranscriptRow {
   if (!old) return row
   if (old.kind === 'item' && row.kind === 'item') {
-    return sameItem(old.item, row.item) && sameChanges(old.changes, row.changes)
+    return sameItem(old.item, row.item) &&
+      sameChanges(old.changes, row.changes) &&
+      old.note === row.note
       ? old
       : row
   }

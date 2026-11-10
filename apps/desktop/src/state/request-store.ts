@@ -84,7 +84,7 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
       }
       return
     }
-    if (event.type === 'threadDelegated') {
+    if (event.type === 'threadDelegated' || event.type === 'taskReopened') {
       set((state) => ({
         pendingTasks: { ...state.pendingTasks, [event.threadId]: true }
       }))

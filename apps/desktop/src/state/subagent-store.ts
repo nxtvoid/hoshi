@@ -6,8 +6,18 @@ import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { TranscriptPage } from '@/bindings/TranscriptPage'
 
 type SubagentState = {
-  /** The transcripts of the subagents whose card is open, by transcript id; `null` while loading. */
+  /** The transcripts of the subagents being shown, by transcript id; `null` while loading. */
   transcripts: Record<string, ThreadItem[] | null>
+  /**
+   * The subagent shown in place of the open thread, as the calls that lead to it, outermost
+   * first; empty while the thread itself shows.
+   */
+  viewing: string[]
+  /** Shows the subagent a call of the current view started. */
+  view: (toolUseId: string) => void
+  /** Goes back to what started the subagent shown. */
+  leave: () => void
+  leaveAll: () => void
   open: (transcriptId: string) => Promise<void>
   close: (transcriptId: string) => void
   applyEvent: (event: Event) => void
@@ -15,6 +25,13 @@ type SubagentState = {
 
 export const useSubagentStore = create<SubagentState>()((set, get) => ({
   transcripts: {},
+  viewing: [],
+  view: (toolUseId) =>
+    set((state) => ({ viewing: [...state.viewing, toolUseId] })),
+  leave: () => set((state) => ({ viewing: state.viewing.slice(0, -1) })),
+  leaveAll: () => {
+    if (get().viewing.length > 0) set({ viewing: [] })
+  },
   open: async (transcriptId) => {
     if (transcriptId in get().transcripts) return
     set((state) => ({

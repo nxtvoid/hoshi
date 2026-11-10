@@ -1,0 +1,934 @@
+{
+  "name": "the-user-stops-a-task",
+  "prompt": "Delegate 2 tasks in parallel with delegate_task: (a) answer \"A ready\" right away; (b) wait 120 seconds, then answer \"B ready\". When both have answered, summarize.",
+  "steps": [
+    {
+      "at": 11,
+      "event": {
+        "event": {
+          "project": {
+            "createdAt": "2026-11-10T17:12:13.034Z",
+            "id": "p",
+            "title": "Project",
+            "updatedAt": "2026-11-10T17:12:13.034Z",
+            "workspaceRoot": "C:/work\\project",
+            "worktreeSetup": null
+          },
+          "type": "projectCreated"
+        },
+        "sequence": 1
+      }
+    },
+    {
+      "at": 12,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:12:13.034Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "t",
+            "model": null,
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Parent",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:12:13.034Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 2
+      }
+    },
+    {
+      "at": 12,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Delegate 2 tasks in parallel with delegate_task: (a) answer \"A ready\" right away; (b) wait 120 seconds, then answer \"B ready\". When both have answered, summarize."
+            },
+            "createdAt": "2026-11-10T17:12:13.034Z",
+            "id": "00000001-1111-4111-8111-111111111111",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 3
+      }
+    },
+    {
+      "at": 12,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:13.034Z",
+          "threadId": "t",
+          "turnId": "00000001-1111-4111-8111-111111111111",
+          "type": "turnStarted"
+        },
+        "sequence": 4
+      }
+    },
+    {
+      "at": 3117,
+      "event": {
+        "event": {
+          "sessionId": "38a68b0c-9d26-4686-89d0-f76c44018ede",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 5
+      }
+    },
+    {
+      "at": 4569,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"max_results\":2,\"query\":\"select:mcp__hoshi__delegate_task,mcp__hoshi__await_background_tasks\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "ToolSearch",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:12:17.591Z",
+            "id": "toolu_01SR4hYPBpcsiMtBPbnGSxgf",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 6
+      }
+    },
+    {
+      "at": 4580,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_01SR4hYPBpcsiMtBPbnGSxgf",
+          "output": "",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 7
+      }
+    },
+    {
+      "at": 6466,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"effort\":\"low\",\"model\":\"haiku\",\"task\":\"Answer exactly \\\"A ready\\\" right away. Do nothing else.\",\"title\":\"Task A\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "mcp__hoshi__delegate_task",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:12:19.488Z",
+            "id": "toolu_01B1VyCEpVy6GnAmuwH5DWtR",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 8
+      }
+    },
+    {
+      "at": 6475,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:12:19.498Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+            "model": "claude-haiku-5-5",
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Task A",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:12:19.498Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 9
+      }
+    },
+    {
+      "at": 6477,
+      "event": {
+        "event": {
+          "parentThreadId": "t",
+          "sharesWorktree": false,
+          "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+          "type": "threadDelegated"
+        },
+        "sequence": 10
+      }
+    },
+    {
+      "at": 6477,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Answer exactly \"A ready\" right away. Do nothing else."
+            },
+            "createdAt": "2026-11-10T17:12:19.500Z",
+            "id": "329f28bc-da44-4cda-8f12-23192db6b624",
+            "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 11
+      }
+    },
+    {
+      "at": 6477,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:19.500Z",
+          "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+          "turnId": "329f28bc-da44-4cda-8f12-23192db6b624",
+          "type": "turnStarted"
+        },
+        "sequence": 12
+      }
+    },
+    {
+      "at": 6580,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_01B1VyCEpVy6GnAmuwH5DWtR",
+          "output": "{\"next\":\"Its answer arrives here as a message, so end your turn. Don't wait on it or poll it.\",\"status\":\"running\",\"taskId\":\"e0f047d2-0e6d-454d-b81a-4f97d801ea62\"}",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 13
+      }
+    },
+    {
+      "at": 7272,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"effort\":\"low\",\"model\":\"haiku\",\"task\":\"Wait 120 seconds (e.g. run a shell command that sleeps 120 seconds in the background and wait for it), then answer exactly \\\"B ready\\\". Do nothing else.\",\"title\":\"Task B\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "mcp__hoshi__delegate_task",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:12:20.295Z",
+            "id": "toolu_012SsEVLY9zv8qVWLkgehZNc",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 14
+      }
+    },
+    {
+      "at": 7276,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:12:20.299Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+            "model": "claude-haiku-5-5",
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Task B",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:12:20.299Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 15
+      }
+    },
+    {
+      "at": 7276,
+      "event": {
+        "event": {
+          "parentThreadId": "t",
+          "sharesWorktree": false,
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "type": "threadDelegated"
+        },
+        "sequence": 16
+      }
+    },
+    {
+      "at": 7276,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Wait 120 seconds (e.g. run a shell command that sleeps 120 seconds in the background and wait for it), then answer exactly \"B ready\". Do nothing else."
+            },
+            "createdAt": "2026-11-10T17:12:20.299Z",
+            "id": "513c0d4e-7145-458b-9970-39377370b980",
+            "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 17
+      }
+    },
+    {
+      "at": 7276,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:20.299Z",
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "turnId": "513c0d4e-7145-458b-9970-39377370b980",
+          "type": "turnStarted"
+        },
+        "sequence": 18
+      }
+    },
+    {
+      "at": 7337,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_012SsEVLY9zv8qVWLkgehZNc",
+          "output": "{\"next\":\"Its answer arrives here as a message, so end your turn. Don't wait on it or poll it.\",\"status\":\"running\",\"taskId\":\"a979313e-3106-4275-9fe6-4a3cb97d516a\"}",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 19
+      }
+    },
+    {
+      "at": 8577,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "I started both tasks in parallel: A (answer \"A ready\") and B (wait 120 seconds, then answer \"B ready\"). Neither has answered yet. I'll summarize once both replies arrive."
+            },
+            "createdAt": "2026-11-10T17:12:21.600Z",
+            "id": "msg_011CgucxfLVPufjQqAwXjne7:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 20
+      }
+    },
+    {
+      "at": 8589,
+      "event": {
+        "event": {
+          "cursor": "5723ac90-7d80-4d55-bcbe-8587758c0bf4",
+          "threadId": "t",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 21
+      }
+    },
+    {
+      "at": 8589,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:21.612Z",
+          "outcome": { "type": "completed" },
+          "threadId": "t",
+          "turnId": "00000001-1111-4111-8111-111111111111",
+          "type": "turnCompleted"
+        },
+        "sequence": 22
+      }
+    },
+    {
+      "at": 9890,
+      "event": {
+        "event": {
+          "sessionId": "a31c5485-6809-418f-a286-26eea963f13c",
+          "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+          "type": "sessionAttached"
+        },
+        "sequence": 23
+      }
+    },
+    {
+      "at": 10982,
+      "event": {
+        "event": {
+          "sessionId": "a8496815-bf78-4e69-8d7e-5d1b9093d2b0",
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "type": "sessionAttached"
+        },
+        "sequence": 24
+      }
+    },
+    {
+      "at": 11804,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "reasoning",
+              "text": "I'm answering with the exact phrase \"A ready\" and nothing else, since the Docs instructions in the system prompt don't apply here.\n\n"
+            },
+            "createdAt": "2026-11-10T17:12:24.827Z",
+            "id": "msg_011CgucxsDrjVwy7V8bbk3yU:0",
+            "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 25
+      }
+    },
+    {
+      "at": 11806,
+      "event": {
+        "event": {
+          "item": {
+            "content": { "kind": "assistantMessage", "text": "A ready" },
+            "createdAt": "2026-11-10T17:12:24.828Z",
+            "id": "msg_011CgucxsDrjVwy7V8bbk3yU:1",
+            "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 26
+      }
+    },
+    {
+      "at": 11864,
+      "event": {
+        "event": {
+          "cursor": "3fbcfa85-c746-44ec-9252-9df181cdb2ad",
+          "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 27
+      }
+    },
+    {
+      "at": 11864,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:24.887Z",
+          "outcome": { "type": "completed" },
+          "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+          "turnId": "329f28bc-da44-4cda-8f12-23192db6b624",
+          "type": "turnCompleted"
+        },
+        "sequence": 28
+      }
+    },
+    {
+      "at": 11864,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": null,
+              "steer": false,
+              "taskResult": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+              "text": "Delegated task e0f047d2-0e6d-454d-b81a-4f97d801ea62 (Task A) [completed]:\nA ready\n\n1 other task still runs. Reply in one line about this task only, in the user's language; summarize once all have answered."
+            },
+            "createdAt": "2026-11-10T17:12:24.887Z",
+            "id": "42e59a03-730d-4e88-9217-722d56408dc6",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 29
+      }
+    },
+    {
+      "at": 11864,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:24.887Z",
+          "threadId": "t",
+          "turnId": "42e59a03-730d-4e88-9217-722d56408dc6",
+          "type": "turnStarted"
+        },
+        "sequence": 30
+      }
+    },
+    {
+      "at": 11864,
+      "event": {
+        "event": {
+          "threadId": "e0f047d2-0e6d-454d-b81a-4f97d801ea62",
+          "type": "taskAnswered"
+        },
+        "sequence": 31
+      }
+    },
+    {
+      "at": 13907,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "reasoning",
+              "text": "I need to wait 120 seconds before answering \"B ready,\" and foreground sleep is blocked in the Bash tool, so I'll run the sleep in the background and then wait for it to finish.\n\nThe sleep can't run in the foreground, so I'm weighing whether to await the background task through a deferred tool or just wait on the sleep directly, and I'll go with the simpler route.\n\n"
+            },
+            "createdAt": "2026-11-10T17:12:26.929Z",
+            "id": "msg_011CgucxwSN3NTxLC9v4zYAH:0",
+            "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 32
+      }
+    },
+    {
+      "at": 13913,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"command\":\"sleep 120\",\"description\":\"Sleep 120 seconds before continuing\",\"run_in_background\":true,\"timeout\":130000}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "Bash",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:12:26.936Z",
+            "id": "toolu_012fXixL5rUfbv56AmpPjD6h",
+            "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 33
+      }
+    },
+    {
+      "at": 14367,
+      "event": {
+        "event": {
+          "sessionId": "38a68b0c-9d26-4686-89d0-f76c44018ede",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 34
+      }
+    },
+    {
+      "at": 14501,
+      "backgroundTasks": {
+        "tasks": [
+          {
+            "description": "Sleep 120 seconds before continuing",
+            "startedAt": 1794330747524,
+            "taskId": "b6ihqpcc9",
+            "toolCallId": null
+          }
+        ],
+        "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+        "waiting": false
+      }
+    },
+    {
+      "at": 14501,
+      "backgroundTasks": {
+        "tasks": [
+          {
+            "description": "Sleep 120 seconds before continuing",
+            "startedAt": 1794330747524,
+            "taskId": "b6ihqpcc9",
+            "toolCallId": "toolu_012fXixL5rUfbv56AmpPjD6h"
+          }
+        ],
+        "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+        "waiting": false
+      }
+    },
+    {
+      "at": 14508,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_012fXixL5rUfbv56AmpPjD6h",
+          "output": "Command running in background with ID: b6ihqpcc9. Output is being written to: C:/tempclaude\\3eecbabbb727a73c\\a8496815-bf78-4e69-8d7e-5d1b9093d2b0\\tasks\\b6ihqpcc9.output. You will be notified when it completes. To check interim output, use Read on that file path.",
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 35
+      }
+    },
+    {
+      "at": 15374,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "The 120-second sleep is running in the background. I'll answer once it completes."
+            },
+            "createdAt": "2026-11-10T17:12:28.397Z",
+            "id": "msg_011CgucyBxEnKC9AkUvKvBoN:0",
+            "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 36
+      }
+    },
+    {
+      "at": 15388,
+      "backgroundTasks": {
+        "tasks": [
+          {
+            "description": "Sleep 120 seconds before continuing",
+            "startedAt": 1794330747524,
+            "taskId": "b6ihqpcc9",
+            "toolCallId": "toolu_012fXixL5rUfbv56AmpPjD6h"
+          }
+        ],
+        "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+        "waiting": false
+      }
+    },
+    {
+      "at": 15388,
+      "event": {
+        "event": {
+          "cursor": "91cddff9-e2d8-413f-a76e-a5323eb1fc8e",
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 37
+      }
+    },
+    {
+      "at": 15388,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:28.411Z",
+          "outcome": { "type": "completed" },
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "turnId": "513c0d4e-7145-458b-9970-39377370b980",
+          "type": "turnCompleted"
+        },
+        "sequence": 38
+      }
+    },
+    {
+      "at": 15389,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": null,
+              "steer": true,
+              "taskResult": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+              "text": "Delegated task a979313e-3106-4275-9fe6-4a3cb97d516a (Task B) [completed]:\nThe 120-second sleep is running in the background. I'll answer once it completes.\n\nIt isn't finished: it answers again once the command or task it still waits on ends. Reply in one line, in the user's language; summarize once it answers again."
+            },
+            "createdAt": "2026-11-10T17:12:28.411Z",
+            "id": "e3c60c8d-8a5d-46ea-93ee-b34935ab109c",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 39
+      }
+    },
+    {
+      "at": 15389,
+      "event": {
+        "event": {
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "type": "taskAnswered"
+        },
+        "sequence": 40
+      }
+    },
+    {
+      "at": 15581,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "Task A finished and answered \"A ready\"; Task B is still running, so I'll summarize once it answers."
+            },
+            "createdAt": "2026-11-10T17:12:28.604Z",
+            "id": "msg_011CgucyBvFxRTmtoG2m1cM9:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 41
+      }
+    },
+    {
+      "at": 15599,
+      "event": {
+        "event": {
+          "item": {
+            "content": { "kind": "runEnded" },
+            "createdAt": "2026-11-10T17:12:28.622Z",
+            "id": "42e59a03-730d-4e88-9217-722d56408dc6:run1",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 42
+      }
+    },
+    {
+      "at": 15871,
+      "event": {
+        "event": {
+          "sessionId": "38a68b0c-9d26-4686-89d0-f76c44018ede",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 43
+      }
+    },
+    {
+      "at": 17173,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "Task B has only reported that its 120-second sleep is still running, so it hasn't answered \"B ready\" yet. I'll summarize once it does."
+            },
+            "createdAt": "2026-11-10T17:12:30.196Z",
+            "id": "msg_011CgucyHpD2H9YrsL1erB8a:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 44
+      }
+    },
+    {
+      "at": 17186,
+      "event": {
+        "event": {
+          "cursor": "51ec95ab-b17c-4ed2-99ca-66519513e0d3",
+          "threadId": "t",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 45
+      }
+    },
+    {
+      "at": 17187,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:30.209Z",
+          "outcome": { "type": "completed" },
+          "threadId": "t",
+          "turnId": "42e59a03-730d-4e88-9217-722d56408dc6",
+          "type": "turnCompleted"
+        },
+        "sequence": 46
+      }
+    },
+    {
+      "at": 23789,
+      "event": {
+        "event": {
+          "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+          "type": "taskCancelled"
+        },
+        "sequence": 47
+      }
+    },
+    {
+      "at": 23925,
+      "backgroundTasks": {
+        "tasks": [],
+        "threadId": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+        "waiting": false
+      }
+    },
+    {
+      "at": 23925,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": null,
+              "steer": false,
+              "taskResult": "a979313e-3106-4275-9fe6-4a3cb97d516a",
+              "text": "Delegated task a979313e-3106-4275-9fe6-4a3cb97d516a (Task B) [stopped]:\nThe user stopped this task before it answered. Don't start it again unless they ask.\n\nNone of the tasks you delegated is still running."
+            },
+            "createdAt": "2026-11-10T17:12:36.948Z",
+            "id": "31f61a7b-98e7-4a14-9fbd-6e0e13fcc223",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 48
+      }
+    },
+    {
+      "at": 23926,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:36.948Z",
+          "threadId": "t",
+          "turnId": "31f61a7b-98e7-4a14-9fbd-6e0e13fcc223",
+          "type": "turnStarted"
+        },
+        "sequence": 49
+      }
+    },
+    {
+      "at": 26080,
+      "event": {
+        "event": {
+          "sessionId": "38a68b0c-9d26-4686-89d0-f76c44018ede",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 50
+      }
+    },
+    {
+      "at": 27502,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "Summary: Task A finished and answered \"A ready\". Task B never answered \"B ready\" because you stopped it during its 120-second wait, and I haven't restarted it. Say so if you want me to run it again."
+            },
+            "createdAt": "2026-11-10T17:12:40.525Z",
+            "id": "msg_011Cgucz3n9N1dGpMu97VY42:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 51
+      }
+    },
+    {
+      "at": 27528,
+      "event": {
+        "event": {
+          "cursor": "6ade8ec4-e77b-4182-ad28-9c76bd6a4c2f",
+          "threadId": "t",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 52
+      }
+    },
+    {
+      "at": 27528,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:12:40.551Z",
+          "outcome": { "type": "completed" },
+          "threadId": "t",
+          "turnId": "31f61a7b-98e7-4a14-9fbd-6e0e13fcc223",
+          "type": "turnCompleted"
+        },
+        "sequence": 53
+      }
+    }
+  ],
+  "timedOut": false
+}

@@ -250,6 +250,11 @@ pub enum Event {
     TaskAnswered {
         thread_id: String,
     },
+    /// The thread's task, already answered, works again: its agent woke for a command it
+    /// left running, and its next answer goes back too.
+    TaskReopened {
+        thread_id: String,
+    },
     /// Mid-turn: the agent waits for the user, or works again.
     ThreadStatusSet {
         thread_id: String,
@@ -809,6 +814,11 @@ impl ReadModel {
             Event::TaskAnswered { thread_id } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.task_answered = true;
+                }
+            }
+            Event::TaskReopened { thread_id } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.task_answered = false;
                 }
             }
             Event::PullRequestWatchSet {
@@ -1518,6 +1528,27 @@ pub fn answer_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
     match model.threads.get(thread_id) {
         Some(thread) if thread.parent_thread_id.is_some() && !thread.task_answered => {
             vec![Event::TaskAnswered {
+                thread_id: thread_id.to_owned(),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Reopens the answered task thread `thread_id` works on, unless it was cancelled or the
+/// thread that delegated it is gone or put away.
+pub fn reopen_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread)
+            if thread.task_answered
+                && !thread.task_cancelled
+                && thread
+                    .parent_thread_id
+                    .as_ref()
+                    .and_then(|parent| model.threads.get(parent))
+                    .is_some_and(|parent| !parent.archived) =>
+        {
+            vec![Event::TaskReopened {
                 thread_id: thread_id.to_owned(),
             }]
         }

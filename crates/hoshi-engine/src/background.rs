@@ -16,6 +16,11 @@ pub(crate) struct Lingering {
     pub running: Box<dyn RunningTurn>,
     /// The commands it runs, once it reported any.
     pub background: Option<ThreadBackgroundTasks>,
+    /// Its turn owed a delegated task's answer, so the turn it wakes for answers again.
+    pub owes_answer: bool,
+    /// Its commands all ended, which shows once it wakes or ends: a task waiting on them
+    /// would otherwise read as done for a moment.
+    pub ended: bool,
 }
 
 impl State {
@@ -41,6 +46,12 @@ impl State {
     fn receive_between_turns(&mut self, thread_id: &str, output: ProviderOutput) {
         match output {
             ProviderOutput::BackgroundTasks { tasks, waiting } => {
+                if tasks.is_empty() {
+                    if let Some(lingering) = self.lingering.get_mut(thread_id) {
+                        lingering.ended = true;
+                    }
+                    return;
+                }
                 let background = ThreadBackgroundTasks {
                     thread_id: thread_id.to_owned(),
                     tasks,
@@ -56,7 +67,6 @@ impl State {
                 if let Some(lingering) = self.lingering.remove(thread_id) {
                     self.clear_background(thread_id, lingering.background.as_ref());
                 }
-                self.release_held_answer(thread_id);
             }
             _ => {}
         }
@@ -78,6 +88,15 @@ impl State {
         let Some(lingering) = self.lingering.remove(thread_id) else {
             return;
         };
+        if lingering.owes_answer {
+            self.reopen_task(thread_id);
+        }
+        let background = if lingering.ended {
+            self.clear_background(thread_id, lingering.background.as_ref());
+            None
+        } else {
+            lingering.background
+        };
         let (workspace, checkpointed) = self
             .cwd(thread_id)
             .map(|cwd| self.turn_workspace(thread_id, &turn_id, &cwd))
@@ -92,7 +111,7 @@ impl State {
                 checkpointed,
                 arrivals: 0,
                 cursor: None,
-                background: lingering.background,
+                background,
             },
         );
     }
@@ -119,12 +138,15 @@ impl State {
             self.clear_background(thread_id, background.as_ref());
             return;
         }
+        let owes_answer = self.delegations.contains_key(thread_id);
         self.lingering.insert(
             thread_id.to_owned(),
             Lingering {
                 process,
                 running,
                 background,
+                owes_answer,
+                ended: false,
             },
         );
     }
@@ -134,7 +156,6 @@ impl State {
         if let Some(lingering) = self.lingering.remove(thread_id) {
             self.end_lingering(thread_id, lingering);
         }
-        self.release_held_answer(thread_id);
     }
 
     pub(crate) fn end_lingering(&self, thread_id: &str, lingering: Lingering) {

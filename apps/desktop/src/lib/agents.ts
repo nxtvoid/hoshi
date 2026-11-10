@@ -31,10 +31,61 @@ export function isPlanningWithUser(
   )
 }
 
-/** How a delegated task stands, read from its thread. */
+/**
+ * Threads at rest that still have something going, by thread id: commands in the
+ * background, or a task of their own in flight.
+ */
+export type BusyThreads = Record<string, unknown>
+
+/**
+ * Whether a task is still to answer the thread that delegated it: its answer hasn't gone
+ * back yet, or it has and what the task left going will have it answer again.
+ */
+export function inFlight(
+  thread: Thread,
+  pendingTasks: Record<string, true>,
+  busy: BusyThreads = {}
+) {
+  return (
+    thread.parentThreadId !== null &&
+    !thread.taskCancelled &&
+    (pendingTasks[thread.id] === true || thread.id in busy)
+  )
+}
+
+/**
+ * The threads at rest that still have something going: those with commands
+ * `inBackground`, and those a task in flight is still to answer, however deep.
+ */
+export function busyThreads(
+  threads: Thread[],
+  pendingTasks: Record<string, true>,
+  inBackground: Record<string, unknown>
+): Record<string, true> {
+  const busy: Record<string, true> = {}
+  for (const id of Object.keys(inBackground)) busy[id] = true
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const thread of threads) {
+      const parent = thread.parentThreadId
+      if (parent && !busy[parent] && inFlight(thread, pendingTasks, busy)) {
+        busy[parent] = true
+        grew = true
+      }
+    }
+  }
+  return busy
+}
+
+/**
+ * How a delegated task stands, read from its thread. At rest it still runs while it is in
+ * flight: its answer is on its way, or it will answer again.
+ */
 export function taskState(
   thread: Thread,
-  pendingTasks: Record<string, true>
+  pendingTasks: Record<string, true>,
+  busy: BusyThreads = {}
 ): AgentState {
   if (isPlanningWithUser(thread, pendingTasks)) return 'waiting'
   if (thread.taskCancelled && thread.status !== 'working') return 'stopped'
@@ -46,8 +97,19 @@ export function taskState(
     case 'error':
       return 'failed'
     case 'idle':
-      return 'done'
+      return inFlight(thread, pendingTasks, busy) ? 'running' : 'done'
   }
+}
+
+/** How a subagent stands, read from the call that started it. */
+export function subagentState(call: {
+  output: string | null
+  isError: boolean
+  interrupted: boolean
+}): AgentState {
+  if (call.interrupted) return 'stopped'
+  if (call.output === null) return 'running'
+  return call.isError ? 'failed' : 'done'
 }
 
 /**
@@ -58,7 +120,8 @@ export function threadAgents(
   threadId: string,
   threads: Thread[],
   items: ThreadItem[],
-  pendingTasks: Record<string, true> = {}
+  pendingTasks: Record<string, true> = {},
+  busy: BusyThreads = {}
 ): ThreadAgent[] {
   const tasks = threads
     .filter((thread) => thread.parentThreadId === threadId)
@@ -67,7 +130,7 @@ export function threadAgents(
         kind: 'task',
         id: thread.id,
         title: thread.title,
-        state: taskState(thread, pendingTasks),
+        state: taskState(thread, pendingTasks, busy),
         at: thread.createdAt
       })
     )
@@ -80,13 +143,7 @@ export function threadAgents(
         kind: 'subagent',
         id: item.id,
         title: description || kind,
-        state: content?.interrupted
-          ? 'stopped'
-          : content?.output === null
-            ? 'running'
-            : content?.isError
-              ? 'failed'
-              : 'done',
+        state: content ? subagentState(content) : 'done',
         at: item.createdAt
       }
     })
@@ -114,21 +171,21 @@ export function taskTime(
 }
 
 /**
- * The tasks a thread delegated that still run and whose answer it waits for, oldest
- * first.
+ * The tasks a thread delegated that are in flight and run, oldest first. Those waiting for
+ * the user are asked about elsewhere.
  */
 export function runningTasks(
   threadId: string,
   threads: Thread[],
-  pendingTasks: Record<string, true>
+  pendingTasks: Record<string, true>,
+  busy: BusyThreads = {}
 ): Thread[] {
   return threads
     .filter(
       (thread) =>
         thread.parentThreadId === threadId &&
-        thread.status === 'working' &&
-        !thread.taskCancelled &&
-        pendingTasks[thread.id] === true
+        inFlight(thread, pendingTasks, busy) &&
+        taskState(thread, pendingTasks, busy) === 'running'
     )
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
 }

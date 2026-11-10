@@ -72,6 +72,9 @@ test('keeps the tasks that still owe their thread an answer', () => {
 
   store.applyEvent({ type: 'taskCancelled', threadId: 'task' })
   expect(useRequestStore.getState().pendingTasks).toEqual({})
+
+  store.applyEvent({ type: 'taskReopened', threadId: 'old' })
+  expect(useRequestStore.getState().pendingTasks).toEqual({ old: true })
 })
 
 test('drops the requests of a thread that went back before them', () => {
