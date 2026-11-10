@@ -11,9 +11,15 @@ import {
   NodeViewWrapper,
   ReactNodeViewRenderer
 } from '@tiptap/react'
+import {
+  type BlockTokens,
+  type CodeBlockAt,
+  codeBlocks,
+  highlightedRuns,
+  mapCodeBlocks,
+  sameCodeBlocks
+} from './code-block-highlight'
 
-/** Longer blocks stay plain, so typing in them never stalls. */
-const MAX_HIGHLIGHTED_CHARS = 20_000
 const HIGHLIGHT_DELAY_MS = 120
 
 function ComposerCodeBlockView({
@@ -57,60 +63,56 @@ export const ComposerCodeBlock = CodeBlock.extend({
   }
 })
 
-const highlightKey = new PluginKey<DecorationSet>('codeBlockHighlight')
+type HighlightState = { decorations: DecorationSet; blocks: CodeBlockAt[] }
+
+const highlightKey = new PluginKey<HighlightState>('codeBlockHighlight')
 
 /** Colors the code blocks, a moment after typing stops. */
 export const CodeBlockHighlight = Extension.create({
   name: 'codeBlockHighlight',
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      new Plugin<HighlightState>({
         key: highlightKey,
         state: {
-          init: () => DecorationSet.empty,
-          apply: (transaction, decorations) =>
-            (transaction.getMeta(highlightKey) as DecorationSet | undefined) ??
-            decorations.map(transaction.mapping, transaction.doc)
+          init: () => ({ decorations: DecorationSet.empty, blocks: [] }),
+          apply: (transaction, current) =>
+            (transaction.getMeta(highlightKey) as HighlightState | undefined) ??
+            (transaction.docChanged
+              ? {
+                  decorations: current.decorations.map(
+                    transaction.mapping,
+                    transaction.doc
+                  ),
+                  blocks: mapCodeBlocks(current.blocks, transaction.mapping)
+                }
+              : current)
         },
         props: {
-          decorations: (state) => highlightKey.getState(state)
+          decorations: (state) => highlightKey.getState(state)?.decorations
         },
         view: (view) => {
           let timer: ReturnType<typeof setTimeout> | undefined
           let painted: ProseMirrorNode | null = null
+          const cache: BlockTokens = new WeakMap()
 
           const paint = async () => {
             const doc = view.state.doc
             painted = doc
-            const blocks: { pos: number; code: string; language: string }[] = []
-            doc.descendants((node, pos) => {
-              if (node.type.name !== 'codeBlock') return true
-              if (node.textContent.length <= MAX_HIGHLIGHTED_CHARS) {
-                blocks.push({
-                  pos,
-                  code: node.textContent,
-                  language: String(node.attrs.language ?? '')
-                })
-              }
-              return false
-            })
-            const decorations: Decoration[] = []
-            for (const block of blocks) {
-              const tokens = await highlightTokens(block.code, block.language)
-              for (const token of tokens ?? []) {
-                decorations.push(
-                  Decoration.inline(
-                    block.pos + 1 + token.from,
-                    block.pos + 1 + token.to,
-                    { style: token.style }
-                  )
-                )
-              }
-            }
+            const blocks = codeBlocks(doc)
+            const shown = highlightKey.getState(view.state)?.blocks ?? []
+            if (sameCodeBlocks(blocks, shown)) return
+            const runs = await highlightedRuns(blocks, cache, highlightTokens)
             if (view.isDestroyed || view.state.doc !== doc) return
+            const decorations = DecorationSet.create(
+              doc,
+              runs.map((run) =>
+                Decoration.inline(run.from, run.to, { style: run.style })
+              )
+            )
             view.dispatch(
               view.state.tr
-                .setMeta(highlightKey, DecorationSet.create(doc, decorations))
+                .setMeta(highlightKey, { decorations, blocks })
                 .setMeta('addToHistory', false)
             )
           }

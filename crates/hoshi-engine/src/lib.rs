@@ -45,7 +45,7 @@ use hoshi_core::{
     ChangesSummary, Command, CommandError, ContextUsage, DiffFile, DiffScope, Editor, Event,
     EventEnvelope, FileDiff, FolderListing, ForgeAccount, ForgeKind, ItemContent,
     MessageAttachment, Note, NoteSummary, ProviderModels, ProviderOutput, PullRequest,
-    PullRequestAction, PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository,
+    PullRequestAction, PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository, SavedNote,
     SlashCommand, Snapshot, StreamDelta, StreamKind, TerminalAttach, ThreadBackgroundTasks,
     ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus,
     ThreadTitleSettings, ThreadWorkspace, TurnFailure, TurnOutcome, UsageLimits, VaultSecret,
@@ -1239,13 +1239,15 @@ impl Engine {
         self.personal.set_always_allow(settings.always_allow);
     }
 
-    /// A project's notes holding `query`, or the general ones for `None`, latest first.
+    /// A project's notes holding `query`, or the general ones for `None`, latest first, at
+    /// most `limit` of them.
     pub fn notes(
         &self,
         project_id: Option<&str>,
         query: &str,
+        limit: Option<usize>,
     ) -> Result<Vec<NoteSummary>, CommandError> {
-        self.personal.notes(project_id, query)
+        self.personal.notes(project_id, query, limit)
     }
 
     pub fn note(&self, note_id: &str) -> Result<Note, CommandError> {
@@ -1260,7 +1262,7 @@ impl Engine {
         project_id: Option<String>,
         text: String,
         document: Option<String>,
-    ) -> Result<Note, CommandError> {
+    ) -> Result<SavedNote, CommandError> {
         self.personal.save_note(note_id, project_id, text, document)
     }
 
@@ -1504,17 +1506,31 @@ impl Engine {
     }
 
     /// Carries out a command from the UI. Git work it needs, such as creating a worktree,
-    /// runs outside the lock.
+    /// runs outside the lock. A message's notes are read here, so what it carries of them
+    /// is what an agent may read.
     pub fn dispatch(&self, command: Command) -> Result<(), CommandError> {
         let command = match command {
             Command::ThreadCreate {
                 workspace: ThreadWorkspace::NewWorktree | ThreadWorkspace::BranchWorktree { .. },
                 ..
             } => return self.create_worktree_thread(command),
-            Command::MessageSend { .. } => match self.restore_before_sending(command)? {
-                Some(command) => command,
-                None => return Ok(()),
-            },
+            Command::MessageSend {
+                thread_id,
+                message_id,
+                text,
+                attachments,
+            } => {
+                let send = Command::MessageSend {
+                    thread_id,
+                    message_id,
+                    text,
+                    attachments: self.personal.with_notes(attachments),
+                };
+                match self.restore_before_sending(send)? {
+                    Some(command) => command,
+                    None => return Ok(()),
+                }
+            }
             other => other,
         };
         let mut state = lock(&self.state);
@@ -1723,6 +1739,7 @@ impl Engine {
         text: String,
         attachments: Vec<MessageAttachment>,
     ) -> Result<(), CommandError> {
+        let attachments = self.personal.with_notes(attachments);
         let mut state = lock(&self.state);
         let busy = state
             .model
@@ -6289,10 +6306,57 @@ Blue"
             })
             .unwrap();
 
-        assert!(harness.engine.notes(Some("p"), "").unwrap().is_empty());
+        assert!(
+            harness
+                .engine
+                .notes(Some("p"), "", None)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            harness.engine.notes(None, "").unwrap()[0].title,
+            harness.engine.notes(None, "", None).unwrap()[0].title,
             "Cache ideas"
+        );
+    }
+
+    #[test]
+    fn a_sent_note_is_read_by_the_engine_and_a_page_leaves_its_text_out() {
+        let harness = Harness::in_memory("note-sent", completed_turn());
+        harness
+            .engine
+            .save_note("n", None, "Deploy\npassword: hunter2".into(), None)
+            .unwrap();
+        let note = |text: Option<&str>| MessageAttachment::Note {
+            id: "n".into(),
+            title: "Deploy".into(),
+            text: text.map(str::to_owned),
+            hidden: 1,
+        };
+
+        harness
+            .engine
+            .dispatch(Command::MessageSend {
+                thread_id: "t".into(),
+                message_id: "m1".into(),
+                text: "use my note".into(),
+                attachments: vec![note(None)],
+            })
+            .unwrap();
+        harness.wait_for_turn_end();
+
+        let read = note(Some("Deploy\npassword: [hidden credential]"));
+        let sent = harness.adapter.requests.lock().unwrap()[0].attachments[0].clone();
+        assert_eq!(sent.attachment, read);
+        let carried = |item: Option<ThreadItem>| match item.map(|item| item.content) {
+            Some(ItemContent::UserMessage { attachments, .. }) => attachments,
+            other => panic!("a message, not {other:?}"),
+        };
+        let page = harness.engine.transcript("t", None).unwrap().items;
+        let listed = page.into_iter().find(|item| item.id == "m1");
+        assert_eq!(carried(listed), [note(None)]);
+        assert_eq!(
+            carried(harness.engine.thread_item("t", "m1").unwrap()),
+            [read]
         );
     }
 

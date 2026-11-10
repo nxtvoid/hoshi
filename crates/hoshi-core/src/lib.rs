@@ -31,7 +31,7 @@ pub use credentials::{REDACTED, find_credentials, redact_credentials};
 pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
 pub use fonts::{SystemFont, group_font_families};
 pub use model::{ModelInfo, ProviderModels};
-pub use notes::{Note, NoteSummary, StoredNote};
+pub use notes::{Note, NoteSearch, NoteSummary, SavedNote, StoredNote};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
     answer_task, answers_message, cancel_task, close_stale_turn, decide, record_branch,

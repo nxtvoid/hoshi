@@ -103,7 +103,7 @@ fn with_context(mut text: String, attachments: &[TurnAttachment]) -> String {
                     ..
                 },
                 _,
-            ) => note_block(title, text, *hidden),
+            ) => note_block(title, text.as_deref().unwrap_or_default(), *hidden),
             _ => continue,
         };
         if !text.is_empty() {
@@ -266,7 +266,7 @@ mod tests {
             attachment: MessageAttachment::Note {
                 id: "n".into(),
                 title: "Deploy \"staging\"".into(),
-                text: "run make deploy\npassword: [hidden credential]".into(),
+                text: Some("run make deploy\npassword: [hidden credential]".into()),
                 hidden,
             },
             path: None,

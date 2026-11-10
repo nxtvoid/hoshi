@@ -1,4 +1,4 @@
-import { useImperativeHandle, useRef } from 'react'
+import { useImperativeHandle, useMemo, useRef } from 'react'
 import type { Ref } from 'react'
 import { cn } from '@hoshi/utils'
 import StarterKit from '@tiptap/starter-kit'
@@ -46,30 +46,41 @@ export function NoteTextEditor({
   const handlers = useRef(current)
   handlers.current = current
 
+  const options = useMemo(
+    () => ({
+      extensions: [
+        StarterKit.configure({
+          link: false,
+          underline: false,
+          codeBlock: false
+        }),
+        ComposerCodeBlock,
+        CodeBlockHighlight,
+        Placeholder.configure({
+          placeholder: ({ node }) =>
+            node.type.name === 'paragraph' ? placeholder : ''
+        })
+      ],
+      editorProps: {
+        attributes: {
+          role: 'textbox',
+          'aria-label': placeholder,
+          'aria-multiline': 'true',
+          class: cn(
+            RICH_TEXT_CLASSES,
+            'min-h-full px-6 pt-5 pb-10 text-sm leading-relaxed'
+          )
+        },
+        handleKeyDown: openFencedBlock
+      }
+    }),
+    [placeholder]
+  )
+
   const editor = useEditor({
     autofocus: 'end',
     content: initialDocument,
-    extensions: [
-      StarterKit.configure({ link: false, underline: false, codeBlock: false }),
-      ComposerCodeBlock,
-      CodeBlockHighlight,
-      Placeholder.configure({
-        placeholder: ({ node }) =>
-          node.type.name === 'paragraph' ? placeholder : ''
-      })
-    ],
-    editorProps: {
-      attributes: {
-        role: 'textbox',
-        'aria-label': placeholder,
-        'aria-multiline': 'true',
-        class: cn(
-          RICH_TEXT_CLASSES,
-          'min-h-full px-6 pt-5 pb-10 text-sm leading-relaxed'
-        )
-      },
-      handleKeyDown: (view, event) => openFencedBlock(view, event)
-    },
+    ...options,
     onUpdate: ({ editor }) =>
       handlers.current.onChange(editor.state.doc, editor.isEmpty),
     onBlur: () => handlers.current.onBlur()

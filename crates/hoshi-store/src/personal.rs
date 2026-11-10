@@ -4,7 +4,8 @@
 //! has it.
 
 use crate::{StoreError, enum_text, json_column, json_document_column};
-use hoshi_core::{StoredNote, VaultAccess, VaultSecret};
+use hoshi_core::{NoteSearch, NoteSummary, StoredNote, VaultAccess, VaultSecret};
+use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::path::Path;
 
@@ -38,18 +39,49 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE notes ADD COLUMN document_json TEXT;
     ",
+    // How a list shows a note is kept beside it, in an index a list reads alone.
+    r"
+    ALTER TABLE notes ADD COLUMN title TEXT NOT NULL DEFAULT '';
+    ALTER TABLE notes ADD COLUMN preview TEXT NOT NULL DEFAULT '';
+    ALTER TABLE notes ADD COLUMN credentials INTEGER NOT NULL DEFAULT 0;
+    DROP INDEX notes_by_project;
+    CREATE INDEX notes_listed
+        ON notes (project_id, updated_at DESC, id, title, preview, credentials);
+    ",
 ];
+
+/// The migration that added what lists show of a note. A database from before it has its
+/// notes summarized once. What a summary masks follows how credentials are found, so a
+/// change to that needs a migration of its own and this set to it.
+const SUMMARIZED_AT: i64 = 4;
 
 const NOTE_COLUMNS: &str =
     "id, project_id, text, ignored_json, created_at, updated_at, document_json";
-/// A list never shows what a note's editor holds, so it isn't read.
-const LISTED_NOTE_COLUMNS: &str =
-    "id, project_id, text, ignored_json, created_at, updated_at, NULL";
+const LISTED_NOTES: &str = "
+    SELECT id, project_id, title, preview, updated_at, credentials FROM notes
+    WHERE project_id IS ?1 ORDER BY updated_at DESC, id LIMIT ?2";
+const SEARCHED_NOTES: &str = "
+    SELECT id, project_id, title, preview, updated_at, credentials, text FROM notes
+    WHERE project_id IS ?1 ORDER BY updated_at DESC, id";
+const REPLACED_NOTE: &str = "
+    SELECT ignored_json, created_at, updated_at,
+        text = ?2 AND project_id IS ?3 AND document_json IS ?4
+    FROM notes WHERE id = ?1";
 const SECRET_COLUMNS: &str =
     "id, name, description, project_id, access, created_at, updated_at, last_used_at, fields_json";
 
 pub struct PersonalStore {
     conn: Connection,
+}
+
+/// What a save needs of the note it replaces, without reading its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacedNote {
+    pub ignored: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// It already holds the text, the document and the project the save brings.
+    pub same: bool,
 }
 
 impl PersonalStore {
@@ -71,23 +103,46 @@ impl PersonalStore {
         for migration in MIGRATIONS.iter().skip(version as usize) {
             tx.execute_batch(migration)?;
         }
+        if version < SUMMARIZED_AT {
+            summarize_notes(&tx)?;
+        }
         tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64)?;
         tx.commit()?;
         Ok(Self { conn })
     }
 
-    /// A project's notes, or the general ones for `None`, the latest edited first, each
-    /// without its editor's document.
-    pub fn notes(&self, project_id: Option<&str>) -> Result<Vec<StoredNote>, StoreError> {
-        let notes = self
-            .conn
-            .prepare_cached(&format!(
-                "SELECT {LISTED_NOTE_COLUMNS} FROM notes WHERE project_id IS ?1
-                 ORDER BY updated_at DESC, id"
-            ))?
-            .query_map([project_id], note)?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(notes)
+    /// A project's notes, or the general ones for `None`, as a list shows them, the latest
+    /// edited first: those whose text `search` finds, at most `limit` of them. Without a
+    /// search no note's text is read.
+    pub fn notes(
+        &self,
+        project_id: Option<&str>,
+        search: Option<&NoteSearch>,
+        limit: Option<usize>,
+    ) -> Result<Vec<NoteSummary>, StoreError> {
+        let Some(search) = search else {
+            let limit = limit.map_or(-1, |limit| limit as i64);
+            return Ok(self
+                .conn
+                .prepare_cached(LISTED_NOTES)?
+                .query_map(params![project_id, limit], summary)?
+                .collect::<Result<Vec<_>, _>>()?);
+        };
+        let limit = limit.unwrap_or(usize::MAX);
+        let mut found = Vec::new();
+        let mut statement = self.conn.prepare_cached(SEARCHED_NOTES)?;
+        let mut rows = statement.query([project_id])?;
+        while found.len() < limit
+            && let Some(row) = rows.next()?
+        {
+            let text = row.get_ref(6)?.as_str().map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
+            })?;
+            if search.finds(text) {
+                found.push(summary(row)?);
+            }
+        }
+        Ok(found)
     }
 
     pub fn note(&self, id: &str) -> Result<Option<StoredNote>, StoreError> {
@@ -98,12 +153,39 @@ impl PersonalStore {
             .optional()?)
     }
 
-    /// Adds the note, or replaces the one with its id.
-    pub fn save_note(&mut self, note: &StoredNote) -> Result<(), StoreError> {
+    /// What the note `id` leaves to a save that brings `text`, `document` and `project_id`,
+    /// compared where they are kept; `None` for a note not written yet.
+    pub fn replaced_note(
+        &self,
+        id: &str,
+        project_id: Option<&str>,
+        text: &str,
+        document: Option<&str>,
+    ) -> Result<Option<ReplacedNote>, StoreError> {
+        Ok(self
+            .conn
+            .prepare_cached(REPLACED_NOTE)?
+            .query_row(params![id, text, project_id, document], |row| {
+                Ok(ReplacedNote {
+                    ignored: json_document_column(row, 0)?,
+                    created_at: row.get(1)?,
+                    updated_at: row.get(2)?,
+                    same: row.get(3)?,
+                })
+            })
+            .optional()?)
+    }
+
+    /// Adds the note, or replaces the one with its id. `summary` is how a list shows it.
+    pub fn save_note(
+        &mut self,
+        note: &StoredNote,
+        summary: &NoteSummary,
+    ) -> Result<(), StoreError> {
         self.conn
             .prepare_cached(&format!(
-                "INSERT OR REPLACE INTO notes ({NOTE_COLUMNS})
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"
+                "INSERT OR REPLACE INTO notes ({NOTE_COLUMNS}, title, preview, credentials)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
             ))?
             .execute(params![
                 note.id,
@@ -113,6 +195,9 @@ impl PersonalStore {
                 note.created_at,
                 note.updated_at,
                 note.document,
+                summary.title,
+                summary.preview,
+                summary.credentials,
             ])?;
         Ok(())
     }
@@ -204,6 +289,36 @@ impl PersonalStore {
     }
 }
 
+fn summarize_notes(conn: &Connection) -> Result<(), StoreError> {
+    let notes = conn
+        .prepare(&format!("SELECT {NOTE_COLUMNS} FROM notes"))?
+        .query_map([], note)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut update =
+        conn.prepare("UPDATE notes SET title = ?2, preview = ?3, credentials = ?4 WHERE id = ?1")?;
+    for note in notes {
+        let summary = note.summary();
+        update.execute(params![
+            note.id,
+            summary.title,
+            summary.preview,
+            summary.credentials
+        ])?;
+    }
+    Ok(())
+}
+
+fn summary(row: &Row) -> rusqlite::Result<NoteSummary> {
+    Ok(NoteSummary {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        preview: row.get(3)?,
+        updated_at: row.get(4)?,
+        credentials: row.get(5)?,
+    })
+}
+
 fn note(row: &Row) -> rusqlite::Result<StoredNote> {
     Ok(StoredNote {
         id: row.get(0)?,
@@ -272,44 +387,159 @@ mod tests {
         }
     }
 
+    fn save(store: &mut PersonalStore, note: &StoredNote) {
+        store.save_note(note, &note.summary()).unwrap();
+    }
+
+    fn ids(notes: Vec<NoteSummary>) -> Vec<String> {
+        notes.into_iter().map(|note| note.id).collect()
+    }
+
+    fn query_plan(store: &PersonalStore, sql: &str) -> Vec<String> {
+        store
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(params![Some("p"), 10], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
     #[test]
     fn notes_are_listed_by_scope_with_the_latest_edit_first() {
         let mut store = PersonalStore::open_in_memory().unwrap();
-        store
-            .save_note(&stored("a", Some("p"), "old", "2026-11-09T10:00:00.000Z"))
-            .unwrap();
-        store
-            .save_note(&stored("b", Some("p"), "new", "2026-11-09T11:00:00.000Z"))
-            .unwrap();
-        store
-            .save_note(&stored("c", None, "general", "2026-11-09T12:00:00.000Z"))
-            .unwrap();
-
-        let ids =
-            |notes: Vec<StoredNote>| notes.into_iter().map(|note| note.id).collect::<Vec<_>>();
+        let old = stored("a", Some("p"), "old", "2026-11-09T10:00:00.000Z");
+        save(&mut store, &old);
+        save(
+            &mut store,
+            &stored("b", Some("p"), "new", "2026-11-09T11:00:00.000Z"),
+        );
+        save(
+            &mut store,
+            &stored("c", None, "general", "2026-11-09T12:00:00.000Z"),
+        );
 
         let mut rich = stored("b", Some("p"), "new", "2026-11-09T11:00:00.000Z");
         rich.document = Some(r#"{"type":"doc"}"#.into());
-        store.save_note(&rich).unwrap();
+        save(&mut store, &rich);
 
-        assert_eq!(ids(store.notes(Some("p")).unwrap()), ["b", "a"]);
-        assert_eq!(store.notes(Some("p")).unwrap()[0].document, None);
+        let listed = store.notes(Some("p"), None, None).unwrap();
+        assert_eq!(listed[1], old.summary());
+        assert_eq!(ids(listed), ["b", "a"]);
+        assert_eq!(ids(store.notes(Some("p"), None, Some(1)).unwrap()), ["b"]);
         assert_eq!(store.note("b").unwrap().unwrap().document, rich.document);
-        assert_eq!(ids(store.notes(None).unwrap()), ["c"]);
-        assert!(store.notes(Some("other")).unwrap().is_empty());
+        assert_eq!(ids(store.notes(None, None, None).unwrap()), ["c"]);
+        assert!(store.notes(Some("other"), None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_list_reads_its_index_alone_and_never_a_note() {
+        let store = PersonalStore::open_in_memory().unwrap();
+
+        let plan = query_plan(&store, LISTED_NOTES);
+
+        assert!(
+            plan.iter()
+                .any(|step| step.contains("COVERING INDEX notes_listed")),
+            "{plan:#?}"
+        );
+        assert!(
+            !plan.iter().any(|step| step.contains("TEMP B-TREE")),
+            "{plan:#?}"
+        );
+    }
+
+    #[test]
+    fn a_search_finds_notes_by_their_text_up_to_a_limit() {
+        let mut store = PersonalStore::open_in_memory().unwrap();
+        for (id, text, at) in [
+            ("a", "Cache ideas\ntry a TTL", "2026-11-09T10:00:00.000Z"),
+            ("b", "Deploy steps", "2026-11-09T11:00:00.000Z"),
+            ("c", "the CACHE again", "2026-11-09T12:00:00.000Z"),
+        ] {
+            save(&mut store, &stored(id, Some("p"), text, at));
+        }
+        let search = NoteSearch::new("cache");
+
+        let found = |limit| ids(store.notes(Some("p"), search.as_ref(), limit).unwrap());
+
+        assert_eq!(found(None), ["c", "a"]);
+        assert_eq!(found(Some(1)), ["c"]);
+        assert!(store.notes(None, search.as_ref(), None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_save_learns_of_the_note_it_replaces_without_reading_it() {
+        let mut store = PersonalStore::open_in_memory().unwrap();
+        let mut note = stored("a", Some("p"), "kept", "2026-11-09T10:00:00.000Z");
+        note.document = Some(r#"{"type":"doc"}"#.into());
+        note.ignored = vec!["hunter2".into()];
+        save(&mut store, &note);
+
+        let replaced = |project_id, text, document| {
+            store
+                .replaced_note("a", project_id, text, document)
+                .unwrap()
+                .unwrap()
+        };
+
+        assert_eq!(
+            replaced(Some("p"), "kept", note.document.as_deref()),
+            ReplacedNote {
+                ignored: note.ignored.clone(),
+                created_at: note.created_at.clone(),
+                updated_at: note.updated_at.clone(),
+                same: true,
+            }
+        );
+        assert!(!replaced(Some("p"), "edited", note.document.as_deref()).same);
+        assert!(!replaced(Some("p"), "kept", None).same);
+        assert!(!replaced(None, "kept", note.document.as_deref()).same);
+        assert_eq!(store.replaced_note("new", None, "", None).unwrap(), None);
+    }
+
+    #[test]
+    fn notes_from_before_lists_kept_a_summary_get_one() {
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..3] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute(
+            "INSERT INTO notes (id, project_id, text, ignored_json, created_at, updated_at)
+             VALUES ('old', NULL, 'Staging\npassword: hunter2', '[]', 't', 't')",
+            [],
+        )
+        .unwrap();
+
+        let store = PersonalStore::init(conn).unwrap();
+
+        let [listed] = &store.notes(None, None, None).unwrap()[..] else {
+            panic!("one note");
+        };
+        assert_eq!(
+            (
+                listed.title.as_str(),
+                listed.preview.as_str(),
+                listed.credentials
+            ),
+            ("Staging", "password: ••••••", 1)
+        );
     }
 
     #[test]
     fn saving_a_note_again_replaces_it_and_deleting_it_leaves_nothing() {
         let mut store = PersonalStore::open_in_memory().unwrap();
         let mut note = stored("a", None, "password: hunter2", "2026-11-09T10:00:00.000Z");
-        store.save_note(&note).unwrap();
+        save(&mut store, &note);
         note.text = "edited".into();
         note.document = Some(r#"{"type":"doc"}"#.into());
         note.ignored = vec!["hunter2".into()];
-        store.save_note(&note).unwrap();
+        save(&mut store, &note);
 
         assert_eq!(store.note("a").unwrap(), Some(note));
+        assert_eq!(store.notes(None, None, None).unwrap()[0].title, "edited");
         assert!(store.delete_note("a").unwrap());
         assert!(!store.delete_note("a").unwrap());
         assert_eq!(store.note("a").unwrap(), None);
@@ -358,12 +588,14 @@ mod tests {
     #[test]
     fn a_removed_project_leaves_its_notes_and_secrets_as_general_ones() {
         let mut store = PersonalStore::open_in_memory().unwrap();
-        store
-            .save_note(&stored("a", Some("p"), "kept", "2026-11-09T10:00:00.000Z"))
-            .unwrap();
-        store
-            .save_note(&stored("b", Some("q"), "other", "2026-11-09T10:00:00.000Z"))
-            .unwrap();
+        save(
+            &mut store,
+            &stored("a", Some("p"), "kept", "2026-11-09T10:00:00.000Z"),
+        );
+        save(
+            &mut store,
+            &stored("b", Some("q"), "other", "2026-11-09T10:00:00.000Z"),
+        );
         store
             .save_vault_secret(&kept("free", Some("p"), VaultAccess::Allow))
             .unwrap();
@@ -376,8 +608,8 @@ mod tests {
 
         store.release_project("p").unwrap();
 
-        assert_eq!(store.notes(None).unwrap()[0].id, "a");
-        assert_eq!(store.notes(Some("q")).unwrap()[0].id, "b");
+        assert_eq!(ids(store.notes(None, None, None).unwrap()), ["a"]);
+        assert_eq!(ids(store.notes(Some("q"), None, None).unwrap()), ["b"]);
         let access = |id: &str| {
             let secret = store.vault_secret(id).unwrap().unwrap();
             (secret.project_id, secret.access)
@@ -394,9 +626,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("personal.sqlite");
         let mut store = PersonalStore::open(&path).unwrap();
-        store
-            .save_note(&stored("a", None, "kept", "2026-11-09T10:00:00.000Z"))
-            .unwrap();
+        save(
+            &mut store,
+            &stored("a", None, "kept", "2026-11-09T10:00:00.000Z"),
+        );
         let secure: i64 = store
             .conn
             .pragma_query_value(None, "secure_delete", |row| row.get(0))
@@ -406,7 +639,7 @@ mod tests {
         let reopened = PersonalStore::open(&path).unwrap();
 
         assert_eq!(secure, 1);
-        assert_eq!(reopened.notes(None).unwrap()[0].text, "kept");
+        assert_eq!(reopened.note("a").unwrap().unwrap().text, "kept");
         drop(reopened);
         let _ = std::fs::remove_dir_all(&dir);
     }

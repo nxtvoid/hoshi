@@ -48,8 +48,23 @@ import {
 const SAVE_DELAY_MS = 400
 const COPIED_MS = 1500
 
+/** What the editor shows of a note around its text. */
+type Shown = Pick<Note, 'title' | 'credentials'>
+
+const shown = ({ title, credentials }: Shown): Shown => ({ title, credentials })
+
+/** `next`, or `kept` when it shows the same, so a save that changes neither renders nothing. */
+function settled(kept: Shown | null, next: Shown) {
+  const same =
+    kept !== null &&
+    kept.title === next.title &&
+    kept.credentials.length === next.credentials.length &&
+    kept.credentials.every((hint, index) => hint === next.credentials[index])
+  return same ? kept : next
+}
+
 /** A note's title names the secret moved out of it, unless the secret was in the title. */
-function suggestedName(note: Note | null) {
+function suggestedName(note: Shown | null) {
   return note && !note.title.includes('•') ? note.title : ''
 }
 
@@ -92,7 +107,7 @@ export function NoteEditor({
   /** What the editor opens with; `null` until the note is read. */
   const [opening, setOpening] = useState<JSONContent | null>(null)
   const [empty, setEmpty] = useState(true)
-  const [note, setNote] = useState<Note | null>(null)
+  const [note, setNote] = useState<Shown | null>(null)
   const [movingToVault, setMovingToVault] = useState(false)
   const editor = useRef<NoteTextEditorHandle>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -132,7 +147,12 @@ export function NoteEditor({
           next.document
         )
         stored.current = next
-        setNote(saved)
+        setNote((kept) =>
+          settled(kept, {
+            title: saved.summary.title,
+            credentials: saved.credentials
+          })
+        )
       } catch (error) {
         console.error('hoshi: failed to save a note', error)
       }
@@ -159,7 +179,7 @@ export function NoteEditor({
         current.current = { ...stored.current }
         setProjectId(found.projectId)
       }
-      setNote(found)
+      setNote(found && shown(found))
       setEmpty((found?.text ?? '').trim() === '')
       setOpening(documentOf(found ?? { text: '', document: null }))
     })
@@ -195,18 +215,18 @@ export function NoteEditor({
     const before = current.current
     const { from, to } = changedStretch(before.text, updated.text)
     const patched = replaceInDocument(documentOf(before), from, to)
-    const shown =
+    const document =
       patched && toMarkdown(patched) === updated.text
         ? patched
         : noteDocument(updated.text)
-    editor.current?.setDocument(shown)
+    editor.current?.setDocument(document)
     stored.current = {
       text: updated.text,
       document: updated.document,
       projectId: updated.projectId
     }
-    current.current = { ...stored.current, document: JSON.stringify(shown) }
-    setNote(updated)
+    current.current = { ...stored.current, document: JSON.stringify(document) }
+    setNote(shown(updated))
     void write()
   }
 
@@ -234,7 +254,7 @@ export function NoteEditor({
   const notASecret = async () => {
     await flush()
     try {
-      setNote(await ignoreNoteCredential(noteId, 0))
+      setNote(shown(await ignoreNoteCredential(noteId, 0)))
     } catch (error) {
       console.error('hoshi: failed to dismiss a credential', error)
     }

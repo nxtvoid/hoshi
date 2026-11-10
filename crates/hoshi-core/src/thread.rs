@@ -364,10 +364,28 @@ pub enum ItemContent {
 const OUTPUT_PREVIEW_CHARS: usize = 200;
 
 impl ItemContent {
-    /// The item as a page of the transcript carries it: tool output cut to its start and
-    /// diffs left out, which the item alone returns.
+    /// The item as a page of the transcript carries it: tool output cut to its start, and
+    /// diffs and the text of attached notes left out, which the item alone returns.
     pub fn summary(self) -> Self {
         match self {
+            Self::UserMessage {
+                text,
+                attachments,
+                steer,
+                task_result,
+                pull_request_update,
+                rewind,
+            } => Self::UserMessage {
+                text,
+                attachments: attachments
+                    .into_iter()
+                    .map(MessageAttachment::summary)
+                    .collect(),
+                steer,
+                task_result,
+                pull_request_update,
+                rewind,
+            },
             Self::ToolCall {
                 name,
                 input,

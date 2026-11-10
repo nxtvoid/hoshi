@@ -101,13 +101,16 @@ impl Token<'_> {
 
 /// The byte ranges of `text` that look like credentials, in order and apart.
 pub fn find_credentials(text: &str) -> Vec<Range<usize>> {
-    let mut found = private_keys(text);
+    let keys = private_keys(text);
+    let mut found = keys.clone();
+    let mut key = 0;
     let tokens = tokens(text);
     let mut labelled: Option<Labelled> = None;
     for (index, token) in tokens.iter().enumerate() {
-        let in_key = found
-            .iter()
-            .any(|key| key.start <= token.start && token.start < key.end);
+        while keys.get(key).is_some_and(|key| key.end <= token.start) {
+            key += 1;
+        }
+        let in_key = keys.get(key).is_some_and(|key| key.start <= token.start);
         let expected = labelled.take();
         if in_key {
             continue;
@@ -419,6 +422,14 @@ mod tests {
             ]
         );
         assert!(found("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----").is_empty());
+    }
+
+    #[test]
+    fn what_stands_between_two_private_keys_is_still_read() {
+        let key = "-----BEGIN PRIVATE KEY-----\ntoken: MIIEvQ1BADAN\n-----END PRIVATE KEY-----";
+        let text = format!("password: hunter2\n{key}\ntoken: abc123def\n{key}\npin: 4821");
+
+        assert_eq!(found(&text), ["hunter2", key, "abc123def", key, "4821"]);
     }
 
     #[test]

@@ -63,23 +63,50 @@ pub struct NoteSummary {
     pub credentials: u32,
 }
 
+/// What saving a note answers with: how a list shows it now, and what its editor flags.
+/// The caller has the rest, having just sent it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SavedNote {
+    pub summary: NoteSummary,
+    /// What looks like a credential in the text, each by its first characters, in order.
+    pub credentials: Vec<String>,
+}
+
+/// What a list of notes is searched for: text, whatever its case.
+pub struct NoteSearch(String);
+
+impl NoteSearch {
+    /// `None` for a query that asks for nothing, which every note answers.
+    pub fn new(query: &str) -> Option<Self> {
+        let query = query.trim().to_lowercase();
+        (!query.is_empty()).then_some(Self(query))
+    }
+
+    pub fn finds(&self, text: &str) -> bool {
+        text.to_lowercase().contains(&self.0)
+    }
+}
+
 impl StoredNote {
     pub fn credentials(&self) -> Vec<Range<usize>> {
         unignored(&self.text, &self.ignored)
     }
 
-    pub fn open(&self) -> Note {
+    /// The note read once for all a save answers with.
+    pub fn saved(&self) -> SavedNote {
         let credentials = self.credentials();
         let (title, preview) = title_and_preview(&masked(&self.text, &credentials));
-        Note {
-            id: self.id.clone(),
-            project_id: self.project_id.clone(),
-            title,
-            preview,
-            text: self.text.clone(),
-            document: self.document.clone(),
-            created_at: self.created_at.clone(),
-            updated_at: self.updated_at.clone(),
+        SavedNote {
+            summary: NoteSummary {
+                id: self.id.clone(),
+                project_id: self.project_id.clone(),
+                title,
+                preview,
+                updated_at: self.updated_at.clone(),
+                credentials: credentials.len() as u32,
+            },
             credentials: credentials
                 .into_iter()
                 .map(|range| hint(&self.text[range]))
@@ -87,24 +114,26 @@ impl StoredNote {
         }
     }
 
-    pub fn summary(&self) -> NoteSummary {
-        let credentials = self.credentials();
-        let masked = masked(&self.text, &credentials);
-        let (title, preview) = title_and_preview(&masked);
-        NoteSummary {
-            id: self.id.clone(),
-            project_id: self.project_id.clone(),
-            title,
-            preview,
-            updated_at: self.updated_at.clone(),
-            credentials: credentials.len() as u32,
+    pub fn open(&self) -> Note {
+        let SavedNote {
+            summary,
+            credentials,
+        } = self.saved();
+        Note {
+            id: summary.id,
+            project_id: summary.project_id,
+            title: summary.title,
+            preview: summary.preview,
+            text: self.text.clone(),
+            document: self.document.clone(),
+            created_at: self.created_at.clone(),
+            updated_at: summary.updated_at,
+            credentials,
         }
     }
 
-    /// Whether the text holds `query`, whatever its case. An empty query matches.
-    pub fn matches(&self, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        query.is_empty() || self.text.to_lowercase().contains(&query)
+    pub fn summary(&self) -> NoteSummary {
+        self.saved().summary
     }
 
     /// The note as a message carries it to an agent, with its credentials left out.
@@ -114,7 +143,7 @@ impl StoredNote {
         MessageAttachment::Note {
             id: self.id.clone(),
             title,
-            text: text.trim().to_owned(),
+            text: Some(text.trim().to_owned()),
             hidden,
         }
     }
@@ -222,18 +251,18 @@ mod tests {
             MessageAttachment::Note {
                 id: "n".into(),
                 title: "Deploy".into(),
-                text: "Deploy\npassword: [hidden credential]".into(),
+                text: Some("Deploy\npassword: [hidden credential]".into()),
                 hidden: 1,
             }
         );
     }
 
     #[test]
-    fn a_search_ignores_case_and_an_empty_one_finds_all() {
-        let stored = note("Revisar el CACHÉ de PRs");
+    fn a_search_ignores_case_and_an_empty_one_asks_for_nothing() {
+        let text = "Revisar el CACHÉ de PRs";
 
-        assert!(stored.matches("caché"));
-        assert!(stored.matches("  "));
-        assert!(!stored.matches("deploy"));
+        assert!(NoteSearch::new(" caché ").unwrap().finds(text));
+        assert!(!NoteSearch::new("deploy").unwrap().finds(text));
+        assert!(NoteSearch::new("  ").is_none());
     }
 }

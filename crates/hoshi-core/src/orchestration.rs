@@ -2348,7 +2348,7 @@ const a = 1
             attachments: vec![MessageAttachment::Note {
                 id: "n".into(),
                 title: "Cache ideas".into(),
-                text: "Cache ideas\ntry a TTL".into(),
+                text: Some("Cache ideas\ntry a TTL".into()),
                 hidden: 0,
             }],
         };
@@ -3022,6 +3022,28 @@ Blue"
         assert_eq!(output.map(|text| text.len()), Some(200));
         assert!(output_omitted);
         assert_eq!(call("short").summary(), call("short"));
+    }
+
+    #[test]
+    fn a_page_leaves_out_the_text_of_an_attached_note() {
+        let message = |text: Option<&str>| ItemContent::UserMessage {
+            text: "see my note".into(),
+            attachments: vec![MessageAttachment::Note {
+                id: "n".into(),
+                title: "Cache ideas".into(),
+                text: text.map(str::to_owned),
+                hidden: 1,
+            }],
+            steer: false,
+            task_result: None,
+            pull_request_update: None,
+            rewind: None,
+        };
+
+        assert_eq!(
+            message(Some("Cache ideas\ntry a TTL")).summary(),
+            message(None)
+        );
     }
 
     #[test]

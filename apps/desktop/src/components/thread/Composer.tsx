@@ -9,6 +9,7 @@ import { useImageStore } from '@/state/image-store'
 import { flushDrafts, useDraftStore } from '@/state/draft-store'
 import { useComposerFillStore } from '@/state/composer-fill-store'
 import { useInChat, useScopeProjectId } from '@/state/use-scope'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ModelPicker } from './ModelPicker'
 import { stepHistory } from '@/lib/prompt-history'
@@ -156,6 +157,13 @@ export function Composer({
   const threadId = useAppStore((state) => state.selectedThreadId)
   const fill = useComposerFillStore((state) => state.fill)
   const restoreImages = images.restore
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
+  const notesWereOpen = useRef(notesOpen)
+
+  useEffect(() => {
+    if (notesWereOpen.current && !notesOpen) editorRef.current?.focus()
+    notesWereOpen.current = notesOpen
+  }, [notesOpen])
 
   useEffect(() => {
     if (!fill || fill.threadId !== threadId) return
@@ -416,7 +424,7 @@ export function Composer({
     editor.setText('')
     const sent = await sendMessage(
       prompt,
-      [...attachments, ...(await noteAttachments(takenNotes))],
+      [...attachments, ...noteAttachments(takenNotes)],
       compactFirst
     )
     setSending(false)

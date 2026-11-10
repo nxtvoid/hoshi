@@ -100,8 +100,8 @@ function useSearch<T>(
 /** The notes of the project, then the general ones, whose text holds `query`. */
 async function searchNotes(projectId: string | null, query: string) {
   const [own, general] = await Promise.all([
-    projectId === null ? [] : listNotes(projectId, query),
-    listNotes(null, query)
+    projectId === null ? [] : listNotes(projectId, query, NOTE_LIMIT),
+    listNotes(null, query, NOTE_LIMIT)
   ])
   return [...own, ...general].slice(0, NOTE_LIMIT)
 }

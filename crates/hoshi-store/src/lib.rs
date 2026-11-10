@@ -6,7 +6,7 @@
 
 mod personal;
 
-pub use personal::PersonalStore;
+pub use personal::{PersonalStore, ReplacedNote};
 
 use hoshi_core::{
     ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, PullRequestWatch,

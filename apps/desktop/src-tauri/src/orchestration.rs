@@ -3,7 +3,7 @@ use hoshi_core::{
     FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
     MessageAttachment, Note, NoteSummary, ProviderAccountStatus, ProviderModels, ProviderVersion,
     PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository,
-    SecretAnswer, SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem,
+    SavedNote, SecretAnswer, SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem,
     TranscriptPage, UsageLimits, VaultSecret, VaultSecretInput, WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
@@ -587,14 +587,16 @@ pub fn answer_secret_request(
     engine.answer_secret_request(&thread_id, &request_id, answer)
 }
 
-/// A project's notes holding `query`, or the general ones without a project.
+/// A project's notes holding `query`, or the general ones without a project, at most
+/// `limit` of them.
 #[tauri::command(async)]
 pub fn list_notes(
     engine: State<'_, Engine>,
     project_id: Option<String>,
     query: String,
+    limit: Option<usize>,
 ) -> Result<Vec<NoteSummary>, CommandError> {
-    engine.notes(project_id.as_deref(), &query)
+    engine.notes(project_id.as_deref(), &query, limit)
 }
 
 #[tauri::command(async)]
@@ -611,7 +613,7 @@ pub fn save_note(
     project_id: Option<String>,
     text: String,
     document: Option<String>,
-) -> Result<Note, CommandError> {
+) -> Result<SavedNote, CommandError> {
     engine.save_note(&note_id, project_id, text, document)
 }
 

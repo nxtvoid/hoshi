@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { Note } from '@/bindings/Note'
 import { withoutKeys } from '@/lib/records'
+import type { SavedNote } from '@/bindings/SavedNote'
 import type { NoteSummary } from '@/bindings/NoteSummary'
 import type { VaultSecretInput } from '@/bindings/VaultSecretInput'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
@@ -113,9 +114,16 @@ export function useAttachedNotes(draftKey: string): AttachedNote[] {
 
 const touch = () => useNotesStore.getState().touch()
 
-/** A project's notes holding `query`, or the general ones for `null`, latest first. */
-export function listNotes(projectId: string | null, query: string) {
-  return invoke<NoteSummary[]>('list_notes', { projectId, query })
+/**
+ * A project's notes holding `query`, or the general ones for `null`, latest first, at most
+ * `limit` of them.
+ */
+export function listNotes(
+  projectId: string | null,
+  query: string,
+  limit: number | null = null
+) {
+  return invoke<NoteSummary[]>('list_notes', { projectId, query, limit })
 }
 
 /** `null` for a note that doesn't exist, as one not written yet. */
@@ -129,7 +137,8 @@ export async function readNote(noteId: string): Promise<Note | null> {
 
 /**
  * Writes a note's text and where it belongs, adding the note if its id is new. `document`
- * is the same note as its editor shows it; a note written as plain text has none.
+ * is the same note as its editor shows it; a note written as plain text has none. Answers
+ * with how a list shows the note now and what in it looks like a credential.
  */
 export async function saveNote(
   noteId: string,
@@ -137,23 +146,14 @@ export async function saveNote(
   text: string,
   document: string | null = null
 ) {
-  const note = await invoke<Note>('save_note', {
+  const saved = await invoke<SavedNote>('save_note', {
     noteId,
     projectId,
     text,
     document
   })
-  useNotesStore.setState({
-    lastSaved: {
-      id: note.id,
-      projectId: note.projectId,
-      title: note.title,
-      preview: note.preview,
-      updatedAt: note.updatedAt,
-      credentials: note.credentials.length
-    }
-  })
-  return note
+  useNotesStore.setState({ lastSaved: saved.summary })
+  return saved
 }
 
 export async function deleteNote(noteId: string) {
@@ -185,18 +185,17 @@ export async function moveNoteCredentialToVault(
 }
 
 /**
- * What a message carries for each attached note, read now and without its credentials. A
- * note deleted since it was attached is left out.
+ * What a message carries for each attached note: which note, and no text. The engine reads
+ * each as it sends the message, without its credentials, and leaves out one deleted since.
  */
-export async function noteAttachments(
+export function noteAttachments(
   notes: readonly AttachedNote[]
-): Promise<MessageAttachment[]> {
-  const read = await Promise.all(
-    notes.map((note) =>
-      invoke<MessageAttachment>('get_note_attachment', {
-        noteId: note.id
-      }).catch(() => null)
-    )
-  )
-  return read.filter((attachment) => attachment !== null)
+): MessageAttachment[] {
+  return notes.map((note) => ({
+    type: 'note',
+    id: note.id,
+    title: note.title,
+    text: null,
+    hidden: note.credentials
+  }))
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { cn, formatRelativeTime } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
@@ -158,7 +158,7 @@ function BackHeader({ projectTitle }: { projectTitle: string | undefined }) {
   )
 }
 
-function NoteRow({
+const NoteRow = memo(function NoteRow({
   note,
   selected,
   onSelect
@@ -206,4 +206,4 @@ function NoteRow({
       ) : null}
     </button>
   )
-}
+})

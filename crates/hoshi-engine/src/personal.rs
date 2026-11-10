@@ -6,8 +6,8 @@
 use crate::secrets::SecretValues;
 use crate::{Notification, Notify, delegation, internal, now};
 use hoshi_core::{
-    CommandError, MessageAttachment, Note, NoteSummary, StoredNote, VaultAccess, VaultField,
-    VaultFieldInput, VaultSecret, VaultSecretInput,
+    CommandError, MessageAttachment, Note, NoteSearch, NoteSummary, SavedNote, StoredNote,
+    VaultAccess, VaultField, VaultFieldInput, VaultSecret, VaultSecretInput,
 };
 use hoshi_store::PersonalStore;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,18 +59,24 @@ impl Personal {
         (self.notify)(Notification::VaultChanged);
     }
 
-    /// A project's notes holding `query`, or the general ones for `None`, latest first.
+    /// A project's notes holding `query`, or the general ones for `None`, latest first, at
+    /// most `limit` of them.
     pub fn notes(
         &self,
         project_id: Option<&str>,
         query: &str,
+        limit: Option<usize>,
     ) -> Result<Vec<NoteSummary>, CommandError> {
-        let notes = self.store().notes(project_id).map_err(internal)?;
-        Ok(notes
-            .iter()
-            .filter(|note| note.matches(query))
-            .map(StoredNote::summary)
-            .collect())
+        self.store()
+            .notes(project_id, NoteSearch::new(query).as_ref(), limit)
+            .map_err(internal)
+    }
+
+    /// Writes the note with how lists show it, and answers what a save does.
+    fn write(store: &mut PersonalStore, note: &StoredNote) -> Result<SavedNote, CommandError> {
+        let saved = note.saved();
+        store.save_note(note, &saved.summary).map_err(internal)?;
+        Ok(saved)
     }
 
     fn stored_note(&self, id: &str) -> Result<StoredNote, CommandError> {
@@ -92,48 +98,51 @@ impl Personal {
     }
 
     /// Writes a note's text, as its editor shows it in `document`, and where it belongs,
-    /// adding the note if `id` is new.
+    /// adding the note if `id` is new. One that already holds all three is left as it is.
     pub fn save_note(
         &self,
         id: &str,
         project_id: Option<String>,
         text: String,
         document: Option<String>,
-    ) -> Result<Note, CommandError> {
+    ) -> Result<SavedNote, CommandError> {
         let mut store = self.store();
+        let replaced = store
+            .replaced_note(id, project_id.as_deref(), &text, document.as_deref())
+            .map_err(internal)?;
         let now = now();
-        let note = match store.note(id).map_err(internal)? {
-            Some(existing)
-                if existing.text == text
-                    && existing.project_id == project_id
-                    && existing.document == document =>
-            {
-                return Ok(existing.open());
-            }
-            Some(existing) => StoredNote {
-                ignored: existing
+        let (ignored, created_at, updated_at, same) = match replaced {
+            Some(replaced) if replaced.same => (
+                replaced.ignored,
+                replaced.created_at,
+                replaced.updated_at,
+                true,
+            ),
+            Some(replaced) => (
+                replaced
                     .ignored
                     .into_iter()
                     .filter(|value| text.contains(value.as_str()))
                     .collect(),
-                project_id,
-                text,
-                document,
-                updated_at: now,
-                ..existing
-            },
-            None => StoredNote {
-                id: id.to_owned(),
-                project_id,
-                text,
-                document,
-                created_at: now.clone(),
-                updated_at: now,
-                ignored: Vec::new(),
-            },
+                replaced.created_at,
+                now,
+                false,
+            ),
+            None => (Vec::new(), now.clone(), now, false),
         };
-        store.save_note(&note).map_err(internal)?;
-        Ok(note.open())
+        let note = StoredNote {
+            id: id.to_owned(),
+            project_id,
+            text,
+            document,
+            created_at,
+            updated_at,
+            ignored,
+        };
+        if same {
+            return Ok(note.saved());
+        }
+        Self::write(&mut store, &note)
     }
 
     pub fn delete_note(&self, id: &str) -> Result<(), CommandError> {
@@ -158,7 +167,7 @@ impl Personal {
         let mut note = Self::held_note(&store, id)?;
         let range = Self::credential(&note, index)?;
         note.ignored.push(note.text[range].to_owned());
-        store.save_note(&note).map_err(internal)?;
+        Self::write(&mut store, &note)?;
         Ok(note.open())
     }
 
@@ -195,7 +204,7 @@ impl Personal {
                 .replace_range(range, &format!("[vault: {}]", secret.name));
             note.document = None;
             note.updated_at = now();
-            store.save_note(&note).map_err(internal)?;
+            Self::write(&mut store, &note)?;
             store.forget_removed();
         }
         Ok(note.open())
@@ -204,6 +213,18 @@ impl Personal {
     /// The note as a message carries it to an agent, without its credentials.
     pub fn note_attachment(&self, id: &str) -> Result<MessageAttachment, CommandError> {
         Ok(self.stored_note(id)?.attachment())
+    }
+
+    /// What a message the user sends carries, each of its notes read now as an agent may
+    /// read it, whatever came with it. A note deleted since it was attached is left out.
+    pub fn with_notes(&self, attachments: Vec<MessageAttachment>) -> Vec<MessageAttachment> {
+        attachments
+            .into_iter()
+            .filter_map(|attachment| match attachment {
+                MessageAttachment::Note { id, .. } => self.note_attachment(&id).ok(),
+                other => Some(other),
+            })
+            .collect()
     }
 
     pub fn set_always_allow(&self, always_allow: bool) {
@@ -449,16 +470,20 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(edited.created_at, created.created_at);
-        assert_eq!(
-            personal.note("n").unwrap().text,
-            "Cache ideas\ntry a 5 min TTL"
+        assert_eq!(created.summary.title, "Cache ideas");
+        assert_eq!(edited.summary.preview, "try a 5 min TTL");
+        let note = personal.note("n").unwrap();
+        assert_eq!(note.text, "Cache ideas\ntry a 5 min TTL");
+        assert_eq!(note.updated_at, edited.summary.updated_at);
+        let found = personal.notes(Some("p"), "5 MIN", None).unwrap();
+        assert_eq!(found, [edited.summary]);
+        assert!(
+            personal
+                .notes(Some("p"), "deploy", None)
+                .unwrap()
+                .is_empty()
         );
-        let found = personal.notes(Some("p"), "5 MIN").unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].title, "Cache ideas");
-        assert!(personal.notes(Some("p"), "deploy").unwrap().is_empty());
-        assert!(personal.notes(None, "").unwrap().is_empty());
+        assert!(personal.notes(None, "", None).unwrap().is_empty());
 
         personal.delete_note("n").unwrap();
         assert_eq!(
@@ -484,9 +509,10 @@ mod tests {
             panic!("a note attachment");
         };
         assert_eq!(
-            (text.as_str(), hidden),
-            ("port: 5432\npassword: hunter2", 0)
+            (text.as_deref(), hidden),
+            (Some("port: 5432\npassword: hunter2"), 0)
         );
+        assert_eq!(personal.notes(None, "", None).unwrap()[0].credentials, 0);
 
         let changed = personal
             .save_note("n", None, "port: 5432\npassword: hunter3".into(), None)
@@ -535,8 +561,41 @@ mod tests {
             .save_note("n", None, "**bold**".into(), document.clone())
             .unwrap();
 
-        assert_eq!(rich.document, document);
         assert_eq!(personal.note("n").unwrap().document, document);
+        let again = personal
+            .save_note("n", None, "**bold**".into(), document)
+            .unwrap();
+        assert_eq!(again, rich);
+    }
+
+    #[test]
+    fn a_sent_note_is_read_by_the_engine_whatever_came_with_it() {
+        let personal = personal();
+        personal
+            .save_note("n", None, "Deploy\npassword: hunter2".into(), None)
+            .unwrap();
+        let carried = |id: &str| MessageAttachment::Note {
+            id: id.into(),
+            title: "made up".into(),
+            text: Some("password: hunter2".into()),
+            hidden: 0,
+        };
+        let skill = MessageAttachment::Skill { name: "pdf".into() };
+
+        let sent = personal.with_notes(vec![carried("n"), skill.clone(), carried("gone")]);
+
+        assert_eq!(
+            sent,
+            [
+                MessageAttachment::Note {
+                    id: "n".into(),
+                    title: "Deploy".into(),
+                    text: Some("Deploy\npassword: [hidden credential]".into()),
+                    hidden: 1,
+                },
+                skill
+            ]
+        );
     }
 
     #[test]

@@ -25,7 +25,10 @@ export function App() {
     <TooltipProvider delay={25}>
       <div className='bg-background text-foreground flex h-screen'>
         {sidebarOpen ? <Sidebar /> : null}
-        {notesOpen ? <NotesView /> : <ThreadView />}
+        <div className='grid min-w-0 flex-1 grid-cols-1 grid-rows-1 *:col-start-1 *:row-start-1'>
+          <ThreadView />
+          {notesOpen ? <NotesView /> : null}
+        </div>
         <Outlet />
       </div>
       <CommandPalette />

@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, test } from 'bun:test'
-import { type AttachedNote, useNotesStore } from '../../src/state/notes-store'
+import {
+  type AttachedNote,
+  noteAttachments,
+  useNotesStore
+} from '../../src/state/notes-store'
 
 const note = (id: string, credentials = 0): AttachedNote => ({
   id,
@@ -54,6 +58,12 @@ describe('attached notes', () => {
 
     expect(attached('t1')).toEqual([])
     expect(attached('t2')).toEqual(['b'])
+  })
+
+  test('a message names its notes and leaves their text to the engine', () => {
+    expect(noteAttachments([note('a', 2)])).toEqual([
+      { type: 'note', id: 'a', title: 'Note a', text: null, hidden: 2 }
+    ])
   })
 })
 

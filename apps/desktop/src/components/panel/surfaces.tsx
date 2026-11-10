@@ -72,9 +72,10 @@ export const SURFACES: {
     label: m.note_surface,
     icon: Note01Icon,
     Title: NoteTitle,
-    render: (_threadId, surface) => (
+    render: (threadId, surface) => (
       <NoteSurface
         key={`${surface.itemId}:${surface.noteId}`}
+        threadId={threadId}
         itemId={surface.itemId}
         noteId={surface.noteId}
       />

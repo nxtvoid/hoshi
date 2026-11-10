@@ -11,6 +11,7 @@ import { Markdown } from '@/components/markdown/Markdown'
 import { useAppStore } from '@/state/app-store'
 import { isPlanningWithUser } from '@/lib/agents'
 import { useRequestStore } from '@/state/request-store'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { useDelegatedRequest, useRequestActions } from './use-request-actions'
 import { invoke } from '@tauri-apps/api/core'
 import { Input } from '@hoshi/ui/components/input'
@@ -651,9 +652,10 @@ function QuestionsPanel({
   const question = questions[progress.index]
   const total = questions.length
   const last = progress.index === total - 1
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
 
   useEffect(() => {
-    if (!question) return
+    if (!question || notesOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.altKey || event.ctrlKey || event.metaKey) return
       const target = event.target
@@ -671,7 +673,7 @@ function QuestionsPanel({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [question, pick])
+  }, [question, pick, notesOpen])
 
   if (!question) return null
   const preview = question.options.find(
