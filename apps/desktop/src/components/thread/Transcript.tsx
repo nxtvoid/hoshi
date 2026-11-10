@@ -9,7 +9,7 @@ import { RequestRow } from './RequestRow'
 import { ApprovalBadge, ApprovalsContext } from './ApprovalBadge'
 import { approvalsByCall } from '@/lib/requests'
 import { SubagentGroup, SubagentRow } from './SubagentRow'
-import { DelegationRow, TaskResultRow } from './DelegationRows'
+import { DelegationRow, TaskResultRow, TaskWaits } from './DelegationRows'
 import { TaskListRow } from './TaskListRow'
 import { TurnChangesCard } from './TurnChangesCard'
 import { RewindButton } from './RewindButton'
@@ -25,8 +25,6 @@ import { TranscriptMinimap } from './TranscriptMinimap'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
 import { useAppStore } from '@/state/app-store'
 import { useStoppingStore } from '@/state/stopping-store'
-import { useRequestStore } from '@/state/request-store'
-import { isPlanningWithUser } from '@/lib/agents'
 import { rowKey, stableRows } from '@/lib/stable-rows'
 import {
   memo,
@@ -56,7 +54,7 @@ import {
   foldTurns,
   groupTranscript,
   isDelegation,
-  isLiveAgent,
+  staysInView,
   isSubagentCall,
   isToolCall,
   reasoningPreview,
@@ -96,33 +94,19 @@ export const Transcript = memo(function Transcript({
   const items = useTranscriptStore((state) => state.items)
   const streaming = useTranscriptStore((state) => state.streaming)
   const threadId = useTranscriptStore((state) => state.threadId)
-  const pendingTasks = useRequestStore((state) => state.pendingTasks)
-  const busyTasks = useAppStore((state) =>
-    state.threads
-      .filter(
-        (thread) =>
-          thread.parentThreadId === threadId &&
-          (thread.status === 'working' ||
-            thread.status === 'waitingForInput' ||
-            isPlanningWithUser(thread, pendingTasks))
-      )
-      .map((thread) => thread.id)
-      .join(' ')
-  )
   const shownRows = useRef<TranscriptRow[]>([])
   const rows = useMemo(() => {
-    const busy = new Set(busyTasks.split(' '))
     const next = stableRows(
       shownRows.current,
       foldTurns(
         groupTranscript(withStreaming(items, streaming)),
         working,
-        (row) => isLiveAgent(row, busy)
+        staysInView
       )
     )
     shownRows.current = next
     return next
-  }, [items, streaming, working, busyTasks])
+  }, [items, streaming, working])
   const approvals = useMemo(() => approvalsByCall(items), [items])
   const liveTasks = useMemo(
     () =>
@@ -217,6 +201,7 @@ export const Transcript = memo(function Transcript({
             <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
           </ApprovalsContext.Provider>
           <BackgroundWork status={working ? <TurnStatus /> : null} />
+          {working || !threadId ? null : <TaskWaits threadId={threadId} />}
         </ol>
       </div>
       <TranscriptMinimap

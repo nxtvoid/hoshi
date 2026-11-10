@@ -1442,6 +1442,7 @@ impl Engine {
                 )
                 .filter(|background| !background.tasks.is_empty())
                 .collect(),
+            task_previews: state.model.task_previews(),
         }
     }
 

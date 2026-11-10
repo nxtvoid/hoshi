@@ -116,16 +116,13 @@ export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
 }
 
 /**
- * Whether a row is an agent still at work: a subagent without its answer, or a delegated
- * task whose thread, among `busyTasks`, is still working or waiting.
+ * Whether a row stays in view when its turn folds: a delegated task, which runs on its
+ * own, or a subagent without its answer.
  */
-export function isLiveAgent(row: TranscriptRow, busyTasks: Set<string>) {
+export function staysInView(row: TranscriptRow) {
   if (row.kind !== 'item' || row.item.content.kind !== 'toolCall') return false
+  if (isDelegation(row.item)) return true
   const call = row.item.content
-  if (isDelegation(row.item)) {
-    const { taskId } = delegationOf(call)
-    return taskId !== null && busyTasks.has(taskId)
-  }
   return isSubagentCall(row.item) && call.output === null && !call.interrupted
 }
 

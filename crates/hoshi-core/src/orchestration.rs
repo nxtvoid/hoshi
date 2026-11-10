@@ -423,6 +423,30 @@ pub struct Snapshot {
     pub pending_tasks: Vec<String>,
     /// The commands each running turn waits for in the background.
     pub background_tasks: Vec<ThreadBackgroundTasks>,
+    /// The latest message of each delegated task, shortened.
+    pub task_previews: Vec<TaskPreview>,
+}
+
+/// A delegated task's latest message, shortened to one line for its card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TaskPreview {
+    pub thread_id: String,
+    pub text: String,
+}
+
+/// How many characters of a task's message its preview keeps.
+pub const TASK_PREVIEW_CHARS: usize = 160;
+
+/// `text` on one line, its whitespace collapsed, cut to [`TASK_PREVIEW_CHARS`].
+pub fn task_preview(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= TASK_PREVIEW_CHARS {
+        return line;
+    }
+    let cut: String = line.chars().take(TASK_PREVIEW_CHARS - 1).collect();
+    format!("{}…", cut.trim_end())
 }
 
 /// An event as delivered to the UI, with its position in the event log.
@@ -464,6 +488,8 @@ pub struct ReadModel {
     requests: BTreeMap<String, ThreadItem>,
     /// Tool calls without output yet, of threads and their subagents.
     open_calls: BTreeSet<OpenToolCall>,
+    /// The latest message of each delegated task, shortened.
+    task_previews: BTreeMap<String, String>,
 }
 
 impl ReadModel {
@@ -485,7 +511,23 @@ impl ReadModel {
                 .map(|item| (item.id.clone(), item.clone()))
                 .collect(),
             open_calls: snapshot.open_tool_calls.iter().cloned().collect(),
+            task_previews: snapshot
+                .task_previews
+                .iter()
+                .map(|preview| (preview.thread_id.clone(), preview.text.clone()))
+                .collect(),
         }
+    }
+
+    /// The latest message of each delegated task, shortened.
+    pub fn task_previews(&self) -> Vec<TaskPreview> {
+        self.task_previews
+            .iter()
+            .map(|(thread_id, text)| TaskPreview {
+                thread_id: thread_id.clone(),
+                text: text.clone(),
+            })
+            .collect()
     }
 
     pub fn open_tool_calls(&self) -> impl Iterator<Item = &OpenToolCall> {
@@ -563,12 +605,15 @@ impl ReadModel {
                     .retain(|_, item| threads.contains_key(&item.thread_id));
                 self.open_calls
                     .retain(|call| threads.contains_key(root_thread(&call.thread_id)));
+                self.task_previews
+                    .retain(|thread_id, _| threads.contains_key(thread_id));
             }
             Event::ThreadCreated { thread } => {
                 self.threads.insert(thread.id.clone(), thread.clone());
             }
             Event::ThreadDeleted { thread_id } => {
                 self.threads.remove(thread_id);
+                self.task_previews.remove(thread_id);
                 self.requests.retain(|_, item| &item.thread_id != thread_id);
                 self.open_calls
                     .retain(|call| root_thread(&call.thread_id) != thread_id);
@@ -682,6 +727,12 @@ impl ReadModel {
             Event::ItemAdded { item } => {
                 if let Some(thread) = self.threads.get_mut(&item.thread_id) {
                     thread.updated_at.clone_from(&item.created_at);
+                    if let (Some(_), ItemContent::AssistantMessage { text }) =
+                        (&thread.parent_thread_id, &item.content)
+                    {
+                        self.task_previews
+                            .insert(thread.id.clone(), task_preview(text));
+                    }
                 }
                 let call = OpenToolCall {
                     thread_id: item.thread_id.clone(),
@@ -2002,6 +2053,63 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn task_preview_keeps_one_short_line() {
+        assert_eq!(
+            task_preview(
+                "  Found it.
+
+- one
+- two  "
+            ),
+            "Found it. - one - two"
+        );
+        let long = "word ".repeat(100);
+        let preview = task_preview(&long);
+        assert_eq!(preview.chars().count(), TASK_PREVIEW_CHARS);
+        assert!(preview.ends_with("word…"));
+    }
+
+    #[test]
+    fn keeps_the_latest_message_of_delegated_tasks_only() {
+        let mut model = model_with_thread();
+        run(&mut model, create_thread("task", "p")).unwrap();
+        model.apply(&Event::ThreadDelegated {
+            thread_id: "task".into(),
+            parent_thread_id: "t".into(),
+            shares_worktree: false,
+        });
+        let say = |thread_id: &str, id: &str, text: &str| Event::ItemAdded {
+            item: ThreadItem {
+                id: id.into(),
+                thread_id: thread_id.into(),
+                created_at: NOW.into(),
+                content: ItemContent::AssistantMessage { text: text.into() },
+            },
+        };
+
+        model.apply(&say("t", "m1", "the parent talks"));
+        model.apply(&say("task", "m2", "Looking"));
+        model.apply(&say(
+            "task",
+            "m3",
+            "Counted
+42 files",
+        ));
+
+        assert_eq!(
+            model.task_previews(),
+            [TaskPreview {
+                thread_id: "task".into(),
+                text: "Counted 42 files".into(),
+            }]
+        );
+        model.apply(&Event::ThreadDeleted {
+            thread_id: "task".into(),
+        });
+        assert!(model.task_previews().is_empty());
     }
 
     fn model_with_thread() -> ReadModel {

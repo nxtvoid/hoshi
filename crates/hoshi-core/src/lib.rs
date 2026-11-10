@@ -29,11 +29,11 @@ pub use fonts::{SystemFont, group_font_families};
 pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
-    answer_task, answers_message, cancel_task, close_stale_turn, decide, record_branch,
-    record_conversation_cursor, record_delegation, record_output, record_pull_request_watch,
-    record_title, record_turn_changes, record_worktree, record_worktree_left,
-    send_pull_request_update, send_task_result, start_queued_turn, start_woken_turn,
-    subagent_thread_id, turn_failed,
+    TaskPreview, answer_task, answers_message, cancel_task, close_stale_turn, decide,
+    record_branch, record_conversation_cursor, record_delegation, record_output,
+    record_pull_request_watch, record_title, record_turn_changes, record_worktree,
+    record_worktree_left, send_pull_request_update, send_task_result, start_queued_turn,
+    start_woken_turn, subagent_thread_id, task_preview, turn_failed,
 };
 pub use project::{
     FolderListing, Project, RemoteRepository, WorktreeSetup, WorktreeSetupRun, WorktreeSetupStatus,

@@ -31,7 +31,8 @@ export function isPlanningWithUser(
   )
 }
 
-function taskState(
+/** How a delegated task stands, read from its thread. */
+export function taskState(
   thread: Thread,
   pendingTasks: Record<string, true>
 ): AgentState {
@@ -90,4 +91,68 @@ export function threadAgents(
       }
     })
   return [...tasks, ...subagents].sort((a, b) => b.at.localeCompare(a.at))
+}
+
+/** When a task's row places it: how long it has run, or when it ended. */
+export type TaskTime =
+  | { kind: 'elapsed'; milliseconds: number }
+  | { kind: 'ended'; at: string }
+
+export function taskTime(
+  thread: Thread,
+  state: AgentState,
+  now: number
+): TaskTime {
+  if (state === 'running' || state === 'waiting') {
+    const started = Date.parse(thread.createdAt)
+    return {
+      kind: 'elapsed',
+      milliseconds: Number.isFinite(started) ? Math.max(0, now - started) : 0
+    }
+  }
+  return { kind: 'ended', at: thread.updatedAt }
+}
+
+/**
+ * The tasks a thread delegated that still run and whose answer it waits for, oldest
+ * first.
+ */
+export function runningTasks(
+  threadId: string,
+  threads: Thread[],
+  pendingTasks: Record<string, true>
+): Thread[] {
+  return threads
+    .filter(
+      (thread) =>
+        thread.parentThreadId === threadId &&
+        thread.status === 'working' &&
+        !thread.taskCancelled &&
+        pendingTasks[thread.id] === true
+    )
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+}
+
+/** How many characters of a task's message its preview keeps; mirrors hoshi-core. */
+export const TASK_PREVIEW_CHARS = 160
+
+/** `text` on one line, its whitespace collapsed, cut short; mirrors `task_preview`. */
+export function taskPreview(text: string) {
+  const line = text.split(/\s+/).filter(Boolean).join(' ')
+  const chars = Array.from(line)
+  if (chars.length <= TASK_PREVIEW_CHARS) return line
+  return `${chars
+    .slice(0, TASK_PREVIEW_CHARS - 1)
+    .join('')
+    .trimEnd()}…`
+}
+
+/** A preview as plain text: links keep their label, markdown marks go. */
+export function plainPreview(text: string) {
+  return text
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*|__|`/g, '')
+    .replace(/^[\s#>*-]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 }

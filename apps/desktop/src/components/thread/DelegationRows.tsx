@@ -1,24 +1,36 @@
-import { useEffect, useRef, useState } from 'react'
-import { cn } from '@hoshi/utils'
+import { useNow } from './use-now'
 import { m } from '@/paraglide/messages'
+import { AGENT_DOT } from './ThreadAgents'
 import { modelRun } from '@/lib/model-runs'
+import { WorkLine } from './BackgroundWork'
+import { confirm } from '@/state/dialog-store'
+import { getLocale } from '@/paraglide/runtime'
 import { ModelRunLabel } from './ModelRunLabel'
-import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
-import { isPlanningWithUser } from '@/lib/agents'
+import type { Thread } from '@/bindings/Thread'
+import { HugeiconsIcon } from '@hugeicons/react'
+import { useEffect, useRef, useState } from 'react'
+import { Button } from '@hoshi/ui/components/button'
 import { useModelsStore } from '@/state/models-store'
 import { useRequestStore } from '@/state/request-store'
-import { confirm } from '@/state/dialog-store'
-import { Button } from '@hoshi/ui/components/button'
-import { IconButton } from '@hoshi/ui/components/icon-button'
 import { useWholeToolCall } from './use-whole-tool-call'
-import type { Thread } from '@/bindings/Thread'
 import { Markdown } from '@/components/markdown/Markdown'
+import { ClaudeIcon } from '@/components/brand/ProviderIcon'
+import { IconButton } from '@hoshi/ui/components/icon-button'
+import { cn, formatClockTime, formatElapsed } from '@hoshi/utils'
 import {
   delegationOf,
   reasoningPreview,
   type ToolCallItem
 } from '@/lib/tool-calls'
+import {
+  type AgentState,
+  isPlanningWithUser,
+  plainPreview,
+  runningTasks,
+  taskState,
+  taskTime
+} from '@/lib/agents'
 import {
   Alert02Icon,
   ArrowRight01Icon,
@@ -54,75 +66,144 @@ function OpenButton({ threadId }: { threadId: string }) {
   )
 }
 
-function TaskStatus({ child }: { child: Thread | undefined }) {
-  if (!child) return null
-  const { icon, label, tone } =
-    child.taskCancelled && child.status !== 'working'
-      ? { icon: CancelCircleIcon, label: m.delegation_cancelled(), tone: '' }
-      : child.status === 'working'
-        ? { icon: Loading03Icon, label: m.tool_running(), tone: 'animate-spin' }
-        : child.status === 'waitingForInput'
-          ? {
-              icon: UserQuestion01Icon,
-              label: m.status_waiting_for_input(),
-              tone: 'text-status-waiting'
-            }
-          : child.status === 'error'
-            ? {
-                icon: Alert02Icon,
-                label: m.tool_failed(),
-                tone: 'text-destructive'
-              }
-            : {
-                icon: CheckmarkCircle02Icon,
-                label: m.delegation_done(),
-                tone: ''
-              }
+/** The agent a task runs on, with a dot for how it stands. */
+function TaskAvatar({ state }: { state: AgentState | null }) {
   return (
-    <span className='text-muted-foreground flex shrink-0 items-center gap-1 text-xs'>
+    <span
+      aria-hidden
+      className='border-border/70 bg-muted relative inline-flex size-6 shrink-0 items-center justify-center rounded-full border'
+    >
+      <ClaudeIcon className='text-provider-claude size-3.5' />
+      {state ? (
+        <span
+          className={cn(
+            'ring-background absolute -right-px -bottom-px size-2 rounded-full ring-2',
+            AGENT_DOT[state],
+            state === 'running' && 'animate-pulse'
+          )}
+        />
+      ) : null}
+    </span>
+  )
+}
+
+const STATUS_ICONS = {
+  running: { icon: Loading03Icon, tone: 'animate-spin' },
+  waiting: { icon: UserQuestion01Icon, tone: 'text-status-waiting' },
+  done: { icon: CheckmarkCircle02Icon, tone: '' },
+  stopped: { icon: CancelCircleIcon, tone: '' },
+  failed: { icon: Alert02Icon, tone: 'text-destructive' }
+} as const
+
+function statusLabel(
+  state: AgentState,
+  child: Thread | undefined,
+  now: number
+) {
+  if (!child) return m.tool_failed()
+  const time = taskTime(child, state, now)
+  if (time.kind === 'elapsed') {
+    const elapsed = formatElapsed(time.milliseconds)
+    return state === 'waiting'
+      ? m.delegation_waiting_for({ elapsed })
+      : m.delegation_running_for({ elapsed })
+  }
+  const clock = formatClockTime(time.at, getLocale())
+  return state === 'stopped'
+    ? m.delegation_stopped_at({ time: clock })
+    : state === 'failed'
+      ? m.delegation_failed_at({ time: clock })
+      : m.delegation_finished_at({ time: clock })
+}
+
+/** How the task's thread is doing: how long it has run, or when it ended. */
+function TaskStatus({
+  state,
+  child
+}: {
+  state: AgentState
+  child: Thread | undefined
+}) {
+  const now = useNow(state === 'running' || state === 'waiting')
+  const { icon, tone } = STATUS_ICONS[state]
+  return (
+    <span className='text-muted-foreground flex shrink-0 items-center gap-1 text-xs tabular-nums'>
       <HugeiconsIcon
         icon={icon}
         strokeWidth={2}
         className={cn('size-3.5', tone)}
       />
-      {label}
+      {statusLabel(state, child, now)}
     </span>
   )
 }
 
-/** A task the agent delegated to a child thread, with how the child is doing. */
+const CARD =
+  'border-border/70 flex w-full items-center gap-2.5 rounded-xl border px-3 py-2 text-left text-sm transition-colors'
+
+/**
+ * A task the agent delegated to a child thread, with how the child is doing and what it
+ * said last. It opens the child.
+ */
 export function DelegationRow({ item }: { item: ToolCallItem }) {
   const whole = useWholeToolCall(item, true)
   const { title, taskId, error } = delegationOf(whole)
   const child = useThread(taskId)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const preview = useRequestStore((state) =>
+    taskId ? state.taskPreviews[taskId] : undefined
+  )
+  const selectThread = useAppStore((state) => state.selectThread)
   const planning = child ? isPlanningWithUser(child, pendingTasks) : false
   const catalog = useModelsStore((state) => state.catalog)
   const run = child ? modelRun(catalog, child.model, child.effort) : null
-  const card = (
-    <div
-      className={cn(
-        'border-border/70 flex items-center gap-2.5 rounded-xl border px-3 py-2 text-sm',
-        planning && 'bg-background relative'
-      )}
-    >
-      <HugeiconsIcon
-        icon={GitForkIcon}
-        strokeWidth={2}
-        className='text-muted-foreground size-4 shrink-0'
-      />
+  const state: AgentState | null = child
+    ? taskState(child, pendingTasks)
+    : error
+      ? 'failed'
+      : null
+  const name = child?.title ?? title
+  const detail = error ?? (preview ? plainPreview(preview) : '')
+  const body = (
+    <>
+      <TaskAvatar state={state} />
       <span className='flex min-w-0 flex-1 flex-col'>
-        <span className='text-foreground truncate font-medium'>
-          {child?.title ?? title}
-        </span>
-        <span className='text-muted-foreground truncate text-xs'>
-          {error ?? m.delegation_task()}
+        <span className='text-foreground truncate font-medium'>{name}</span>
+        <span
+          className={cn(
+            'truncate text-xs',
+            error ? 'text-destructive' : 'text-muted-foreground'
+          )}
+        >
+          {detail || m.delegation_task()}
         </span>
       </span>
       <ModelRunLabel run={run} />
-      {planning ? null : <TaskStatus child={child} />}
-      {child ? <OpenButton threadId={child.id} /> : null}
-    </div>
+      {planning || !state ? null : <TaskStatus state={state} child={child} />}
+      {child ? (
+        <HugeiconsIcon
+          icon={ArrowRight01Icon}
+          strokeWidth={2}
+          className='text-muted-foreground/60 group-hover/task:text-foreground size-3.5 shrink-0 transition-colors'
+        />
+      ) : null}
+    </>
+  )
+  const card = child ? (
+    <button
+      type='button'
+      aria-label={m.delegation_open_task({ task: name })}
+      onClick={() => selectThread(child.id)}
+      className={cn(
+        CARD,
+        'group/task hover:bg-foreground/5 focus-visible:ring-ring cursor-pointer outline-none focus-visible:ring-2',
+        planning && 'bg-background relative'
+      )}
+    >
+      {body}
+    </button>
+  ) : (
+    <div className={CARD}>{body}</div>
   )
   if (!child || !planning) return card
   return (
@@ -130,6 +211,65 @@ export function DelegationRow({ item }: { item: ToolCallItem }) {
       {card}
       <PlanningTray threadId={child.id} />
     </div>
+  )
+}
+
+/**
+ * At the end of the transcript, while its agent rests: the tasks it delegated that still
+ * run, whose answers it waits for.
+ */
+export function TaskWaits({ threadId }: { threadId: string }) {
+  const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const ids = useAppStore((state) =>
+    runningTasks(threadId, state.threads, pendingTasks)
+      .map((thread) => thread.id)
+      .join(' ')
+  )
+  if (!ids) return null
+  return (
+    <li className='flex flex-col gap-2'>
+      {ids.split(' ').map((id) => (
+        <TaskWaitLine key={id} threadId={id} />
+      ))}
+    </li>
+  )
+}
+
+function TaskWaitLine({ threadId }: { threadId: string }) {
+  const child = useThread(threadId)
+  const selectThread = useAppStore((state) => state.selectThread)
+  const cancelTask = useRequestStore((state) => state.cancelTask)
+  const [stopping, setStopping] = useState(false)
+  const now = useNow()
+  if (!child) return null
+  const time = taskTime(child, 'running', now)
+  return (
+    <WorkLine
+      label={m.background_waiting()}
+      title={child.title || m.delegation_task()}
+      elapsed={time.kind === 'elapsed' ? formatElapsed(time.milliseconds) : ''}
+    >
+      <Button
+        size='xs'
+        variant='ghost'
+        onClick={() => selectThread(threadId)}
+        className='text-muted-foreground hover:text-foreground -ml-1 shrink-0'
+      >
+        {m.delegation_open()}
+      </Button>
+      <Button
+        size='xs'
+        variant='ghost'
+        disabled={stopping}
+        onClick={() => {
+          setStopping(true)
+          void cancelTask(threadId)
+        }}
+        className='text-muted-foreground hover:text-foreground -ml-2 shrink-0'
+      >
+        {stopping ? m.background_task_stopping() : m.background_task_stop()}
+      </Button>
+    </WorkLine>
   )
 }
 

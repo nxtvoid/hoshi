@@ -542,7 +542,11 @@ async function startSync() {
   useSidebarStore.getState().setView(start.sidebarView)
   useRequestStore
     .getState()
-    .seed(snapshot.pendingRequests, snapshot.pendingTasks)
+    .seed(
+      snapshot.pendingRequests,
+      snapshot.pendingTasks,
+      snapshot.taskPreviews
+    )
   useBackgroundTaskStore.getState().seed(snapshot.backgroundTasks)
   useAppStore.setState({
     ready: true,

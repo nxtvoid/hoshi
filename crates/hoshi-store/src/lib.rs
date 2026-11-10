@@ -6,8 +6,8 @@
 
 use hoshi_core::{
     ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, PullRequestWatch,
-    Snapshot, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome,
-    UsageLimits,
+    Snapshot, TaskPreview, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus,
+    TurnOutcome, UsageLimits, task_preview,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, types::Type};
 use std::path::Path;
@@ -486,6 +486,17 @@ impl Store {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let task_previews = threads
+            .iter()
+            .filter(|thread| thread.parent_thread_id.is_some())
+            .map(|thread| {
+                Ok(self.last_answer(&thread.id)?.map(|text| TaskPreview {
+                    thread_id: thread.id.clone(),
+                    text: task_preview(&text),
+                }))
+            })
+            .filter_map(Result::transpose)
+            .collect::<Result<Vec<_>, StoreError>>()?;
         Ok(Snapshot {
             sequence: sequence as u64,
             projects,
@@ -497,6 +508,7 @@ impl Store {
             // The engine knows which tasks still owe an answer.
             pending_tasks: Vec::new(),
             background_tasks: Vec::new(),
+            task_previews,
         })
     }
 
@@ -1369,6 +1381,47 @@ mod tests {
                 updated_at: NOW.into(),
             },
         }
+    }
+
+    #[test]
+    fn snapshot_previews_the_latest_message_of_delegated_tasks() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .append(
+                &[
+                    project_created("p"),
+                    thread_created("t", "p"),
+                    thread_created("task", "p"),
+                    Event::ThreadDelegated {
+                        thread_id: "task".into(),
+                        parent_thread_id: "t".into(),
+                        shares_worktree: false,
+                    },
+                    answer("t", "parent says"),
+                    answer("task", "first"),
+                    item(
+                        "task",
+                        "m2",
+                        ItemContent::AssistantMessage {
+                            text: "Counted
+  42 files"
+                                .into(),
+                        },
+                    ),
+                ],
+                NOW,
+            )
+            .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+
+        assert_eq!(
+            snapshot.task_previews,
+            [TaskPreview {
+                thread_id: "task".into(),
+                text: "Counted 42 files".into(),
+            }]
+        );
     }
 
     #[test]
