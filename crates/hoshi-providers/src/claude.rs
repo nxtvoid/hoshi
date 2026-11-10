@@ -5,6 +5,7 @@ use crate::claude_models::{TurnModel, Version, manifest, parse_version};
 use crate::claude_output::LiveOutput;
 use crate::claude_prompt;
 use crate::claude_requests::{self, Access, Grants, Requests};
+use crate::claude_resets;
 use crate::claude_subagents::{self, Subagents};
 use crate::claude_titles;
 use crate::claude_tools;
@@ -17,8 +18,9 @@ use crate::{
     TitleRequest, TurnAttachment, TurnRequest, truncate,
 };
 use hoshi_core::{
-    AccessMode, BackgroundTask, ContextUsage, Effort, ProviderAccountStatus, ProviderModels,
-    ProviderOutput, RequestResponse, SlashCommand, TurnFailure, TurnOutcome, UsageLimits,
+    AccessMode, BackgroundTask, BankedResetSpend, ContextUsage, Effort, ProviderAccountStatus,
+    ProviderModels, ProviderOutput, RequestResponse, SlashCommand, TurnFailure, TurnOutcome,
+    UsageLimits,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -73,6 +75,11 @@ impl ClaudeCodeAdapter {
             parse_version(&String::from_utf8_lossy(&output.stdout))
         })
     }
+
+    fn version_text(&self) -> Option<String> {
+        self.version()
+            .map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"))
+    }
 }
 
 impl ProviderAdapter for ClaudeCodeAdapter {
@@ -85,14 +92,27 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     }
 
     fn usage_limits(&self) -> Option<UsageLimits> {
-        claude_usage::probe(self.binary())
+        let mut limits = claude_usage::probe(self.binary())?;
+        if !limits.windows.is_empty()
+            && let Some(version) = self.version_text()
+        {
+            limits.banked_resets = claude_resets::read(&version);
+        }
+        Some(limits)
+    }
+
+    fn spend_banked_reset(&self, grant_id: &str, request_id: &str) -> BankedResetSpend {
+        match self.version_text() {
+            Some(version) => claude_resets::spend(&version, grant_id, request_id),
+            None => BankedResetSpend::NoneLeft,
+        }
     }
 
     fn installation(&self) -> Option<Installation> {
-        let installed = self
-            .version()
-            .map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"));
-        Some(claude_install::installation(self.binary(), installed))
+        Some(claude_install::installation(
+            self.binary(),
+            self.version_text(),
+        ))
     }
 
     fn forget_version(&self) {

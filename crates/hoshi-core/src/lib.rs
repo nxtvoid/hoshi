@@ -64,5 +64,8 @@ pub use thread::{
     TaskStatus, Thread, ThreadBackgroundTasks, ThreadItem, ThreadStatus, ThreadWorkspace,
     ToolDetail, TranscriptPage, TurnFailure, TurnOutcome,
 };
-pub use usage::{ContextUsage, ThreadContextUsage, UsageLimits, UsageWindow, UsageWindowKind};
+pub use usage::{
+    BankedResetFailure, BankedResetSpend, BankedResets, ContextUsage, ThreadContextUsage,
+    UsageLimits, UsageWindow, UsageWindowKind,
+};
 pub use workspace::{ChangesSummary, Editor};

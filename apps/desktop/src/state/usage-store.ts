@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
 import type { UsageLimits } from '@/bindings/UsageLimits'
+import type { BankedResetSpend } from '@/bindings/BankedResetSpend'
 
 type UsageState = {
   /** `null` until the provider was read once, in this run or an earlier one. */
@@ -12,6 +13,9 @@ type UsageState = {
   load: () => Promise<void>
   /** Asks the provider, which answers at once if it did within the last minute. */
   refresh: (options?: { force?: boolean }) => Promise<void>
+  spending: boolean
+  /** Spends the next banked reset; the limits read after it arrive through `receive`. */
+  spendBankedReset: () => Promise<BankedResetSpend>
   /** The engine sends every window it knows, merged with what turns reported. */
   receive: (limits: UsageLimits) => void
 }
@@ -42,6 +46,18 @@ export const useUsageStore = create<UsageState>()((set, get) => ({
       set({ failed: true })
     } finally {
       set({ checking: false })
+    }
+  },
+  spending: false,
+  spendBankedReset: async () => {
+    set({ spending: true })
+    try {
+      return await invoke<BankedResetSpend>('spend_banked_reset')
+    } catch (error) {
+      console.error('hoshi: failed to spend a banked reset', error)
+      return { status: 'failed', reason: 'requestFailed' }
+    } finally {
+      set({ spending: false })
     }
   },
   receive: (limits) => set({ limits, failed: false })

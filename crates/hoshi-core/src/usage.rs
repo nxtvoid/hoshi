@@ -50,12 +50,18 @@ pub struct ThreadContextUsage {
 #[ts(export)]
 pub struct UsageLimits {
     pub windows: Vec<UsageWindow>,
+    /// `None` when the plan can't bank resets or they couldn't be read.
+    #[serde(default)]
+    pub banked_resets: Option<BankedResets>,
 }
 
 impl UsageLimits {
     /// Replaces the windows `update` reports and keeps the others, since a
     /// provider may report some windows mid-turn and all of them on request.
     pub fn merge(&mut self, update: UsageLimits) {
+        if update.banked_resets.is_some() {
+            self.banked_resets = update.banked_resets;
+        }
         for window in update.windows {
             match self
                 .windows
@@ -91,6 +97,70 @@ pub enum UsageWindowKind {
     Weekly,
 }
 
+/// Session resets the plan banked, each spendable once to clear the session limit early.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct BankedResets {
+    /// Zero when none can be spent now.
+    pub count: u32,
+    /// The grant the next spend draws from; `None` leaves nothing to spend.
+    pub next_grant_id: Option<String>,
+    /// When each spendable grant expires, RFC 3339, soonest first. Grants that never
+    /// expire are left out.
+    pub expires_at: Vec<String>,
+}
+
+/// What spending a banked reset did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export)]
+pub enum BankedResetSpend {
+    /// The session limit was cleared.
+    Reset,
+    /// The session limit wasn't reached, so nothing was spent.
+    NothingToReset,
+    /// That grant was already spent.
+    AlreadyUsed,
+    NoneLeft,
+    Failed {
+        reason: BankedResetFailure,
+    },
+}
+
+impl BankedResetSpend {
+    /// Whether the provider answered, so a retry is a new spend rather than the same one.
+    pub fn settled(&self) -> bool {
+        !matches!(
+            self,
+            BankedResetSpend::Failed {
+                reason: BankedResetFailure::Unconfirmed | BankedResetFailure::RequestFailed
+            }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum BankedResetFailure {
+    /// The provider's login or account file couldn't be read.
+    LoginUnreadable,
+    SignedOut,
+    RateLimited,
+    CoolingDown,
+    /// The provider couldn't say whether it reset; spending again retries the same request.
+    Unconfirmed,
+    /// No answer; spending again retries the same request.
+    RequestFailed,
+    /// The reset went through but the limits couldn't be read again.
+    LimitsUnread,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,21 +177,29 @@ mod tests {
 
     #[test]
     fn a_partial_update_keeps_the_windows_it_does_not_report() {
+        let banked = BankedResets {
+            count: 1,
+            next_grant_id: Some("grant_a".into()),
+            expires_at: Vec::new(),
+        };
         let mut limits = UsageLimits {
             windows: vec![
                 window(UsageWindowKind::Session, None, 10),
                 window(UsageWindowKind::Weekly, None, 20),
                 window(UsageWindowKind::Weekly, Some("Fable"), 0),
             ],
+            banked_resets: Some(banked.clone()),
         };
 
         limits.merge(UsageLimits {
             windows: vec![window(UsageWindowKind::Session, None, 35)],
+            banked_resets: None,
         });
 
         assert_eq!(limits.windows[0].used_percent, 35);
         assert_eq!(limits.windows[1].used_percent, 20);
         assert_eq!(limits.windows[2].model.as_deref(), Some("Fable"));
+        assert_eq!(limits.banked_resets, Some(banked));
     }
 
     #[test]

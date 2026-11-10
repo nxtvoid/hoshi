@@ -89,6 +89,7 @@ pub fn run() {
             orchestration::get_models,
             orchestration::get_known_usage_limits,
             orchestration::get_usage_limits,
+            orchestration::spend_banked_reset,
             orchestration::get_provider_version,
             orchestration::check_provider_version,
             orchestration::get_provider_account_status,

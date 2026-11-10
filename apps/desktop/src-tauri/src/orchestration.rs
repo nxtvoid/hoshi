@@ -1,10 +1,10 @@
 use hoshi_core::{
-    AppSettings, BrowserInput, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor,
-    FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
-    MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderVersion, PullRequest,
-    PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand,
-    Snapshot, TerminalAttach, TerminalEvent, ThreadItem, TranscriptPage, UsageLimits,
-    WorkspaceEntry,
+    AppSettings, BankedResetSpend, BrowserInput, ChangesSummary, Command, CommandError, DiffFile,
+    DiffScope, Editor, FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest,
+    GitActionResult, GitStatus, MessageAttachment, ProviderAccountStatus, ProviderModels,
+    ProviderVersion, PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel,
+    RemoteRepository, SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem,
+    TranscriptPage, UsageLimits, WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
@@ -148,6 +148,12 @@ pub fn get_known_usage_limits(engine: State<'_, Engine>) -> Option<UsageLimits> 
 #[tauri::command(async)]
 pub fn get_usage_limits(engine: State<'_, Engine>, force: bool) -> Option<UsageLimits> {
     engine.usage_limits(force)
+}
+
+/// Spends the next banked reset and reads the limits again, which takes a few seconds.
+#[tauri::command(async)]
+pub fn spend_banked_reset(engine: State<'_, Engine>) -> BankedResetSpend {
+    engine.spend_banked_reset()
 }
 
 /// The provider's CLI as last checked; `None` until checked or while disabled.

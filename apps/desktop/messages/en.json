@@ -798,6 +798,33 @@
   "usage_no_limits": "This plan has no usage limits",
   "usage_no_limits_description": "API keys and some plans have no session or weekly windows.",
   "usage_try_again": "Try again",
+  "usage_banked_resets": "{count} banked",
+  "usage_banked_resets_expiring": "{count} banked · expires in {time}",
+  "usage_banked_resets_label": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} banked reset",
+        "countPlural=*": "{count} banked resets"
+      }
+    }
+  ],
+  "usage_use_reset": "Use reset",
+  "usage_using_reset": "Using…",
+  "usage_use_reset_title": "Use a banked reset?",
+  "usage_use_reset_description": "This resets the session limit now and leaves {count} banked. It can't be undone.",
+  "usage_reset_done": "Session limit reset.",
+  "usage_reset_nothing_to_reset": "The session limit isn't reached, so nothing was spent.",
+  "usage_reset_already_used": "That reset was already used.",
+  "usage_reset_none_left": "No banked resets left.",
+  "usage_reset_login_unreadable": "Couldn't read the sign-in. Try again.",
+  "usage_reset_signed_out": "Sign in again to use resets.",
+  "usage_reset_rate_limited": "Too many tries. Try again soon.",
+  "usage_reset_cooling_down": "Resets are cooling down. Try again later.",
+  "usage_reset_unconfirmed": "Couldn't confirm the reset. If the limit is still reached in a moment, try again.",
+  "usage_reset_request_failed": "Couldn't use the reset. Try again.",
+  "usage_reset_limits_unread": "The reset went through, but the limits couldn't be read again. Refresh to check.",
   "updates": "Updates",
   "provider_version": "Version",
   "provider_version_description": "The installed CLI, checked against its latest release every few hours.",

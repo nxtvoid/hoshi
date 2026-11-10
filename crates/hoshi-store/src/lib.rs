@@ -1165,9 +1165,9 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
 mod tests {
     use super::*;
     use hoshi_core::{
-        AccessMode, ChecksState, Command, ForgeKind, ItemContent, Mergeability, ProviderOutput,
-        PullRequest, PullRequestState, ReadModel, ToolDetail, UsageWindow, UsageWindowKind, decide,
-        record_output,
+        AccessMode, BankedResets, ChecksState, Command, ForgeKind, ItemContent, Mergeability,
+        ProviderOutput, PullRequest, PullRequestState, ReadModel, ToolDetail, UsageWindow,
+        UsageWindowKind, decide, record_output,
     };
 
     const NOW: &str = "2026-11-07T12:00:00.000Z";
@@ -1569,6 +1569,11 @@ mod tests {
                 window_minutes: 300,
                 resets_at: Some("2026-11-08T12:00:00Z".into()),
             }],
+            banked_resets: Some(BankedResets {
+                count: 1,
+                next_grant_id: Some("grant_a".into()),
+                expires_at: vec!["2026-12-01T00:00:00Z".into()],
+            }),
         };
 
         store.save_usage_limits(&window(20)).unwrap();

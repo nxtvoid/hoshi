@@ -39,6 +39,7 @@ use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
 use hoshi_core::ProviderAccountStatus;
+use hoshi_core::{BankedResetFailure, BankedResetSpend};
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, TranscriptPage,
@@ -121,6 +122,9 @@ pub struct Engine {
     slash_commands: Refreshing<Vec<SlashCommand>>,
     /// Held while the provider is asked for its limits, so one ask serves everyone waiting.
     usage_probe: Arc<Mutex<()>>,
+    /// Held while a banked reset is spent: the grant and the request id a retry reuses until
+    /// the provider answers.
+    reset_spend: Mutex<Option<(String, String)>>,
     /// Held while the provider's CLI is checked against its releases or updated.
     maintenance: Arc<Mutex<()>>,
 }
@@ -560,6 +564,7 @@ impl Engine {
             paths: Refreshing::new(PATHS_FRESH_FOR),
             slash_commands: Refreshing::new(SLASH_COMMANDS_FRESH_FOR),
             usage_probe: Arc::default(),
+            reset_spend: Mutex::default(),
             maintenance,
         })
     }
@@ -1345,6 +1350,46 @@ impl Engine {
     /// `force` always waits for an answer given after the call. `None` when it can't say.
     pub fn usage_limits(&self, force: bool) -> Option<UsageLimits> {
         check_usage_limits(&self.state, &self.usage_probe, force)
+    }
+
+    /// Spends the next banked reset, then reads the limits again. Reaches the network.
+    pub fn spend_banked_reset(&self) -> BankedResetSpend {
+        let mut pending = self
+            .reset_spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (adapter, grant) = {
+            let state = lock(&self.state);
+            let grant = state
+                .usage_limits
+                .as_ref()
+                .and_then(|limits| limits.banked_resets.as_ref())
+                .filter(|banked| banked.count > 0)
+                .and_then(|banked| banked.next_grant_id.clone());
+            (state.adapter.clone(), grant)
+        };
+        let (Some(adapter), Some(grant)) = (adapter, grant) else {
+            return BankedResetSpend::NoneLeft;
+        };
+        let request_id = match pending.take() {
+            Some((pending_grant, request_id)) if pending_grant == grant => request_id,
+            _ => delegation::new_id(),
+        };
+        let spend = adapter.spend_banked_reset(&grant, &request_id);
+        if !spend.settled() {
+            *pending = Some((grant, request_id));
+            return spend;
+        }
+        if matches!(spend, BankedResetSpend::Failed { .. }) {
+            return spend;
+        }
+        let refreshed = check_usage_limits(&self.state, &self.usage_probe, true);
+        if spend == BankedResetSpend::Reset && refreshed.is_none() {
+            return BankedResetSpend::Failed {
+                reason: BankedResetFailure::LimitsUnread,
+            };
+        }
+        spend
     }
 
     /// Hands a delegated task's answer back to its thread now, as it stands, with its plan
@@ -4071,7 +4116,47 @@ mod tests {
                     window_minutes: 300,
                     resets_at: None,
                 }],
+                banked_resets: None,
             })
+        }
+
+        fn start_turn(
+            &self,
+            _request: TurnRequest,
+            _sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            Err(TurnFailure::ProviderDisabled)
+        }
+    }
+
+    /// Banks one reset of `grant_a` and answers each spend with the next of `answers`.
+    struct ResetAdapter {
+        answers: Mutex<Vec<BankedResetSpend>>,
+        spends: Mutex<Vec<(String, String)>>,
+    }
+
+    impl ProviderAdapter for ResetAdapter {
+        fn models(&self) -> hoshi_core::ProviderModels {
+            hoshi_core::ProviderModels::default()
+        }
+
+        fn usage_limits(&self) -> Option<UsageLimits> {
+            Some(UsageLimits {
+                windows: Vec::new(),
+                banked_resets: Some(hoshi_core::BankedResets {
+                    count: 1,
+                    next_grant_id: Some("grant_a".into()),
+                    expires_at: Vec::new(),
+                }),
+            })
+        }
+
+        fn spend_banked_reset(&self, grant_id: &str, request_id: &str) -> BankedResetSpend {
+            self.spends
+                .lock()
+                .unwrap()
+                .push((grant_id.to_owned(), request_id.to_owned()));
+            self.answers.lock().unwrap().remove(0)
         }
 
         fn start_turn(
@@ -4181,6 +4266,38 @@ mod tests {
 
         let restarted = Engine::open(&data_dir, notify).unwrap();
         assert_eq!(restarted.known_usage_limits(), Some(forced));
+    }
+
+    #[test]
+    fn an_unanswered_spend_is_retried_with_the_same_request() {
+        let data_dir = scratch_dir("banked-resets");
+        let engine = Engine::open(&data_dir, Arc::new(|_| {})).unwrap();
+        let unconfirmed = BankedResetSpend::Failed {
+            reason: BankedResetFailure::Unconfirmed,
+        };
+        let adapter = Arc::new(ResetAdapter {
+            answers: Mutex::new(vec![
+                unconfirmed,
+                BankedResetSpend::Reset,
+                BankedResetSpend::NothingToReset,
+            ]),
+            spends: Mutex::default(),
+        });
+
+        assert_eq!(engine.spend_banked_reset(), BankedResetSpend::NoneLeft);
+        engine.set_adapter(Some(adapter.clone()));
+        engine.usage_limits(true).unwrap();
+        assert_eq!(engine.spend_banked_reset(), unconfirmed);
+        assert_eq!(engine.spend_banked_reset(), BankedResetSpend::Reset);
+        assert_eq!(
+            engine.spend_banked_reset(),
+            BankedResetSpend::NothingToReset
+        );
+
+        let spends = adapter.spends.lock().unwrap();
+        assert!(spends.iter().all(|(grant, _)| grant == "grant_a"));
+        assert_eq!(spends[0].1, spends[1].1);
+        assert_ne!(spends[1].1, spends[2].1);
     }
 
     #[test]

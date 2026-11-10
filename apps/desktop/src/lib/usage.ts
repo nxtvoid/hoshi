@@ -1,4 +1,6 @@
+import type { UsageLimits } from '@/bindings/UsageLimits'
 import type { UsageWindow } from '@/bindings/UsageWindow'
+import type { BankedResets } from '@/bindings/BankedResets'
 import type { ContextUsage } from '@/bindings/ContextUsage'
 
 export type Pace = 'ahead' | 'on' | 'under'
@@ -32,10 +34,14 @@ export function remainingPercent(window: UsageWindow) {
   return 100 - Math.min(100, Math.max(0, window.usedPercent))
 }
 
+function millisUntil(time: string | null, now: number): number | null {
+  if (!time) return null
+  const at = Date.parse(time)
+  return Number.isFinite(at) ? Math.max(0, at - now) : null
+}
+
 function millisToReset(window: UsageWindow, now: number): number | null {
-  if (!window.resetsAt) return null
-  const resetsAt = Date.parse(window.resetsAt)
-  return Number.isFinite(resetsAt) ? Math.max(0, resetsAt - now) : null
+  return millisUntil(window.resetsAt, now)
 }
 
 /** How much of the window's time is left, 0 to 100: where even spending would leave the quota. */
@@ -57,12 +63,34 @@ export function paceOf(window: UsageWindow, now: number): Pace | null {
 
 export type Duration = { days: number; hours: number; minutes: number }
 
+function durationOf(millis: number): Duration {
+  return {
+    days: Math.floor(millis / DAY),
+    hours: Math.floor((millis % DAY) / HOUR),
+    minutes: Math.floor((millis % HOUR) / MINUTE)
+  }
+}
+
 export function timeToReset(window: UsageWindow, now: number): Duration | null {
   const left = millisToReset(window, now)
-  if (left === null) return null
-  return {
-    days: Math.floor(left / DAY),
-    hours: Math.floor((left % DAY) / HOUR),
-    minutes: Math.floor((left % HOUR) / MINUTE)
-  }
+  return left === null ? null : durationOf(left)
+}
+
+/** The banked resets that can be spent now; `null` when there are none to show. */
+export function spendableResets(
+  limits: UsageLimits | null
+): BankedResets | null {
+  const banked = limits?.bankedResets
+  return banked && banked.count > 0 && banked.nextGrantId ? banked : null
+}
+
+/** How long until the soonest banked reset expires; `null` when none does. */
+export function timeToExpiry(
+  banked: BankedResets,
+  now: number
+): Duration | null {
+  const left = banked.expiresAt
+    .map((time) => millisUntil(time, now))
+    .find((millis) => millis !== null && millis > 0)
+  return left == null ? null : durationOf(left)
 }

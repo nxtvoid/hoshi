@@ -10,6 +10,7 @@ mod claude_models;
 mod claude_output;
 mod claude_prompt;
 mod claude_requests;
+mod claude_resets;
 mod claude_subagents;
 mod claude_titles;
 mod claude_tools;
@@ -20,8 +21,8 @@ mod updater;
 
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
 use hoshi_core::{
-    AccessMode, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderOutput,
-    RequestResponse, SlashCommand, SubagentEffort, TurnFailure, UsageLimits,
+    AccessMode, BankedResetSpend, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels,
+    ProviderOutput, RequestResponse, SlashCommand, SubagentEffort, TurnFailure, UsageLimits,
 };
 use std::path::{Path, PathBuf};
 pub use updater::{UpdateFailure, Updater, run as run_update};
@@ -171,6 +172,13 @@ pub trait ProviderAdapter: Send + Sync {
     /// The plan's rolling limits; `None` when they can't be read. Can run the CLI.
     fn usage_limits(&self) -> Option<UsageLimits> {
         None
+    }
+
+    /// Spends the banked reset of grant `grant_id`, which [`UsageLimits`] named. Retrying with
+    /// the same `request_id` repeats the same spend instead of spending another. Reaches the
+    /// network.
+    fn spend_banked_reset(&self, _grant_id: &str, _request_id: &str) -> BankedResetSpend {
+        BankedResetSpend::NoneLeft
     }
 
     /// The installed CLI, its latest release and how to update it; `None` when the

@@ -49,7 +49,10 @@ fn usage_limits(usage: &Value) -> UsageLimits {
             resets_at: window["resets_at"].as_str().and_then(normalize_time),
         })
     }));
-    UsageLimits { windows }
+    UsageLimits {
+        windows,
+        banked_resets: None,
+    }
 }
 
 /// A `rate_limit_event`'s windows. Its utilization runs from 0 to 1.
@@ -71,7 +74,10 @@ pub(crate) fn rate_limit_event(info: &Value) -> Option<UsageLimits> {
         })
     })
     .collect();
-    (!windows.is_empty()).then_some(UsageLimits { windows })
+    (!windows.is_empty()).then_some(UsageLimits {
+        windows,
+        banked_resets: None,
+    })
 }
 
 fn percent(value: f64) -> u8 {

@@ -1,11 +1,14 @@
 import { describe, expect, test } from 'bun:test'
+import type { UsageLimits } from '../../src/bindings/UsageLimits'
 import type { UsageWindow } from '../../src/bindings/UsageWindow'
 import {
   contextPercent,
   formatTokens,
   paceOf,
   remainingPercent,
+  spendableResets,
   timeLeftPercent,
+  timeToExpiry,
   timeToReset
 } from '../../src/lib/usage'
 
@@ -71,5 +74,34 @@ describe('limits', () => {
       hours: 0,
       minutes: 0
     })
+  })
+})
+
+describe('banked resets', () => {
+  const limits = (bankedResets: UsageLimits['bankedResets']): UsageLimits => ({
+    windows: [session(40, null)],
+    bankedResets
+  })
+  const banked = {
+    count: 2,
+    nextGrantId: 'grant_a',
+    expiresAt: ['2026-11-07T21:00:00Z', '2027-03-07T04:30:00Z']
+  }
+
+  test('show only while one can be spent', () => {
+    expect(spendableResets(limits(banked))).toBe(banked)
+    expect(spendableResets(limits({ ...banked, count: 0 }))).toBeNull()
+    expect(spendableResets(limits({ ...banked, nextGrantId: null }))).toBeNull()
+    expect(spendableResets(limits(null))).toBeNull()
+    expect(spendableResets(null)).toBeNull()
+  })
+
+  test('expire with the soonest grant still to come', () => {
+    expect(timeToExpiry(banked, NOW)).toEqual({
+      days: 119,
+      hours: 6,
+      minutes: 30
+    })
+    expect(timeToExpiry({ ...banked, expiresAt: [] }, NOW)).toBeNull()
   })
 })
