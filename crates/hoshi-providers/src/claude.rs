@@ -666,11 +666,16 @@ pub struct ClaudeParser {
     idle: bool,
     /// How the latest run ended, which a turn that ends on its own between runs reports.
     last_outcome: Option<TurnOutcome>,
-    /// Every task that ran in the background, by task id.
+    /// Every task of the thread's own agent that ran in the background, by task id.
     ever_background: HashSet<String>,
-    /// Background tasks that ended, by run id, until Claude Code's turn about each ends:
-    /// it answers each one in a run of its own.
-    pending_wakes: HashSet<String>,
+    /// The subagent each task a subagent started in the background belongs to, by task id.
+    /// Claude Code tells that subagent, not the thread's agent, when such a task ends.
+    owners: HashMap<String, Option<String>>,
+    /// Subagents Claude Code runs again, as a task of theirs ended after they did.
+    reviving: HashSet<String>,
+    /// Background tasks that ended, by run id in the order they ended, until Claude Code's
+    /// turn about each ends: it answers each one in a run of its own, or in the run going on.
+    pending_wakes: VecDeque<String>,
     /// Calls that started a subagent in the background, whose result comes with the
     /// subagent's end rather than at once.
     async_agents: HashSet<String>,
@@ -678,9 +683,9 @@ pub struct ClaudeParser {
     runs: u32,
     /// A run ended and no other started yet.
     between_runs: bool,
-    /// Background tasks that ended while a run went on, each told as the run that answers
-    /// it starts.
-    ended_tasks: VecDeque<ProviderOutput>,
+    /// Background tasks that ended while a run went on, by run id, each told as the run that
+    /// answers it starts.
+    ended_tasks: VecDeque<(String, ProviderOutput)>,
     subagents: Subagents,
 }
 
@@ -780,13 +785,21 @@ impl ClaudeParser {
                     let task = value["task_id"].as_str().unwrap_or_default();
                     let mut outputs = self.background_agent_ended(&value);
                     self.background_agents.remove(task);
+                    self.reviving.remove(task);
                     self.ending.remove(task);
                     outputs.extend(self.background_command_ended(task));
+                    let stopped = value["status"] == "stopped";
+                    if let Some(Some(owner)) = self.owners.get(task)
+                        && !stopped
+                        && !self.background_agents.contains(owner)
+                    {
+                        self.reviving.insert(owner.clone());
+                    }
                     if self.ever_background.contains(task)
-                        && value["status"] != "stopped"
+                        && !stopped
                         && let Some(run) = value["run_id"].as_str()
                     {
-                        self.pending_wakes.insert(run.to_owned());
+                        self.pending_wakes.push_back(run.to_owned());
                         let ended = ProviderOutput::BackgroundTaskEnded {
                             task_id: task.to_owned(),
                             tool_use_id: value["tool_use_id"].as_str().map(str::to_owned),
@@ -795,7 +808,7 @@ impl ClaudeParser {
                         if std::mem::take(&mut self.between_runs) {
                             outputs.push(ended);
                         } else {
-                            self.ended_tasks.push_back(ended);
+                            self.ended_tasks.push_back((run.to_owned(), ended));
                         }
                     }
                     outputs.extend(self.end_between_runs());
@@ -905,7 +918,8 @@ impl ClaudeParser {
             Some("user") => {
                 let interrupted = self.queue.state().interrupted;
                 let results = parse_tool_results(value, interrupted);
-                let mut outputs = self.hold_async_agents(value, results);
+                let mut outputs = self.answered(value);
+                outputs.extend(self.hold_async_agents(value, results));
                 outputs.extend(self.worktree_move(value));
                 outputs.extend(self.changed_task_list(&value["message"]));
                 outputs
@@ -916,11 +930,7 @@ impl ClaudeParser {
                 .collect(),
             Some("result") => {
                 let mut outputs: Vec<_> = self.reported_window(value).into_iter().collect();
-                if value["origin"]["kind"] == "task-notification"
-                    && let Some(run) = value["origin"]["runId"].as_str()
-                {
-                    self.pending_wakes.remove(run);
-                }
+                outputs.extend(self.answered(value));
                 let shared = self.queue.clone();
                 let mut queue = shared.state();
                 // A message not yet taken in, or background work the turn waits for, gets
@@ -943,7 +953,7 @@ impl ClaudeParser {
                 self.idle = true;
                 outputs.push(ProviderOutput::RunEnded { run: self.runs });
                 match self.ended_tasks.pop_front() {
-                    Some(ended) => outputs.push(ended),
+                    Some((_, ended)) => outputs.push(ended),
                     None => self.between_runs = true,
                 }
                 outputs.extend(self.waiting_changed());
@@ -1139,6 +1149,8 @@ impl ClaudeParser {
 
     fn background_task_started(&mut self, value: &Value) -> Option<ProviderOutput> {
         let task_id = value["task_id"].as_str()?;
+        self.reviving.remove(task_id);
+        self.own_task(value);
         let tool_use_id = value["tool_use_id"].as_str()?;
         self.task_calls_by_task
             .insert(task_id.to_owned(), tool_use_id.to_owned());
@@ -1150,18 +1162,36 @@ impl ClaudeParser {
         Some(self.background_roster())
     }
 
+    /// Notes the subagent a task belongs to, from fields Claude Code sends without declaring.
+    fn own_task(&mut self, task: &Value) {
+        let Some(task_id) = task["task_id"].as_str() else {
+            return;
+        };
+        let owner = task["parent_task_id"]
+            .as_str()
+            .filter(|owner| !owner.is_empty())
+            .map(str::to_owned);
+        if owner.is_some() || task["owned_by_subagent"] == true {
+            self.ever_background.remove(task_id);
+            self.owners.insert(task_id.to_owned(), owner);
+        }
+    }
+
     /// Claude Code lists what runs in the background whenever that changes. Subagents hold
     /// the turn; shell commands (`Bash` sent to the background, `Monitor`) only when the agent
     /// awaits them.
     fn background_tasks_changed(&mut self, value: &Value) -> Option<ProviderOutput> {
         let tasks: Vec<&Value> = value["tasks"].as_array().into_iter().flatten().collect();
+        for task in &tasks {
+            self.own_task(task);
+        }
         self.background_agents = tasks
             .iter()
             .filter(|task| task["task_type"] == "local_agent")
             .filter_map(|task| task["task_id"].as_str().map(str::to_owned))
             .collect();
-        self.ever_background
-            .extend(self.background_agents.iter().cloned());
+        self.reviving
+            .retain(|owner| !self.background_agents.contains(owner));
         let now = unix_millis();
         let commands: Vec<BackgroundTask> = tasks
             .iter()
@@ -1180,8 +1210,19 @@ impl ClaudeParser {
                 }))
             })
             .collect();
-        self.ever_background
-            .extend(commands.iter().map(|command| command.task_id.clone()));
+        let own = tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task["task_type"].as_str(),
+                    Some("local_agent" | "local_bash")
+                )
+            })
+            .filter_map(|task| task["task_id"].as_str())
+            .filter(|task_id| !self.owners.contains_key(*task_id))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        self.ever_background.extend(own);
         for gone in &self.background_commands {
             if !commands
                 .iter()
@@ -1231,7 +1272,7 @@ impl ClaudeParser {
     /// Whether the turn waits for background work: its subagents, and the commands the
     /// agent awaits.
     fn holds(&self, queue: &QueueState) -> bool {
-        !self.background_agents.is_empty() || !queue.awaited.is_empty()
+        !self.background_agents.is_empty() || !self.reviving.is_empty() || !queue.awaited.is_empty()
     }
 
     /// Ends the turn. Its process stays for the commands still running in the background,
@@ -1264,8 +1305,30 @@ impl ClaudeParser {
             queue.turn_open = true;
         }
         let mut outputs = vec![ProviderOutput::Woke];
-        outputs.extend(self.ended_tasks.pop_front());
+        outputs.extend(self.ended_tasks.pop_front().map(|(_, ended)| ended));
         outputs
+    }
+
+    /// A line Claude Code sent about a background task that ended answers it, as a run of
+    /// its own ending or as the run going on taking it in. It answers the tasks that ended
+    /// before it too, which Claude Code answered first or took in along with it; those not
+    /// told yet are told now.
+    fn answered(&mut self, value: &Value) -> Vec<ProviderOutput> {
+        if value["origin"]["kind"] != "task-notification" {
+            return Vec::new();
+        }
+        let Some(run) = value["origin"]["runId"].as_str() else {
+            return Vec::new();
+        };
+        let Some(position) = self.pending_wakes.iter().position(|wake| wake == run) else {
+            return Vec::new();
+        };
+        let answered: HashSet<String> = self.pending_wakes.drain(..=position).collect();
+        let (told, untold) = std::mem::take(&mut self.ended_tasks)
+            .into_iter()
+            .partition(|(run, _)| answered.contains(run));
+        self.ended_tasks = untold;
+        told.into_iter().map(|(_, ended)| ended).collect()
     }
 
     /// Between turns, the process ends once nothing it kept runs or waits for an answer.
@@ -1275,6 +1338,7 @@ impl ClaudeParser {
             && self.background_commands.is_empty()
             && self.ending.is_empty()
             && self.background_agents.is_empty()
+            && self.reviving.is_empty()
             && self.pending_wakes.is_empty()
         {
             queue.closing = true;
@@ -2491,6 +2555,209 @@ mod tests {
             parser_line(&mut parser, second).as_slice(),
             [ProviderOutput::TurnCompleted { .. }]
         ));
+    }
+
+    fn agent_roster(run: &str) -> Value {
+        json!({ "task_id": "a1", "run_id": run, "task_type": "local_agent",
+            "subagent_type": "general-purpose", "description": "Wait in the background" })
+    }
+
+    /// The `sleep` the subagent `a1` started in the background, which belongs to it.
+    fn subagent_sleep() -> Value {
+        json!({ "task_id": "b1", "run_id": "run-b1", "task_type": "local_bash",
+            "description": "Sleep for 20 seconds", "parent_task_id": "a1" })
+    }
+
+    fn agent_ended(run: &str, summary: &str) -> Value {
+        json!({ "type": "system", "subtype": "task_notification", "task_id": "a1",
+            "run_id": run, "tool_use_id": "toolu_agent", "status": "completed",
+            "summary": summary })
+    }
+
+    fn wake_result(run: &str) -> Value {
+        json!({ "type": "result", "subtype": "success", "is_error": false,
+            "origin": { "kind": "task-notification", "producer": "session-task", "runId": run } })
+    }
+
+    /// The agent starts the subagent `a1` in the background and ends its run; `a1` starts
+    /// `sleep` in the background.
+    fn subagent_starts_sleep(parser: &mut ClaudeParser) -> Vec<ProviderOutput> {
+        feed(
+            parser,
+            &[
+                json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+                roster(json!([agent_roster("run-a1")])),
+                json!({ "type": "system", "subtype": "task_started", "task_id": "a1",
+                    "run_id": "run-a1", "tool_use_id": "toolu_agent", "is_backgrounded": true,
+                    "task_type": "local_agent" }),
+                json!({ "type": "user", "parent_tool_use_id": null,
+                    "tool_use_result": { "isAsync": true, "status": "async_launched" },
+                    "message": { "role": "user", "content": [{ "type": "tool_result",
+                        "tool_use_id": "toolu_agent",
+                        "content": "Async agent launched successfully." }] } }),
+                json!({ "type": "result", "subtype": "success", "is_error": false }),
+                roster(json!([agent_roster("run-a1"), subagent_sleep()])),
+                json!({ "type": "system", "subtype": "task_started", "task_id": "b1",
+                    "run_id": "run-b1", "owned_by_subagent": true, "tool_use_id": "toolu_sleep",
+                    "is_backgrounded": true, "parent_task_id": "a1", "task_type": "local_bash" }),
+            ],
+        )
+    }
+
+    /// `sleep` ends: Claude Code tells `a1`, which runs again, answers and ends.
+    fn sleep_ends_and_subagent_runs_again() -> Vec<Value> {
+        vec![
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
+                "run_id": "run-b1", "tool_use_id": "toolu_sleep", "status": "completed",
+                "summary": "Background command \"Sleep for 20 seconds\" completed (exit code 0)" }),
+            roster(json!([])),
+            roster(json!([agent_roster("run-a1-again")])),
+            json!({ "type": "system", "subtype": "task_started", "task_id": "a1",
+                "run_id": "run-a1-again", "tool_use_id": "toolu_agent", "is_backgrounded": true,
+                "task_type": "local_agent" }),
+            agent_ended("run-a1-again", "waited"),
+            roster(json!([])),
+        ]
+    }
+
+    fn told_ended(outputs: &[ProviderOutput]) -> Vec<String> {
+        outputs
+            .iter()
+            .filter_map(|output| match output {
+                ProviderOutput::BackgroundTaskEnded { task_id, .. } => Some(task_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_background_task_of_a_subagent_wakes_that_subagent_and_not_the_agent() {
+        let mut parser = ClaudeParser::new(None);
+        let mut outputs = subagent_starts_sleep(&mut parser);
+        outputs.extend(feed(
+            &mut parser,
+            &[
+                agent_ended("run-a1", "The sleep still runs; I reply once it ends."),
+                roster(json!([subagent_sleep()])),
+                json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+                wake_result("run-a1"),
+            ],
+        ));
+        assert_eq!(completions(&outputs), [TurnOutcome::Completed]);
+        let queue = parser.queue.state();
+        assert!(!queue.closing && !queue.turn_open, "{outputs:#?}");
+        drop(queue);
+
+        let ended = feed(&mut parser, &sleep_ends_and_subagent_runs_again());
+        assert!(told_ended(&ended).is_empty(), "{ended:#?}");
+        assert!(!parser.queue.state().closing, "Claude still answers a1");
+
+        let woke = feed(
+            &mut parser,
+            &[
+                json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+                json!({ "type": "assistant", "parent_tool_use_id": null, "message": {
+                    "id": "msg_9", "content": [{ "type": "text", "text": "It waited." }] } }),
+                wake_result("run-a1-again"),
+            ],
+        );
+        assert_eq!(woke[0], ProviderOutput::Woke);
+        assert_eq!(told_ended(&woke), ["a1"]);
+        assert_eq!(completions(&woke), [TurnOutcome::Completed]);
+        assert!(parser.queue.state().closing, "nothing is left running");
+    }
+
+    #[test]
+    fn a_subagent_run_again_for_its_own_task_holds_the_turn() {
+        let mut parser = ClaudeParser::new(None);
+        subagent_starts_sleep(&mut parser);
+        let mut lines = vec![
+            agent_ended("run-a1", "The sleep still runs; I reply once it ends."),
+            roster(json!([subagent_sleep()])),
+        ];
+        lines.extend(sleep_ends_and_subagent_runs_again().into_iter().take(2));
+        lines.push(json!({ "type": "system", "subtype": "init", "session_id": "s1" }));
+        lines.push(wake_result("run-a1"));
+        let waits = feed(&mut parser, &lines);
+        assert!(completions(&waits).is_empty(), "{waits:#?}");
+        assert!(!parser.queue.state().closing);
+
+        let mut rest = sleep_ends_and_subagent_runs_again().split_off(2);
+        rest.push(json!({ "type": "system", "subtype": "init", "session_id": "s1" }));
+        rest.push(wake_result("run-a1-again"));
+        let answered = feed(&mut parser, &rest);
+        assert!(!answered.contains(&ProviderOutput::Woke), "{answered:#?}");
+        assert_eq!(completions(&answered), [TurnOutcome::Completed]);
+        assert!(parser.queue.state().closing);
+    }
+
+    #[test]
+    fn a_task_that_ends_while_a_run_goes_on_is_answered_by_that_run() {
+        let mut parser = ClaudeParser::new(None);
+        let mut lines = sleep_in_background();
+        lines.extend([
+            json!({ "type": "system", "subtype": "task_started", "task_id": "f1",
+                "run_id": "run-f1", "tool_use_id": "toolu_fg", "is_backgrounded": false,
+                "task_type": "local_bash" }),
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "b1",
+                "run_id": "run-b1", "tool_use_id": "toolu_bg", "status": "completed",
+                "summary": "Background command \"Sleep then echo done\" completed (exit code 0)" }),
+            roster(json!([])),
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "f1",
+                "run_id": "run-f1", "tool_use_id": "toolu_fg", "status": "completed" }),
+            json!({ "type": "user", "parent_tool_use_id": null,
+                "message": { "role": "user", "content": [{ "type": "tool_result",
+                    "tool_use_id": "toolu_fg", "content": "late" }] } }),
+        ]);
+        let before = feed(&mut parser, &lines);
+        assert!(told_ended(&before).is_empty(), "{before:#?}");
+
+        let taken_in = feed(
+            &mut parser,
+            &[
+                json!({ "type": "user", "parent_tool_use_id": null, "isReplay": true,
+                "message": { "role": "user", "content":
+                    "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>" },
+                "origin": { "kind": "task-notification", "producer": "session-task",
+                    "runId": "run-b1" } }),
+            ],
+        );
+        assert_eq!(taken_in, [sleep_ended_output()]);
+
+        let ended = feed(
+            &mut parser,
+            &[
+                json!({ "type": "assistant", "parent_tool_use_id": null, "message": {
+                    "id": "msg_2", "content": [{ "type": "text", "text": "Both ran." }] } }),
+                run_result(),
+            ],
+        );
+        assert!(!ended.contains(&ProviderOutput::RunEnded { run: 1 }));
+        assert_eq!(completions(&ended), [TurnOutcome::Completed]);
+    }
+
+    #[test]
+    fn a_run_about_a_task_answers_the_tasks_that_ended_before_it() {
+        let mut parser = ClaudeParser::new(None);
+        let ended = feed(
+            &mut parser,
+            &[
+                roster(json!([
+                    { "task_id": "a", "task_type": "local_agent" },
+                    { "task_id": "b", "task_type": "local_agent" }])),
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "a",
+                    "run_id": "run-a", "status": "completed" }),
+                json!({ "type": "system", "subtype": "task_notification", "task_id": "b",
+                    "run_id": "run-b", "status": "completed" }),
+                roster(json!([])),
+                json!({ "type": "result", "subtype": "success", "is_error": false }),
+            ],
+        );
+        assert_eq!(told_ended(&ended), ["a"]);
+
+        let answered = feed(&mut parser, &[wake_result("run-b")]);
+        assert_eq!(told_ended(&answered), ["b"]);
+        assert_eq!(completions(&answered), [TurnOutcome::Completed]);
     }
 
     #[test]
