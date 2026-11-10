@@ -3,6 +3,7 @@ import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Kbd } from '@hoshi/ui/components/kbd'
 import { usePanelStore } from '@/state/panel-store'
+import { useSidebarStore } from '@/state/sidebar-store'
 import {
   isAvailable,
   kindForShortcut,
@@ -24,8 +25,10 @@ function isTyping(target: EventTarget | null) {
 export function SurfaceLauncher({ threadId }: { threadId: string }) {
   const openSurface = usePanelStore((state) => state.openSurface)
   const context = useSurfaceContext(threadId)
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
 
   useEffect(() => {
+    if (notesOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.altKey || event.metaKey) return
       if (isTyping(event.target)) return
@@ -36,7 +39,7 @@ export function SurfaceLauncher({ threadId }: { threadId: string }) {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [threadId, openSurface, context])
+  }, [threadId, openSurface, context, notesOpen])
 
   return (
     <div className='flex flex-1 flex-col items-center justify-center gap-3 p-4'>

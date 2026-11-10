@@ -1,6 +1,7 @@
 import { useImperativeHandle, useRef } from 'react'
 import type { Ref } from 'react'
 import { cn } from '@hoshi/utils'
+import { noteReferences } from '@/lib/note-reference'
 import { type PastedImages, pastedImages } from '@/lib/pasted-images'
 import { CHIP_CLASSES } from '@/lib/chips'
 import { fileIcon } from '@/lib/file-icons'
@@ -9,6 +10,7 @@ import { Placeholder } from '@tiptap/extensions'
 import type { EditorState } from '@tiptap/pm/state'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { openFencedBlock } from './code-fence'
+import { RICH_TEXT_CLASSES } from './rich-text'
 import { CodeBlockHighlight, ComposerCodeBlock } from './composer-code-block'
 import type { EditorView } from '@tiptap/pm/view'
 import { EditorContent, useEditor } from '@tiptap/react'
@@ -100,6 +102,8 @@ type ComposerEditorProps = {
   onKeyDown: (event: KeyboardEvent, context: KeyContext) => boolean
   /** Images pasted; the editor leaves them to the composer. */
   onImages: (pasted: PastedImages) => void
+  /** References to notes pasted, as copied from a note: the composer attaches them. */
+  onNotes: (noteIds: string[]) => void
 }
 
 const leafText = (node: ProseMirrorNode) =>
@@ -270,15 +274,8 @@ const ComposerKeys = Extension.create({
 })
 
 const CONTENT_CLASSES = cn(
-  'px-2.5 font-(family-name:--font-composer) wrap-break-word whitespace-pre-wrap text-(length:--composer-font-size) outline-none',
-  '[&_p]:my-0 [&_strong]:font-semibold',
-  '[&_blockquote]:border-foreground/25 [&_blockquote]:text-muted-foreground [&_blockquote]:my-1 [&_blockquote]:border-s-2 [&_blockquote]:ps-3',
-  '[&_code]:bg-foreground/10 [&_code]:rounded [&_code]:px-[0.35em] [&_code]:py-[0.1em] [&_code]:font-mono [&_code]:text-[0.85em]',
-  '[&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:text-xs [&_pre_span]:text-(--shiki-light) dark:[&_pre_span]:text-(--shiki-dark)',
-  '[&_ol]:my-1 [&_ol]:list-decimal [&_ol]:ps-5 [&_ul]:my-1 [&_ul]:list-disc [&_ul]:ps-5',
-  '[&_h1]:text-xl [&_h1]:font-semibold [&_h2]:text-lg [&_h2]:font-semibold [&_h3]:text-base [&_h3]:font-semibold',
-  '[&_hr]:border-border [&_hr]:my-2',
-  '[&_p.is-editor-empty:first-child]:before:text-muted-foreground [&_p.is-editor-empty:first-child]:before:pointer-events-none [&_p.is-editor-empty:first-child]:before:float-left [&_p.is-editor-empty:first-child]:before:h-0 [&_p.is-editor-empty:first-child]:before:content-[attr(data-placeholder)]'
+  'px-2.5 font-(family-name:--font-composer) text-(length:--composer-font-size)',
+  RICH_TEXT_CLASSES
 )
 
 /** The composer's rich text: markdown as you type it, and mentions as chips. */
@@ -293,10 +290,12 @@ export function ComposerEditor({
   onDocument,
   onBlur,
   onKeyDown,
-  onImages
+  onImages,
+  onNotes
 }: ComposerEditorProps) {
-  const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onImages })
-  handlers.current = { onChange, onDocument, onBlur, onKeyDown, onImages }
+  const current = { onChange, onDocument, onBlur, onKeyDown, onImages, onNotes }
+  const handlers = useRef(current)
+  handlers.current = current
   /** The last document read, so a caret move doesn't convert it again. */
   const lastRead = useRef<{
     doc: ProseMirrorNode
@@ -367,6 +366,11 @@ export function ComposerEditor({
       // Never left to WebKit, which pastes an image as an attachment element of its own.
       handlePaste: (_view, event) => {
         const data = event.clipboardData
+        const notes = data ? noteReferences(data.getData('text/plain')) : null
+        if (notes) {
+          handlers.current.onNotes(notes)
+          return true
+        }
         const pasted = data ? pastedImages(data, { orClipboard: true }) : null
         if (!pasted) return false
         handlers.current.onImages(pasted)

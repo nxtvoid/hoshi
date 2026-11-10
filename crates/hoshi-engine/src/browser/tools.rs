@@ -421,11 +421,17 @@ impl Browsing {
                         _ => page.click(needs_ref()?)?,
                     },
                     "hover" => page.hover(needs_ref()?)?,
-                    "type" => page.type_text(
-                        needs_ref()?,
-                        arguments["text"].as_str().unwrap_or_default(),
-                        arguments["clear"].as_bool().unwrap_or(false),
-                    )?,
+                    "type" => {
+                        let typed = arguments["text"].as_str().unwrap_or_default();
+                        if arguments["secretFile"].is_string() {
+                            page.withhold(typed);
+                        }
+                        page.type_text(
+                            needs_ref()?,
+                            typed,
+                            arguments["clear"].as_bool().unwrap_or(false),
+                        )?;
+                    }
                     "press" => page.press(text(arguments, "key").ok_or("`key` is required")?)?,
                     "select" => {
                         let values: Vec<String> = arguments["values"]

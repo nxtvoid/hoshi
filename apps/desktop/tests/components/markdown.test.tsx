@@ -41,6 +41,18 @@ describe('Markdown', () => {
     expect(html).toContain('<code>const a = 1 &lt; 2</code>')
   })
 
+  test('a numbered list leaves room for its widest number', () => {
+    const items = (count: number, start = 1) =>
+      Array.from({ length: count }, (_, index) => `${start + index}. step`)
+        .join('\n')
+        .concat('\n')
+
+    expect(render(items(2))).toContain('2ch)')
+    expect(render(items(12))).toContain('3ch)')
+    expect(render(items(2, 9))).toContain('3ch)')
+    expect(render(items(1, 100))).toContain('4ch)')
+  })
+
   test('web links carry their site icon; other links do not', () => {
     const web = render('[PR](https://github.com/nxtvoid/avzx/pull/3)')
     const local = render('[section](#usage)')

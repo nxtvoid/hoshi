@@ -2,6 +2,7 @@ import { m } from '@/paraglide/messages'
 import type { ComponentType } from 'react'
 import { SettingsNav } from './SettingsNav'
 import { AboutSection } from './AboutSection'
+import { VaultSection } from './VaultSection'
 import { GeneralSection } from './GeneralSection'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useNavigate } from '@tanstack/react-router'
@@ -18,6 +19,7 @@ const CONTENT: Record<SettingsSection, ComponentType> = {
   appearance: AppearanceSection,
   providers: ProvidersSection,
   forges: SourceControlSection,
+  vault: VaultSection,
   about: AboutSection
 }
 

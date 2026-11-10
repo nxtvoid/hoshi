@@ -40,14 +40,21 @@ function SecretRow({
 }: {
   content: Extract<RequestContent, { kind: 'secretRequest' }>
 }) {
+  const { vault } = content
   const label =
     content.status === 'pending'
-      ? m.secret_request_waiting({ label: content.label })
+      ? vault
+        ? m.secret_request_vault_waiting({ name: vault.name })
+        : m.secret_request_waiting({ label: content.label })
       : content.status === 'cancelled'
         ? m.secret_request_unanswered({ label: content.label })
-        : content.saved
-          ? m.secret_request_saved({ label: content.label })
-          : m.secret_request_declined({ label: content.label })
+        : !content.saved
+          ? m.secret_request_declined({ label: content.label })
+          : content.kept
+            ? m.secret_request_kept({ label: content.label })
+            : vault
+              ? m.secret_request_from_vault({ name: vault.name })
+              : m.secret_request_saved({ label: content.label })
   return (
     <div className='text-muted-foreground flex min-h-6 items-center gap-2 text-sm'>
       <StatusIcon content={content} />

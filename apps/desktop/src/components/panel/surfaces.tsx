@@ -1,6 +1,7 @@
 import { m } from '@/paraglide/messages'
 import { DiffSurface } from './DiffSurface'
 import { BrowserSurface } from './BrowserSurface'
+import { NoteSurface, useSentNote } from './NoteSurface'
 import { useAppStore } from '@/state/app-store'
 import type { ComponentType, ReactNode } from 'react'
 import { usePanelStore } from '@/state/panel-store'
@@ -10,7 +11,8 @@ import {
   ComputerTerminal01Icon,
   FileDiffIcon,
   GitPullRequestIcon,
-  Globe02Icon
+  Globe02Icon,
+  Note01Icon
 } from '@hugeicons/core-free-icons'
 import type { Surface, SurfaceKind } from '@/state/panel-surfaces'
 
@@ -20,12 +22,12 @@ export type SurfaceContext = { hasPullRequest: boolean }
 type SurfaceDefinition<S extends Surface> = {
   label: () => string
   icon: typeof FileDiffIcon
-  /** Single key that opens it from the launcher. */
-  shortcut: string
+  /** Single key that opens it from the launcher; none for a kind opened from elsewhere. */
+  shortcut?: string
   /** Omitted when it can always open. */
   available?: (context: SurfaceContext) => boolean
   /** The tab's text; the label when omitted. */
-  Title?: ComponentType<{ threadId: string }>
+  Title?: ComponentType<{ threadId: string; surfaceId: string }>
   render: (threadId: string, surface: S) => ReactNode
 }
 
@@ -65,10 +67,23 @@ export const SURFACES: {
     icon: Globe02Icon,
     shortcut: 'B',
     render: (threadId) => <BrowserSurface threadId={threadId} />
+  },
+  note: {
+    label: m.note_surface,
+    icon: Note01Icon,
+    Title: NoteTitle,
+    render: (threadId, surface) => (
+      <NoteSurface
+        key={`${surface.itemId}:${surface.noteId}`}
+        threadId={threadId}
+        itemId={surface.itemId}
+        noteId={surface.noteId}
+      />
+    )
   }
 }
 
-/** Launcher order. */
+/** The kinds the launcher opens, in its order. */
 export const SURFACE_KINDS: SurfaceKind[] = [
   'terminal',
   'diff',
@@ -97,6 +112,8 @@ export function renderSurface(threadId: string, surface: Surface): ReactNode {
       return SURFACES.terminal.render(threadId, surface)
     case 'browser':
       return SURFACES.browser.render(threadId, surface)
+    case 'note':
+      return SURFACES.note.render(threadId, surface)
   }
 }
 
@@ -107,7 +124,7 @@ export function kindForShortcut(
 ): SurfaceKind | undefined {
   return SURFACE_KINDS.find(
     (kind) =>
-      SURFACES[kind].shortcut.toLowerCase() === key.toLowerCase() &&
+      SURFACES[kind].shortcut?.toLowerCase() === key.toLowerCase() &&
       isAvailable(kind, context)
   )
 }
@@ -115,6 +132,23 @@ export function kindForShortcut(
 function PullRequestTitle({ threadId }: { threadId: string }) {
   const number = useAppStore((state) => state.pullRequests[threadId]?.number)
   return <>{number === undefined ? m.surface_pull_request() : `#${number}`}</>
+}
+
+function NoteTitle({
+  threadId,
+  surfaceId
+}: {
+  threadId: string
+  surfaceId: string
+}) {
+  const surface = usePanelStore((state) =>
+    state.threads[threadId]?.surfaces.find(
+      (candidate) => candidate.id === surfaceId
+    )
+  )
+  const note = surface?.kind === 'note' ? surface : undefined
+  const title = useSentNote(note?.itemId ?? '', note?.noteId ?? '')?.title
+  return <span className='max-w-40 truncate'>{title || m.note_surface()}</span>
 }
 
 function TerminalSurface({

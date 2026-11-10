@@ -1,5 +1,6 @@
 use crate::{
     BackgroundTask, ContextUsage, ItemContent, Task, ToolDetail, TurnOutcome, UsageLimits,
+    VaultSecretRef,
 };
 
 /// What a provider adapter reports while it runs a turn, in provider-neutral terms.
@@ -64,6 +65,14 @@ pub enum ProviderOutput {
     RequestOpened {
         request_id: String,
         content: ItemContent,
+    },
+    /// The agent took a secret the vault lets it have without asking. Nobody waits: it is
+    /// recorded so the transcript shows the use.
+    SecretProvided {
+        item_id: String,
+        /// Why the agent wanted it, in its own words.
+        reason: String,
+        vault: VaultSecretRef,
     },
     /// The agent stopped waiting for an answer to the request.
     RequestWithdrawn {

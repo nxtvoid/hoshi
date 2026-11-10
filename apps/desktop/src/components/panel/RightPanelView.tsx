@@ -89,7 +89,7 @@ export function RightPanelView({ threadId }: { threadId: string }) {
             strokeWidth={2}
           />
         </IconButton>
-        <IconButton label={m.close_panel()} onClick={close}>
+        <IconButton label={m.close_panel()} onClick={() => close(threadId)}>
           <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
         </IconButton>
       </div>
@@ -144,7 +144,7 @@ function SurfaceTab({
         className='focus-visible:ring-ring flex h-full items-center gap-1.5 rounded-md pl-2 outline-none focus-visible:ring-2'
       >
         <HugeiconsIcon icon={icon} strokeWidth={2} className='size-3.5' />
-        {Title ? <Title threadId={threadId} /> : label()}
+        {Title ? <Title threadId={threadId} surfaceId={surface.id} /> : label()}
       </button>
       <button
         type='button'

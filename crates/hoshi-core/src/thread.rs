@@ -1,5 +1,6 @@
 use crate::{
     ApprovalDecision, DiffFile, MessageAttachment, PullRequestUpdate, Question, RequestStatus,
+    SecretField, VaultSecretRef,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -326,9 +327,28 @@ pub enum ItemContent {
         /// What it is for and where to get it, in the agent's words.
         reason: String,
         placeholder: Option<String>,
+        /// The values it asks for when they are several that go together, such as a
+        /// login's email and password. Empty for a single value, which `label` names.
+        #[serde(default)]
+        fields: Vec<SecretField>,
         status: RequestStatus,
-        /// Once resolved: whether the user saved one or declined.
+        /// Once resolved: whether the agent got one or the user declined.
         saved: Option<bool>,
+        /// The vault's secret this is about: the one the agent asked to use, the one the
+        /// user picked, or the one the typed value was kept as.
+        #[serde(default)]
+        vault: Option<VaultSecretRef>,
+        /// The typed value was also kept in the vault, as `vault`.
+        #[serde(default)]
+        kept: bool,
+        /// The card opens set to keep the value in the vault, as when the user asked the
+        /// agent to save one.
+        #[serde(default)]
+        keep_by_default: bool,
+        /// The user already wrote the values in a message and asked to save them: the
+        /// card types nothing, it only asks whether to keep them in the vault.
+        #[serde(default)]
+        pasted: bool,
     },
     /// A plan mode turn's plan, which the agent carries out once accepted.
     ProposedPlan {
@@ -344,10 +364,28 @@ pub enum ItemContent {
 const OUTPUT_PREVIEW_CHARS: usize = 200;
 
 impl ItemContent {
-    /// The item as a page of the transcript carries it: tool output cut to its start and
-    /// diffs left out, which the item alone returns.
+    /// The item as a page of the transcript carries it: tool output cut to its start, and
+    /// diffs and the text of attached notes left out, which the item alone returns.
     pub fn summary(self) -> Self {
         match self {
+            Self::UserMessage {
+                text,
+                attachments,
+                steer,
+                task_result,
+                pull_request_update,
+                rewind,
+            } => Self::UserMessage {
+                text,
+                attachments: attachments
+                    .into_iter()
+                    .map(MessageAttachment::summary)
+                    .collect(),
+                steer,
+                task_result,
+                pull_request_update,
+                rewind,
+            },
             Self::ToolCall {
                 name,
                 input,

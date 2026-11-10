@@ -771,7 +771,10 @@ impl ClaudeParser {
                     outputs.push(ProviderOutput::ToolCallStarted {
                         item_id: block["id"].as_str().unwrap_or(&item_id).to_owned(),
                         name: name.to_owned(),
-                        input: truncate(&block["input"].to_string(), TOOL_INPUT_MAX_CHARS),
+                        input: truncate(
+                            &claude_tools::recorded_input(name, &block["input"]),
+                            TOOL_INPUT_MAX_CHARS,
+                        ),
                     });
                     outputs.extend(todos.map(|tasks| ProviderOutput::TaskList { tasks }));
                 }

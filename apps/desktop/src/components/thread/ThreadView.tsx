@@ -27,7 +27,7 @@ import { ReviewCommentsBar } from './ReviewCommentsBar'
 import { WorktreeSetupBar } from './WorktreeSetupBar'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { LogoMark } from '@/components/brand/Logo'
-import { usePanelStore } from '@/state/panel-store'
+import { usePanelOpen, usePanelStore } from '@/state/panel-store'
 import { useTerminalStore } from '@/state/terminal-store'
 import { RightPanel } from '@/components/panel/RightPanel'
 import { useTranscriptStore } from '@/state/transcript-store'
@@ -57,7 +57,7 @@ export function ThreadView() {
       state.projects.find((project) => project.id === thread?.projectId)
         ?.workspaceRoot
   )
-  const panelOpen = usePanelStore((state) => state.open)
+  const panelOpen = usePanelOpen(thread?.id)
   const togglePanel = usePanelStore((state) => state.toggle)
   const panelMaximized = usePanelStore((state) => state.maximized)
   const detailsOpen = usePanelStore((state) => state.detailsOpen)
@@ -66,7 +66,9 @@ export function ThreadView() {
   )
   const toggleTerminal = useTerminalStore((state) => state.toggleDrawer)
   const threadId = thread?.id
-  useOpenInShortcut(thread?.id)
+  const hidden = useSidebarStore((state) => state.notesOpen)
+  const mainRef = useRef<HTMLElement>(null)
+  useOpenInShortcut(hidden ? undefined : thread?.id)
   const chatRef = useRef<HTMLDivElement>(null)
   const chatWidth = useElementWidth(chatRef)
   const detailsInline = chatWidth >= DETAILS_INLINE_MIN_WIDTH
@@ -78,11 +80,23 @@ export function ThreadView() {
   const draft = !loading && empty && !working
   const composerDraft = draftKey(thread?.id ?? null, scopeProjectId, chat)
 
+  useLayoutEffect(() => {
+    const focused = document.activeElement
+    if (
+      hidden &&
+      focused instanceof HTMLElement &&
+      mainRef.current?.contains(focused)
+    ) {
+      focused.blur()
+    }
+  }, [hidden])
+
   useEffect(() => {
+    if (hidden) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.altKey && event.code === 'KeyB') {
         event.preventDefault()
-        togglePanel()
+        if (threadId) togglePanel(threadId)
       } else if (
         threadId &&
         event.ctrlKey &&
@@ -95,10 +109,14 @@ export function ThreadView() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [togglePanel, toggleTerminal, threadId])
+  }, [togglePanel, toggleTerminal, threadId, hidden])
 
   return (
-    <main className='flex min-w-0 flex-1 flex-col'>
+    <main
+      ref={mainRef}
+      inert={hidden}
+      className={cn('flex min-w-0 flex-1 flex-col', hidden && 'invisible')}
+    >
       <header
         data-tauri-drag-region
         className='border-border flex h-10 shrink-0 items-center gap-2 border-b pl-3'
@@ -143,7 +161,7 @@ export function ThreadView() {
             <IconButton
               label={m.toggle_panel()}
               active={panelOpen}
-              onClick={togglePanel}
+              onClick={() => togglePanel(thread.id)}
             >
               <HugeiconsIcon icon={SidebarRightIcon} strokeWidth={2} />
             </IconButton>

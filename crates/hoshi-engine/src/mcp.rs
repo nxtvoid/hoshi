@@ -232,18 +232,41 @@ fn tools() -> Value {
         },
         {
             "name": "request_secret",
-            "description": "Ask the user for one secret only they can give, such as a token, password, PIN or pairing code, in a card they type it into; one secret per call. Use it when a command needs a credential you lack, instead of asking in chat or searching files and the environment for one; not for access you already have. Waits for the answer and returns a file holding the value: read it only inside the command that needs it, such as `curl -H \"Authorization: Bearer $(cat <file>)\"`, and never print it. A secret the user already pasted in this thread goes in `value`, with no card.",
+            "description": "Get one secret you lack, such as a token, password, PIN or pairing code; one secret per call. Values that go together, such as the email and password of a login or a client id and its secret, are one secret: name them in `fields`, and the user fills one card and keeps them as one. Call vault_list first: a secret the user keeps in the vault comes by its `vaultId`, at once or once they approve it in a card. One the vault lacks, the user types in a card, where they can keep it in the vault for next time; when they ask you to save or create a secret, call it with `keep`. Use it when a command or a page needs a credential, instead of asking in chat or searching files, databases and the environment for one; not for access you already have. Waits for the answer and returns a file holding the value, or `files` with one per field: read one only inside the command that needs it, such as `curl -H \"Authorization: Bearer $(cat <file>)\"`, and never print it; to type a value into a page, pass its file to preview_act as secretFile. What the user already pasted in this thread goes in `value`, or in each field's `value`, with no card and only to a file; when they ask you to save it, add `keep` and they confirm in a card. The result's `inVault` tells whether the vault holds the secret now.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "label": { "type": "string", "description": "Card title, such as \"GitHub token\"." },
-                    "reason": { "type": "string", "description": "What it is for and where to get it." },
+                    "vaultId": { "type": "string", "description": "The id vault_list gave for a secret the vault holds. `label` is then not needed." },
+                    "label": { "type": "string", "description": "Card title, such as \"GitHub token\". Required without vaultId." },
+                    "reason": { "type": "string", "description": "What it is for and, when the user must type it, where to get it." },
                     "placeholder": { "type": "string", "description": "Hint in the empty field, such as \"ghp_…\"." },
-                    "value": { "type": "string", "description": "A secret the user pasted in this thread, saved with no card." },
+                    "fields": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 6,
+                        "description": "The values of a secret that has several, in the order to ask for them, such as a login's email and password. Leave out for a single key, token or code. Not with vaultId.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": { "type": "string", "description": "What the value is, such as \"Email\"." },
+                                "secret": { "type": "boolean", "description": "False for a value the user may see as they type it, such as an email or a user name. True by default." },
+                                "value": { "type": "string", "description": "The value itself, when the user pasted it in this thread: for every field or for none." },
+                            },
+                            "required": ["label"],
+                        },
+                    },
+                    "keep": { "type": "boolean", "description": "The user asked to save this secret in the vault: the card opens set to keep it, named by `label`. With pasted values the card only asks them to confirm. Not with vaultId." },
+                    "value": { "type": "string", "description": "A single secret the user pasted in this thread: written to a file with no card, and kept in the vault only with `keep`, once they confirm." },
                     "timeoutMs": { "type": "integer", "description": "How long to wait for the user; 10 minutes by default, at most an hour." },
                 },
-                "required": ["label", "reason"],
+                "required": ["reason"],
             },
+            "_meta": { "anthropic/alwaysLoad": true },
+        },
+        {
+            "name": "vault_list",
+            "description": "List the secrets the user keeps in hoshi's vault for this project, such as tokens, passwords and the logins of the apps they work on: each by its name and what it is for, never its value. Call it first whenever you need a credential, before you ask for one or go looking. Each has the id request_secret takes as vaultId, and its access: \"allowed\" comes at once, \"ask\" once the user approves.",
+            "inputSchema": { "type": "object", "properties": {} },
             "_meta": { "anthropic/alwaysLoad": true },
         },
         {
@@ -351,13 +374,14 @@ fn tools() -> Value {
         },
         {
             "name": "preview_act",
-            "description": "Use the page as a person would, with real input: click (a ref, or x and y), hover, type (text into a ref; clear empties it first), press (a key such as Enter, Tab, Escape, ArrowDown), select (values of a <select> ref) or scroll (deltaX, deltaY, at a ref or the page). Snapshot again to see the result.",
+            "description": "Use the page as a person would, with real input: click (a ref, or x and y), hover, type (text into a ref; clear empties it first; secretFile in place of text types a secret you never read), press (a key such as Enter, Tab, Escape, ArrowDown), select (values of a <select> ref) or scroll (deltaX, deltaY, at a ref or the page). Snapshot again to see the result.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["click", "hover", "type", "press", "select", "scroll"] },
                     "ref": { "type": "string" },
                     "text": { "type": "string" },
+                    "secretFile": { "type": "string", "description": "With type: the file request_secret returned, typed in place of `text`." },
                     "clear": { "type": "boolean" },
                     "key": { "type": "string" },
                     "values": { "type": "array", "items": { "type": "string" } },
@@ -486,6 +510,7 @@ mod tests {
                 "task_status",
                 "task_cancel",
                 "request_secret",
+                "vault_list",
                 "thread_list",
                 "thread_read",
                 "thread_send",

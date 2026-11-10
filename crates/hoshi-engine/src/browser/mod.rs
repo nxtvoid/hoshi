@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_SIZE: (u32, u32) = (1280, 800);
 const CONSOLE_KEPT: usize = 200;
 const READY_POLL: Duration = Duration::from_millis(100);
+/// Stands in a snapshot for what was typed from a secret file.
+const WITHHELD: &str = "[typed from a secret file]";
 
 pub struct Browser {
     connection: Arc<Connection>,
@@ -66,6 +68,7 @@ impl Browser {
             target_id,
             session_id,
             refs: HashMap::new(),
+            withheld: Vec::new(),
             console,
             size,
         };
@@ -223,6 +226,8 @@ pub struct Page {
     session_id: String,
     /// The last snapshot's refs, to the DOM nodes they name.
     refs: HashMap<String, i64>,
+    /// What was typed from secret files, which no snapshot shows back.
+    withheld: Vec<String>,
     console: Arc<Mutex<VecDeque<String>>>,
     size: (u32, u32),
 }
@@ -271,9 +276,17 @@ impl Page {
     pub fn snapshot(&mut self, max_chars: usize) -> Result<String, String> {
         let tree = self.call("Accessibility.getFullAXTree", json!({}))?;
         let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
-        let (text, refs) = format_tree(&nodes, max_chars);
+        let (text, refs) = format_tree(&nodes, max_chars, &self.withheld);
         self.refs = refs;
         Ok(text)
+    }
+
+    /// From now on snapshots show `secret` as withheld wherever the page holds it, such as
+    /// in the field it was typed into, so the agent that typed it never reads it.
+    pub fn withhold(&mut self, secret: &str) {
+        if !secret.is_empty() && !self.withheld.iter().any(|kept| kept == secret) {
+            self.withheld.push(secret.to_owned());
+        }
     }
 
     fn node(&self, reference: &str) -> Result<i64, String> {
@@ -591,9 +604,25 @@ fn text_of(value: &Value) -> String {
     }
 }
 
+/// `text` with each of `withheld` replaced by a marker.
+fn without(text: String, withheld: &[String]) -> String {
+    withheld.iter().fold(text, |text, secret| {
+        if text.contains(secret.as_str()) {
+            text.replace(secret.as_str(), WITHHELD)
+        } else {
+            text
+        }
+    })
+}
+
 /// `Accessibility.getFullAXTree` as an outline like
-/// `- button "Save" [ref=e3]`, and the DOM node each ref names.
-fn format_tree(nodes: &[Value], max_chars: usize) -> (String, HashMap<String, i64>) {
+/// `- button "Save" [ref=e3]`, and the DOM node each ref names. What `withheld` lists is
+/// left out of names and values.
+fn format_tree(
+    nodes: &[Value],
+    max_chars: usize,
+    withheld: &[String],
+) -> (String, HashMap<String, i64>) {
     let by_id: HashMap<&str, &Value> = nodes
         .iter()
         .filter_map(|node| Some((node["nodeId"].as_str()?, node)))
@@ -610,7 +639,7 @@ fn format_tree(nodes: &[Value], max_chars: usize) -> (String, HashMap<String, i6
             break;
         }
         let role = text_of(&node["role"]["value"]);
-        let name = text_of(&node["name"]["value"]).trim().to_owned();
+        let name = without(text_of(&node["name"]["value"]).trim().to_owned(), withheld);
         let ignored = node["ignored"] == true;
         let shown = !ignored && !(PLAIN_ROLES.contains(&role.as_str()) && name.is_empty());
         let child_depth = if shown { depth + 1 } else { depth };
@@ -623,7 +652,7 @@ fn format_tree(nodes: &[Value], max_chars: usize) -> (String, HashMap<String, i6
                 if !name.is_empty() {
                     line.push_str(&format!(" {}", json!(name)));
                 }
-                let value = text_of(&node["value"]["value"]);
+                let value = without(text_of(&node["value"]["value"]), withheld);
                 if !value.is_empty() {
                     line.push_str(&format!(" value={}", json!(value)));
                 }
@@ -690,15 +719,35 @@ mod tests {
             node("6", "StaticText", "Sign in", &[], None),
         ];
 
-        let (text, refs) = format_tree(&nodes, 10_000);
+        let (text, refs) = format_tree(&nodes, 10_000, &[]);
 
         assert_eq!(
             text,
             "- heading \"Sign in\" [ref=e1]\n  - text: Sign in\n- button \"Save\" [ref=e2]\n- checkbox \"Remember me\" [checked] [ref=e3]\n"
         );
         assert_eq!(refs["e2"], 14);
-        let (cut, _) = format_tree(&nodes, 40);
+        let (cut, _) = format_tree(&nodes, 40, &[]);
         assert!(cut.ends_with("[truncated: the page has more]\n"));
+    }
+
+    #[test]
+    fn a_snapshot_never_shows_what_was_typed_from_a_secret_file() {
+        let mut email = node("2", "textbox", "Email", &[], Some(12));
+        email["value"] = json!({ "value": "a@b.dev" });
+        let nodes = vec![
+            node("1", "RootWebArea", "", &["2", "3"], Some(11)),
+            email,
+            node("3", "StaticText", "Signed in as a@b.dev", &[], None),
+        ];
+
+        let (shown, _) = format_tree(&nodes, 10_000, &[]);
+        let (text, _) = format_tree(&nodes, 10_000, &["a@b.dev".to_owned()]);
+
+        assert!(shown.contains("value=\"a@b.dev\""));
+        assert_eq!(
+            text,
+            "- textbox \"Email\" value=\"[typed from a secret file]\" [ref=e1]\n- text: Signed in as [typed from a secret file]\n"
+        );
     }
 
     #[test]

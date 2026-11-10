@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { useBrowserStore } from '@/state/browser-store'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import type { BrowserInput } from '@/bindings/BrowserInput'
 import { useEffect, useRef, useState } from 'react'
@@ -105,12 +106,14 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
     }
   }, [fill, threadId])
 
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
   useEffect(() => {
+    if (notesOpen) return
     void invoke('browser_view', { threadId, viewing: true })
     return () => {
       void invoke('browser_view', { threadId, viewing: false })
     }
-  }, [threadId])
+  }, [threadId, notesOpen])
 
   useEffect(() => {
     if (page?.url) setAddress(page.url)

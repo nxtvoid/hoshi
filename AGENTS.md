@@ -15,12 +15,12 @@
 - `crates/hoshi-core` - Domain model and orchestrator. Pure: commands in, events out. No I/O.
   Its types are the contract with the UI.
 - `crates/hoshi-engine` - Runtime that wires core, store and providers: persists events, runs effects.
-- `crates/hoshi-store` - SQLite persistence for events and projections, in `state.sqlite` under hoshi's home. Each append writes events and projection rows in one transaction.
+- `crates/hoshi-store` - SQLite persistence for events and projections, in `state.sqlite` under hoshi's home. Each append writes events and projection rows in one transaction. The user's notes and the vault's entries are kept apart, in `personal.sqlite`: nothing there is an event, so what the user deletes is gone.
 - `crates/hoshi-providers` - One adapter per agent CLI behind a common trait. Claude Code first, Codex next.
 
 ## Data
 
-Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-dev` for debug builds (`bun run dev`) so they never touch the installed app's data. `HOSHI_HOME` overrides both. It holds `settings.json`, `state.sqlite`, `worktrees/`, `chats/`, `attachments/` and `webview/` (the webview's storage). Never write to Tauri's per-identifier folders (`app_data_dir` and the like); `apps/desktop/src-tauri/src/home.rs` moves what older versions left there on first start, except worktrees, whose paths git registered.
+Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-dev` for debug builds (`bun run dev`) so they never touch the installed app's data. `HOSHI_HOME` overrides both. It holds `settings.json`, `state.sqlite`, `personal.sqlite`, `worktrees/`, `chats/`, `attachments/`, `secrets/` and `webview/` (the webview's storage). Never write to Tauri's per-identifier folders (`app_data_dir` and the like); `apps/desktop/src-tauri/src/home.rs` moves what older versions left there on first start, except worktrees, whose paths git registered.
 
 ## Commands
 
@@ -49,6 +49,12 @@ The repo is indexed by [CodeGraph](https://github.com/colbymchenry/codegraph). O
   Virtualize long lists and do not ship whole transcripts across the IPC bridge.
 - Types that cross to the UI derive `Serialize` and `TS` with `#[ts(export)]` and use camelCase:
   `rename_all = "camelCase"` on structs; on enums also `rename_all_fields = "camelCase"`.
+- Notes are the user's own. An agent reads one only when the user attaches it to a message, and then
+  without what looks like a credential (`hoshi_core::redact_credentials`). Nothing puts notes in a
+  prompt by itself, and no agent tool lists, reads or writes them.
+- A vault secret's value lives in the system's credential store, never in a database, an event or
+  the transcript. An agent gets it as a file under `secrets/`, after the user approved it or marked
+  the secret as allowed; a hidden one is never offered. The value does not travel to the webview.
 
 ## Code conventions
 

@@ -388,6 +388,19 @@ pub enum CommandError {
     /// Not `owner/name` or a link to a repository on the chosen forge.
     #[error("{input} does not name a repository")]
     RepositoryNameInvalid { input: String },
+    #[error("note {note_id} not found")]
+    NoteNotFound { note_id: String },
+    #[error("the vault has no secret {secret_id}")]
+    VaultSecretNotFound { secret_id: String },
+    /// A secret needs a name, and a value when it is new.
+    #[error("the secret has no name or no value")]
+    VaultSecretIncomplete,
+    /// The system's credential store refused; `detail` is its own message, shown as is.
+    #[error("the system's credential store failed: {detail}")]
+    VaultUnavailable { detail: String },
+    /// The system's credential store no longer holds a value of this secret.
+    #[error("the value of secret {secret_id} is gone from the system's credential store")]
+    VaultValueMissing { secret_id: String },
     /// Storage or other failures outside the domain; `detail` is for logs, not the UI.
     #[error("internal error: {detail}")]
     Internal { detail: String },
@@ -1170,15 +1183,23 @@ fn resolved(content: &ItemContent, response: &RequestResponse) -> Option<ItemCon
                 label,
                 reason,
                 placeholder,
+                fields,
+                keep_by_default,
+                pasted,
                 ..
             },
-            RequestResponse::Secret { saved },
+            RequestResponse::Secret { saved, vault, kept },
         ) => Some(ItemContent::SecretRequest {
             label,
             reason,
             placeholder,
+            fields,
             status: RequestStatus::Resolved,
             saved: Some(*saved),
+            vault: vault.clone(),
+            kept: *kept,
+            keep_by_default,
+            pasted,
         }),
         (ItemContent::Questions { questions, .. }, RequestResponse::Answers { answers })
             if answers.len() == questions.len() =>
@@ -1240,10 +1261,13 @@ fn message_events(
         return Err(CommandError::ThreadNotFound { thread_id });
     };
     let text = text.trim().to_owned();
-    let images = attachments
-        .iter()
-        .filter(|attachment| matches!(attachment, MessageAttachment::Image { .. }));
-    if text.is_empty() && images.count() == 0 {
+    let carries_something = attachments.iter().any(|attachment| {
+        matches!(
+            attachment,
+            MessageAttachment::Image { .. } | MessageAttachment::Note { .. }
+        )
+    });
+    if text.is_empty() && !carries_something {
         return Err(CommandError::EmptyMessage);
     }
     let mut events = Vec::with_capacity(5);
@@ -1515,6 +1539,25 @@ pub fn record_output(
             }
             events
         }
+        ProviderOutput::SecretProvided {
+            item_id,
+            reason,
+            vault,
+        } => vec![item(
+            item_id,
+            ItemContent::SecretRequest {
+                label: vault.name.clone(),
+                reason,
+                placeholder: None,
+                fields: Vec::new(),
+                status: RequestStatus::Resolved,
+                saved: Some(true),
+                vault: Some(vault),
+                kept: false,
+                keep_by_default: false,
+                pasted: false,
+            },
+        )],
         ProviderOutput::RequestWithdrawn { request_id } => {
             let Some(pending) = model
                 .requests
@@ -1831,7 +1874,7 @@ pub fn turn_failed(reason: TurnFailure) -> ProviderOutput {
 }
 
 /// The message's first line of prose, without its markdown, or the name of its
-/// first image when it has none. Stands until a generated title replaces it.
+/// first image or note when it has none. Stands until a generated title replaces it.
 fn title_from(text: &str, attachments: &[MessageAttachment]) -> String {
     let mut in_code = false;
     let prose = text.lines().find_map(|line| {
@@ -1856,12 +1899,13 @@ fn title_from(text: &str, attachments: &[MessageAttachment]) -> String {
         let line = line.trim();
         (!line.is_empty() && line != "---").then(|| line.to_owned())
     });
-    let image = attachments.iter().find_map(|attachment| match attachment {
+    let carried = attachments.iter().find_map(|attachment| match attachment {
         MessageAttachment::Image { name, .. } => Some(name.clone()),
+        MessageAttachment::Note { title, .. } if !title.is_empty() => Some(title.clone()),
         _ => None,
     });
     prose
-        .or(image)
+        .or(carried)
         .unwrap_or_default()
         .chars()
         .take(TITLE_MAX_CHARS)
@@ -2292,6 +2336,26 @@ const a = 1
             run(&mut model, command).unwrap_err(),
             CommandError::EmptyMessage
         );
+    }
+
+    #[test]
+    fn a_note_alone_is_a_message_and_names_a_new_thread() {
+        let mut model = model_with_thread();
+        let command = Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: "m1".into(),
+            text: String::new(),
+            attachments: vec![MessageAttachment::Note {
+                id: "n".into(),
+                title: "Cache ideas".into(),
+                text: Some("Cache ideas\ntry a TTL".into()),
+                hidden: 0,
+            }],
+        };
+
+        run(&mut model, command).unwrap();
+
+        assert_eq!(model.thread("t").unwrap().title, "Cache ideas");
     }
 
     #[test]
@@ -2958,6 +3022,28 @@ Blue"
         assert_eq!(output.map(|text| text.len()), Some(200));
         assert!(output_omitted);
         assert_eq!(call("short").summary(), call("short"));
+    }
+
+    #[test]
+    fn a_page_leaves_out_the_text_of_an_attached_note() {
+        let message = |text: Option<&str>| ItemContent::UserMessage {
+            text: "see my note".into(),
+            attachments: vec![MessageAttachment::Note {
+                id: "n".into(),
+                title: "Cache ideas".into(),
+                text: text.map(str::to_owned),
+                hidden: 1,
+            }],
+            steer: false,
+            task_result: None,
+            pull_request_update: None,
+            rewind: None,
+        };
+
+        assert_eq!(
+            message(Some("Cache ideas\ntry a TTL")).summary(),
+            message(None)
+        );
     }
 
     #[test]

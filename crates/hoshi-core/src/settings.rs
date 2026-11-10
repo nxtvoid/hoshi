@@ -12,8 +12,17 @@ pub struct AppSettings {
     pub favorite_models: Vec<FavoriteModel>,
     pub thread_titles: ThreadTitleSettings,
     pub general: GeneralSettings,
+    pub vault: VaultSettings,
     /// When the first-run setup was finished or skipped; `None` until then.
     pub onboarding_completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export)]
+pub struct VaultSettings {
+    /// Agents take any secret that isn't hidden without asking, whatever its own access.
+    pub always_allow: bool,
 }
 
 /// What the app shows when it opens.

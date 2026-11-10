@@ -42,6 +42,45 @@ pub fn read_clipboard_text() -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Puts a secret on the system clipboard from here, so its value never reaches the
+/// webview, and keeps it out of clipboard histories where the system lets an app ask.
+#[cfg(windows)]
+pub fn copy_secret(text: String) -> Result<(), String> {
+    use arboard::SetExtWindows;
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| {
+            clipboard
+                .set()
+                .exclude_from_history()
+                .exclude_from_cloud()
+                .text(text)
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "macos")]
+pub fn copy_secret(text: String) -> Result<(), String> {
+    use arboard::SetExtApple;
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set().exclude_from_history().text(text))
+        .map_err(|error| error.to_string())
+}
+
+/// Under X11 and Wayland a copy lasts only while its owner serves it, so a thread does
+/// until something else is copied.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn copy_secret(text: String) -> Result<(), String> {
+    use arboard::SetExtLinux;
+    std::thread::spawn(move || {
+        let served =
+            arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set().wait().text(text));
+        if let Err(error) = served {
+            eprintln!("hoshi: failed to copy to the clipboard: {error}");
+        }
+    });
+    Ok(())
+}
+
 fn image_file(path: &Path) -> Result<Vec<u8>, String> {
     let extension = path
         .extension()

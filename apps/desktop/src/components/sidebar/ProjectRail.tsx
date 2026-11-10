@@ -4,6 +4,7 @@ import { WorktreeSetupDialog } from './WorktreeSetupDialog'
 import { ProjectIcon } from './ProjectIcon'
 import { RailInboxButton } from './InboxButton'
 import { RailChatsButton } from './ChatsButton'
+import { RailNotesButton } from './NotesButton'
 import { SIGNAL_BORDER } from './signal-border'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
@@ -33,7 +34,10 @@ const SIGNAL_LABEL: Record<ProjectSignal, () => string> = {
 export function ProjectRail() {
   const projects = useAppStore((state) => state.projects)
   const selectedProjectId = useAppStore((state) => state.selectedProjectId)
-  const inProject = useSidebarStore((state) => state.view === 'project')
+  const inProject = useSidebarStore(
+    (state) => state.view === 'project' && !state.notesOpen
+  )
+  const inNotes = useSidebarStore((state) => state.notesOpen)
   const openThreadProjectId = useAppStore(
     (state) =>
       state.threads.find((thread) => thread.id === state.selectedThreadId)
@@ -46,6 +50,7 @@ export function ProjectRail() {
     <nav className='border-sidebar-border flex w-12 shrink-0 flex-col items-center gap-1.5 overflow-y-auto border-r py-2'>
       <RailInboxButton />
       <RailChatsButton />
+      <RailNotesButton />
       {projects.length > 0 ? (
         <div className='bg-sidebar-border my-0.5 h-px w-6 shrink-0' />
       ) : null}
@@ -54,7 +59,9 @@ export function ProjectRail() {
           key={project.id}
           project={project}
           selected={inProject && project.id === selectedProjectId}
-          holdsOpenThread={!inProject && project.id === openThreadProjectId}
+          holdsOpenThread={
+            !inProject && !inNotes && project.id === openThreadProjectId
+          }
         />
       ))}
     </nav>

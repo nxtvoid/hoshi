@@ -24,6 +24,7 @@ import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
 import { useAppStore } from '@/state/app-store'
+import { usePanelStore } from '@/state/panel-store'
 import { useStoppingStore } from '@/state/stopping-store'
 import { useRequestStore } from '@/state/request-store'
 import { isPlanningWithUser } from '@/lib/agents'
@@ -446,6 +447,9 @@ const Item = memo(function Item({
           attachments={content.attachments}
           steer={content.steer}
           createdAt={item.createdAt}
+          onOpenNote={(noteId) =>
+            usePanelStore.getState().openNote(item.threadId, item.id, noteId)
+          }
           action={
             content.rewind ? (
               <RewindButton
@@ -504,6 +508,7 @@ const Item = memo(function Item({
     case 'approval':
     case 'questions':
     case 'proposedPlan':
+    case 'secretRequest':
       return <RequestRow content={content} cwd={cwd} />
     case 'taskList':
       return <TaskListRow tasks={content.tasks} working={live} />

@@ -20,6 +20,7 @@ pub fn update_settings(app: AppHandle, settings: AppSettings) -> Result<AppSetti
         engine.set_adapter(crate::orchestration::adapter_for(&settings));
     }
     engine.set_thread_titles(settings.thread_titles.clone());
+    engine.set_vault(settings.vault);
     Ok(settings)
 }
 
@@ -68,7 +69,7 @@ mod tests {
     use super::*;
     use hoshi_core::{
         ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
-        ThreadTitleSettings,
+        ThreadTitleSettings, VaultSettings,
     };
 
     fn settings_file(name: &str) -> PathBuf {
@@ -147,6 +148,7 @@ mod tests {
                 notifications: false,
                 projects_folder: Some("D:\\code".into()),
             },
+            vault: VaultSettings { always_allow: true },
             onboarding_completed_at: Some("2026-11-09T08:00:00.000Z".into()),
         };
 

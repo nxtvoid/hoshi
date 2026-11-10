@@ -1,17 +1,30 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { toolTarget } from '@/lib/tool-calls'
+import { fieldLabels, secretsAnswering } from '@/lib/vault'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Kbd } from '@hoshi/ui/components/kbd'
 import { Button } from '@hoshi/ui/components/button'
+import { Switch } from '@hoshi/ui/components/switch'
 import { Markdown } from '@/components/markdown/Markdown'
 import { useAppStore } from '@/state/app-store'
 import { isPlanningWithUser } from '@/lib/agents'
 import { useRequestStore } from '@/state/request-store'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { useDelegatedRequest, useRequestActions } from './use-request-actions'
 import { invoke } from '@tauri-apps/api/core'
 import { Input } from '@hoshi/ui/components/input'
+import type { SecretAnswer } from '@/bindings/SecretAnswer'
+import type { CommandError } from '@/bindings/CommandError'
+import { ensureVaultLoaded, useVaultStore } from '@/state/vault-store'
+import { vaultErrorMessage } from '@/components/vault/vault-messages'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger
+} from '@hoshi/ui/components/dropdown-menu'
 import type {
   QuestionsContent,
   RequestItem,
@@ -156,7 +169,11 @@ export function RequestPanel({
   }
 }
 
-/** A secret the agent waits on: typed here, it goes to a file and never to the chat. */
+/**
+ * A secret the agent waits on. One the vault holds is approved here, one the user already
+ * wrote in the chat is confirmed here, and any other is typed here, and goes to a file
+ * and never to the chat.
+ */
 function SecretPanel({
   request,
   content
@@ -164,21 +181,228 @@ function SecretPanel({
   request: RequestItem
   content: SecretRequestContent
 }) {
-  const [value, setValue] = useState('')
   const [sending, setSending] = useState(false)
-  const answer = async (secret: string | null) => {
+  const [error, setError] = useState<CommandError | null>(null)
+  const answer = async (answer: SecretAnswer) => {
     setSending(true)
+    setError(null)
     try {
       await invoke('answer_secret_request', {
         threadId: request.threadId,
         requestId: request.id,
-        secret
+        answer
       })
-    } catch (error) {
-      console.error('hoshi: failed to answer a secret request', error)
+    } catch (failure) {
+      console.error('hoshi: failed to answer a secret request', failure)
+      setError(failure as CommandError)
       setSending(false)
     }
   }
+  const failure = error ? (
+    <p role='alert' className='text-destructive text-xs'>
+      {vaultErrorMessage(error)}
+    </p>
+  ) : null
+
+  if (content.vault) {
+    return (
+      <VaultSecretPanel
+        vault={content.vault}
+        reason={content.reason}
+        sending={sending}
+        failure={failure}
+        onAnswer={(given) => void answer(given)}
+      />
+    )
+  }
+  if (content.pasted) {
+    return (
+      <PastedSecretPanel
+        request={request}
+        content={content}
+        sending={sending}
+        failure={failure}
+        onAnswer={(given) => void answer(given)}
+      />
+    )
+  }
+  return (
+    <TypedSecretPanel
+      request={request}
+      content={content}
+      sending={sending}
+      failure={failure}
+      onAnswer={(given) => void answer(given)}
+    />
+  )
+}
+
+/** The project of the request's thread, where a kept secret goes; none for a chat. */
+function useRequestProject(request: RequestItem) {
+  const projectId = useAppStore(
+    (state) =>
+      state.threads.find((thread) => thread.id === request.threadId)
+        ?.projectId ?? null
+  )
+  const projectTitle = useAppStore(
+    (state) => state.projects.find((project) => project.id === projectId)?.title
+  )
+  return { projectId, projectTitle }
+}
+
+/** Asks whether to keep in the vault what the user already wrote in the chat. */
+function PastedSecretPanel({
+  request,
+  content,
+  sending,
+  failure,
+  onAnswer
+}: {
+  request: RequestItem
+  content: SecretRequestContent
+  sending: boolean
+  failure: React.ReactNode
+  onAnswer: (answer: SecretAnswer) => void
+}) {
+  const { projectTitle } = useRequestProject(request)
+  const labels = content.fields.map((field) => field.label).join(', ')
+  return (
+    <div className={PANEL} role='alertdialog' aria-label={m.request_waiting()}>
+      <PanelTitle icon={Key01Icon}>
+        {m.secret_request_keep_title({ name: content.label })}
+      </PanelTitle>
+      <p className='text-muted-foreground text-xs'>{content.reason}</p>
+      <p className='text-muted-foreground text-[0.6875rem]'>
+        {labels ? `${labels} · ` : null}
+        {m.secret_request_pasted_note()}
+      </p>
+      {failure}
+      <div className='flex flex-wrap justify-end gap-1.5'>
+        <Button
+          size='sm'
+          variant='ghost'
+          disabled={sending}
+          onClick={() => onAnswer({ type: 'decline' })}
+        >
+          {m.request_decline()}
+        </Button>
+        <Button
+          size='sm'
+          autoFocus
+          disabled={sending}
+          onClick={() =>
+            onAnswer({
+              type: 'keep',
+              keep: { name: content.label, access: 'ask' }
+            })
+          }
+        >
+          {projectTitle
+            ? m.secret_request_keep_project({ project: projectTitle })
+            : m.secret_request_keep()}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+/** Asks to use a secret the vault holds: all of its values, or none. */
+function VaultSecretPanel({
+  vault,
+  reason,
+  sending,
+  failure,
+  onAnswer
+}: {
+  vault: NonNullable<SecretRequestContent['vault']>
+  reason: string
+  sending: boolean
+  failure: React.ReactNode
+  onAnswer: (answer: SecretAnswer) => void
+}) {
+  const { id, name } = vault
+  const labels = useVaultStore((state) => {
+    const secret = state.secrets?.find((secret) => secret.id === id)
+    return secret ? fieldLabels(secret).join(', ') : ''
+  })
+
+  useEffect(ensureVaultLoaded, [])
+
+  return (
+    <div className={PANEL} role='alertdialog' aria-label={m.request_waiting()}>
+      <PanelTitle icon={Key01Icon}>
+        {m.secret_request_vault_title({ name })}
+      </PanelTitle>
+      <p className='text-muted-foreground text-xs'>{reason}</p>
+      {labels ? (
+        <p className='text-muted-foreground text-[0.6875rem]'>{labels}</p>
+      ) : null}
+      {failure}
+      <div className='flex flex-wrap justify-end gap-1.5'>
+        <Button
+          size='sm'
+          variant='ghost'
+          disabled={sending}
+          onClick={() => onAnswer({ type: 'decline' })}
+        >
+          {m.request_decline()}
+        </Button>
+        <Button
+          size='sm'
+          variant='outline'
+          disabled={sending}
+          onClick={() =>
+            onAnswer({ type: 'vault', secretId: id, always: true })
+          }
+        >
+          {m.secret_request_always_allow()}
+        </Button>
+        <Button
+          size='sm'
+          autoFocus
+          disabled={sending}
+          onClick={() =>
+            onAnswer({ type: 'vault', secretId: id, always: false })
+          }
+        >
+          {m.secret_request_allow_once()}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function TypedSecretPanel({
+  request,
+  content,
+  sending,
+  failure,
+  onAnswer
+}: {
+  request: RequestItem
+  content: SecretRequestContent
+  sending: boolean
+  failure: React.ReactNode
+  onAnswer: (answer: SecretAnswer) => void
+}) {
+  const keepId = useId()
+  const fieldId = useId()
+  const several = content.fields.length > 0
+  const asked = several
+    ? content.fields
+    : [{ label: content.label, masked: true }]
+  const [values, setValues] = useState(() => asked.map(() => ''))
+  const complete = values.every((value) => value.trim() !== '')
+  const [keep, setKeep] = useState(content.keepByDefault)
+  const { projectId, projectTitle } = useRequestProject(request)
+  const secrets = useVaultStore((state) => state.secrets)
+  const saved = useMemo(
+    () => secretsAnswering(secrets ?? [], projectId, asked.length),
+    [secrets, projectId, asked.length]
+  )
+
+  useEffect(ensureVaultLoaded, [])
+
   return (
     <form
       className={PANEL}
@@ -186,37 +410,124 @@ function SecretPanel({
       aria-label={m.request_waiting()}
       onSubmit={(event) => {
         event.preventDefault()
-        if (value.trim()) void answer(value)
+        if (!complete) return
+        onAnswer({
+          type: 'value',
+          values,
+          keep: keep ? { name: content.label, access: 'ask' } : null
+        })
       }}
     >
       <PanelTitle icon={Key01Icon}>{content.label}</PanelTitle>
       <p className='text-muted-foreground text-xs'>{content.reason}</p>
-      <Input
-        type='password'
-        autoFocus
-        autoComplete='off'
-        spellCheck={false}
-        value={value}
-        placeholder={content.placeholder ?? m.secret_request_placeholder()}
-        aria-label={content.label}
-        onChange={(event) => setValue(event.target.value)}
-      />
+      {asked.map((field, index) => (
+        <div key={field.label} className='flex flex-col gap-1'>
+          {several ? (
+            <label
+              htmlFor={`${fieldId}-${index}`}
+              className='text-muted-foreground text-xs'
+            >
+              {field.label}
+            </label>
+          ) : null}
+          <Input
+            id={`${fieldId}-${index}`}
+            type={field.masked ? 'password' : 'text'}
+            autoFocus={index === 0}
+            autoComplete='off'
+            spellCheck={false}
+            value={values[index]}
+            placeholder={
+              several
+                ? undefined
+                : (content.placeholder ?? m.secret_request_placeholder())
+            }
+            aria-label={several ? undefined : field.label}
+            onChange={(event) =>
+              setValues((current) =>
+                current.map((value, at) =>
+                  at === index ? event.target.value : value
+                )
+              )
+            }
+          />
+        </div>
+      ))}
       <p className='text-muted-foreground text-[0.6875rem]'>
-        {m.secret_request_note()}
+        {several ? m.secret_request_note_fields() : m.secret_request_note()}
       </p>
-      <div className='flex justify-end gap-1.5'>
-        <Button
-          type='button'
-          size='sm'
-          variant='ghost'
-          disabled={sending}
-          onClick={() => void answer(null)}
+      {failure}
+      <div className='flex flex-wrap items-center gap-x-3 gap-y-1.5'>
+        <label
+          htmlFor={keepId}
+          className='text-muted-foreground flex min-w-0 items-center gap-2 text-xs'
         >
-          {m.request_decline()}
-        </Button>
-        <Button type='submit' size='sm' disabled={sending || !value.trim()}>
-          {m.secret_request_save()}
-        </Button>
+          <Switch
+            id={keepId}
+            size='sm'
+            checked={keep}
+            onCheckedChange={setKeep}
+          />
+          <span className='truncate'>
+            {projectTitle
+              ? m.secret_request_keep_project({ project: projectTitle })
+              : m.secret_request_keep()}
+          </span>
+        </label>
+        <div className='ms-auto flex gap-1.5'>
+          {saved.length > 0 ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                render={
+                  <Button
+                    type='button'
+                    size='sm'
+                    variant='ghost'
+                    disabled={sending}
+                  />
+                }
+              >
+                {m.secret_request_use_saved()}
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align='end' className='w-64'>
+                {saved.map((secret) => (
+                  <DropdownMenuItem
+                    key={secret.id}
+                    onClick={() =>
+                      onAnswer({
+                        type: 'vault',
+                        secretId: secret.id,
+                        always: false
+                      })
+                    }
+                  >
+                    <HugeiconsIcon icon={Key01Icon} strokeWidth={2} />
+                    <span className='min-w-0 flex-1 truncate'>
+                      {secret.name}
+                    </span>
+                    {secret.projectId === null ? (
+                      <span className='text-muted-foreground shrink-0 text-xs'>
+                        {m.vault_scope_all()}
+                      </span>
+                    ) : null}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
+          <Button
+            type='button'
+            size='sm'
+            variant='ghost'
+            disabled={sending}
+            onClick={() => onAnswer({ type: 'decline' })}
+          >
+            {m.request_decline()}
+          </Button>
+          <Button type='submit' size='sm' disabled={sending || !complete}>
+            {m.secret_request_send()}
+          </Button>
+        </div>
       </div>
     </form>
   )
@@ -341,9 +652,10 @@ function QuestionsPanel({
   const question = questions[progress.index]
   const total = questions.length
   const last = progress.index === total - 1
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
 
   useEffect(() => {
-    if (!question) return
+    if (!question || notesOpen) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.altKey || event.ctrlKey || event.metaKey) return
       const target = event.target
@@ -361,7 +673,7 @@ function QuestionsPanel({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [question, pick])
+  }, [question, pick, notesOpen])
 
   if (!question) return null
   const preview = question.options.find(

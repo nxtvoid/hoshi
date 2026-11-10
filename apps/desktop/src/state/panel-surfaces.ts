@@ -19,14 +19,25 @@ export type Surface =
   | { id: string; kind: 'terminal' }
   /** The thread's headless browser page. */
   | { id: string; kind: 'browser' }
+  /** The note `noteId` as the message `itemId` carried it to the agent. */
+  | { id: string; kind: 'note'; itemId: string; noteId: string }
 
 export type SurfaceKind = Surface['kind']
+
+const KINDS: ReadonlySet<string> = new Set<SurfaceKind>([
+  'diff',
+  'pullRequest',
+  'terminal',
+  'browser',
+  'note'
+])
 
 /** Kinds a thread shows at most once; opening another one focuses it. */
 const SINGLE_INSTANCE: ReadonlySet<SurfaceKind> = new Set([
   'diff',
   'pullRequest',
-  'browser'
+  'browser',
+  'note'
 ])
 
 /** The surfaces a thread has open, in tab order. */
@@ -42,6 +53,22 @@ export function newSurface(kind: SurfaceKind, id: string): Surface {
     case 'terminal':
     case 'browser':
       return { id, kind }
+    case 'note':
+      return { id, kind, itemId: '', noteId: '' }
+  }
+}
+
+/**
+ * The panel without the surfaces of a kind this version doesn't have, as one saved by
+ * another version may hold.
+ */
+export function knownSurfaces(panel: ThreadSurfaces): ThreadSurfaces {
+  const surfaces = panel.surfaces.filter((surface) => KINDS.has(surface.kind))
+  if (surfaces.length === panel.surfaces.length) return panel
+  const active = surfaces.some((surface) => surface.id === panel.activeId)
+  return {
+    surfaces,
+    activeId: active ? panel.activeId : (surfaces[0]?.id ?? null)
   }
 }
 
@@ -71,6 +98,19 @@ export function showTurnDiff(
     surface.kind === 'diff'
       ? { ...surface, scope: 'turn', turnId, focusPath }
       : surface
+  )
+}
+
+/** Opens the note surface on a note a message carried. */
+export function showNote(
+  panel: ThreadSurfaces,
+  itemId: string,
+  noteId: string,
+  makeId: () => string
+): ThreadSurfaces {
+  const opened = openSurface(panel, 'note', makeId)
+  return updateSurface(opened, opened.activeId ?? '', (surface) =>
+    surface.kind === 'note' ? { ...surface, itemId, noteId } : surface
   )
 }
 

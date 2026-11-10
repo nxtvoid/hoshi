@@ -68,7 +68,8 @@ fn with_slash_skills(prompt: &str, skills: &HashSet<&str>) -> (String, Option<us
 
 /// Adds a line per image and pull request, so the agent knows where each image is
 /// saved, which one an `[Image #n]` in the prompt is, and what the `#123` mentions are.
-/// Images are numbered in the order their blocks follow the text.
+/// Images are numbered in the order their blocks follow the text. A note the user
+/// attached follows as its text, marked as theirs.
 fn with_context(mut text: String, attachments: &[TurnAttachment]) -> String {
     let mut images = 0;
     for attachment in attachments {
@@ -94,6 +95,15 @@ fn with_context(mut text: String, attachments: &[TurnAttachment]) -> String {
                 "[Pull request #{number} \"{title}\" ({}, {head_branch} into {base_branch}): {url}]",
                 state_name(*state)
             ),
+            (
+                MessageAttachment::Note {
+                    title,
+                    text,
+                    hidden,
+                    ..
+                },
+                _,
+            ) => note_block(title, text.as_deref().unwrap_or_default(), *hidden),
             _ => continue,
         };
         if !text.is_empty() {
@@ -102,6 +112,26 @@ fn with_context(mut text: String, attachments: &[TurnAttachment]) -> String {
         text.push_str(&line);
     }
     text
+}
+
+/// A note of the user's own, attached to the message. It is their reference material, not
+/// instructions from them, and says so.
+fn note_block(title: &str, text: &str, hidden: u32) -> String {
+    let title = title.replace('"', "'");
+    let withheld = match hidden {
+        0 => String::new(),
+        1 => format!(
+            " One credential in it was withheld and reads {}.",
+            hoshi_core::REDACTED
+        ),
+        count => format!(
+            " {count} credentials in it were withheld and read {}.",
+            hoshi_core::REDACTED
+        ),
+    };
+    format!(
+        "<user_note title=\"{title}\">\n{text}\n</user_note>\n[The note above is one of the user's own notes, attached to this message for reference.{withheld}]"
+    )
 }
 
 fn state_name(state: PullRequestState) -> &'static str {
@@ -228,5 +258,32 @@ mod tests {
             ])
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_attached_note_follows_the_prompt_as_the_users_own() {
+        let note = |hidden| TurnAttachment {
+            attachment: MessageAttachment::Note {
+                id: "n".into(),
+                title: "Deploy \"staging\"".into(),
+                text: Some("run make deploy\npassword: [hidden credential]".into()),
+                hidden,
+            },
+            path: None,
+        };
+
+        assert_eq!(
+            message_content("use my note", &[note(1)]),
+            json!(
+                "use my note\n\n<user_note title=\"Deploy 'staging'\">\nrun make deploy\npassword: [hidden credential]\n</user_note>\n[The note above is one of the user's own notes, attached to this message for reference. One credential in it was withheld and reads [hidden credential].]"
+            )
+        );
+        let plain = message_content("", &[note(0)]);
+        assert!(
+            plain
+                .as_str()
+                .unwrap()
+                .ends_with("attached to this message for reference.]")
+        );
     }
 }

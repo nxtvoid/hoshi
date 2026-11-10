@@ -3,9 +3,11 @@
 mod app_release;
 mod browser;
 mod composer;
+mod credentials;
 mod diff;
 mod fonts;
 mod model;
+mod notes;
 mod orchestration;
 mod project;
 mod provider;
@@ -19,14 +21,17 @@ mod terminal;
 mod theme_import;
 mod thread;
 mod usage;
+mod vault;
 mod workspace;
 
 pub use app_release::AppRelease;
 pub use browser::{BrowserFrame, BrowserInput, BrowserPage, BrowserPoint};
 pub use composer::{EntryKind, MessageAttachment, SlashCommand, WorkspaceEntry};
+pub use credentials::{REDACTED, find_credentials, redact_credentials};
 pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
 pub use fonts::{SystemFont, group_font_families};
 pub use model::{ModelInfo, ProviderModels};
+pub use notes::{Note, NoteSearch, NoteSummary, SavedNote, StoredNote};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
     answer_task, answers_message, cancel_task, close_stale_turn, decide, record_branch,
@@ -49,7 +54,7 @@ pub use pull_request::{
 pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
 pub use settings::{
     AppSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
-    ThreadTitleSettings,
+    ThreadTitleSettings, VaultSettings,
 };
 pub use source_control::{
     GitAction, GitActionPhase, GitActionProgress, GitActionPullRequest, GitActionRequest,
@@ -63,4 +68,8 @@ pub use thread::{
     ToolDetail, TranscriptPage, TurnFailure, TurnOutcome,
 };
 pub use usage::{ContextUsage, ThreadContextUsage, UsageLimits, UsageWindow, UsageWindowKind};
+pub use vault::{
+    SecretAnswer, SecretField, VaultAccess, VaultField, VaultFieldInput, VaultKeep, VaultSecret,
+    VaultSecretInput, VaultSecretRef,
+};
 pub use workspace::{ChangesSummary, Editor};

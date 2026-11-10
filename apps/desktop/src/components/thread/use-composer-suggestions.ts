@@ -3,9 +3,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
 import { useInChat, useScopeProjectId } from '@/state/use-scope'
+import { listNotes } from '@/state/notes-store'
 import { rankCommands } from '@/lib/slash-commands'
 import { useSettingsStore } from '@/state/settings-store'
 import type { PullRequest } from '@/bindings/PullRequest'
+import type { NoteSummary } from '@/bindings/NoteSummary'
 import type { CommandError } from '@/bindings/CommandError'
 import type { SlashCommand } from '@/bindings/SlashCommand'
 import type { ComposerTrigger } from '@/lib/composer-trigger'
@@ -18,6 +20,8 @@ import { useAccess } from './ComposerMenus'
 
 const PATH_SEARCH_DELAY_MS = 50
 const PULL_REQUEST_SEARCH_DELAY_MS = 200
+/** The most notes a `!` lists. */
+const NOTE_LIMIT = 30
 const NO_COMMANDS: SlashCommand[] = []
 
 /** Commands hoshi runs itself instead of sending them to the agent. */
@@ -33,6 +37,8 @@ export type Suggestion =
     }
   | { id: string; type: 'pullRequest'; pullRequest: PullRequest }
   | { id: string; type: 'skill'; command: SlashCommand }
+  /** One of the user's notes, attached to the message when picked. */
+  | { id: string; type: 'note'; note: NoteSummary }
 
 type CommandSuggestion = Extract<Suggestion, { type: 'command' }>
 
@@ -91,7 +97,16 @@ function useSearch<T>(
   return result?.key === key ? result : null
 }
 
-/** What to offer for `trigger`: files, commands, pull requests or skills. */
+/** The notes of the project, then the general ones, whose text holds `query`. */
+async function searchNotes(projectId: string | null, query: string) {
+  const [own, general] = await Promise.all([
+    projectId === null ? [] : listNotes(projectId, query, NOTE_LIMIT),
+    listNotes(null, query, NOTE_LIMIT)
+  ])
+  return [...own, ...general].slice(0, NOTE_LIMIT)
+}
+
+/** What to offer for `trigger`: files, commands, pull requests, skills or notes. */
 export function useComposerSuggestions(trigger: ComposerTrigger | null) {
   const projectId = useScopeProjectId()
   const chat = useInChat()
@@ -114,6 +129,12 @@ export function useComposerSuggestions(trigger: ComposerTrigger | null) {
     PATH_SEARCH_DELAY_MS,
     (query) =>
       invoke<WorkspaceEntry[]>('search_paths', { projectId, threadId, query })
+  )
+  const notes = useSearch(
+    key === null ? null : `notes:${projectId ?? ''}`,
+    trigger?.kind === 'note' ? trigger.query : null,
+    PATH_SEARCH_DELAY_MS,
+    (query) => searchNotes(projectId, query)
   )
   const pullRequests = useSearch(
     projectId,
@@ -168,6 +189,17 @@ export function useComposerSuggestions(trigger: ComposerTrigger | null) {
         {
           searching: m.composer_suggestions_searching_files(),
           none: m.composer_suggestions_no_files()
+        }
+      )
+    case 'note':
+      return searched(
+        notes,
+        (note) => ({ id: `note:${note.id}`, type: 'note', note }),
+        {
+          searching: m.composer_suggestions_searching_notes(),
+          none: trigger.query
+            ? m.composer_suggestions_no_notes()
+            : m.notes_empty()
         }
       )
     case 'pullRequest':

@@ -1,3 +1,4 @@
+use crate::VaultSecretRef;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -70,6 +71,14 @@ pub enum RequestResponse {
     /// One answer per question, in order: an option's label, several joined with ", ",
     /// or the user's own text.
     Answers { answers: Vec<String> },
-    /// For a secret: whether the user saved one. The value goes straight to the engine.
-    Secret { saved: bool },
+    /// For a secret: whether the agent gets one. The value goes straight to the engine.
+    Secret {
+        saved: bool,
+        /// The vault's secret given, or the one the typed value was kept as.
+        #[serde(default)]
+        vault: Option<VaultSecretRef>,
+        /// The typed value was also kept in the vault.
+        #[serde(default)]
+        kept: bool,
+    },
 }

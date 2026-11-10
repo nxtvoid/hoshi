@@ -7,9 +7,11 @@ import type { PullRequestUpdate } from "./PullRequestUpdate";
 import type { Question } from "./Question";
 import type { RequestStatus } from "./RequestStatus";
 import type { Rewind } from "./Rewind";
+import type { SecretField } from "./SecretField";
 import type { Task } from "./Task";
 import type { ToolDetail } from "./ToolDetail";
 import type { TurnFailure } from "./TurnFailure";
+import type { VaultSecretRef } from "./VaultSecretRef";
 
 export type ItemContent = { "kind": "userMessage", text: string, attachments: Array<MessageAttachment>, 
 /**
@@ -74,11 +76,35 @@ label: string,
 /**
  * What it is for and where to get it, in the agent's words.
  */
-reason: string, placeholder: string | null, status: RequestStatus, 
+reason: string, placeholder: string | null, 
 /**
- * Once resolved: whether the user saved one or declined.
+ * The values it asks for when they are several that go together, such as a
+ * login's email and password. Empty for a single value, which `label` names.
  */
-saved: boolean | null, } | { "kind": "proposedPlan", 
+fields: Array<SecretField>, status: RequestStatus, 
+/**
+ * Once resolved: whether the agent got one or the user declined.
+ */
+saved: boolean | null, 
+/**
+ * The vault's secret this is about: the one the agent asked to use, the one the
+ * user picked, or the one the typed value was kept as.
+ */
+vault: VaultSecretRef | null, 
+/**
+ * The typed value was also kept in the vault, as `vault`.
+ */
+kept: boolean, 
+/**
+ * The card opens set to keep the value in the vault, as when the user asked the
+ * agent to save one.
+ */
+keepByDefault: boolean, 
+/**
+ * The user already wrote the values in a message and asked to save them: the
+ * card types nothing, it only asks whether to keep them in the vault.
+ */
+pasted: boolean, } | { "kind": "proposedPlan", 
 /**
  * Markdown.
  */

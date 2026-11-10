@@ -15,6 +15,7 @@ mod mcp;
 use delegation::Delegation;
 use mcp::{McpServer, ToolFilter, ToolHandler};
 mod paths;
+mod personal;
 mod project_icon;
 mod pull_request_cache;
 mod pull_request_tool;
@@ -43,13 +44,14 @@ use hoshi_core::{
 use hoshi_core::{
     ChangesSummary, Command, CommandError, ContextUsage, DiffFile, DiffScope, Editor, Event,
     EventEnvelope, FileDiff, FolderListing, ForgeAccount, ForgeKind, ItemContent,
-    MessageAttachment, ProviderModels, ProviderOutput, PullRequest, PullRequestAction,
-    PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository, SlashCommand, Snapshot,
-    StreamDelta, StreamKind, TerminalAttach, ThreadBackgroundTasks, ThreadContextUsage, ThreadItem,
-    ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace,
-    TurnFailure, TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn,
-    decide, record_branch, record_conversation_cursor, record_output, record_title,
-    record_turn_changes, record_worktree, record_worktree_left, start_queued_turn, turn_failed,
+    MessageAttachment, Note, NoteSummary, ProviderModels, ProviderOutput, PullRequest,
+    PullRequestAction, PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository, SavedNote,
+    SlashCommand, Snapshot, StreamDelta, StreamKind, TerminalAttach, ThreadBackgroundTasks,
+    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus,
+    ThreadTitleSettings, ThreadWorkspace, TurnFailure, TurnOutcome, UsageLimits, VaultSecret,
+    VaultSecretInput, VaultSettings, WorkspaceEntry, answers_message, close_stale_turn, decide,
+    record_branch, record_conversation_cursor, record_output, record_title, record_turn_changes,
+    record_worktree, record_worktree_left, start_queued_turn, turn_failed,
 };
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
@@ -59,7 +61,8 @@ use hoshi_providers::{
     Installation, ProviderAdapter, RunningTurn, TitleRequest, TurnAttachment, TurnRequest, Updater,
     run_update,
 };
-use hoshi_store::{CachedPullRequestDetail, Store, StoreError};
+use hoshi_store::{CachedPullRequestDetail, PersonalStore, Store, StoreError};
+use personal::Personal;
 use pull_request_cache::{PullRequestCache, Version};
 use pull_request_watch::Wake;
 use pull_requests::PullRequestSync;
@@ -99,6 +102,8 @@ pub enum Notification {
     BrowserPage(BrowserPage),
     /// A worktree's setup command started, wrote output, or ended.
     WorktreeSetup(hoshi_core::WorktreeSetupRun),
+    /// The vault's secrets changed: one was added, edited, removed or taken by an agent.
+    VaultChanged,
 }
 
 pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
@@ -118,6 +123,8 @@ pub struct Engine {
     usage_probe: Arc<Mutex<()>>,
     /// Held while the provider's CLI is checked against its releases or updated.
     maintenance: Arc<Mutex<()>>,
+    /// The user's notes and vault.
+    personal: Arc<Personal>,
 }
 
 const LINKED_PULL_REQUEST_FRESH_FOR: Duration = Duration::from_secs(60);
@@ -204,7 +211,9 @@ struct State {
     secrets_dir: PathBuf,
     /// The `request_secret` calls waiting for the user, by request id: they get the file the
     /// secret was saved to, or `None` when the user declined.
-    secret_waits: HashMap<String, mpsc::Sender<Option<PathBuf>>>,
+    secret_waits: HashMap<String, secret_requests::SecretWait>,
+    /// The user's notes and vault, which have a lock of their own.
+    personal: Arc<Personal>,
     /// What each thread's agent was told about its pull request, watched now or before.
     watches: HashMap<String, hoshi_core::PullRequestWatch>,
     /// When each watched pull request was last read in detail, and as what.
@@ -384,18 +393,28 @@ struct WorktreeCheck {
 }
 
 impl Engine {
-    /// Keeps everything under `data_dir`: the database, worktrees, chats and attachments.
+    /// Keeps everything under `data_dir`: the databases, worktrees, chats and attachments.
     pub fn open(data_dir: &Path, notify: Notify) -> Result<Self, StoreError> {
-        Self::from_store(
+        Self::build(
             Store::open(&data_dir.join("state.sqlite"))?,
             data_dir,
             notify,
+            Box::new(secrets::Keychain),
         )
     }
 
     /// Turns that were running when the app last closed are recorded as
     /// interrupted, and every thread's branch is read again. Files go under `data_dir`.
     pub fn from_store(store: Store, data_dir: &Path, notify: Notify) -> Result<Self, StoreError> {
+        Self::build(store, data_dir, notify, vault_values())
+    }
+
+    fn build(
+        store: Store,
+        data_dir: &Path,
+        notify: Notify,
+        vault_values: Box<dyn secrets::SecretValues>,
+    ) -> Result<Self, StoreError> {
         let snapshot = store.snapshot()?;
         let known = snapshot.pull_requests.iter().filter_map(|update| {
             let pull_request = update.pull_request.clone()?;
@@ -414,6 +433,12 @@ impl Engine {
         });
         let terminals = Arc::new(Terminals::default());
         let setups = WorktreeSetups::new(terminals.clone(), notify.clone());
+        let _ = std::fs::create_dir_all(data_dir);
+        let personal = Arc::new(Personal::new(
+            PersonalStore::open(&data_dir.join("personal.sqlite"))?,
+            vault_values,
+            notify.clone(),
+        ));
         let mut state = State {
             setups,
             model: ReadModel::from_snapshot(&snapshot),
@@ -448,6 +473,7 @@ impl Engine {
             checkpoints: Arc::new(Checkpointer::new()),
             secrets_dir: data_dir.join("secrets"),
             secret_waits: HashMap::new(),
+            personal: personal.clone(),
             watches,
             watch_reads: HashMap::new(),
             pending_wakes: HashMap::new(),
@@ -487,17 +513,20 @@ impl Engine {
             lock(&shared).notify.clone(),
         )));
         let pages = browsing.clone();
+        let secrets_dir = data_dir.join("secrets");
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
             if tool.starts_with("preview_") {
+                let typed = secret_requests::with_secret_text(&secrets_dir, tool, arguments)?;
                 let mut pages = pages
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                return pages.call(caller, tool, arguments);
+                return pages.call(caller, tool, typed.as_ref().unwrap_or(arguments));
             }
             match tool {
                 "request_secret" => {
                     return secret_requests::request_secret(&weak, caller, arguments);
                 }
+                "vault_list" => return secret_requests::vault_list(&weak, caller),
                 "thread_wait" => return thread_tools::wait_for_thread(&weak, caller, arguments),
                 "delegate_task" => return delegation::delegate_task(&weak, caller, arguments),
                 pull_request_tool::TOOL => {
@@ -542,6 +571,7 @@ impl Engine {
             slash_commands: Refreshing::new(SLASH_COMMANDS_FRESH_FOR),
             usage_probe: Arc::default(),
             maintenance,
+            personal,
         })
     }
 
@@ -1205,6 +1235,93 @@ impl Engine {
         lock(&self.state).thread_titles = settings;
     }
 
+    pub fn set_vault(&self, settings: VaultSettings) {
+        self.personal.set_always_allow(settings.always_allow);
+    }
+
+    /// A project's notes holding `query`, or the general ones for `None`, latest first, at
+    /// most `limit` of them.
+    pub fn notes(
+        &self,
+        project_id: Option<&str>,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<NoteSummary>, CommandError> {
+        self.personal.notes(project_id, query, limit)
+    }
+
+    pub fn note(&self, note_id: &str) -> Result<Note, CommandError> {
+        self.personal.note(note_id)
+    }
+
+    /// Writes a note's text, as its editor shows it in `document`, and where it belongs,
+    /// adding the note if its id is new.
+    pub fn save_note(
+        &self,
+        note_id: &str,
+        project_id: Option<String>,
+        text: String,
+        document: Option<String>,
+    ) -> Result<SavedNote, CommandError> {
+        self.personal.save_note(note_id, project_id, text, document)
+    }
+
+    pub fn delete_note(&self, note_id: &str) -> Result<(), CommandError> {
+        self.personal.delete_note(note_id)
+    }
+
+    /// The user says the note's `index`th credential is none.
+    pub fn ignore_note_credential(
+        &self,
+        note_id: &str,
+        index: usize,
+    ) -> Result<Note, CommandError> {
+        self.personal.ignore_credential(note_id, index)
+    }
+
+    /// Moves the note's `index`th credential into the vault, as `input` describes it.
+    pub fn move_note_credential_to_vault(
+        &self,
+        note_id: &str,
+        index: usize,
+        input: VaultSecretInput,
+    ) -> Result<Note, CommandError> {
+        self.personal
+            .move_credential_to_vault(note_id, index, input)
+    }
+
+    /// The note as a message carries it to an agent, without its credentials.
+    pub fn note_attachment(&self, note_id: &str) -> Result<MessageAttachment, CommandError> {
+        self.personal.note_attachment(note_id)
+    }
+
+    /// The vault's secrets, without their values.
+    pub fn vault_secrets(&self) -> Result<Vec<VaultSecret>, CommandError> {
+        self.personal.secrets()
+    }
+
+    /// Adds a secret, or changes the one with `secret_id`.
+    pub fn save_vault_secret(
+        &self,
+        secret_id: Option<&str>,
+        input: VaultSecretInput,
+    ) -> Result<VaultSecret, CommandError> {
+        self.personal.save_secret(secret_id, input)
+    }
+
+    pub fn delete_vault_secret(&self, secret_id: &str) -> Result<(), CommandError> {
+        self.personal.delete_secret(secret_id)
+    }
+
+    /// The value of one of a secret's fields, for the user to copy.
+    pub fn reveal_vault_secret(
+        &self,
+        secret_id: &str,
+        field_id: &str,
+    ) -> Result<String, CommandError> {
+        self.personal.reveal(secret_id, field_id)
+    }
+
     /// Names the thread again from its whole conversation, in the background. The
     /// title only changes if the user did not rename it meanwhile.
     pub fn regenerate_title(&self, thread_id: &str) -> Result<(), CommandError> {
@@ -1389,17 +1506,31 @@ impl Engine {
     }
 
     /// Carries out a command from the UI. Git work it needs, such as creating a worktree,
-    /// runs outside the lock.
+    /// runs outside the lock. A message's notes are read here, so what it carries of them
+    /// is what an agent may read.
     pub fn dispatch(&self, command: Command) -> Result<(), CommandError> {
         let command = match command {
             Command::ThreadCreate {
                 workspace: ThreadWorkspace::NewWorktree | ThreadWorkspace::BranchWorktree { .. },
                 ..
             } => return self.create_worktree_thread(command),
-            Command::MessageSend { .. } => match self.restore_before_sending(command)? {
-                Some(command) => command,
-                None => return Ok(()),
-            },
+            Command::MessageSend {
+                thread_id,
+                message_id,
+                text,
+                attachments,
+            } => {
+                let send = Command::MessageSend {
+                    thread_id,
+                    message_id,
+                    text,
+                    attachments: self.personal.with_notes(attachments),
+                };
+                match self.restore_before_sending(send)? {
+                    Some(command) => command,
+                    None => return Ok(()),
+                }
+            }
             other => other,
         };
         let mut state = lock(&self.state);
@@ -1608,6 +1739,7 @@ impl Engine {
         text: String,
         attachments: Vec<MessageAttachment>,
     ) -> Result<(), CommandError> {
+        let attachments = self.personal.with_notes(attachments);
         let mut state = lock(&self.state);
         let busy = state
             .model
@@ -2637,6 +2769,7 @@ impl State {
                         watcher.unwatch(project_id);
                     }
                     self.repositories.remove(project_id);
+                    self.personal.release_project(project_id);
                 }
                 Event::ThreadDeleted { thread_id } => self.forget_thread(thread_id),
                 _ => {}
@@ -3771,6 +3904,18 @@ fn check_usage_limits(state: &Mutex<State>, probe: &Mutex<()>, force: bool) -> O
     Some(limits)
 }
 
+/// Where the vault's values go: the system's credential store, or memory under test.
+fn vault_values() -> Box<dyn secrets::SecretValues> {
+    #[cfg(test)]
+    {
+        Box::<secrets::MemoryValues>::default()
+    }
+    #[cfg(not(test))]
+    {
+        Box::new(secrets::Keychain)
+    }
+}
+
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     state
         .lock()
@@ -3819,7 +3964,7 @@ mod tests {
     use super::*;
     use hoshi_core::{
         AccessMode, ApprovalDecision, BackgroundTask, Effort, GitAction, GitActionRequest,
-        RequestResponse, RequestStatus, ThreadStatus, ToolDetail,
+        RequestResponse, RequestStatus, SecretAnswer, ThreadStatus, ToolDetail, VaultAccess,
     };
     use hoshi_providers::OutputSink;
     use std::sync::mpsc::{self, Receiver, Sender};
@@ -5660,6 +5805,561 @@ Blue"
         assert_eq!(roles, [("user", "check the tests"), ("assistant", "done")]);
     }
 
+    fn typed(value: &str, keep: Option<&str>) -> SecretAnswer {
+        SecretAnswer::Value {
+            values: vec![value.into()],
+            keep: keep.map(|name| hoshi_core::VaultKeep {
+                name: name.into(),
+                access: VaultAccess::Ask,
+            }),
+        }
+    }
+
+    fn ask_secret(
+        harness: &Harness,
+        arguments: serde_json::Value,
+    ) -> thread::JoinHandle<Result<serde_json::Value, String>> {
+        let state = Arc::downgrade(&harness.engine.state);
+        thread::spawn(move || secret_requests::request_secret(&state, "t", &arguments))
+    }
+
+    fn secret_card(harness: &Harness) -> (String, Option<hoshi_core::VaultSecretRef>) {
+        harness.wait_for(|event| match event {
+            Event::ItemAdded { item } => match item.content {
+                ItemContent::SecretRequest {
+                    status: RequestStatus::Pending,
+                    vault,
+                    ..
+                } => Some((item.id, vault)),
+                _ => None,
+            },
+            _ => None,
+        })
+    }
+
+    fn secret_rows(harness: &Harness) -> Vec<(Option<bool>, Option<String>, bool)> {
+        harness
+            .engine
+            .transcript("t", None)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|item| match item.content {
+                ItemContent::SecretRequest {
+                    saved, vault, kept, ..
+                } => Some((saved, vault.map(|vault| vault.name), kept)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_secret_kept_in_the_vault_is_asked_for_by_id_then_taken_freely() {
+        let harness = Harness::in_memory("vault-keep", Vec::new());
+        harness.send("t", "m1", "sign in and check the page");
+
+        let first = ask_secret(
+            &harness,
+            serde_json::json!({ "label": "Admin password", "reason": "To sign in." }),
+        );
+        let (request_id, asked) = secret_card(&harness);
+        assert_eq!(asked, None);
+        harness
+            .engine
+            .answer_secret_request("t", &request_id, typed("hunter2", Some("Admin password")))
+            .unwrap();
+        assert_eq!(first.join().unwrap().unwrap()["status"], "saved");
+        let [secret] = &harness.engine.vault_secrets().unwrap()[..] else {
+            panic!("one secret in the vault");
+        };
+        assert_eq!(secret.project_id.as_deref(), Some("p"));
+        assert_eq!(secret.access, VaultAccess::Ask);
+
+        let state = Arc::downgrade(&harness.engine.state);
+        let listed = secret_requests::vault_list(&state, "t").unwrap();
+        assert_eq!(
+            listed["secrets"],
+            serde_json::json!([{
+                "id": secret.id,
+                "name": "Admin password",
+                "description": "",
+                "scope": "project",
+                "access": "ask",
+            }])
+        );
+
+        let by_id = serde_json::json!({ "vaultId": secret.id, "reason": "To sign in again." });
+        let second = ask_secret(&harness, by_id.clone());
+        let (request_id, asked) = secret_card(&harness);
+        assert_eq!(asked, Some(secret.reference()));
+        let approve = SecretAnswer::Vault {
+            secret_id: secret.id.clone(),
+            always: true,
+        };
+        harness
+            .engine
+            .answer_secret_request("t", &request_id, approve)
+            .unwrap();
+        let second = second.join().unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(second["file"].as_str().unwrap()).unwrap(),
+            "hunter2"
+        );
+        let secret = &harness.engine.vault_secrets().unwrap()[0];
+        assert_eq!(secret.access, VaultAccess::Allow);
+        assert!(secret.last_used_at.is_some());
+
+        let third = secret_requests::request_secret(&state, "t", &by_id).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(third["file"].as_str().unwrap()).unwrap(),
+            "hunter2"
+        );
+        assert_eq!(harness.thread("t").status, ThreadStatus::Working);
+        assert_eq!(
+            secret_rows(&harness),
+            [
+                (Some(true), Some("Admin password".into()), true),
+                (Some(true), Some("Admin password".into()), false),
+                (Some(true), Some("Admin password".into()), false),
+            ]
+        );
+        let recorded =
+            serde_json::to_string(&harness.engine.transcript("t", None).unwrap().items).unwrap();
+        assert!(!recorded.contains("hunter2"));
+    }
+
+    #[test]
+    fn a_secret_the_user_asked_to_save_opens_its_card_set_to_keep_it() {
+        let harness = Harness::in_memory("vault-keep-hint", Vec::new());
+        harness.send("t", "m1", "save my deploy token in the vault");
+        let keeps = |harness: &Harness| {
+            harness.wait_for(|event| match event {
+                Event::ItemAdded { item } => match item.content {
+                    ItemContent::SecretRequest {
+                        status: RequestStatus::Pending,
+                        keep_by_default,
+                        ..
+                    } => Some((item.id, keep_by_default)),
+                    _ => None,
+                },
+                _ => None,
+            })
+        };
+
+        let saving = ask_secret(
+            &harness,
+            serde_json::json!({ "label": "Deploy token", "reason": "To keep it.", "keep": true }),
+        );
+        let (request_id, kept_by_default) = keeps(&harness);
+        harness
+            .engine
+            .answer_secret_request("t", &request_id, typed("tok-1", Some("Deploy token")))
+            .unwrap();
+        saving.join().unwrap().unwrap();
+        let plain = ask_secret(
+            &harness,
+            serde_json::json!({ "label": "One-time code", "reason": "To pair." }),
+        );
+        let (plain_id, plain_keeps) = keeps(&harness);
+        harness
+            .engine
+            .answer_secret_request("t", &plain_id, SecretAnswer::Decline)
+            .unwrap();
+        plain.join().unwrap().unwrap();
+
+        assert!(kept_by_default);
+        assert!(!plain_keeps);
+        assert_eq!(
+            harness.engine.vault_secrets().unwrap()[0].name,
+            "Deploy token"
+        );
+    }
+
+    #[test]
+    fn a_login_is_asked_in_one_card_kept_as_one_secret_and_given_as_a_file_each() {
+        let harness = Harness::in_memory("vault-login", Vec::new());
+        harness.send("t", "m1", "sign in to the app");
+        let login = serde_json::json!({
+            "label": "Test login",
+            "reason": "To sign in.",
+            "keep": true,
+            "fields": [{ "label": "Email", "secret": false }, { "label": "Password" }],
+        });
+        let card = |harness: &Harness| {
+            harness.wait_for(|event| match event {
+                Event::ItemAdded { item } => match item.content {
+                    ItemContent::SecretRequest {
+                        status: RequestStatus::Pending,
+                        fields,
+                        ..
+                    } => Some((item.id, fields)),
+                    _ => None,
+                },
+                _ => None,
+            })
+        };
+        let read = |answer: &serde_json::Value| -> Vec<(String, String)> {
+            answer["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|file| {
+                    let value = std::fs::read_to_string(file["file"].as_str().unwrap()).unwrap();
+                    (file["field"].as_str().unwrap().to_owned(), value)
+                })
+                .collect()
+        };
+        let both = [
+            ("Email".to_owned(), "a@b.dev".to_owned()),
+            ("Password".to_owned(), "hunter2".to_owned()),
+        ];
+
+        let asking = ask_secret(&harness, login);
+        let (request_id, fields) = card(&harness);
+        let answer = |values: &[&str]| SecretAnswer::Value {
+            values: values.iter().map(|value| (*value).to_owned()).collect(),
+            keep: Some(hoshi_core::VaultKeep {
+                name: "Test login".into(),
+                access: VaultAccess::Allow,
+            }),
+        };
+        let short = harness
+            .engine
+            .answer_secret_request("t", &request_id, answer(&["a@b.dev"]));
+        harness
+            .engine
+            .answer_secret_request("t", &request_id, answer(&["a@b.dev", "hunter2"]))
+            .unwrap();
+        let typed = asking.join().unwrap().unwrap();
+
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| (field.label.as_str(), field.masked))
+                .collect::<Vec<_>>(),
+            [("Email", false), ("Password", true)]
+        );
+        assert!(matches!(
+            short,
+            Err(CommandError::RequestResponseInvalid { .. })
+        ));
+        assert_eq!(read(&typed), both);
+        let [secret] = &harness.engine.vault_secrets().unwrap()[..] else {
+            panic!("one secret in the vault");
+        };
+        assert_eq!(secret.name, "Test login");
+        assert_eq!(secret.fields.len(), 2);
+
+        let state = Arc::downgrade(&harness.engine.state);
+        let listed = secret_requests::vault_list(&state, "t").unwrap();
+        assert_eq!(
+            listed["secrets"][0]["fields"],
+            serde_json::json!(["Email", "Password"])
+        );
+        let by_id = serde_json::json!({ "vaultId": secret.id, "reason": "To sign in again." });
+        let taken = secret_requests::request_secret(&state, "t", &by_id).unwrap();
+
+        assert_eq!(read(&taken), both);
+        assert_eq!(
+            secret_rows(&harness),
+            [
+                (Some(true), Some("Test login".into()), true),
+                (Some(true), Some("Test login".into()), false),
+            ]
+        );
+        let recorded =
+            serde_json::to_string(&harness.engine.transcript("t", None).unwrap().items).unwrap();
+        assert!(!recorded.contains("hunter2") && !recorded.contains("a@b.dev"));
+    }
+
+    #[test]
+    fn values_the_user_pasted_reach_the_vault_only_once_they_confirm() {
+        let harness = Harness::in_memory("vault-pasted", Vec::new());
+        harness.send("t", "m1", "save my login: a@b.dev / hunter2");
+        let state = Arc::downgrade(&harness.engine.state);
+        let fields = serde_json::json!([
+            { "label": "Email", "secret": false, "value": "a@b.dev" },
+            { "label": "Password", "value": "hunter2" },
+        ]);
+        let card = |harness: &Harness| {
+            harness.wait_for(|event| match event {
+                Event::ItemAdded { item } => match item.content {
+                    ItemContent::SecretRequest {
+                        status: RequestStatus::Pending,
+                        pasted,
+                        ..
+                    } => Some((item.id, pasted)),
+                    _ => None,
+                },
+                _ => None,
+            })
+        };
+        let keep = |name: &str| SecretAnswer::Keep {
+            keep: hoshi_core::VaultKeep {
+                name: name.into(),
+                access: VaultAccess::Ask,
+            },
+        };
+
+        let used =
+            secret_requests::request_secret(&state, "t", &serde_json::json!({ "fields": fields }))
+                .unwrap();
+        let half = secret_requests::request_secret(
+            &state,
+            "t",
+            &serde_json::json!({ "fields": [{ "label": "Email", "value": "a@b.dev" }, { "label": "Password" }] }),
+        );
+
+        assert_eq!(used["inVault"], false);
+        assert_eq!(used["files"].as_array().unwrap().len(), 2);
+        assert!(half.is_err());
+        assert!(harness.engine.vault_secrets().unwrap().is_empty());
+        assert!(secret_rows(&harness).is_empty());
+
+        let keeping = ask_secret(
+            &harness,
+            serde_json::json!({ "label": "Test login", "reason": "To keep it.", "keep": true, "fields": fields }),
+        );
+        let (request_id, pasted) = card(&harness);
+        let retyped = harness
+            .engine
+            .answer_secret_request("t", &request_id, typed("other", None));
+        harness
+            .engine
+            .answer_secret_request("t", &request_id, keep("Test login"))
+            .unwrap();
+        let kept = keeping.join().unwrap().unwrap();
+
+        assert!(pasted);
+        assert!(matches!(
+            retyped,
+            Err(CommandError::RequestResponseInvalid { .. })
+        ));
+        assert_eq!(kept["inVault"], true);
+        let [secret] = &harness.engine.vault_secrets().unwrap()[..] else {
+            panic!("one secret in the vault");
+        };
+        let values: Vec<(String, bool, String)> = secret
+            .fields
+            .iter()
+            .map(|field| {
+                let value = harness
+                    .engine
+                    .reveal_vault_secret(&secret.id, &field.id)
+                    .unwrap();
+                (field.label.clone(), field.masked, value)
+            })
+            .collect();
+        assert_eq!(
+            values,
+            [
+                ("Email".into(), false, "a@b.dev".into()),
+                ("Password".into(), true, "hunter2".into()),
+            ]
+        );
+
+        let refusing = ask_secret(
+            &harness,
+            serde_json::json!({ "label": "Token", "reason": "To keep it.", "keep": true, "value": "tok-1" }),
+        );
+        let (refused_id, _) = card(&harness);
+        let typed_keep = harness
+            .engine
+            .answer_secret_request("t", &request_id, keep("Again"));
+        harness
+            .engine
+            .answer_secret_request("t", &refused_id, SecretAnswer::Decline)
+            .unwrap();
+        let refused = refusing.join().unwrap().unwrap();
+
+        assert!(typed_keep.is_err());
+        assert_eq!(refused["status"], "declined");
+        assert!(refused["note"].as_str().unwrap().contains("not to keep"));
+        assert_eq!(harness.engine.vault_secrets().unwrap().len(), 1);
+        assert_eq!(
+            secret_rows(&harness),
+            [
+                (Some(true), Some("Test login".into()), true),
+                (Some(false), None, false),
+            ]
+        );
+        let recorded =
+            serde_json::to_string(&harness.engine.transcript("t", None).unwrap().items).unwrap();
+        assert!(!recorded.contains("\"hunter2\"") && !recorded.contains("tok-1"));
+    }
+
+    #[test]
+    fn the_vault_gives_an_agent_nothing_hidden_or_of_another_project() {
+        let harness = Harness::in_memory("vault-reach", Vec::new());
+        harness.send("t", "m1", "deploy it");
+        let add = |name: &str, project_id: Option<&str>, access: VaultAccess| {
+            harness
+                .engine
+                .save_vault_secret(
+                    None,
+                    VaultSecretInput {
+                        name: name.into(),
+                        description: "for tests".into(),
+                        project_id: project_id.map(str::to_owned),
+                        access,
+                        fields: vec![hoshi_core::VaultFieldInput::single(format!(
+                            "value of {name}"
+                        ))],
+                    },
+                )
+                .unwrap()
+        };
+        let hidden = add("Hidden", Some("p"), VaultAccess::Hidden);
+        let elsewhere = add("Elsewhere", Some("other"), VaultAccess::Allow);
+        let general = add("General", None, VaultAccess::Ask);
+        let state = Arc::downgrade(&harness.engine.state);
+
+        let listed = secret_requests::vault_list(&state, "t").unwrap();
+        let by_id = |id: &str| {
+            let arguments = serde_json::json!({ "vaultId": id, "reason": "To deploy." });
+            secret_requests::request_secret(&state, "t", &arguments)
+        };
+
+        assert_eq!(listed["secrets"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["secrets"][0]["id"], general.id.as_str());
+        assert_eq!(listed["secrets"][0]["scope"], "general");
+        assert!(by_id(&hidden.id).is_err());
+        assert!(by_id(&elsewhere.id).is_err());
+        assert!(by_id("nope").is_err());
+        assert!(secret_rows(&harness).is_empty());
+
+        harness
+            .engine
+            .set_vault(VaultSettings { always_allow: true });
+        let taken = by_id(&general.id).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(taken["file"].as_str().unwrap()).unwrap(),
+            "value of General"
+        );
+        assert!(by_id(&hidden.id).is_err());
+    }
+
+    #[test]
+    fn the_user_answers_a_card_with_a_secret_the_vault_holds() {
+        let harness = Harness::in_memory("vault-pick", Vec::new());
+        harness.send("t", "m1", "deploy it");
+        let input = VaultSecretInput {
+            name: "Deploy token".into(),
+            description: String::new(),
+            project_id: None,
+            access: VaultAccess::Hidden,
+            fields: vec![hoshi_core::VaultFieldInput::single("tok-123".into())],
+        };
+        let secret = harness.engine.save_vault_secret(None, input).unwrap();
+
+        let asking = ask_secret(
+            &harness,
+            serde_json::json!({ "label": "A token", "reason": "To deploy." }),
+        );
+        let (request_id, _) = secret_card(&harness);
+        let pick = |secret_id: &str| SecretAnswer::Vault {
+            secret_id: secret_id.into(),
+            always: false,
+        };
+        let missing = harness
+            .engine
+            .answer_secret_request("t", &request_id, pick("nope"));
+        harness
+            .engine
+            .answer_secret_request("t", &request_id, pick(&secret.id))
+            .unwrap();
+        let answer = asking.join().unwrap().unwrap();
+
+        assert_eq!(
+            missing,
+            Err(CommandError::VaultSecretNotFound {
+                secret_id: "nope".into()
+            })
+        );
+        assert_eq!(
+            std::fs::read_to_string(answer["file"].as_str().unwrap()).unwrap(),
+            "tok-123"
+        );
+        assert_eq!(
+            harness.engine.vault_secrets().unwrap()[0].access,
+            VaultAccess::Hidden
+        );
+        assert_eq!(
+            secret_rows(&harness),
+            [(Some(true), Some("Deploy token".into()), false)]
+        );
+    }
+
+    #[test]
+    fn a_removed_project_leaves_its_notes_as_general_ones() {
+        let harness = Harness::in_memory("notes-project", Vec::new());
+        harness
+            .engine
+            .save_note("n", Some("p".into()), "Cache ideas".into(), None)
+            .unwrap();
+
+        harness
+            .engine
+            .dispatch(Command::ProjectRemove {
+                project_id: "p".into(),
+            })
+            .unwrap();
+
+        assert!(
+            harness
+                .engine
+                .notes(Some("p"), "", None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            harness.engine.notes(None, "", None).unwrap()[0].title,
+            "Cache ideas"
+        );
+    }
+
+    #[test]
+    fn a_sent_note_is_read_by_the_engine_and_a_page_leaves_its_text_out() {
+        let harness = Harness::in_memory("note-sent", completed_turn());
+        harness
+            .engine
+            .save_note("n", None, "Deploy\npassword: hunter2".into(), None)
+            .unwrap();
+        let note = |text: Option<&str>| MessageAttachment::Note {
+            id: "n".into(),
+            title: "Deploy".into(),
+            text: text.map(str::to_owned),
+            hidden: 1,
+        };
+
+        harness
+            .engine
+            .dispatch(Command::MessageSend {
+                thread_id: "t".into(),
+                message_id: "m1".into(),
+                text: "use my note".into(),
+                attachments: vec![note(None)],
+            })
+            .unwrap();
+        harness.wait_for_turn_end();
+
+        let read = note(Some("Deploy\npassword: [hidden credential]"));
+        let sent = harness.adapter.requests.lock().unwrap()[0].attachments[0].clone();
+        assert_eq!(sent.attachment, read);
+        let carried = |item: Option<ThreadItem>| match item.map(|item| item.content) {
+            Some(ItemContent::UserMessage { attachments, .. }) => attachments,
+            other => panic!("a message, not {other:?}"),
+        };
+        let page = harness.engine.transcript("t", None).unwrap().items;
+        let listed = page.into_iter().find(|item| item.id == "m1");
+        assert_eq!(carried(listed), [note(None)]);
+        assert_eq!(
+            carried(harness.engine.thread_item("t", "m1").unwrap()),
+            [read]
+        );
+    }
+
     #[test]
     fn a_secret_the_user_saves_reaches_the_agent_as_a_file_only() {
         let harness = Harness::in_memory("secret", Vec::new());
@@ -5689,14 +6389,14 @@ Blue"
         assert_eq!(harness.thread("t").status, ThreadStatus::WaitingForInput);
         harness
             .engine
-            .answer_secret_request("t", &request_id, Some("s3cret"))
+            .answer_secret_request("t", &request_id, typed("s3cret", None))
             .unwrap();
         let answer = saving.join().unwrap().unwrap();
         let declining = ask("Other token");
         let declined_id = opened(&harness);
         harness
             .engine
-            .answer_secret_request("t", &declined_id, None)
+            .answer_secret_request("t", &declined_id, SecretAnswer::Decline)
             .unwrap();
         let declined = declining.join().unwrap().unwrap();
 

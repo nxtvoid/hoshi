@@ -14,7 +14,9 @@ import {
 } from '@hoshi/ui/components/tooltip'
 
 function useChats() {
-  const open = useSidebarStore((state) => state.view === 'chats')
+  const open = useSidebarStore(
+    (state) => state.view === 'chats' && !state.notesOpen
+  )
   const setView = useSidebarStore((state) => state.setView)
   const unseen = useUnseenStore((state) => state.unseen)
   const signal = useAppStore((state) =>

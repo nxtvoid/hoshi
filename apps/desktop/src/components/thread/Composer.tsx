@@ -9,6 +9,7 @@ import { useImageStore } from '@/state/image-store'
 import { flushDrafts, useDraftStore } from '@/state/draft-store'
 import { useComposerFillStore } from '@/state/composer-fill-store'
 import { useInChat, useScopeProjectId } from '@/state/use-scope'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ModelPicker } from './ModelPicker'
 import { stepHistory } from '@/lib/prompt-history'
@@ -20,9 +21,16 @@ import {
   PlanningTasksNote,
   RequestPanel
 } from './RequestPanel'
+import { ComposerNotes } from './ComposerNotes'
 import { ComposerImages } from './ComposerImages'
 import { Button } from '@hoshi/ui/components/button'
 import { useComposerImages } from './use-composer-images'
+import {
+  noteAttachments,
+  readNote,
+  useAttachedNotes,
+  useNotesStore
+} from '@/state/notes-store'
 import type { CommandError } from '@/bindings/CommandError'
 import { useModelPickerStore } from '@/state/model-picker-store'
 import { usePromptHistoryStore } from '@/state/prompt-history-store'
@@ -139,6 +147,7 @@ export function Composer({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
   const images = useComposerImages()
+  const notes = useAttachedNotes(draftKey)
   const history = usePromptHistoryStore((state) => state.entries)
   const remember = usePromptHistoryStore((state) => state.add)
   const sendMessage = useAppStore((state) => state.sendMessage)
@@ -148,11 +157,26 @@ export function Composer({
   const threadId = useAppStore((state) => state.selectedThreadId)
   const fill = useComposerFillStore((state) => state.fill)
   const restoreImages = images.restore
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
+  const notesWereOpen = useRef(notesOpen)
+
+  useEffect(() => {
+    if (notesWereOpen.current && !notesOpen) editorRef.current?.focus()
+    notesWereOpen.current = notesOpen
+  }, [notesOpen])
 
   useEffect(() => {
     if (!fill || fill.threadId !== threadId) return
     editorRef.current?.setText(fill.text)
     restoreImages(fill.attachments, useImageStore.getState().urls)
+    for (const attachment of fill.attachments) {
+      if (attachment.type !== 'note') continue
+      useNotesStore.getState().attach(fill.threadId, {
+        id: attachment.id,
+        title: attachment.title,
+        credentials: attachment.hidden
+      })
+    }
     useComposerFillStore.getState().done()
   }, [fill, threadId, restoreImages])
   const request = usePendingRequest()
@@ -164,7 +188,8 @@ export function Composer({
     request !== null &&
     request.content.kind !== 'secretRequest' &&
     text.trim() !== ''
-  const written = text.trim() !== '' || images.saved.length > 0
+  const written =
+    text.trim() !== '' || images.saved.length > 0 || notes.length > 0
   /** A message sent while the agent works joins its turn. */
   const canSend = request
     ? answering && !sending
@@ -253,6 +278,19 @@ export function Composer({
     else if (pasted.kind === 'paths') editorRef.current?.paste(pasted.text)
   }
 
+  /** A reference to a note deleted since it was copied attaches nothing. */
+  const attachNotes = async (noteIds: string[]) => {
+    const found = await Promise.all(noteIds.map(readNote))
+    for (const note of found) {
+      if (!note) continue
+      useNotesStore.getState().attach(draftKey, {
+        id: note.id,
+        title: note.title,
+        credentials: note.credentials.length
+      })
+    }
+  }
+
   const removeImage = (key: string) => {
     images.remove(key)
     editorRef.current?.removeImage(key)
@@ -276,6 +314,12 @@ export function Composer({
             mention: { kind: 'file', value: path, attachment: null }
           })
         }
+        return
+      }
+      case 'note': {
+        const { id, title, credentials } = item.note
+        editor.replace(trigger, { remove: true })
+        useNotesStore.getState().attach(draftKey, { id, title, credentials })
         return
       }
       case 'pullRequest': {
@@ -372,17 +416,27 @@ export function Composer({
     const compactFirst = compaction?.compact === true && !isCompactCommand(text)
     const doc = editor.document()
     const taken = images.take()
+    const takenNotes = notes
+    useNotesStore.getState().clearAttached(draftKey)
     setSending(true)
     setRecalled(undefined)
     saveDraft(draftKey, null)
     editor.setText('')
-    const sent = await sendMessage(prompt, attachments, compactFirst)
+    const sent = await sendMessage(
+      prompt,
+      [...attachments, ...noteAttachments(takenNotes)],
+      compactFirst
+    )
     setSending(false)
     if (sent) {
       remember(prompt)
       images.release(taken)
       return
     }
+    const key = draftKey.startsWith('new:')
+      ? (useAppStore.getState().selectedThreadId ?? draftKey)
+      : draftKey
+    for (const note of takenNotes) useNotesStore.getState().attach(key, note)
     const restored = joinDocuments(doc, editorRef.current?.document() ?? null)
     saveDraft(draftKey, restored)
     images.putBack(taken)
@@ -569,6 +623,14 @@ export function Composer({
           {images.images.length > 0 ? (
             <ComposerImages images={images.images} onRemove={removeImage} />
           ) : null}
+          {notes.length > 0 && !request ? (
+            <ComposerNotes
+              notes={notes}
+              onRemove={(noteId) =>
+                useNotesStore.getState().detach(draftKey, noteId)
+              }
+            />
+          ) : null}
           <div
             className={cn(
               'flex',
@@ -591,6 +653,7 @@ export function Composer({
                 onBlur={flushDrafts}
                 onKeyDown={onKeyDown}
                 onImages={(pasted) => void addImages(pasted)}
+                onNotes={(noteIds) => void attachNotes(noteIds)}
               />
             </div>
             {stacked ? (
