@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   activateSurface,
   closeSurface,
+  knownSurfaces,
   NO_SURFACES,
   openSurface,
   showTurnDiff,
@@ -116,5 +117,26 @@ describe('showTurnDiff', () => {
       focusPath: undefined
     })
     expect(panel.activeId).toBe('s1')
+  })
+})
+
+describe('knownSurfaces', () => {
+  test('drops surfaces another version saved and keeps a known one focused', () => {
+    const saved = {
+      t1: {
+        surfaces: [
+          { id: 'n1', kind: 'note', itemId: 'i', noteId: 'x' },
+          { id: 'd1', kind: 'diff', scope: 'uncommitted' }
+        ],
+        activeId: 'n1'
+      }
+    } as unknown as Record<string, ThreadSurfaces>
+
+    expect(knownSurfaces(saved)).toEqual({
+      t1: {
+        surfaces: [{ id: 'd1', kind: 'diff', scope: 'uncommitted' }],
+        activeId: 'd1'
+      }
+    })
   })
 })
