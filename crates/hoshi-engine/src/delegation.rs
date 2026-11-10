@@ -72,7 +72,8 @@ pub(crate) const BITBUCKET_INSTRUCTIONS: &str = "- On Bitbucket, open pull reque
 
 /// Added to the system prompt of agents that have hoshi's tools, of a thread `depth`
 /// delegations deep.
-pub(crate) fn instructions(depth: usize, bitbucket: bool) -> String {
+/// `in_project` is false for a chat, which has no repository to open pull requests on.
+pub(crate) fn instructions(depth: usize, in_project: bool, bitbucket: bool) -> String {
     let mut parts = vec![
         format!(
             "hoshi, the app running you, has tools on its MCP server{}. Ordinary coding needs none.",
@@ -80,7 +81,7 @@ pub(crate) fn instructions(depth: usize, bitbucket: bool) -> String {
         ),
         TOOLS.to_owned(),
     ];
-    if depth == 0 {
+    if depth == 0 && in_project {
         parts.push(PULL_REQUESTS.to_owned());
     }
     parts.push(BROWSER_AND_BACKGROUND.to_owned());
@@ -210,10 +211,11 @@ impl State {
     pub(crate) fn offers_tool(&self, caller: &str, tool: &str) -> bool {
         match tool {
             crate::pull_request_tool::TOOL => self.opens_pull_requests(caller),
-            "watch_pull_request" | "unwatch_pull_request" => self
-                .model
-                .thread(caller)
-                .is_some_and(|thread| thread.parent_thread_id.is_none()),
+            "watch_pull_request" | "unwatch_pull_request" => {
+                self.model.thread(caller).is_some_and(|thread| {
+                    thread.parent_thread_id.is_none() && thread.project_id.is_some()
+                })
+            }
             _ => true,
         }
     }
@@ -291,6 +293,9 @@ impl State {
             .take(TITLE_MAX_CHARS)
             .collect();
         let isolated = arguments["isolation"] == "worktree";
+        if isolated && parent.project_id.is_none() {
+            return Err("a chat has no repository: leave `isolation` out".into());
+        }
         let workspace = match (&parent.worktree_path, isolated) {
             (_, true) => ThreadWorkspace::NewWorktree,
             (Some(path), false) => ThreadWorkspace::Worktree {
@@ -575,15 +580,16 @@ mod tests {
 
     #[test]
     fn the_instructions_stay_within_their_budget() {
-        let worst = [instructions(0, true), instructions(1, true)]
+        let worst = [instructions(0, true, true), instructions(1, true, true)]
             .iter()
             .map(String::len)
             .max()
             .unwrap();
         assert!(worst <= 1_350, "{worst} bytes");
-        assert!(instructions(0, false).contains("watch_pull_request"));
-        assert!(!instructions(1, false).contains("watch_pull_request"));
-        assert!(instructions(1, false).ends_with(TASK_INSTRUCTIONS));
+        assert!(instructions(0, true, false).contains("watch_pull_request"));
+        assert!(!instructions(0, false, false).contains("watch_pull_request"));
+        assert!(!instructions(1, true, false).contains("watch_pull_request"));
+        assert!(instructions(1, true, false).ends_with(TASK_INSTRUCTIONS));
     }
 
     #[test]

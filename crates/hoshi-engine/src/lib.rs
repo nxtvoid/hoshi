@@ -3674,7 +3674,7 @@ fn start_turn(
     let mcp = state
         .mcp
         .as_ref()
-        .filter(|_| thread.project_id.is_some() && depth < delegation::MAX_DEPTH)
+        .filter(|_| depth < delegation::MAX_DEPTH)
         .and_then(|server| {
             Some(hoshi_providers::McpServer {
                 url: server.url.clone(),
@@ -3684,7 +3684,7 @@ fn start_turn(
     let bitbucket = state.opens_pull_requests(thread_id);
     let instructions = mcp
         .as_ref()
-        .map(|_| delegation::instructions(depth, bitbucket));
+        .map(|_| delegation::instructions(depth, thread.project_id.is_some(), bitbucket));
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
@@ -4503,7 +4503,7 @@ mod tests {
             resume_at: None,
             model: Some("haiku".into()),
             attachments: Vec::new(),
-            instructions: Some(delegation::instructions(0, false)),
+            instructions: Some(delegation::instructions(0, true, false)),
             subagent_effort: SubagentEffort::AgentDecides,
         };
         assert_eq!(
@@ -4525,9 +4525,22 @@ mod tests {
         assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
 
         let folder = harness.data_dir.join("chats").join("chat-1");
-        let cwd = harness.adapter.requests.lock().unwrap()[0].cwd.clone();
-        assert_eq!(PathBuf::from(cwd), folder);
+        let request = harness.adapter.requests.lock().unwrap()[0].clone();
+        assert_eq!(PathBuf::from(&request.cwd), folder);
         assert!(folder.is_dir());
+        let instructions = request.instructions.unwrap();
+        assert!(instructions.contains("delegate_task"));
+        assert!(!instructions.contains("watch_pull_request"));
+        {
+            let mut state = lock(&harness.engine.state);
+            assert!(!state.offers_tool("chat-1", "watch_pull_request"));
+            let isolated = state.call_tool(
+                "chat-1",
+                "delegate_task",
+                &serde_json::json!({ "task": "look", "isolation": "worktree" }),
+            );
+            assert!(isolated.is_err());
+        }
         assert_eq!(
             harness.create_thread_in("chat-2", None, ThreadWorkspace::NewWorktree),
             Err(CommandError::ChatNotLocal {
