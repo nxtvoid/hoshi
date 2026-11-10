@@ -365,7 +365,12 @@ export function TaskResultRow({
   const [open, setOpen] = useState(false)
   const answer = text.slice(text.indexOf('\n') + 1).trim()
   return (
-    <div className='border-border/70 flex flex-col gap-2 rounded-xl border px-3 py-2'>
+    <div
+      className={cn(
+        'border-border/70 flex flex-col gap-2 rounded-xl border px-3 py-2',
+        open && answer && 'pb-3'
+      )}
+    >
       <div className='flex items-center gap-2.5 text-sm'>
         <button
           type='button'

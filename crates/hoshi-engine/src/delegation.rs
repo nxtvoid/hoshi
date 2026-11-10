@@ -65,7 +65,7 @@ const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. Work
 const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.";
 
 const BROWSER_AND_BACKGROUND: &str = "- Web previews only when the user asks for browser work: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
-- Background Bash or Monitor commands don't hold your turn. To wait for tests or a build you started: await_background_tasks with its id, then end your turn. Never for dev servers or watchers.";
+- Background Bash or Monitor commands don't hold your turn. To wait for one (tests, a build; a plain sleep is blocked, so background it): await_background_tasks with its id, then end your turn. Never for dev servers or watchers.";
 
 /// Added after the rest of [`instructions`] for agents of threads on Bitbucket.
 pub(crate) const BITBUCKET_INSTRUCTIONS: &str = "- On Bitbucket, open pull requests with create_pull_request, signed in as the user. Never look for or use a Bitbucket token, nor call its API yourself. If it fails, tell the user what it says.";
