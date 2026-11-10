@@ -363,6 +363,17 @@ html[data-terminal-font="system"] {
   --terminal-selection: oklch(0.6 0.08 var(--palette-hue) / 0.45);
 }
 
+/* List numbers without the space browsers put after the period, which is a whole character
+   wide in a monospace font and pushes the number out of its gutter. The list sets the gap. */
+@counter-style tight-decimal {
+  system: extends decimal;
+  suffix: ".";
+}
+@counter-style tight-lower-alpha {
+  system: extends lower-alpha;
+  suffix: ".";
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

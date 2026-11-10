@@ -19,6 +19,18 @@ import remarkBreaks from 'remark-breaks'
 type HastElement = NonNullable<ExtraProps['node']>
 const TRAILING_NEWLINE = /\r?\n$/
 
+/**
+ * How many characters the last number of an ordered list takes with its period, which is
+ * the widest: the room the list leaves for its numbers, so none is cut off.
+ */
+function widestMarkerChars(list: HastElement | undefined, start = 1) {
+  const items =
+    list?.children.filter(
+      (child) => child.type === 'element' && child.tagName === 'li'
+    ).length ?? 1
+  return String(start + Math.max(items, 1) - 1).length + 1
+}
+
 const COMPONENTS: Components = {
   h1: ({ node: _, ...props }) => (
     <h1 className='mt-5 mb-2 text-xl leading-snug font-semibold' {...props} />
@@ -38,13 +50,16 @@ const COMPONENTS: Components = {
   ),
   ul: ({ node: _, ...props }) => (
     <ul
-      className='my-2.5 list-disc ps-5 [&_ul]:my-1 [&_ul]:list-[circle] [&_ul_ul]:list-[square]'
+      className='my-2.5 list-disc ps-[max(1.25rem,2ch_+_0.25em)] [&_ul]:my-1 [&_ul]:list-[circle] [&_ul_ul]:list-[square]'
       {...props}
     />
   ),
-  ol: ({ node: _, ...props }) => (
+  ol: ({ node, ...props }) => (
     <ol
-      className='my-2.5 list-decimal ps-5 marker:tabular-nums [&_ol]:my-1 [&_ol]:list-[lower-alpha]'
+      className='my-2.5 list-[tight-decimal] marker:tabular-nums [&_ol]:my-1 [&_ol]:list-[tight-lower-alpha] [&>li]:ps-[0.25em]'
+      style={{
+        paddingInlineStart: `max(1.25rem - 0.25em, ${widestMarkerChars(node, props.start)}ch)`
+      }}
       {...props}
     />
   ),
