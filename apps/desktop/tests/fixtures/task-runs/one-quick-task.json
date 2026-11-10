@@ -1,0 +1,457 @@
+{
+  "name": "one-quick-task",
+  "prompt": "Delegate one task with the hoshi delegate_task tool: \"Answer with exactly the word PINEAPPLE.\" When its answer arrives, tell me the word.",
+  "steps": [
+    {
+      "at": 4,
+      "event": {
+        "event": {
+          "project": {
+            "createdAt": "2026-11-10T17:11:46.367Z",
+            "id": "p",
+            "title": "Project",
+            "updatedAt": "2026-11-10T17:11:46.367Z",
+            "workspaceRoot": "C:/work\\project",
+            "worktreeSetup": null
+          },
+          "type": "projectCreated"
+        },
+        "sequence": 1
+      }
+    },
+    {
+      "at": 4,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:11:46.368Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "t",
+            "model": null,
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Parent",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:11:46.368Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 2
+      }
+    },
+    {
+      "at": 5,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Delegate one task with the hoshi delegate_task tool: \"Answer with exactly the word PINEAPPLE.\" When its answer arrives, tell me the word."
+            },
+            "createdAt": "2026-11-10T17:11:46.368Z",
+            "id": "00000001-1111-4111-8111-111111111111",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 3
+      }
+    },
+    {
+      "at": 5,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:11:46.368Z",
+          "threadId": "t",
+          "turnId": "00000001-1111-4111-8111-111111111111",
+          "type": "turnStarted"
+        },
+        "sequence": 4
+      }
+    },
+    {
+      "at": 2152,
+      "event": {
+        "event": {
+          "sessionId": "5a860b60-d2a7-407c-8eed-6dfb9478fc63",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 5
+      }
+    },
+    {
+      "at": 3511,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"max_results\":1,\"query\":\"select:mcp__hoshi__delegate_task\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "ToolSearch",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:11:49.875Z",
+            "id": "toolu_01WA5ydHbsmGUNqpN4ccV6Zi",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 6
+      }
+    },
+    {
+      "at": 3519,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_01WA5ydHbsmGUNqpN4ccV6Zi",
+          "output": "",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 7
+      }
+    },
+    {
+      "at": 4957,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "detail": null,
+              "input": "{\"effort\":\"low\",\"model\":\"haiku\",\"task\":\"Answer with exactly the word PINEAPPLE.\",\"title\":\"Pineapple answer\"}",
+              "interrupted": false,
+              "isError": false,
+              "kind": "toolCall",
+              "name": "mcp__hoshi__delegate_task",
+              "output": null,
+              "outputOmitted": false
+            },
+            "createdAt": "2026-11-10T17:11:51.320Z",
+            "id": "toolu_011YZn1TgFZqAxtiihBxswLk",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 8
+      }
+    },
+    {
+      "at": 4963,
+      "event": {
+        "event": {
+          "thread": {
+            "accessMode": "fullAccess",
+            "activeTurnId": null,
+            "archived": false,
+            "branch": null,
+            "conversationCursor": null,
+            "createdAt": "2026-11-10T17:11:51.326Z",
+            "effort": "low",
+            "fastMode": false,
+            "id": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+            "model": "claude-haiku-5-5",
+            "parentThreadId": null,
+            "pinned": false,
+            "planMode": false,
+            "projectId": "p",
+            "resumeAt": null,
+            "sessionId": null,
+            "status": "idle",
+            "taskAnswered": false,
+            "taskCancelled": false,
+            "title": "Pineapple answer",
+            "ultracode": false,
+            "updatedAt": "2026-11-10T17:11:51.326Z",
+            "watchingPullRequest": false,
+            "worktreeAdopted": false,
+            "worktreePath": null,
+            "worktreeReleased": false
+          },
+          "type": "threadCreated"
+        },
+        "sequence": 9
+      }
+    },
+    {
+      "at": 4963,
+      "event": {
+        "event": {
+          "parentThreadId": "t",
+          "sharesWorktree": false,
+          "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+          "type": "threadDelegated"
+        },
+        "sequence": 10
+      }
+    },
+    {
+      "at": 4963,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": { "kind": "start" },
+              "steer": false,
+              "taskResult": null,
+              "text": "Answer with exactly the word PINEAPPLE."
+            },
+            "createdAt": "2026-11-10T17:11:51.326Z",
+            "id": "bb9c6d3d-d818-4496-8c26-99eca58b4c6c",
+            "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 11
+      }
+    },
+    {
+      "at": 4963,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:11:51.326Z",
+          "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+          "turnId": "bb9c6d3d-d818-4496-8c26-99eca58b4c6c",
+          "type": "turnStarted"
+        },
+        "sequence": 12
+      }
+    },
+    {
+      "at": 5019,
+      "event": {
+        "event": {
+          "detail": null,
+          "isError": false,
+          "itemId": "toolu_011YZn1TgFZqAxtiihBxswLk",
+          "output": "{\"next\":\"Its answer arrives here as a message, so end your turn. Don't wait on it or poll it.\",\"status\":\"running\",\"taskId\":\"1c75fa3a-4835-46e9-b587-d8ad3c9db11b\"}",
+          "threadId": "t",
+          "type": "toolCallCompleted"
+        },
+        "sequence": 13
+      }
+    },
+    {
+      "at": 6357,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "I've delegated the task to a child agent (task `1c75fa3a-4835-46e9-b587-d8ad3c9db11b`). It hasn't answered yet. I'll tell you the word when its answer arrives."
+            },
+            "createdAt": "2026-11-10T17:11:52.720Z",
+            "id": "msg_011CgucvXSvru5ne1cpafKM1:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 14
+      }
+    },
+    {
+      "at": 6376,
+      "event": {
+        "event": {
+          "cursor": "fcb86eab-e7e8-46a6-a1e9-e226752395ae",
+          "threadId": "t",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 15
+      }
+    },
+    {
+      "at": 6376,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:11:52.739Z",
+          "outcome": { "type": "completed" },
+          "threadId": "t",
+          "turnId": "00000001-1111-4111-8111-111111111111",
+          "type": "turnCompleted"
+        },
+        "sequence": 16
+      }
+    },
+    {
+      "at": 6746,
+      "event": {
+        "event": {
+          "sessionId": "01980fad-787d-413c-a70c-935c1c06a2eb",
+          "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+          "type": "sessionAttached"
+        },
+        "sequence": 17
+      }
+    },
+    {
+      "at": 7831,
+      "event": {
+        "event": {
+          "item": {
+            "content": { "kind": "assistantMessage", "text": "PINEAPPLE" },
+            "createdAt": "2026-11-10T17:11:54.195Z",
+            "id": "msg_011Cgucvf8HichNKgxasQbsY:0",
+            "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 18
+      }
+    },
+    {
+      "at": 7875,
+      "event": {
+        "event": {
+          "cursor": "e7950024-c860-4491-9bf8-558af5ac302f",
+          "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 19
+      }
+    },
+    {
+      "at": 7875,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:11:54.239Z",
+          "outcome": { "type": "completed" },
+          "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+          "turnId": "bb9c6d3d-d818-4496-8c26-99eca58b4c6c",
+          "type": "turnCompleted"
+        },
+        "sequence": 20
+      }
+    },
+    {
+      "at": 7876,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "attachments": [],
+              "kind": "userMessage",
+              "pullRequestUpdate": null,
+              "rewind": null,
+              "steer": false,
+              "taskResult": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+              "text": "Delegated task 1c75fa3a-4835-46e9-b587-d8ad3c9db11b (Pineapple answer) [completed]:\nPINEAPPLE\n\nNone of the tasks you delegated is still running."
+            },
+            "createdAt": "2026-11-10T17:11:54.239Z",
+            "id": "348383e0-27b7-4f32-a8ea-607544aafd7a",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 21
+      }
+    },
+    {
+      "at": 7876,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:11:54.239Z",
+          "threadId": "t",
+          "turnId": "348383e0-27b7-4f32-a8ea-607544aafd7a",
+          "type": "turnStarted"
+        },
+        "sequence": 22
+      }
+    },
+    {
+      "at": 7876,
+      "event": {
+        "event": {
+          "threadId": "1c75fa3a-4835-46e9-b587-d8ad3c9db11b",
+          "type": "taskAnswered"
+        },
+        "sequence": 23
+      }
+    },
+    {
+      "at": 10168,
+      "event": {
+        "event": {
+          "sessionId": "5a860b60-d2a7-407c-8eed-6dfb9478fc63",
+          "threadId": "t",
+          "type": "sessionAttached"
+        },
+        "sequence": 24
+      }
+    },
+    {
+      "at": 11255,
+      "event": {
+        "event": {
+          "item": {
+            "content": {
+              "kind": "assistantMessage",
+              "text": "The delegated task's answer is: **PINEAPPLE**"
+            },
+            "createdAt": "2026-11-10T17:11:57.618Z",
+            "id": "msg_011Cgucvuhda4x48BFy2DzE7:0",
+            "threadId": "t"
+          },
+          "type": "itemAdded"
+        },
+        "sequence": 25
+      }
+    },
+    {
+      "at": 11288,
+      "event": {
+        "event": {
+          "cursor": "af059875-dd95-44b8-b04c-35792ccc5d63",
+          "threadId": "t",
+          "type": "conversationCursorSet"
+        },
+        "sequence": 26
+      }
+    },
+    {
+      "at": 11288,
+      "event": {
+        "event": {
+          "at": "2026-11-10T17:11:57.651Z",
+          "outcome": { "type": "completed" },
+          "threadId": "t",
+          "turnId": "348383e0-27b7-4f32-a8ea-607544aafd7a",
+          "type": "turnCompleted"
+        },
+        "sequence": 27
+      }
+    }
+  ],
+  "timedOut": false
+}

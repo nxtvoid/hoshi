@@ -1,5 +1,7 @@
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
 
+export type MessageImage = Extract<MessageAttachment, { type: 'image' }>
+
 export type SegmentKind =
   | 'text'
   | 'file'
@@ -15,14 +17,16 @@ export type PromptSegment = {
   end: number
   /** What an `[Image #n]` chip shows: the image's name. */
   label?: string
+  /** The image an `[Image #n]` chip stands for. */
+  image?: MessageImage
 }
 
 /** The pull requests, skills and images the prompt's `#123`, `$name` and `[Image #n]` stand for. */
 export type KnownMentions = {
   pullRequests: ReadonlySet<number>
   skills: ReadonlySet<string>
-  /** The names of the message's images, in the order `[Image #n]` counts them. */
-  images: readonly string[]
+  /** The message's images, in the order `[Image #n]` counts them. */
+  images: readonly MessageImage[]
 }
 
 const MENTION =
@@ -67,14 +71,15 @@ export function promptSegments(
     })
   }
   for (const match of text.matchAll(IMAGE)) {
-    const label = known.images[Number(match[1]) - 1]
-    if (label === undefined) continue
+    const image = known.images[Number(match[1]) - 1]
+    if (image === undefined) continue
     chips.push({
       kind: 'image',
       text: match[0],
       start: match.index,
       end: match.index + match[0].length,
-      label
+      label: image.name,
+      image
     })
   }
   chips.sort((a, b) => a.start - b.start)
@@ -103,11 +108,11 @@ export function knownMentions(
 ): KnownMentions {
   const pullRequests = new Set<number>()
   const skills = new Set<string>()
-  const images: string[] = []
+  const images: MessageImage[] = []
   for (const attachment of attachments) {
     if (attachment.type === 'pullRequest') pullRequests.add(attachment.number)
     if (attachment.type === 'skill') skills.add(attachment.name)
-    if (attachment.type === 'image') images.push(attachment.name)
+    if (attachment.type === 'image') images.push(attachment)
   }
   return { pullRequests, skills, images }
 }

@@ -5,6 +5,9 @@ import { type KnownMentions, promptSegments } from '@/lib/prompt-segments'
 type HastElement = NonNullable<ExtraProps['node']>
 type HastChild = HastElement['children'][number]
 
+/** Where an `[Image #n]` chip goes, drawn by `ImageMention`. */
+export const IMAGE_MENTION_TAG = 'hoshi-image'
+
 /** Mentions written inside these stay as they are. */
 const LITERAL = new Set(['code', 'pre', 'a'])
 
@@ -35,18 +38,30 @@ function withChips(node: HastChild, known: KnownMentions): HastChild[] {
     (segment): HastChild =>
       segment.kind === 'text' || segment.kind === 'command'
         ? { type: 'text', value: segment.text }
-        : {
-            type: 'element',
-            tagName: 'span',
-            properties: {
-              className: [
-                'rounded-sm',
-                'px-0.5',
-                ...CHIP_CLASSES[segment.kind].split(' ')
-              ],
-              title: segment.label ? segment.text : undefined
-            },
-            children: [{ type: 'text', value: segment.label ?? segment.text }]
-          }
+        : segment.image
+          ? {
+              type: 'element',
+              tagName: IMAGE_MENTION_TAG,
+              properties: {
+                dataId: segment.image.id,
+                dataName: segment.image.name,
+                dataMimeType: segment.image.mimeType,
+                dataSize: segment.image.size
+              },
+              children: []
+            }
+          : {
+              type: 'element',
+              tagName: 'span',
+              properties: {
+                className: [
+                  'rounded-sm',
+                  'px-0.5',
+                  ...CHIP_CLASSES[segment.kind].split(' ')
+                ],
+                title: segment.label ? segment.text : undefined
+              },
+              children: [{ type: 'text', value: segment.label ?? segment.text }]
+            }
   )
 }

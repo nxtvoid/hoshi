@@ -5,6 +5,7 @@ import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
 import { useRequestStore } from '@/state/request-store'
+import { useBusyThreads } from './use-busy-threads'
 import { useTranscriptStore } from '@/state/transcript-store'
 import type { ThreadItem } from '@/bindings/ThreadItem'
 import { type AgentState, type ThreadAgent, threadAgents } from '@/lib/agents'
@@ -18,7 +19,8 @@ const ROW =
   'flex h-8 w-full min-w-0 cursor-pointer items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] font-medium text-foreground/80 outline-none transition-colors hover:bg-foreground/5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset'
 const NO_ITEMS: ThreadItem[] = []
 
-const DOT: Record<AgentState, string> = {
+/** The color of the dot that tells how an agent stands. */
+export const AGENT_DOT: Record<AgentState, string> = {
   running: 'bg-status-working',
   waiting: 'bg-status-waiting',
   done: 'bg-status-done',
@@ -45,9 +47,10 @@ export function ThreadAgents({
   )
   const [previousOpen, setPreviousOpen] = useState(false)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
+  const busy = useBusyThreads()
   const agents = useMemo(
-    () => threadAgents(threadId, threads, items, pendingTasks),
-    [threadId, threads, items, pendingTasks]
+    () => threadAgents(threadId, threads, items, pendingTasks, busy),
+    [threadId, threads, items, pendingTasks, busy]
   )
   const parent = useMemo(() => {
     const own = threads.find((thread) => thread.id === threadId)
@@ -83,7 +86,7 @@ export function ThreadAgents({
         <span
           className={cn(
             'ring-popover absolute -right-0.5 -bottom-0.5 size-1.5 rounded-full ring-2',
-            DOT[agent.state],
+            AGENT_DOT[agent.state],
             agent.state === 'running' && 'animate-pulse'
           )}
         />

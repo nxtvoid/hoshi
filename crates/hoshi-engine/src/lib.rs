@@ -3,6 +3,7 @@
 //! (provider turns, git). Provider output comes back through the same path.
 
 mod attachments;
+mod background;
 mod browser;
 mod checkpoint;
 mod delegation;
@@ -23,6 +24,7 @@ mod pull_requests;
 mod refreshing;
 mod secret_requests;
 mod secrets;
+mod setup_files;
 mod source_control;
 mod terminal;
 mod thread_tools;
@@ -32,10 +34,12 @@ mod worktree;
 mod worktree_setup;
 
 use attachments::Attachments;
+use background::Lingering;
 use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
 use hoshi_core::ProviderAccountStatus;
+use hoshi_core::{BankedResetFailure, BankedResetSpend};
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, TranscriptPage,
@@ -45,11 +49,12 @@ use hoshi_core::{
     EventEnvelope, FileDiff, FolderListing, ForgeAccount, ForgeKind, ItemContent,
     MessageAttachment, ProviderModels, ProviderOutput, PullRequest, PullRequestAction,
     PullRequestDetail, PullRequestLabel, ReadModel, RemoteRepository, SlashCommand, Snapshot,
-    StreamDelta, StreamKind, TerminalAttach, ThreadBackgroundTasks, ThreadContextUsage, ThreadItem,
-    ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus, ThreadTitleSettings, ThreadWorkspace,
-    TurnFailure, TurnOutcome, UsageLimits, WorkspaceEntry, answers_message, close_stale_turn,
-    decide, record_branch, record_conversation_cursor, record_output, record_title,
-    record_turn_changes, record_worktree, record_worktree_left, start_queued_turn, turn_failed,
+    StreamDelta, StreamKind, SubagentEffort, TerminalAttach, ThreadBackgroundTasks,
+    ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadPullRequestDetail, ThreadStatus,
+    ThreadTitleSettings, ThreadWorkspace, TurnFailure, TurnOutcome, UsageLimits, WorkspaceEntry,
+    answers_message, close_stale_turn, decide, record_branch, record_conversation_cursor,
+    record_output, record_title, record_turn_changes, record_worktree, record_worktree_left,
+    start_queued_turn, turn_failed,
 };
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
@@ -85,7 +90,8 @@ pub enum Notification {
     PullRequestDetail(ThreadPullRequestDetail),
     /// Cached, not part of the event log: it changes on every model call.
     ContextUsage(ThreadContextUsage),
-    /// The commands a thread's running turn waits for; empty once none is left.
+    /// The commands a thread's agent runs in the background, during its turn or after it;
+    /// empty once none is left.
     BackgroundTasks(ThreadBackgroundTasks),
     /// The provider plan's limits, as a running turn last reported them.
     UsageLimits(UsageLimits),
@@ -116,6 +122,9 @@ pub struct Engine {
     slash_commands: Refreshing<Vec<SlashCommand>>,
     /// Held while the provider is asked for its limits, so one ask serves everyone waiting.
     usage_probe: Arc<Mutex<()>>,
+    /// Held while a banked reset is spent: the grant and the request id a retry reuses until
+    /// the provider answers.
+    reset_spend: Mutex<Option<(String, String)>>,
     /// Held while the provider's CLI is checked against its releases or updated.
     maintenance: Arc<Mutex<()>>,
 }
@@ -124,7 +133,8 @@ const LINKED_PULL_REQUEST_FRESH_FOR: Duration = Duration::from_secs(60);
 const PATHS_FRESH_FOR: Duration = Duration::from_secs(10);
 const SLASH_COMMANDS_FRESH_FOR: Duration = Duration::from_secs(5 * 60);
 const USAGE_LIMITS_FRESH_FOR: Duration = Duration::from_secs(60);
-const PROVIDER_VERSION_CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+const PROVIDER_VERSION_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+const PROVIDER_VERSION_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 const UPDATE_PROGRESS_EVERY: Duration = Duration::from_millis(250);
 const PATH_SEARCH_LIMIT: usize = 50;
 /// A first title is tried this many times, waiting longer before each retry.
@@ -147,6 +157,11 @@ struct State {
     sequence: u64,
     /// Running turns by thread id.
     turns: HashMap<String, Turn>,
+    /// Agent processes kept after their turn for the commands it left running in the
+    /// background, by thread id.
+    lingering: HashMap<String, Lingering>,
+    /// How many agent processes the engine started, which numbers each one.
+    processes: u64,
     /// `None` when the provider is disabled.
     adapter: Option<Arc<dyn ProviderAdapter>>,
     notify: Notify,
@@ -173,6 +188,7 @@ struct State {
     linked_pull_requests: HashMap<(RepositoryRef, u32), (Instant, PullRequest)>,
     context_usages: HashMap<String, ContextUsage>,
     thread_titles: ThreadTitleSettings,
+    subagent_effort: SubagentEffort,
     /// Threads whose generated title missed the subject; named again after their turn.
     titles_to_refine: HashSet<String>,
     /// `None` until the provider reports or is asked for them; kept across restarts.
@@ -181,6 +197,7 @@ struct State {
     usage_checked_at: Option<Instant>,
     /// `None` until the enabled provider's CLI was checked.
     provider_version: Option<ProviderVersion>,
+    provider_version_checked_at: Option<Instant>,
     /// Where each thread's agent last moved its session, until git confirmed it.
     session_moves: HashMap<String, String>,
     /// Messages sent while a thread's turn was ending, too late to join it, oldest first.
@@ -220,6 +237,9 @@ struct QueuedMessage {
     id: String,
     text: String,
     attachments: Vec<MessageAttachment>,
+    /// The user sent it, so a running turn reads it at once. News hoshi brings, such as a
+    /// task's answer, waits for the agent to finish its step.
+    from_user: bool,
 }
 
 /// A thread whose pull request is due to be read.
@@ -361,6 +381,8 @@ struct PullRequestJob {
 
 struct Turn {
     id: String,
+    /// The agent process it runs in, by number.
+    process: u64,
     running: Box<dyn RunningTurn>,
     /// `None` outside a git repository.
     workspace: Option<TurnWorkspace>,
@@ -371,7 +393,7 @@ struct Turn {
     arrivals: usize,
     /// The provider's latest message of the conversation so far.
     cursor: Option<String>,
-    /// The commands the turn waits for in the background, once it reported any.
+    /// The commands running in the background, once the turn reported any.
     background: Option<ThreadBackgroundTasks>,
 }
 
@@ -420,6 +442,8 @@ impl Engine {
             sequence: snapshot.sequence,
             store,
             turns: HashMap::new(),
+            lingering: HashMap::new(),
+            processes: 0,
             adapter: None,
             notify,
             worktrees_dir: data_dir.join("worktrees"),
@@ -437,6 +461,7 @@ impl Engine {
             usage_limits,
             usage_checked_at: None,
             provider_version: None,
+            provider_version_checked_at: None,
             session_moves: HashMap::new(),
             queued: HashMap::new(),
             mcp: None,
@@ -453,6 +478,7 @@ impl Engine {
             pending_wakes: HashMap::new(),
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
+            subagent_effort: SubagentEffort::default(),
             titles_to_refine: HashSet::new(),
         };
         let stale: Vec<_> = state
@@ -510,10 +536,8 @@ impl Engine {
         });
         let weak = Arc::downgrade(&shared);
         let offered: Arc<ToolFilter> = Arc::new(move |caller, tool| {
-            tool != pull_request_tool::TOOL
-                || weak
-                    .upgrade()
-                    .is_some_and(|shared| lock(&shared).opens_pull_requests(caller))
+            weak.upgrade()
+                .is_some_and(|shared| lock(&shared).offers_tool(caller, tool))
         });
         match McpServer::start(tools, offered) {
             Ok(server) => lock(&shared).mcp = Some(server),
@@ -541,6 +565,7 @@ impl Engine {
             paths: Refreshing::new(PATHS_FRESH_FOR),
             slash_commands: Refreshing::new(SLASH_COMMANDS_FRESH_FOR),
             usage_probe: Arc::default(),
+            reset_spend: Mutex::default(),
             maintenance,
         })
     }
@@ -558,6 +583,17 @@ impl Engine {
         let mut state = lock(&self.state);
         state.pull_requests.check_stale(Instant::now());
         state.wake_sync();
+    }
+
+    /// Checks the provider's CLI again when the last check is a few minutes old, as when
+    /// the window gets focus.
+    pub fn refresh_provider_version(&self) {
+        let stale = lock(&self.state)
+            .provider_version_checked_at
+            .is_none_or(|at| at.elapsed() >= PROVIDER_VERSION_FRESH_FOR);
+        if stale {
+            self.check_provider_version();
+        }
     }
 
     /// The detail of a thread's pull request as last read, answered at once. When it is
@@ -981,6 +1017,7 @@ impl Engine {
             if thread.worktree_released {
                 return state.decide_and_commit(release);
             }
+            state.close_lingering(thread_id);
             let op = state.begin_op(thread_id, &[&path])?;
             (op, root, path, state.checkpoints.clone())
         };
@@ -1048,6 +1085,7 @@ impl Engine {
                 folders.push(&root);
             }
             let op = state.begin_op(thread_id, &folders)?;
+            state.close_lingering(thread_id);
             let plan = CleanUpPlan {
                 root,
                 pull_request,
@@ -1205,6 +1243,11 @@ impl Engine {
         lock(&self.state).thread_titles = settings;
     }
 
+    /// How agents choose the model and effort of their subagents, from their next turn on.
+    pub fn set_subagent_effort(&self, policy: SubagentEffort) {
+        lock(&self.state).subagent_effort = policy;
+    }
+
     /// Names the thread again from its whole conversation, in the background. The
     /// title only changes if the user did not rename it meanwhile.
     pub fn regenerate_title(&self, thread_id: &str) -> Result<(), CommandError> {
@@ -1310,15 +1353,56 @@ impl Engine {
         check_usage_limits(&self.state, &self.usage_probe, force)
     }
 
+    /// Spends the next banked reset, then reads the limits again. Reaches the network.
+    pub fn spend_banked_reset(&self) -> BankedResetSpend {
+        let mut pending = self
+            .reset_spend
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (adapter, grant) = {
+            let state = lock(&self.state);
+            let grant = state
+                .usage_limits
+                .as_ref()
+                .and_then(|limits| limits.banked_resets.as_ref())
+                .filter(|banked| banked.count > 0)
+                .and_then(|banked| banked.next_grant_id.clone());
+            (state.adapter.clone(), grant)
+        };
+        let (Some(adapter), Some(grant)) = (adapter, grant) else {
+            return BankedResetSpend::NoneLeft;
+        };
+        let request_id = match pending.take() {
+            Some((pending_grant, request_id)) if pending_grant == grant => request_id,
+            _ => delegation::new_id(),
+        };
+        let spend = adapter.spend_banked_reset(&grant, &request_id);
+        if !spend.settled() {
+            *pending = Some((grant, request_id));
+            return spend;
+        }
+        if matches!(spend, BankedResetSpend::Failed { .. }) {
+            return spend;
+        }
+        let refreshed = check_usage_limits(&self.state, &self.usage_probe, true);
+        if spend == BankedResetSpend::Reset && refreshed.is_none() {
+            return BankedResetSpend::Failed {
+                reason: BankedResetFailure::LimitsUnread,
+            };
+        }
+        spend
+    }
+
     /// Hands a delegated task's answer back to its thread now, as it stands, with its plan
     /// when it still plans.
     pub fn send_task_answer(&self, thread_id: &str) {
         lock(&self.state).hand_back(thread_id, &TurnOutcome::Completed);
     }
 
-    /// Cancels a delegated task: it stops if it runs, and its answer never goes back.
+    /// The user cancels a delegated task: it stops if it runs, its answer never goes back,
+    /// and the thread that still waited for it hears it was stopped.
     pub fn cancel_task(&self, thread_id: &str) {
-        lock(&self.state).cancel_task(thread_id);
+        lock(&self.state).stop_task(thread_id);
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -1328,7 +1412,12 @@ impl Engine {
             projects: state.model.projects().cloned().collect(),
             threads: state.model.threads().cloned().collect(),
             pending_requests: state.model.all_pending_requests(),
-            pending_tasks: state.delegations.keys().cloned().collect(),
+            pending_tasks: state
+                .delegations
+                .keys()
+                .filter(|task| state.awaited(task))
+                .cloned()
+                .collect(),
             open_tool_calls: state.model.open_tool_calls().cloned().collect(),
             pull_requests: state
                 .pull_requests
@@ -1350,8 +1439,15 @@ impl Engine {
                 .turns
                 .values()
                 .filter_map(|turn| turn.background.clone())
+                .chain(
+                    state
+                        .lingering
+                        .values()
+                        .filter_map(|lingering| lingering.background.clone()),
+                )
                 .filter(|background| !background.tasks.is_empty())
                 .collect(),
+            task_previews: state.model.task_previews(),
         }
     }
 
@@ -1594,6 +1690,12 @@ impl Engine {
     }
 
     /// Closes every page and the headless browser, as when the app quits.
+    /// Ends the agent processes kept between turns, and the commands running in them, as
+    /// when the app quits.
+    pub fn close_lingering_agents(&self) {
+        lock(&self.state).close_all_lingering();
+    }
+
     pub fn close_browser(&self) {
         self.browsing().close();
     }
@@ -1632,6 +1734,7 @@ impl Engine {
                 id: message_id.to_owned(),
                 text,
                 attachments,
+                from_user: true,
             },
         );
         let compacted = state.run_command(Command::MessageSend {
@@ -1747,7 +1850,8 @@ impl Engine {
             .ok_or_else(|| CommandError::ThreadNotFound {
                 thread_id: thread_id.to_owned(),
             })?;
-        state.run_worktree_setup(launch)
+        state.run_worktree_setup(launch);
+        Ok(())
     }
 
     /// Lets the agent start without the thread's setup, sending what it held.
@@ -2117,6 +2221,7 @@ impl State {
                 event: event.clone(),
             }));
         }
+        self.close_lingering_after(events);
         Ok(())
     }
 
@@ -2226,18 +2331,11 @@ impl State {
                 Some(turn) if turn.id == turn_id => self.turns.remove(thread_id),
                 _ => None,
             };
-            if ended_turn
-                .as_ref()
-                .and_then(|turn| turn.background.as_ref())
-                .is_some_and(|background| !background.tasks.is_empty())
-            {
-                (self.notify)(Notification::BackgroundTasks(ThreadBackgroundTasks {
-                    thread_id: thread_id.to_owned(),
-                    tasks: Vec::new(),
-                    waiting: false,
-                }));
-            }
-            let workspace = ended_turn.and_then(|turn| turn.workspace);
+            let workspace = ended_turn.and_then(|mut turn| {
+                let workspace = turn.workspace.take();
+                self.keep_between_turns(thread_id, turn);
+                workspace
+            });
             // The agent may have created a worktree or switched branches.
             let check = workspace
                 .filter(|workspace| !workspace.moved)
@@ -2394,13 +2492,10 @@ impl State {
         })
     }
 
-    /// Runs the project's setup command in the thread's worktree, if it has one.
+    /// Runs the project's setup in the thread's worktree, if it has one.
     fn start_worktree_setup(&self, thread_id: &str) {
-        let Some(launch) = self.setup_launch(thread_id) else {
-            return;
-        };
-        if let Err(error) = self.run_worktree_setup(launch) {
-            eprintln!("hoshi: the setup of thread {thread_id} didn't start: {error}");
+        if let Some(launch) = self.setup_launch(thread_id) {
+            self.run_worktree_setup(launch);
         }
     }
 
@@ -2413,13 +2508,14 @@ impl State {
             thread_id: thread_id.to_owned(),
             project_root: project.workspace_root.clone(),
             worktree_path,
+            files: setup.files,
             command: setup.command,
             wait: setup.wait,
         })
     }
 
     /// The messages a setup held are sent apart from its terminal, whose lock it ends under.
-    fn run_worktree_setup(&self, launch: SetupLaunch) -> Result<(), CommandError> {
+    fn run_worktree_setup(&self, launch: SetupLaunch) {
         let this = self.this.clone();
         self.setups.start(launch, move |held| {
             let this = this.clone();
@@ -2523,10 +2619,17 @@ impl State {
         {
             turn.running.stop_subagent(&tool_use_id);
         }
-        if let Some((thread_id, task_id)) = stop_background
-            && let Some(turn) = self.turns.get(&thread_id)
-        {
-            turn.running.stop_background_task(&task_id);
+        if let Some((thread_id, task_id)) = stop_background {
+            let running = match self.turns.get(&thread_id) {
+                Some(turn) => Some(&turn.running),
+                None => self
+                    .lingering
+                    .get(&thread_id)
+                    .map(|lingering| &lingering.running),
+            };
+            if let Some(running) = running {
+                running.stop_background_task(&task_id);
+            }
         }
         // A deleted thread (or a removed project's threads) must not keep an agent running.
         let orphaned: Vec<_> = self
@@ -2539,6 +2642,15 @@ impl State {
             if let Some(turn) = self.turns.remove(&thread_id) {
                 turn.running.interrupt();
             }
+        }
+        let orphaned: Vec<_> = self
+            .lingering
+            .keys()
+            .filter(|thread_id| self.model.thread(thread_id).is_none())
+            .cloned()
+            .collect();
+        for thread_id in orphaned {
+            self.close_lingering(&thread_id);
         }
         let State {
             model,
@@ -2594,7 +2706,11 @@ impl State {
                             thread_id,
                             content:
                                 ItemContent::UserMessage {
-                                    text, attachments, ..
+                                    text,
+                                    attachments,
+                                    task_result,
+                                    pull_request_update,
+                                    ..
                                 },
                             ..
                         },
@@ -2603,6 +2719,7 @@ impl State {
                         id: id.clone(),
                         text: text.clone(),
                         attachments: attachments.clone(),
+                        from_user: task_result.is_none() && pull_request_update.is_none(),
                     });
                     joining = Some(thread_id.clone());
                     if let Some((thread_id, provisional)) = titled.first() {
@@ -2761,10 +2878,10 @@ impl State {
     /// of its own when the turn is ending.
     fn join_turn(&mut self, thread_id: &str, message: QueuedMessage) {
         let attachments = self.turn_attachments(message.attachments.clone());
-        let joined = self
-            .turns
-            .get(thread_id)
-            .is_some_and(|turn| turn.running.steer(&message.id, &message.text, &attachments));
+        let joined = self.turns.get(thread_id).is_some_and(|turn| {
+            turn.running
+                .steer(&message.id, &message.text, &attachments, message.from_user)
+        });
         if joined {
             return;
         }
@@ -3568,26 +3685,12 @@ fn start_turn(
     let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
-    let project = thread
-        .project_id
-        .as_deref()
-        .and_then(|project_id| state.model.project(project_id));
-    let workspace = project.and_then(|project| {
-        let repository = project.workspace_root.clone();
-        let worktrees_before = git::worktrees(&repository)?;
-        Some(TurnWorkspace {
-            repository,
-            worktrees_before,
-            tool_inputs: Vec::new(),
-            moved: false,
-        })
-    });
     let attachments = state.turn_attachments(attachments);
     let depth = state.depth(thread_id);
     let mcp = state
         .mcp
         .as_ref()
-        .filter(|_| thread.project_id.is_some() && depth < delegation::MAX_DEPTH)
+        .filter(|_| depth < delegation::MAX_DEPTH)
         .and_then(|server| {
             Some(hoshi_providers::McpServer {
                 url: server.url.clone(),
@@ -3595,18 +3698,9 @@ fn start_turn(
             })
         });
     let bitbucket = state.opens_pull_requests(thread_id);
-    let instructions = mcp.as_ref().map(|_| {
-        let mut instructions = delegation::INSTRUCTIONS.to_owned();
-        if bitbucket {
-            instructions.push('\n');
-            instructions.push_str(delegation::BITBUCKET_INSTRUCTIONS);
-        }
-        if depth > 0 {
-            instructions.push('\n');
-            instructions.push_str(delegation::TASK_INSTRUCTIONS);
-        }
-        instructions
-    });
+    let instructions = mcp
+        .as_ref()
+        .map(|_| delegation::instructions(depth, thread.project_id.is_some(), bitbucket));
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
@@ -3621,30 +3715,40 @@ fn start_turn(
         plan_mode: thread.plan_mode,
         mcp,
         instructions,
+        subagent_effort: state.subagent_effort,
     };
-    let checkpointed = workspace.as_ref().map(|_| cwd.to_owned());
-    if let Some(dir) = &checkpointed {
-        let (dir, reference) = (
-            dir.clone(),
-            checkpoint::reference(thread_id, turn_id, Moment::Before),
-        );
-        state.checkpoints.queue(&dir.clone(), move || {
-            if let Err(error) = checkpoint::capture(&dir, &reference) {
-                eprintln!("hoshi: no checkpoint before the turn in {dir}: {error}");
-            }
-        });
+    let (workspace, checkpointed) = state.turn_workspace(thread_id, turn_id, &cwd);
+    if let Some(lingering) = state.lingering.remove(thread_id) {
+        if lingering.running.continue_with(&request) {
+            let turn = Turn {
+                id: turn_id.to_owned(),
+                process: lingering.process,
+                running: lingering.running,
+                workspace,
+                checkpointed,
+                arrivals: 0,
+                cursor: None,
+                background: lingering.background,
+            };
+            state.turns.insert(thread_id.to_owned(), turn);
+            return;
+        }
+        state.end_lingering(thread_id, lingering);
     }
+    state.processes += 1;
+    let process = state.processes;
     let weak: Weak<Mutex<State>> = state.this.clone();
-    let (sink_thread, sink_turn) = (thread_id.to_owned(), turn_id.to_owned());
+    let sink_thread = thread_id.to_owned();
     let sink = Box::new(move |output| {
         if let Some(shared) = weak.upgrade() {
-            lock(&shared).receive(&sink_thread, &sink_turn, output);
+            lock(&shared).receive_from(&sink_thread, process, output);
         }
     });
     match adapter.start_turn(request, sink) {
         Ok(running) => {
             let turn = Turn {
                 id: turn_id.to_owned(),
+                process,
                 running,
                 workspace,
                 checkpointed,
@@ -3658,6 +3762,46 @@ fn start_turn(
     }
 }
 
+impl State {
+    /// What a turn starting now in `cwd` reads its changes against: the project's worktrees
+    /// before it, and a checkpoint of the folder, queued now.
+    fn turn_workspace(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        cwd: &str,
+    ) -> (Option<TurnWorkspace>, Option<String>) {
+        let project = self
+            .model
+            .thread(thread_id)
+            .and_then(|thread| thread.project_id.as_deref())
+            .and_then(|project_id| self.model.project(project_id));
+        let workspace = project.and_then(|project| {
+            let repository = project.workspace_root.clone();
+            let worktrees_before = git::worktrees(&repository)?;
+            Some(TurnWorkspace {
+                repository,
+                worktrees_before,
+                tool_inputs: Vec::new(),
+                moved: false,
+            })
+        });
+        let checkpointed = workspace.as_ref().map(|_| cwd.to_owned());
+        if let Some(dir) = &checkpointed {
+            let (dir, reference) = (
+                dir.clone(),
+                checkpoint::reference(thread_id, turn_id, Moment::Before),
+            );
+            self.checkpoints.queue(&dir.clone(), move || {
+                if let Err(error) = checkpoint::capture(&dir, &reference) {
+                    eprintln!("hoshi: no checkpoint before the turn in {dir}: {error}");
+                }
+            });
+        }
+        (workspace, checkpointed)
+    }
+}
+
 fn check_provider_version(
     state: &Mutex<State>,
     maintenance: &Mutex<()>,
@@ -3668,8 +3812,10 @@ fn check_provider_version(
         Err(TryLockError::WouldBlock) => return lock(state).provider_version.clone(),
     };
     let adapter = lock(state).adapter.clone()?;
+    adapter.forget_version();
     let installation = adapter.installation()?;
     let mut state = lock(state);
+    state.provider_version_checked_at = Some(Instant::now());
     let update = state
         .provider_version
         .as_ref()
@@ -3833,6 +3979,7 @@ mod tests {
         model: Option<String>,
         attachments: Vec<TurnAttachment>,
         instructions: Option<String>,
+        subagent_effort: SubagentEffort,
     }
 
     /// Records each request and replays a script; a turn whose script does not
@@ -3865,7 +4012,13 @@ mod tests {
             let _ = self.stop.send(TurnOutcome::Completed);
         }
 
-        fn steer(&self, message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
+        fn steer(
+            &self,
+            message_id: &str,
+            _prompt: &str,
+            _attachments: &[TurnAttachment],
+            _at_once: bool,
+        ) -> bool {
             let Some(steers) = &self.steers else {
                 return false;
             };
@@ -3911,6 +4064,7 @@ mod tests {
                 model: request.model,
                 attachments: request.attachments,
                 instructions: request.instructions,
+                subagent_effort: request.subagent_effort,
             });
             let script: Vec<_> = self
                 .script
@@ -3973,6 +4127,8 @@ mod tests {
                     window_minutes: 300,
                     resets_at: None,
                 }],
+                banked_resets: None,
+                account: None,
             })
         }
 
@@ -3985,9 +4141,50 @@ mod tests {
         }
     }
 
+    /// Banks one reset of `grant_a` and answers each spend with the next of `answers`.
+    struct ResetAdapter {
+        answers: Mutex<Vec<BankedResetSpend>>,
+        spends: Mutex<Vec<(String, String)>>,
+    }
+
+    impl ProviderAdapter for ResetAdapter {
+        fn models(&self) -> hoshi_core::ProviderModels {
+            hoshi_core::ProviderModels::default()
+        }
+
+        fn usage_limits(&self) -> Option<UsageLimits> {
+            Some(UsageLimits {
+                windows: Vec::new(),
+                banked_resets: Some(hoshi_core::BankedResets {
+                    count: 1,
+                    next_grant_id: Some("grant_a".into()),
+                    expires_at: Vec::new(),
+                }),
+                account: None,
+            })
+        }
+
+        fn spend_banked_reset(&self, grant_id: &str, request_id: &str) -> BankedResetSpend {
+            self.spends
+                .lock()
+                .unwrap()
+                .push((grant_id.to_owned(), request_id.to_owned()));
+            self.answers.lock().unwrap().remove(0)
+        }
+
+        fn start_turn(
+            &self,
+            _request: TurnRequest,
+            _sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            Err(TurnFailure::ProviderDisabled)
+        }
+    }
+
     /// Reports 1.0.0 against a 1.1.0 release until its updater ran.
+    /// Its update writes `marker`, which the installed version reads.
     struct OutdatedAdapter {
-        updated: Mutex<bool>,
+        marker: PathBuf,
     }
 
     impl ProviderAdapter for OutdatedAdapter {
@@ -3996,11 +4193,18 @@ mod tests {
         }
 
         fn installation(&self) -> Option<Installation> {
-            let updated = *self.updated.lock().unwrap();
+            let updated = self.marker.is_file();
+            let marker = self.marker.display();
             let (program, args) = if cfg!(windows) {
-                ("cmd", vec!["/C".to_owned(), "echo updated".to_owned()])
+                (
+                    "cmd",
+                    vec!["/C".to_owned(), format!("echo updated> {marker}")],
+                )
             } else {
-                ("sh", vec!["-c".to_owned(), "echo updated".to_owned()])
+                (
+                    "sh",
+                    vec!["-c".to_owned(), format!("echo updated > '{marker}'")],
+                )
             };
             Some(Installation {
                 installed: Some(if updated { "1.1.0" } else { "1.0.0" }.into()),
@@ -4010,10 +4214,6 @@ mod tests {
                     args,
                 }),
             })
-        }
-
-        fn forget_version(&self) {
-            *self.updated.lock().unwrap() = true;
         }
 
         fn start_turn(
@@ -4033,14 +4233,10 @@ mod tests {
                 let _ = sender.send(version);
             }
         });
-        let engine = Engine::from_store(
-            Store::open_in_memory().unwrap(),
-            &scratch_dir("provider-update"),
-            notify,
-        )
-        .unwrap();
+        let dir = scratch_dir("provider-update");
+        let engine = Engine::from_store(Store::open_in_memory().unwrap(), &dir, notify).unwrap();
         engine.set_adapter(Some(Arc::new(OutdatedAdapter {
-            updated: Mutex::new(false),
+            marker: dir.join("updated"),
         })));
 
         let checked = engine.check_provider_version().unwrap();
@@ -4083,6 +4279,38 @@ mod tests {
 
         let restarted = Engine::open(&data_dir, notify).unwrap();
         assert_eq!(restarted.known_usage_limits(), Some(forced));
+    }
+
+    #[test]
+    fn an_unanswered_spend_is_retried_with_the_same_request() {
+        let data_dir = scratch_dir("banked-resets");
+        let engine = Engine::open(&data_dir, Arc::new(|_| {})).unwrap();
+        let unconfirmed = BankedResetSpend::Failed {
+            reason: BankedResetFailure::Unconfirmed,
+        };
+        let adapter = Arc::new(ResetAdapter {
+            answers: Mutex::new(vec![
+                unconfirmed,
+                BankedResetSpend::Reset,
+                BankedResetSpend::NothingToReset,
+            ]),
+            spends: Mutex::default(),
+        });
+
+        assert_eq!(engine.spend_banked_reset(), BankedResetSpend::NoneLeft);
+        engine.set_adapter(Some(adapter.clone()));
+        engine.usage_limits(true).unwrap();
+        assert_eq!(engine.spend_banked_reset(), unconfirmed);
+        assert_eq!(engine.spend_banked_reset(), BankedResetSpend::Reset);
+        assert_eq!(
+            engine.spend_banked_reset(),
+            BankedResetSpend::NothingToReset
+        );
+
+        let spends = adapter.spends.lock().unwrap();
+        assert!(spends.iter().all(|(grant, _)| grant == "grant_a"));
+        assert_eq!(spends[0].1, spends[1].1);
+        assert_ne!(spends[1].1, spends[2].1);
     }
 
     #[test]
@@ -4297,7 +4525,8 @@ mod tests {
             resume_at: None,
             model: Some("haiku".into()),
             attachments: Vec::new(),
-            instructions: Some(delegation::INSTRUCTIONS.into()),
+            instructions: Some(delegation::instructions(0, true, false)),
+            subagent_effort: SubagentEffort::AgentDecides,
         };
         assert_eq!(
             *harness.adapter.requests.lock().unwrap(),
@@ -4318,9 +4547,22 @@ mod tests {
         assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
 
         let folder = harness.data_dir.join("chats").join("chat-1");
-        let cwd = harness.adapter.requests.lock().unwrap()[0].cwd.clone();
-        assert_eq!(PathBuf::from(cwd), folder);
+        let request = harness.adapter.requests.lock().unwrap()[0].clone();
+        assert_eq!(PathBuf::from(&request.cwd), folder);
         assert!(folder.is_dir());
+        let instructions = request.instructions.unwrap();
+        assert!(instructions.contains("delegate_task"));
+        assert!(!instructions.contains("watch_pull_request"));
+        {
+            let mut state = lock(&harness.engine.state);
+            assert!(!state.offers_tool("chat-1", "watch_pull_request"));
+            let isolated = state.call_tool(
+                "chat-1",
+                "delegate_task",
+                &serde_json::json!({ "task": "look", "isolation": "worktree" }),
+            );
+            assert!(isolated.is_err());
+        }
         assert_eq!(
             harness.create_thread_in("chat-2", None, ThreadWorkspace::NewWorktree),
             Err(CommandError::ChatNotLocal {
@@ -4382,6 +4624,7 @@ mod tests {
                 id: "m1".into(),
                 text: "later".into(),
                 attachments: Vec::new(),
+                from_user: true,
             };
             state
                 .queued
@@ -4862,6 +5105,271 @@ Blue"
     }
 
     #[test]
+    fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
+        let harness = Harness::in_memory("delegate-woken", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "wait a minute" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        lock(&harness.engine.state).lingering.insert(
+            child.clone(),
+            Lingering {
+                process: 99,
+                running: Box::new(KeptTurn(Arc::default())),
+                background: None,
+                owes_answer: true,
+                ended: false,
+            },
+        );
+
+        child_turn_ends(&harness, &adapter, 1);
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let first = adapter.requests.lock().unwrap()[2].prompt.clone();
+        assert!(first.starts_with("Delegated task"));
+        assert!(first.contains(delegation::ANSWERS_AGAIN));
+        assert!(harness.thread(&child).task_answered);
+        finish(&adapter, 2, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+
+        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::Woke);
+        assert!(!harness.thread(&child).task_answered);
+        assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+        let state = &harness.engine.state;
+        lock(state).receive_from(
+            &child,
+            99,
+            ProviderOutput::AssistantMessage {
+                item_id: "woken".into(),
+                text: "The minute is up.".into(),
+            },
+        );
+        lock(state).receive_from(
+            &child,
+            99,
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[3].prompt.contains("The minute is up."));
+        assert!(harness.thread(&child).task_answered);
+    }
+
+    /// Thread `t` delegated a task whose turn said `answer` and ended leaving a command
+    /// running in process 99, its answer owed to `t` when `owes_answer`.
+    fn task_left_a_command_running(
+        name: &str,
+        answer: &str,
+        owes_answer: bool,
+    ) -> (Harness, Arc<FakeAdapter>, String) {
+        let harness = Harness::in_memory(name, Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "wait a minute" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        let process = lock(&harness.engine.state).turns[&child].process;
+        lock(&harness.engine.state).receive_from(
+            &child,
+            process,
+            ProviderOutput::AssistantMessage {
+                item_id: "first".into(),
+                text: answer.into(),
+            },
+        );
+        lock(&harness.engine.state).lingering.insert(
+            child.clone(),
+            Lingering {
+                process: 99,
+                running: Box::new(KeptTurn(Arc::default())),
+                background: None,
+                owes_answer,
+                ended: false,
+            },
+        );
+        child_turn_ends(&harness, &adapter, 1);
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        finish(&adapter, 2, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        (harness, adapter, child)
+    }
+
+    fn woken_turn_ends(harness: &Harness, child: &str) {
+        let state = &harness.engine.state;
+        lock(state).receive_from(child, 99, ProviderOutput::Woke);
+        lock(state).receive_from(
+            child,
+            99,
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+        harness.wait_for_turn_end();
+        harness.thread("t");
+    }
+
+    #[test]
+    fn a_task_that_wakes_without_saying_anything_new_leaves_its_parent_alone() {
+        let (harness, adapter, child) =
+            task_left_a_command_running("delegate-woken-silent", "Started the wait.", true);
+
+        woken_turn_ends(&harness, &child);
+
+        assert_eq!(adapter.requests.lock().unwrap().len(), 3);
+        assert!(harness.thread(&child).task_answered);
+        assert!(lock(&harness.engine.state).delegations.is_empty());
+    }
+
+    #[test]
+    fn a_task_woken_by_what_the_user_left_running_doesnt_answer_its_parent() {
+        let (harness, adapter, child) =
+            task_left_a_command_running("delegate-woken-user", "Started the tests.", false);
+
+        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::Woke);
+
+        assert!(harness.thread(&child).task_answered);
+        assert!(lock(&harness.engine.state).delegations.is_empty());
+        assert_eq!(adapter.requests.lock().unwrap().len(), 3);
+    }
+
+    fn says(harness: &Harness, thread_id: &str, item_id: &str, text: &str) {
+        let process = lock(&harness.engine.state).turns[thread_id].process;
+        lock(&harness.engine.state).receive_from(
+            thread_id,
+            process,
+            ProviderOutput::AssistantMessage {
+                item_id: item_id.into(),
+                text: text.into(),
+            },
+        );
+    }
+
+    /// Thread `t` delegated a task, which delegated one of its own; `t`'s turn ended.
+    fn task_with_a_task_of_its_own(name: &str) -> (Harness, Arc<FakeAdapter>, String, String) {
+        let harness = Harness::in_memory(name, Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "delegate the wait" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        let own = lock(&harness.engine.state)
+            .call_tool(
+                &child,
+                "delegate_task",
+                &serde_json::json!({ "task": "wait" }),
+            )
+            .unwrap();
+        let grandchild = own["taskId"].as_str().unwrap().to_owned();
+        (harness, adapter, child, grandchild)
+    }
+
+    #[test]
+    fn a_task_waiting_on_a_task_of_its_own_says_so_and_answers_again() {
+        let (harness, adapter, child, grandchild) = task_with_a_task_of_its_own("delegate-nested");
+        let turn_started = |event: Event| matches!(event, Event::TurnStarted { .. }).then_some(());
+
+        says(&harness, &child, "first", "Started my task.");
+        child_turn_ends(&harness, &adapter, 1);
+        harness.wait_for(turn_started);
+        let first = adapter.requests.lock().unwrap()[3].prompt.clone();
+        assert!(first.contains("Started my task."));
+        assert!(first.contains(delegation::ANSWERS_AGAIN));
+        assert!(harness.thread(&child).task_answered);
+        finish(&adapter, 3, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+
+        says(&harness, &grandchild, "waited", "Waited.");
+        child_turn_ends(&harness, &adapter, 2);
+        harness.wait_for(turn_started);
+        assert!(!harness.thread(&child).task_answered);
+        assert!(
+            adapter.requests.lock().unwrap()[4]
+                .prompt
+                .contains("Waited.")
+        );
+
+        says(&harness, &child, "second", "My task said: Waited.");
+        child_turn_ends(&harness, &adapter, 4);
+        harness.wait_for(turn_started);
+        let last = adapter.requests.lock().unwrap()[5].prompt.clone();
+        assert!(last.contains("My task said: Waited."));
+        assert!(last.contains(delegation::ALL_ANSWERED));
+        assert!(harness.thread(&child).task_answered);
+    }
+
+    #[test]
+    fn cancelling_a_task_cancels_the_tasks_of_its_own() {
+        let (harness, adapter, child, grandchild) =
+            task_with_a_task_of_its_own("delegate-nested-cancel");
+        says(&harness, &child, "first", "Started my task.");
+        child_turn_ends(&harness, &adapter, 1);
+
+        assert!(lock(&harness.engine.state).cancel_task(&child));
+
+        assert!(harness.thread(&child).task_cancelled);
+        assert!(harness.thread(&grandchild).task_cancelled);
+        assert!(lock(&harness.engine.state).delegations.is_empty());
+    }
+
+    #[test]
+    fn a_task_a_restart_cut_short_is_awaited_again_only_once_it_runs() {
+        let harness = Harness::in_memory("delegate-restored", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "count the files" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+
+        let restored = lock(&harness.engine.state).pending_delegations();
+        lock(&harness.engine.state).delegations = restored;
+        assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+
+        lock(&harness.engine.state).turns.remove(&child);
+        assert!(harness.engine.snapshot().pending_tasks.is_empty());
+        assert!(lock(&harness.engine.state).delegations.contains_key(&child));
+    }
+
+    #[test]
+    fn cancelling_a_task_that_answered_stops_the_commands_it_left_running() {
+        let harness = Harness::in_memory("delegate-cancel-kept", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "wait a minute" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        let process = Arc::new(KeptProcess::default());
+        lock(&harness.engine.state).lingering.insert(
+            child.clone(),
+            Lingering {
+                process: 99,
+                running: Box::new(KeptTurn(process.clone())),
+                background: None,
+                owes_answer: true,
+                ended: false,
+            },
+        );
+        child_turn_ends(&harness, &adapter, 1);
+
+        assert!(lock(&harness.engine.state).cancel_task(&child));
+
+        assert!(*process.closed.lock().unwrap());
+        assert!(!lock(&harness.engine.state).lingering.contains_key(&child));
+        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::Woke);
+        assert!(harness.thread(&child).task_answered);
+        assert!(harness.thread(&child).task_cancelled);
+    }
+
+    #[test]
     fn a_cancelled_task_never_answers_and_only_its_parent_reaches_it() {
         let harness = Harness::in_memory("delegate-cancel", Vec::new());
         let adapter = adapter(None);
@@ -4900,12 +5408,17 @@ Blue"
         let child = planning_task(&harness, &adapter);
 
         harness.engine.cancel_task(&child);
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let told = adapter.requests.lock().unwrap()[2].prompt.clone();
+        assert!(told.contains("[stopped]") && told.contains(delegation::STOPPED_BY_USER));
+        assert!(told.contains(delegation::ALL_ANSWERED));
+
         harness.send(&child, "m5", "one more thing");
-        child_turn_ends(&harness, &adapter, 2);
+        child_turn_ends(&harness, &adapter, 3);
 
         assert!(harness.thread(&child).task_cancelled);
         assert!(harness.engine.snapshot().pending_tasks.is_empty());
-        assert_eq!(adapter.requests.lock().unwrap().len(), 3);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 4);
     }
 
     #[test]
@@ -4933,6 +5446,12 @@ Blue"
             )
             .unwrap();
         let grandchild = deeper["taskId"].as_str().unwrap().to_owned();
+        {
+            let state = lock(&harness.engine.state);
+            assert!(state.offers_tool("t", "watch_pull_request"));
+            assert!(!state.offers_tool(&child, "watch_pull_request"));
+            assert!(!state.offers_tool(&child, "unwatch_pull_request"));
+        }
         assert_eq!(
             harness.thread(&grandchild).parent_thread_id.as_deref(),
             Some(child.as_str())
@@ -4955,6 +5474,22 @@ Blue"
         assert!(told(0).is_some_and(|told| !told.contains(delegation::TASK_INSTRUCTIONS)));
         assert!(told(1).is_some_and(|told| told.contains(delegation::TASK_INSTRUCTIONS)));
         assert_eq!(told(2), None);
+    }
+
+    #[test]
+    fn turns_carry_how_the_agent_chooses_its_subagents_effort() {
+        let harness = Harness::in_memory("subagent-effort", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "look it up");
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        harness.engine.set_subagent_effort(SubagentEffort::Thread);
+        harness.send("t", "m2", "again");
+
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests[0].subagent_effort, SubagentEffort::AgentDecides);
+        assert_eq!(requests[1].subagent_effort, SubagentEffort::Thread);
     }
 
     /// A task whose plan the user sent back to planning, its turn over, and its parent at rest.
@@ -5141,6 +5676,7 @@ Blue"
             .dispatch(Command::ProjectWorktreeSetupSet {
                 project_id: "p".into(),
                 setup: Some(hoshi_core::WorktreeSetup {
+                    files: Vec::new(),
                     command: format!("  {marker}  "),
                     wait: true,
                 }),
@@ -5175,6 +5711,7 @@ Blue"
             .dispatch(Command::ProjectWorktreeSetupSet {
                 project_id: "p".into(),
                 setup: Some(hoshi_core::WorktreeSetup {
+                    files: Vec::new(),
                     command: "exit 3".into(),
                     wait: true,
                 }),
@@ -5201,6 +5738,148 @@ Blue"
         harness.engine.skip_worktree_setup("f1234567-rest").unwrap();
         harness.wait_for_turn_end();
         assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    fn wait_for_setup_end(harness: &Harness) -> hoshi_core::WorktreeSetupRun {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let runs = harness.engine.worktree_setups();
+            if let Some(run) = runs
+                .into_iter()
+                .find(|run| run.status != hoshi_core::WorktreeSetupStatus::Running)
+            {
+                return run;
+            }
+            assert!(Instant::now() < deadline, "the setup never ended");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn a_new_worktree_gets_the_project_s_files_before_its_command_runs() {
+        let repo = git::tests::temp_repository("engine-setup-files");
+        std::fs::write(repo.join(".env"), "KEY=1").unwrap();
+        std::fs::create_dir_all(repo.join("secrets")).unwrap();
+        std::fs::write(repo.join("secrets/a.env"), "a").unwrap();
+        std::fs::write(repo.join("secrets/b.env"), "b").unwrap();
+        std::fs::write(repo.join("secrets/notes.txt"), "n").unwrap();
+        let harness = Harness::new(
+            "setup-files",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        let check = if cfg!(windows) {
+            "if (Test-Path secrets/b.env) { Copy-Item .env ready.txt } else { exit 4 }"
+        } else {
+            "test -f secrets/b.env && cp .env ready.txt"
+        };
+        harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    files: vec![
+                        ".env".into(),
+                        "secrets/*.env".into(),
+                        "local.properties".into(),
+                    ],
+                    command: check.into(),
+                    wait: true,
+                }),
+            })
+            .unwrap();
+        harness
+            .create_thread("c1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        harness.send("c1234567-rest", "m1", "go");
+
+        harness.wait_for_turn_end();
+        let worktree = PathBuf::from(harness.thread("c1234567-rest").worktree_path.unwrap());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("ready.txt"))
+                .unwrap()
+                .trim(),
+            "KEY=1"
+        );
+        assert!(worktree.join("secrets/a.env").is_file());
+        assert!(!worktree.join("secrets/notes.txt").exists());
+        let run = wait_for_setup_end(&harness);
+        assert_eq!(run.status, hoshi_core::WorktreeSetupStatus::Succeeded);
+        assert_eq!(run.copied_files, 3);
+        assert_eq!(run.missing_files, ["local.properties"]);
+        assert!(run.failed_files.is_empty());
+        assert!(run.terminal_id.is_some());
+    }
+
+    #[test]
+    fn a_setup_of_files_only_releases_the_held_message_once_copied() {
+        let repo = git::tests::temp_repository("engine-setup-files-only");
+        std::fs::write(repo.join(".env"), "KEY=1").unwrap();
+        let harness = Harness::new(
+            "setup-files-only",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+        harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    files: vec!["missing/*.env".into(), ".env".into()],
+                    command: " ".into(),
+                    wait: true,
+                }),
+            })
+            .unwrap();
+        harness
+            .create_thread("o1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        harness.send("o1234567-rest", "m1", "go");
+
+        harness.wait_for_turn_end();
+        let worktree = PathBuf::from(harness.thread("o1234567-rest").worktree_path.unwrap());
+        assert!(worktree.join(".env").is_file());
+        let run = wait_for_setup_end(&harness);
+        assert_eq!(run.status, hoshi_core::WorktreeSetupStatus::Succeeded);
+        assert_eq!(run.terminal_id, None);
+        assert_eq!(run.exit_code, None);
+        assert_eq!(run.copied_files, 1);
+        assert_eq!(run.missing_files, ["missing/*.env"]);
+        assert_eq!(run.held_messages, 0);
+        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_setup_refuses_files_outside_the_project() {
+        let repo = git::tests::temp_repository("engine-setup-escape");
+        let harness = Harness::new(
+            "setup-escape",
+            repo,
+            Store::open_in_memory().unwrap(),
+            completed_turn(),
+        );
+
+        let error = harness
+            .engine
+            .dispatch(Command::ProjectWorktreeSetupSet {
+                project_id: "p".into(),
+                setup: Some(hoshi_core::WorktreeSetup {
+                    files: vec![".env".into(), "../outside/.env".into()],
+                    command: String::new(),
+                    wait: false,
+                }),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            CommandError::SetupFileInvalid {
+                path: "../outside/.env".into()
+            }
+        );
+        assert_eq!(harness.engine.snapshot().projects[0].worktree_setup, None);
     }
 
     #[test]
@@ -5644,8 +6323,10 @@ Blue"
         .unwrap();
         let read = call("thread_read", serde_json::json!({ "threadId": "o" })).unwrap();
 
-        assert_eq!(waited["timedOut"], false);
+        assert_eq!(waited.get("timedOut"), None);
         assert_eq!(waited["lastAnswer"], "done");
+        assert_eq!(read.get("archived"), None);
+        assert_eq!(read.get("earlierMessages"), None);
         let roles: Vec<_> = read["messages"]
             .as_array()
             .unwrap()
@@ -6983,5 +7664,286 @@ Blue"
             .unwrap_err();
 
         assert!(matches!(error, CommandError::NotAGitRepository { .. }));
+    }
+
+    /// One agent process the test speaks for, kept after its turns while it says so.
+    #[derive(Default)]
+    struct KeptProcess {
+        sink: Mutex<Option<OutputSink>>,
+        spawned: Mutex<usize>,
+        lingers: Mutex<bool>,
+        /// Whether a next turn may run in it.
+        takes_turns: Mutex<bool>,
+        continued: Mutex<Vec<String>>,
+        stopped: Mutex<Vec<String>>,
+        closed: Mutex<bool>,
+    }
+
+    impl KeptProcess {
+        fn report(&self, output: ProviderOutput) {
+            let mut sink = self.sink.lock().unwrap().take().unwrap();
+            sink(output);
+            *self.sink.lock().unwrap() = Some(sink);
+        }
+    }
+
+    struct KeptAdapter(Arc<KeptProcess>);
+
+    struct KeptTurn(Arc<KeptProcess>);
+
+    impl RunningTurn for KeptTurn {
+        fn interrupt(&self) {}
+
+        fn respond(&self, _request_id: &str, _response: &RequestResponse) {}
+
+        fn stop_background_task(&self, task_id: &str) {
+            self.0.stopped.lock().unwrap().push(task_id.to_owned());
+        }
+
+        fn await_background_tasks(
+            &self,
+            task_ids: &[String],
+            _awaited: bool,
+        ) -> Option<Vec<String>> {
+            Some(
+                task_ids
+                    .iter()
+                    .filter(|task_id| *task_id == "b1")
+                    .cloned()
+                    .collect(),
+            )
+        }
+
+        fn lingers(&self) -> bool {
+            *self.0.lingers.lock().unwrap()
+        }
+
+        fn continue_with(&self, request: &TurnRequest) -> bool {
+            if !*self.0.takes_turns.lock().unwrap() {
+                return false;
+            }
+            self.0
+                .continued
+                .lock()
+                .unwrap()
+                .push(request.prompt.clone());
+            true
+        }
+
+        fn close(&self) {
+            *self.0.closed.lock().unwrap() = true;
+        }
+    }
+
+    impl ProviderAdapter for KeptAdapter {
+        fn models(&self) -> hoshi_core::ProviderModels {
+            hoshi_core::ProviderModels::default()
+        }
+
+        fn start_turn(
+            &self,
+            _request: TurnRequest,
+            sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            *self.0.spawned.lock().unwrap() += 1;
+            *self.0.sink.lock().unwrap() = Some(sink);
+            Ok(Box::new(KeptTurn(self.0.clone())))
+        }
+    }
+
+    fn dev_server() -> BackgroundTask {
+        BackgroundTask {
+            task_id: "b1".into(),
+            tool_call_id: Some("toolu_1".into()),
+            description: "Start the dev server".into(),
+            started_at: 1,
+        }
+    }
+
+    /// Thread `t`'s first turn starts the dev server and completes, leaving it running.
+    fn leave_dev_server_running(name: &str) -> (Harness, Arc<KeptProcess>) {
+        let harness = Harness::in_memory(name, Vec::new());
+        let process = Arc::new(KeptProcess {
+            takes_turns: Mutex::new(true),
+            ..KeptProcess::default()
+        });
+        harness
+            .engine
+            .set_adapter(Some(Arc::new(KeptAdapter(process.clone()))));
+        harness.send("t", "m1", "start the dev server");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        process.report(ProviderOutput::SessionStarted {
+            session_id: "s1".into(),
+        });
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: vec![dev_server()],
+            waiting: false,
+        });
+        *process.lingers.lock().unwrap() = true;
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+        (harness, process)
+    }
+
+    fn running_in_background(harness: &Harness) -> Vec<ThreadBackgroundTasks> {
+        harness.engine.snapshot().background_tasks
+    }
+
+    #[test]
+    fn a_turn_that_leaves_a_command_running_ends_and_its_process_takes_the_next_message() {
+        let (harness, process) = leave_dev_server_running("kept-process");
+
+        assert_eq!(harness.thread("t").status, ThreadStatus::Idle);
+        assert_eq!(
+            running_in_background(&harness),
+            [ThreadBackgroundTasks {
+                thread_id: "t".into(),
+                tasks: vec![dev_server()],
+                waiting: false,
+            }]
+        );
+
+        harness.send("t", "m2", "is it up?");
+        let started = harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } => Some(turn_id),
+            _ => None,
+        });
+        assert_eq!(started, "m2");
+        assert_eq!(*process.spawned.lock().unwrap(), 1);
+        assert_eq!(*process.continued.lock().unwrap(), ["is it up?"]);
+
+        process.report(ProviderOutput::AssistantMessage {
+            item_id: "a2".into(),
+            text: "It is.".into(),
+        });
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+        assert_eq!(running_in_background(&harness).len(), 1);
+    }
+
+    #[test]
+    fn a_command_left_running_that_ends_wakes_the_agent_in_a_turn_of_its_own() {
+        let (harness, process) = leave_dev_server_running("kept-process-wake");
+
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false,
+        });
+        process.report(ProviderOutput::Woke);
+        let woken = harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } => Some(turn_id),
+            _ => None,
+        });
+        assert_ne!(woken, "m1");
+        assert_eq!(harness.thread("t").status, ThreadStatus::Working);
+        process.report(ProviderOutput::BackgroundTaskEnded {
+            task_id: "b1".into(),
+            tool_use_id: Some("toolu_1".into()),
+            failed: true,
+        });
+        *process.lingers.lock().unwrap() = false;
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+
+        let items = harness.engine.transcript("t", None).unwrap().items;
+        assert!(
+            items
+                .iter()
+                .any(|item| item.id == format!("{woken}:ended:b1"))
+        );
+        assert!(running_in_background(&harness).is_empty());
+        assert!(lock(&harness.engine.state).lingering.is_empty());
+    }
+
+    #[test]
+    fn a_process_kept_between_turns_is_forgotten_once_it_ends() {
+        let (harness, process) = leave_dev_server_running("kept-process-ends");
+
+        process.report(ProviderOutput::ProcessEnded);
+
+        assert!(running_in_background(&harness).is_empty());
+        assert!(lock(&harness.engine.state).lingering.is_empty());
+        harness.send("t", "m2", "again");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        assert_eq!(*process.spawned.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_command_left_running_can_be_stopped_between_turns() {
+        let (harness, process) = leave_dev_server_running("kept-process-stop");
+
+        harness
+            .engine
+            .dispatch(Command::BackgroundTaskStop {
+                thread_id: "t".into(),
+                task_id: "b1".into(),
+            })
+            .unwrap();
+
+        assert_eq!(*process.stopped.lock().unwrap(), ["b1"]);
+    }
+
+    #[test]
+    fn a_next_message_the_kept_process_cannot_take_starts_a_fresh_one() {
+        let (harness, process) = leave_dev_server_running("kept-process-refuses");
+        *process.takes_turns.lock().unwrap() = false;
+
+        harness.send("t", "m2", "now with another model");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+
+        assert!(*process.closed.lock().unwrap());
+        assert_eq!(*process.spawned.lock().unwrap(), 2);
+        assert!(running_in_background(&harness).is_empty());
+    }
+
+    #[test]
+    fn archiving_or_deleting_a_thread_ends_the_process_its_turn_kept() {
+        let (harness, process) = leave_dev_server_running("kept-process-archive");
+        harness
+            .engine
+            .dispatch(Command::ThreadArchive {
+                thread_id: "t".into(),
+                archived: true,
+            })
+            .unwrap();
+        assert!(*process.closed.lock().unwrap());
+        assert!(running_in_background(&harness).is_empty());
+
+        let (harness, process) = leave_dev_server_running("kept-process-delete");
+        harness
+            .engine
+            .dispatch(Command::ThreadDelete {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert!(*process.closed.lock().unwrap());
+        assert!(lock(&harness.engine.state).lingering.is_empty());
+    }
+
+    #[test]
+    fn the_agent_awaits_its_background_commands_while_its_turn_runs() {
+        let (harness, _process) = leave_dev_server_running("kept-process-await");
+        let call = |harness: &Harness| {
+            lock(&harness.engine.state).call_tool(
+                "t",
+                background::TOOL,
+                &serde_json::json!({ "backgroundTaskIds": ["b1", "b9"] }),
+            )
+        };
+        assert!(call(&harness).is_err(), "no turn runs");
+
+        harness.send("t", "m2", "run the tests");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let answer = call(&harness).unwrap();
+
+        assert_eq!(answer["backgroundTaskIds"], serde_json::json!(["b1"]));
+        assert_eq!(answer["notRunning"], serde_json::json!(["b9"]));
+        assert!(answer["next"].is_string());
     }
 }

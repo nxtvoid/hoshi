@@ -49,6 +49,12 @@ pub enum ProviderOutput {
         is_error: bool,
         detail: Option<ToolDetail>,
     },
+    /// What a running call did so far, such as the model a subagent runs on; replaces what
+    /// was reported before.
+    ToolCallDetail {
+        item_id: String,
+        detail: ToolDetail,
+    },
     /// What a subagent did, which the agent's `tool_use_id` call started. Only its messages,
     /// reasoning and tool calls are kept.
     Subagent {
@@ -86,8 +92,8 @@ pub enum ProviderOutput {
         failed: bool,
     },
     /// The commands the agent left running in the background, whenever they change or a run
-    /// starts or ends beside them. The turn waits for them, and the agent answers each one
-    /// that ends. `waiting` when no run goes on: the turn only waits for them.
+    /// starts or ends beside them. The turn waits only for those the agent said it awaits;
+    /// the others outlive it. `waiting` when no run goes on: the turn only waits.
     BackgroundTasks {
         tasks: Vec<BackgroundTask>,
         waiting: bool,
@@ -117,4 +123,11 @@ pub enum ProviderOutput {
     TurnCompleted {
         outcome: TurnOutcome,
     },
+    /// After its turn completed, the agent went on by itself, as a command it left running in
+    /// the background ended: what follows, up to the next `TurnCompleted`, is a turn of its
+    /// own.
+    Woke,
+    /// The process a completed turn left running for its background commands ended; nothing
+    /// more comes from it.
+    ProcessEnded,
 }

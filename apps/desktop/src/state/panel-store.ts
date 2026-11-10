@@ -6,6 +6,7 @@ import { useTerminalStore } from './terminal-store'
 import {
   activateSurface,
   closeSurface,
+  knownSurfaces,
   NO_SURFACES,
   openSurface,
   showTurnDiff,
@@ -121,6 +122,14 @@ export const usePanelStore = create<PanelState>()(
     },
     {
       name: 'hoshi-panel',
+      merge: (saved, current) => {
+        const restored = saved as Partial<PanelState> | undefined
+        return {
+          ...current,
+          ...restored,
+          threads: knownSurfaces(restored?.threads ?? {})
+        }
+      },
       partialize: ({ open, detailsOpen, maximized, width, threads }) => ({
         open,
         detailsOpen,

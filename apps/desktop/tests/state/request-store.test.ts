@@ -72,6 +72,9 @@ test('keeps the tasks that still owe their thread an answer', () => {
 
   store.applyEvent({ type: 'taskCancelled', threadId: 'task' })
   expect(useRequestStore.getState().pendingTasks).toEqual({})
+
+  store.applyEvent({ type: 'taskReopened', threadId: 'old' })
+  expect(useRequestStore.getState().pendingTasks).toEqual({ old: true })
 })
 
 test('drops the requests of a thread that went back before them', () => {
@@ -95,4 +98,33 @@ test('drops the requests of a thread that went back before them', () => {
   expect(useRequestStore.getState().pending.map((item) => item.id)).toEqual([
     'c'
   ])
+})
+
+test('keeps the latest message of each delegated task', () => {
+  const store = useRequestStore.getState()
+  store.seed([], ['task'], [{ threadId: 'old', text: 'Earlier answer' }])
+  const say = (threadId: string, id: string, text: string) =>
+    store.applyEvent({
+      type: 'itemAdded',
+      item: {
+        id,
+        threadId,
+        createdAt: '2026-11-08T10:00:00Z',
+        content: { kind: 'assistantMessage', text }
+      }
+    })
+
+  say('task', 'm1', 'Looking\n  around')
+  say('old', 'm2', 'More')
+  say('parent', 'm3', 'Not a task')
+
+  expect(useRequestStore.getState().taskPreviews).toEqual({
+    task: 'Looking around',
+    old: 'More'
+  })
+
+  store.applyEvent({ type: 'threadDeleted', threadId: 'old' })
+  expect(useRequestStore.getState().taskPreviews).toEqual({
+    task: 'Looking around'
+  })
 })

@@ -5,7 +5,7 @@ import type { ThreadBackgroundTasks } from '@/bindings/ThreadBackgroundTasks'
 type ThreadBackground = { tasks: BackgroundTask[]; waiting: boolean }
 
 type BackgroundTaskState = {
-  /** The commands each running turn waits for in the background, by thread id. */
+  /** The commands each thread's agent runs in the background, by thread id. */
   byThread: Record<string, ThreadBackground>
   /** Task ids the user asked to stop, until they end. */
   stopping: Record<string, true>

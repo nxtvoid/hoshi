@@ -1,7 +1,9 @@
 import { create } from 'zustand'
+import { taskPreview } from '@/lib/agents'
 import { invoke } from '@tauri-apps/api/core'
 import type { Event } from '@/bindings/Event'
 import type { ThreadItem } from '@/bindings/ThreadItem'
+import type { TaskPreview } from '@/bindings/TaskPreview'
 import {
   isRequest,
   type QuestionProgress,
@@ -16,7 +18,13 @@ type RequestState = {
   pending: RequestItem[]
   /** Delegated tasks whose answer hasn't gone back yet, by thread id. */
   pendingTasks: Record<string, true>
-  seed: (items: ThreadItem[], pendingTasks: string[]) => void
+  /** The latest message of each delegated task, shortened, by thread id. */
+  taskPreviews: Record<string, string>
+  seed: (
+    items: ThreadItem[],
+    pendingTasks: string[],
+    taskPreviews?: TaskPreview[]
+  ) => void
   applyEvent: (event: Event) => void
   /** Hands a task's answer back to its thread now, as it stands. */
   sendTaskAnswer: (threadId: string) => Promise<void>
@@ -35,6 +43,7 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
     })),
   pending: [],
   pendingTasks: {},
+  taskPreviews: {},
   onScreenTasks: {},
   setTaskOnScreen: (threadId, onScreen) =>
     set((state) => {
@@ -42,10 +51,13 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
       const { [threadId]: _, ...rest } = state.onScreenTasks
       return { onScreenTasks: onScreen ? { ...rest, [threadId]: true } : rest }
     }),
-  seed: (items, pendingTasks) =>
+  seed: (items, pendingTasks, taskPreviews = []) =>
     set({
       pending: items.filter(isRequest),
-      pendingTasks: Object.fromEntries(pendingTasks.map((id) => [id, true]))
+      pendingTasks: Object.fromEntries(pendingTasks.map((id) => [id, true])),
+      taskPreviews: Object.fromEntries(
+        taskPreviews.map(({ threadId, text }) => [threadId, text])
+      )
     }),
   cancelTask: (threadId) =>
     invoke<void>('cancel_task', { threadId }).catch((error) =>
@@ -56,7 +68,23 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
       console.error('hoshi: failed to send a task answer', error)
     ),
   applyEvent: (event) => {
-    if (event.type === 'threadDelegated') {
+    if (
+      event.type === 'itemAdded' &&
+      event.item.content.kind === 'assistantMessage'
+    ) {
+      const { threadId } = event.item
+      const { pendingTasks, taskPreviews } = get()
+      if (threadId in pendingTasks || threadId in taskPreviews) {
+        set({
+          taskPreviews: {
+            ...taskPreviews,
+            [threadId]: taskPreview(event.item.content.text)
+          }
+        })
+      }
+      return
+    }
+    if (event.type === 'threadDelegated' || event.type === 'taskReopened') {
       set((state) => ({
         pendingTasks: { ...state.pendingTasks, [event.threadId]: true }
       }))
@@ -76,6 +104,10 @@ export const useRequestStore = create<RequestState>()((set, get) => ({
     }
     const { pending } = get()
     if (event.type === 'threadDeleted') {
+      if (event.threadId in get().taskPreviews) {
+        const { [event.threadId]: _, ...taskPreviews } = get().taskPreviews
+        set({ taskPreviews })
+      }
       if (pending.some((item) => item.threadId === event.threadId)) {
         set({
           pending: pending.filter((item) => item.threadId !== event.threadId)

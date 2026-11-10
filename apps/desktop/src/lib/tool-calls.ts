@@ -19,8 +19,17 @@ export type StreamingText = { kind: StreamKind; text: string }
 /** The files a finished turn changed, shown under its last answer. */
 export type TurnChanges = { turnId: string; files: DiffFile[] }
 
+/** How a delegated task ended, as its answer says. */
+export type TaskOutcome = 'completed' | 'failed' | 'stopped'
+
 export type TranscriptRow =
-  | { kind: 'item'; item: TranscriptItem; changes?: TurnChanges }
+  | {
+      kind: 'item'
+      item: TranscriptItem
+      changes?: TurnChanges
+      /** The agent's reply to a task's answer, while the work on its tasks goes on. */
+      note?: TaskOutcome
+    }
   | { kind: 'work'; id: string; entries: WorkItem[] }
   | {
       kind: 'fold'
@@ -116,16 +125,13 @@ export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
 }
 
 /**
- * Whether a row is an agent still at work: a subagent without its answer, or a delegated
- * task whose thread, among `busyTasks`, is still working or waiting.
+ * Whether a row stays in view when its turn folds: a delegated task, which runs on its
+ * own, or a subagent without its answer.
  */
-export function isLiveAgent(row: TranscriptRow, busyTasks: Set<string>) {
+export function staysInView(row: TranscriptRow) {
   if (row.kind !== 'item' || row.item.content.kind !== 'toolCall') return false
+  if (isDelegation(row.item)) return true
   const call = row.item.content
-  if (isDelegation(row.item)) {
-    const { taskId } = delegationOf(call)
-    return taskId !== null && busyTasks.has(taskId)
-  }
   return isSubagentCall(row.item) && call.output === null && !call.interrupted
 }
 

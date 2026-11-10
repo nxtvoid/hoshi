@@ -6,11 +6,15 @@ mod claude_account;
 mod claude_commands;
 mod claude_control;
 mod claude_install;
+mod claude_login;
 mod claude_models;
 mod claude_output;
 mod claude_prompt;
 mod claude_requests;
+mod claude_resets;
+mod claude_subagents;
 mod claude_titles;
+mod claude_tool_search;
 mod claude_tools;
 mod claude_usage;
 mod claude_writing;
@@ -19,8 +23,8 @@ mod updater;
 
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
 use hoshi_core::{
-    AccessMode, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderOutput,
-    RequestResponse, SlashCommand, TurnFailure, UsageLimits,
+    AccessMode, BankedResetSpend, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels,
+    ProviderOutput, RequestResponse, SlashCommand, SubagentEffort, TurnFailure, UsageLimits,
 };
 use std::path::{Path, PathBuf};
 pub use updater::{UpdateFailure, Updater, run as run_update};
@@ -44,6 +48,8 @@ pub struct TurnRequest {
     pub mcp: Option<McpServer>,
     /// Added to the agent's system prompt.
     pub instructions: Option<String>,
+    /// How the agent chooses the model and effort of the subagents and tasks it starts.
+    pub subagent_effort: SubagentEffort,
 }
 
 /// An MCP server reached over HTTP.
@@ -56,6 +62,10 @@ pub struct McpServer {
 
 /// The name agents know hoshi's MCP server by; its tools are `mcp__hoshi__<tool>`.
 pub const MCP_SERVER_NAME: &str = "hoshi";
+
+/// Where hoshi's instructions say its tools are deferred, which the adapter leaves out when
+/// the user turned Claude Code's tool search off.
+pub const DEFERRED_TOOLS: &str = ", deferred: load them with ToolSearch, several at once (\"select:mcp__hoshi__<a>,mcp__hoshi__<b>\")";
 
 /// Something the message carries besides its text.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,7 +165,10 @@ impl Installation {
     }
 }
 
-/// Receives everything a turn reports, ending with `ProviderOutput::TurnCompleted`.
+/// Receives everything a turn reports, ending with `ProviderOutput::TurnCompleted`. When the
+/// turn's process outlives it ([`RunningTurn::lingers`]), it goes on with what that process
+/// reports later: the turns [`RunningTurn::continue_with`] or `ProviderOutput::Woke` start in
+/// it, and `ProviderOutput::ProcessEnded` once it is gone.
 pub type OutputSink = Box<dyn FnMut(ProviderOutput) + Send>;
 
 pub trait ProviderAdapter: Send + Sync {
@@ -165,6 +178,13 @@ pub trait ProviderAdapter: Send + Sync {
     /// The plan's rolling limits; `None` when they can't be read. Can run the CLI.
     fn usage_limits(&self) -> Option<UsageLimits> {
         None
+    }
+
+    /// Spends the banked reset of grant `grant_id`, which [`UsageLimits`] named. Retrying with
+    /// the same `request_id` repeats the same spend instead of spending another. Reaches the
+    /// network.
+    fn spend_banked_reset(&self, _grant_id: &str, _request_id: &str) -> BankedResetSpend {
+        BankedResetSpend::NoneLeft
     }
 
     /// The installed CLI, its latest release and how to update it; `None` when the
@@ -227,10 +247,42 @@ pub trait RunningTurn: Send {
     /// Ignored when it already ended.
     fn stop_background_task(&self, _task_id: &str) {}
 
-    /// Gives the running turn another message, which the agent reads at its next step.
+    /// Gives the running turn another message. The agent reads it `at_once`, as when the
+    /// user steers it, or once the step it is on is over, as fits news it didn't ask for.
     /// `false` when the turn is ending and can't take it: it then needs a turn of its own.
-    fn steer(&self, _message_id: &str, _prompt: &str, _attachments: &[TurnAttachment]) -> bool {
+    fn steer(
+        &self,
+        _message_id: &str,
+        _prompt: &str,
+        _attachments: &[TurnAttachment],
+        _at_once: bool,
+    ) -> bool {
         false
+    }
+
+    /// Makes the turn wait for background commands it started, or stop waiting with
+    /// `awaited` false. Returns the ids among `task_ids` that run; `None` when the provider
+    /// can't wait for them.
+    fn await_background_tasks(&self, _task_ids: &[String], _awaited: bool) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Whether the process stays once its turn completed, keeping the commands the turn left
+    /// running in the background.
+    fn lingers(&self) -> bool {
+        false
+    }
+
+    /// Runs the thread's next turn in the process a completed turn left running, reporting to
+    /// that turn's sink. `false` when it can't, as when the request changed what the process
+    /// was started with: the caller then closes it and starts a turn of its own.
+    fn continue_with(&self, _request: &TurnRequest) -> bool {
+        false
+    }
+
+    /// Ends the process and everything it started.
+    fn close(&self) {
+        self.interrupt();
     }
 }
 

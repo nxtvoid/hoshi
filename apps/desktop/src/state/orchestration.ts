@@ -106,6 +106,7 @@ export function applyEvent(
         updatedAt: event.item.createdAt
       })
     case 'toolCallCompleted':
+    case 'toolCallDetailSet':
     case 'toolCallInterrupted':
       return state
     case 'turnCompleted':
@@ -125,6 +126,8 @@ export function applyEvent(
       return updateThread(event.threadId, { taskCancelled: true })
     case 'taskAnswered':
       return updateThread(event.threadId, { taskAnswered: true })
+    case 'taskReopened':
+      return updateThread(event.threadId, { taskAnswered: false })
     case 'pullRequestWatchSet':
       return updateThread(event.threadId, {
         watchingPullRequest: event.watching
@@ -168,6 +171,13 @@ export function applyItemEvent(
               detail: event.detail
             }
           }
+        : item
+    )
+  }
+  if (event.type === 'toolCallDetailSet' && event.threadId === threadId) {
+    return items.map((item) =>
+      item.id === event.itemId && item.content.kind === 'toolCall'
+        ? { ...item, content: { ...item.content, detail: event.detail } }
         : item
     )
   }

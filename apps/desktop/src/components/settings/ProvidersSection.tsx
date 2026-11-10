@@ -4,7 +4,15 @@ import { Switch } from '@hoshi/ui/components/switch'
 import { useSettingsStore } from '@/state/settings-store'
 import { ThreadTitlesSection } from './ThreadTitlesSection'
 import { ProviderVersionRow } from './ProviderVersionRow'
+import type { SubagentEffort } from '@/bindings/SubagentEffort'
 import { SettingsPage, SettingsRow, SettingsSection } from './SettingsLayout'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue
+} from '@hoshi/ui/components/select'
 
 export function ProvidersSection() {
   const claudeCode = useSettingsStore(
@@ -26,6 +34,23 @@ export function ProvidersSection() {
       </SettingsPage>
     )
   }
+
+  const subagentEffortItems: {
+    value: SubagentEffort
+    label: string
+    description: string
+  }[] = [
+    {
+      value: 'thread',
+      label: m.subagent_effort_thread(),
+      description: m.subagent_effort_thread_description()
+    },
+    {
+      value: 'agentDecides',
+      label: m.subagent_effort_agent_decides(),
+      description: m.subagent_effort_agent_decides_description()
+    }
+  ]
 
   const commitBinaryPath = (value: string) => {
     const binaryPath = value.trim() || null
@@ -65,6 +90,39 @@ export function ProvidersSection() {
                 if (event.key === 'Enter') event.currentTarget.blur()
               }}
             />
+          }
+        />
+        <SettingsRow
+          title={m.subagent_effort()}
+          description={m.subagent_effort_description()}
+          htmlFor='claude-code-subagent-effort'
+          control={
+            <Select
+              items={subagentEffortItems}
+              value={claudeCode.subagentEffort}
+              onValueChange={(value: SubagentEffort | null) => {
+                if (value) updateClaudeCode({ subagentEffort: value })
+              }}
+            >
+              <SelectTrigger
+                id='claude-code-subagent-effort'
+                className='min-w-40'
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align='end' className='w-72'>
+                {subagentEffortItems.map(({ value, label, description }) => (
+                  <SelectItem key={value} value={value} className='py-1.5'>
+                    <div className='flex min-w-0 flex-col gap-0.5'>
+                      <span>{label}</span>
+                      <span className='text-xs whitespace-normal opacity-70'>
+                        {description}
+                      </span>
+                    </div>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           }
         />
         {claudeCode.enabled ? <ProviderVersionRow /> : null}

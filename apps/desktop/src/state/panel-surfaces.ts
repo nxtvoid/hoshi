@@ -34,6 +34,33 @@ export type ThreadSurfaces = { surfaces: Surface[]; activeId: string | null }
 
 export const NO_SURFACES: ThreadSurfaces = { surfaces: [], activeId: null }
 
+const KINDS: Record<SurfaceKind, true> = {
+  diff: true,
+  pullRequest: true,
+  terminal: true,
+  browser: true
+}
+
+/**
+ * Saved panels without the surfaces this version doesn't know, as another version of
+ * the app may have saved.
+ */
+export function knownSurfaces(
+  threads: Record<string, ThreadSurfaces>
+): Record<string, ThreadSurfaces> {
+  return Object.fromEntries(
+    Object.entries(threads).map(([threadId, panel]) => {
+      const surfaces = (panel.surfaces ?? []).filter(
+        (surface) => surface?.kind in KINDS
+      )
+      const activeId = surfaces.some((surface) => surface.id === panel.activeId)
+        ? panel.activeId
+        : (surfaces[0]?.id ?? null)
+      return [threadId, { surfaces, activeId }]
+    })
+  )
+}
+
 export function newSurface(kind: SurfaceKind, id: string): Surface {
   switch (kind) {
     case 'diff':

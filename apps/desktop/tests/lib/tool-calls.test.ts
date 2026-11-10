@@ -6,6 +6,7 @@ import {
   groupTranscript,
   reasoningPreview,
   relativePath,
+  staysInView,
   summarizeToolCalls,
   subagentTranscriptId,
   toolName,
@@ -300,6 +301,25 @@ describe('foldTurns', () => {
     expect(kinds(foldTurns(rows, false, (row) => row.kind === 'item'))).toEqual(
       ['u1', 'one', 'two', 'a1']
     )
+  })
+
+  test('keeps a delegated task in view after its turn folds', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      tool('task', 'mcp__hoshi__delegate_task', { title: 'Count' }),
+      tool('done', 'Agent'),
+      answer('a1', '2026-11-08T10:00:10Z')
+    ])
+    const kinds = (folded: TranscriptRow[]) =>
+      folded.map((row) => (row.kind === 'item' ? row.item.id : row.kind))
+
+    expect(kinds(foldTurns(rows, false, staysInView))).toEqual([
+      'u1',
+      'fold',
+      'task',
+      'a1'
+    ])
   })
 
   const marker = (

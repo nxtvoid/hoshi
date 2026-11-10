@@ -29,16 +29,18 @@ pub use fonts::{SystemFont, group_font_families};
 pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
-    answer_task, answers_message, cancel_task, close_stale_turn, decide, record_branch,
-    record_conversation_cursor, record_delegation, record_output, record_pull_request_watch,
-    record_title, record_turn_changes, record_worktree, record_worktree_left,
-    send_pull_request_update, send_task_result, start_queued_turn, subagent_thread_id, turn_failed,
+    TaskPreview, answer_task, answers_message, cancel_task, close_stale_turn, decide,
+    record_branch, record_conversation_cursor, record_delegation, record_output,
+    record_pull_request_watch, record_title, record_turn_changes, record_worktree,
+    record_worktree_left, reopen_task, send_pull_request_update, send_task_result,
+    start_queued_turn, start_woken_turn, subagent_thread_id, task_preview, turn_failed,
 };
 pub use project::{
     FolderListing, Project, RemoteRepository, WorktreeSetup, WorktreeSetupRun, WorktreeSetupStatus,
+    setup_file_path, setup_file_paths,
 };
 pub use provider::ProviderOutput;
-pub use provider_account::ProviderAccountStatus;
+pub use provider_account::{ProviderAccount, ProviderAccountStatus, ProviderPlan};
 pub use provider_update::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion};
 pub use pull_request::{
     ChecksState, ForgeAccount, ForgeKind, MergeMethod, Mergeability, PullRequest,
@@ -49,7 +51,7 @@ pub use pull_request::{
 pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
 pub use settings::{
     AppSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
-    ThreadTitleSettings,
+    SubagentEffort, ThreadTitleSettings,
 };
 pub use source_control::{
     GitAction, GitActionPhase, GitActionProgress, GitActionPullRequest, GitActionRequest,
@@ -62,5 +64,8 @@ pub use thread::{
     TaskStatus, Thread, ThreadBackgroundTasks, ThreadItem, ThreadStatus, ThreadWorkspace,
     ToolDetail, TranscriptPage, TurnFailure, TurnOutcome,
 };
-pub use usage::{ContextUsage, ThreadContextUsage, UsageLimits, UsageWindow, UsageWindowKind};
+pub use usage::{
+    BankedResetFailure, BankedResetSpend, BankedResets, ContextUsage, ThreadContextUsage,
+    UsageLimits, UsageWindow, UsageWindowKind,
+};
 pub use workspace::{ChangesSummary, Editor};

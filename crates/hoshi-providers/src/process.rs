@@ -8,12 +8,14 @@ use std::thread;
 
 const STDERR_TAIL_BYTES: usize = 2_000;
 
-/// One agent process running one turn. Dropping it does not stop the process.
+/// One agent process, running a turn or kept between turns for the commands it left in the
+/// background. Dropping it does not stop the process.
 #[derive(Clone)]
 pub struct ProcessTurn {
     child: Arc<Mutex<Child>>,
     pid: u32,
     interrupted: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
     stdin: Stdin,
 }
 
@@ -24,13 +26,16 @@ impl ProcessTurn {
 }
 
 impl ProcessTurn {
+    /// Kills the process and everything it started.
     pub fn interrupt(&self) {
         self.interrupted.store(true, Ordering::SeqCst);
-        kill_tree(self.pid, &self.child);
+        if !self.exited.load(Ordering::SeqCst) {
+            kill_tree(self.pid, &self.child);
+        }
     }
 }
 
-/// The turn's stdin, open until the turn completes so the agent can be answered mid-turn.
+/// The process's stdin, open while the agent can be answered or given another turn.
 #[derive(Clone, Default)]
 pub struct Stdin(Arc<Mutex<Option<ChildStdin>>>);
 
@@ -70,13 +75,15 @@ impl Stdin {
 }
 
 /// Spawns `command`, writes `input` to its stdin, then feeds each stdout line through
-/// `parse` into `sink` on a background thread. Stdin stays open until a
-/// `TurnCompleted`, for `parse` and the turn to answer the agent.
+/// `parse` into `sink` on a background thread. `parse` closes stdin once the agent should
+/// end. When the process ends, a turn still open (`in_turn`) completes as failed or
+/// interrupted; otherwise the sink gets `ProcessEnded`.
 pub fn spawn_turn(
     mut command: Command,
     input: String,
     mut sink: OutputSink,
     mut parse: impl FnMut(&str, &Stdin) -> Vec<ProviderOutput> + Send + 'static,
+    in_turn: impl Fn() -> bool + Send + 'static,
 ) -> Result<ProcessTurn, TurnFailure> {
     command
         .stdin(Stdio::piped())
@@ -94,6 +101,7 @@ pub fn spawn_turn(
     stdin.write_line(input.trim_end());
     let child = Arc::new(Mutex::new(child));
     let interrupted = Arc::new(AtomicBool::new(false));
+    let exited = Arc::new(AtomicBool::new(false));
 
     let stderr_tail = thread::spawn(move || {
         let mut buffer = Vec::new();
@@ -106,18 +114,14 @@ pub fn spawn_turn(
 
     let reader_child = Arc::clone(&child);
     let reader_interrupted = Arc::clone(&interrupted);
+    let reader_exited = Arc::clone(&exited);
     let reader_stdin = stdin.clone();
     thread::spawn(move || {
-        let mut completed = false;
         if let Some(stdout) = stdout {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 for output in parse(&line, &reader_stdin) {
-                    completed |= matches!(output, ProviderOutput::TurnCompleted { .. });
                     sink(output);
-                }
-                if completed {
-                    reader_stdin.close();
                 }
             }
         }
@@ -126,8 +130,10 @@ pub fn spawn_turn(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .wait();
+        reader_exited.store(true, Ordering::SeqCst);
         let stderr = stderr_tail.join().unwrap_or_default();
-        if completed {
+        if !in_turn() {
+            sink(ProviderOutput::ProcessEnded);
             return;
         }
         let outcome = if reader_interrupted.load(Ordering::SeqCst) {
@@ -147,6 +153,7 @@ pub fn spawn_turn(
         child,
         pid,
         interrupted,
+        exited,
         stdin,
     })
 }
@@ -192,11 +199,21 @@ mod tests {
     use std::sync::mpsc;
 
     fn run(command: Command) -> Vec<ProviderOutput> {
+        run_in_turn(command, true)
+    }
+
+    fn run_in_turn(command: Command, in_turn: bool) -> Vec<ProviderOutput> {
         let (sender, receiver) = mpsc::channel();
         let sink: OutputSink = Box::new(move |output| {
             let _ = sender.send(output);
         });
-        match spawn_turn(command, String::new(), sink, |_, _| Vec::new()) {
+        match spawn_turn(
+            command,
+            String::new(),
+            sink,
+            |_, _| Vec::new(),
+            move || in_turn,
+        ) {
             Ok(_turn) => receiver.iter().collect(),
             Err(failure) => vec![ProviderOutput::TurnCompleted {
                 outcome: TurnOutcome::Failed { reason: failure },
@@ -244,5 +261,13 @@ mod tests {
                 }
             }]
         ));
+    }
+
+    #[test]
+    fn a_process_that_ends_between_turns_reports_only_its_end() {
+        assert_eq!(
+            run_in_turn(exit_with(0), false),
+            [ProviderOutput::ProcessEnded]
+        );
     }
 }

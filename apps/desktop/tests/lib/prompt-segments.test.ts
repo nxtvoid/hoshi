@@ -1,10 +1,18 @@
 import { expect, test } from 'bun:test'
 import { promptSegments } from '../../src/lib/prompt-segments'
 
+const screenshot = {
+  type: 'image' as const,
+  id: 'image-1',
+  name: 'screenshot.png',
+  mimeType: 'image/png',
+  size: 2048
+}
+
 const known = {
   pullRequests: new Set([12]),
   skills: new Set(['pdf', 'anthropic-skills:docx']),
-  images: ['screenshot.png']
+  images: [screenshot]
 }
 
 const chips = (text: string) =>
@@ -52,7 +60,8 @@ test('an image the message sent shows as a chip with its name', () => {
       text: '[Image #1]',
       start: 8,
       end: 18,
-      label: 'screenshot.png'
+      label: 'screenshot.png',
+      image: screenshot
     }
   ])
 })

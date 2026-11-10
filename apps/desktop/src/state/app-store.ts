@@ -154,9 +154,11 @@ export const useAppStore = create<AppState>()((set, get) => ({
   clearComposerError: () => set({ composerError: null }),
   selectProject: (projectId) => {
     set({ selectedProjectId: projectId, selectedThreadId: null, search: '' })
+    useSubagentStore.getState().leaveAll()
     void useTranscriptStore.getState().load(null)
   },
   selectThread: (threadId) => {
+    useSubagentStore.getState().leaveAll()
     if (get().selectedThreadId === threadId) return
     const projectId = get().threads.find(
       (thread) => thread.id === threadId
@@ -169,6 +171,7 @@ export const useAppStore = create<AppState>()((set, get) => ({
   },
   openDraft: () => {
     set({ selectedThreadId: null, search: '', composerError: null })
+    useSubagentStore.getState().leaveAll()
     void useTranscriptStore.getState().load(null)
   },
   toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
@@ -407,6 +410,8 @@ function receive({ sequence, event }: EventEnvelope) {
   useRequestStore.getState().applyEvent(event)
   if (event.type === 'turnCompleted' || event.type === 'threadDeleted') {
     useStoppingStore.getState().end(event.threadId)
+  }
+  if (event.type === 'threadDeleted') {
     useBackgroundTaskStore.getState().forget(event.threadId)
   }
   if (event.type === 'threadDeleted') {
@@ -540,7 +545,11 @@ async function startSync() {
   useSidebarStore.getState().setView(start.sidebarView)
   useRequestStore
     .getState()
-    .seed(snapshot.pendingRequests, snapshot.pendingTasks)
+    .seed(
+      snapshot.pendingRequests,
+      snapshot.pendingTasks,
+      snapshot.taskPreviews
+    )
   useBackgroundTaskStore.getState().seed(snapshot.backgroundTasks)
   useAppStore.setState({
     ready: true,

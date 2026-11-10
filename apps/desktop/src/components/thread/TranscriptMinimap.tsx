@@ -44,7 +44,7 @@ export function TranscriptMinimap({
 }: {
   rows: TranscriptRow[]
   scrollRef: RefObject<HTMLDivElement | null>
-  listRef: RefObject<HTMLOListElement | null>
+  listRef: RefObject<HTMLElement | null>
   /** Scrolls the transcript to the message with this id. */
   onJump: (id: string) => void
 }) {

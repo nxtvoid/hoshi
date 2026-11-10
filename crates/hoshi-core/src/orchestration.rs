@@ -27,7 +27,7 @@ pub enum Command {
     ProjectRemove {
         project_id: String,
     },
-    /// `None`, or a blank command, stops setting up the project's new worktrees.
+    /// `None`, or no files and a blank command, stops setting up the project's new worktrees.
     ProjectWorktreeSetupSet {
         project_id: String,
         setup: Option<WorktreeSetup>,
@@ -98,7 +98,8 @@ pub enum Command {
         thread_id: String,
         tool_use_id: String,
     },
-    /// Stops one command the running turn left in the background.
+    /// Stops one command the thread's agent left running in the background, during its turn
+    /// or after it.
     BackgroundTaskStop {
         thread_id: String,
         task_id: String,
@@ -217,6 +218,12 @@ pub enum Event {
         #[serde(default)]
         detail: Option<ToolDetail>,
     },
+    /// What a running call did so far replaces what it reported before.
+    ToolCallDetailSet {
+        thread_id: String,
+        item_id: String,
+        detail: ToolDetail,
+    },
     TurnCompleted {
         thread_id: String,
         turn_id: String,
@@ -241,6 +248,11 @@ pub enum Event {
     },
     /// The thread's task answered the agent that delegated it.
     TaskAnswered {
+        thread_id: String,
+    },
+    /// The thread's task, already answered, works again: its agent woke for a command it
+    /// left running, and its next answer goes back too.
+    TaskReopened {
         thread_id: String,
     },
     /// Mid-turn: the agent waits for the user, or works again.
@@ -385,6 +397,9 @@ pub enum CommandError {
     /// A new project or a clone would mix with files already there.
     #[error("folder {path} is not empty")]
     FolderNotEmpty { path: String },
+    /// A file for worktrees to copy is absolute, or leads out of the project or into `.git`.
+    #[error("{path} is not a path inside the project")]
+    SetupFileInvalid { path: String },
     /// Not `owner/name` or a link to a repository on the chosen forge.
     #[error("{input} does not name a repository")]
     RepositoryNameInvalid { input: String },
@@ -413,6 +428,30 @@ pub struct Snapshot {
     pub pending_tasks: Vec<String>,
     /// The commands each running turn waits for in the background.
     pub background_tasks: Vec<ThreadBackgroundTasks>,
+    /// The latest message of each delegated task, shortened.
+    pub task_previews: Vec<TaskPreview>,
+}
+
+/// A delegated task's latest message, shortened to one line for its card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TaskPreview {
+    pub thread_id: String,
+    pub text: String,
+}
+
+/// How many characters of a task's message its preview keeps.
+pub const TASK_PREVIEW_CHARS: usize = 160;
+
+/// `text` on one line, its whitespace collapsed, cut to [`TASK_PREVIEW_CHARS`].
+pub fn task_preview(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= TASK_PREVIEW_CHARS {
+        return line;
+    }
+    let cut: String = line.chars().take(TASK_PREVIEW_CHARS - 1).collect();
+    format!("{}…", cut.trim_end())
 }
 
 /// An event as delivered to the UI, with its position in the event log.
@@ -454,6 +493,8 @@ pub struct ReadModel {
     requests: BTreeMap<String, ThreadItem>,
     /// Tool calls without output yet, of threads and their subagents.
     open_calls: BTreeSet<OpenToolCall>,
+    /// The latest message of each delegated task, shortened.
+    task_previews: BTreeMap<String, String>,
 }
 
 impl ReadModel {
@@ -475,7 +516,23 @@ impl ReadModel {
                 .map(|item| (item.id.clone(), item.clone()))
                 .collect(),
             open_calls: snapshot.open_tool_calls.iter().cloned().collect(),
+            task_previews: snapshot
+                .task_previews
+                .iter()
+                .map(|preview| (preview.thread_id.clone(), preview.text.clone()))
+                .collect(),
         }
+    }
+
+    /// The latest message of each delegated task, shortened.
+    pub fn task_previews(&self) -> Vec<TaskPreview> {
+        self.task_previews
+            .iter()
+            .map(|(thread_id, text)| TaskPreview {
+                thread_id: thread_id.clone(),
+                text: text.clone(),
+            })
+            .collect()
     }
 
     pub fn open_tool_calls(&self) -> impl Iterator<Item = &OpenToolCall> {
@@ -553,12 +610,15 @@ impl ReadModel {
                     .retain(|_, item| threads.contains_key(&item.thread_id));
                 self.open_calls
                     .retain(|call| threads.contains_key(root_thread(&call.thread_id)));
+                self.task_previews
+                    .retain(|thread_id, _| threads.contains_key(thread_id));
             }
             Event::ThreadCreated { thread } => {
                 self.threads.insert(thread.id.clone(), thread.clone());
             }
             Event::ThreadDeleted { thread_id } => {
                 self.threads.remove(thread_id);
+                self.task_previews.remove(thread_id);
                 self.requests.retain(|_, item| &item.thread_id != thread_id);
                 self.open_calls
                     .retain(|call| root_thread(&call.thread_id) != thread_id);
@@ -672,6 +732,12 @@ impl ReadModel {
             Event::ItemAdded { item } => {
                 if let Some(thread) = self.threads.get_mut(&item.thread_id) {
                     thread.updated_at.clone_from(&item.created_at);
+                    if let (Some(_), ItemContent::AssistantMessage { text }) =
+                        (&thread.parent_thread_id, &item.content)
+                    {
+                        self.task_previews
+                            .insert(thread.id.clone(), task_preview(text));
+                    }
                 }
                 let call = OpenToolCall {
                     thread_id: item.thread_id.clone(),
@@ -709,6 +775,7 @@ impl ReadModel {
                     item_id: item_id.clone(),
                 });
             }
+            Event::ToolCallDetailSet { .. } => {}
             Event::TurnCompleted {
                 thread_id,
                 outcome,
@@ -747,6 +814,11 @@ impl ReadModel {
             Event::TaskAnswered { thread_id } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.task_answered = true;
+                }
+            }
+            Event::TaskReopened { thread_id } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.task_answered = false;
                 }
             }
             Event::PullRequestWatchSet {
@@ -819,11 +891,15 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 return Err(CommandError::ProjectNotFound { project_id });
             }
             let setup = setup
-                .map(|setup| WorktreeSetup {
-                    command: setup.command.trim().to_owned(),
-                    wait: setup.wait,
+                .map(|setup| {
+                    Ok::<_, CommandError>(WorktreeSetup {
+                        files: crate::setup_file_paths(&setup.files)?,
+                        command: setup.command.trim().to_owned(),
+                        wait: setup.wait,
+                    })
                 })
-                .filter(|setup| !setup.command.is_empty());
+                .transpose()?
+                .filter(|setup| !setup.files.is_empty() || !setup.command.is_empty());
             Ok(vec![Event::ProjectWorktreeSetupSet { project_id, setup }])
         }
         Command::ProjectRemove { project_id } => {
@@ -1065,12 +1141,18 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             Ok(Vec::new())
         }
-        Command::SubagentStop { thread_id, .. } | Command::BackgroundTaskStop { thread_id, .. } => {
+        Command::SubagentStop { thread_id, .. } => {
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
             if thread.active_turn_id.is_none() {
                 return Err(CommandError::ThreadNotWorking { thread_id });
+            }
+            Ok(Vec::new())
+        }
+        Command::BackgroundTaskStop { thread_id, .. } => {
+            if !model.threads.contains_key(&thread_id) {
+                return Err(CommandError::ThreadNotFound { thread_id });
             }
             Ok(Vec::new())
         }
@@ -1453,6 +1535,27 @@ pub fn answer_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
     }
 }
 
+/// Reopens the answered task thread `thread_id` works on, unless it was cancelled or the
+/// thread that delegated it is gone or put away.
+pub fn reopen_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread)
+            if thread.task_answered
+                && !thread.task_cancelled
+                && thread
+                    .parent_thread_id
+                    .as_ref()
+                    .and_then(|parent| model.threads.get(parent))
+                    .is_some_and(|parent| !parent.archived) =>
+        {
+            vec![Event::TaskReopened {
+                thread_id: thread_id.to_owned(),
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
 pub fn record_delegation(model: &ReadModel, thread_id: &str, parent_thread_id: &str) -> Vec<Event> {
     let (Some(thread), Some(parent)) = (
         model.threads.get(thread_id),
@@ -1534,7 +1637,9 @@ pub fn record_output(
         | ProviderOutput::UsageLimits(_)
         | ProviderOutput::WorkingDirectory { .. }
         | ProviderOutput::BackgroundTasks { .. }
-        | ProviderOutput::ConversationCursor { .. } => Vec::new(),
+        | ProviderOutput::ConversationCursor { .. }
+        | ProviderOutput::Woke
+        | ProviderOutput::ProcessEnded => Vec::new(),
         ProviderOutput::Subagent {
             tool_use_id,
             output,
@@ -1621,6 +1726,11 @@ pub fn record_output(
             item_id,
             output,
             is_error,
+            detail,
+        }],
+        ProviderOutput::ToolCallDetail { item_id, detail } => vec![Event::ToolCallDetailSet {
+            thread_id: thread_id.to_owned(),
+            item_id,
             detail,
         }],
         ProviderOutput::ToolCallStopped { item_id } => vec![Event::ToolCallInterrupted {
@@ -1724,6 +1834,11 @@ fn record_subagent(transcript: &str, output: ProviderOutput, now: &str) -> Vec<E
             is_error,
             detail,
         }],
+        ProviderOutput::ToolCallDetail { item_id, detail } => vec![Event::ToolCallDetailSet {
+            thread_id: transcript.to_owned(),
+            item_id,
+            detail,
+        }],
         ProviderOutput::ToolCallStopped { item_id } => vec![Event::ToolCallInterrupted {
             thread_id: transcript.to_owned(),
             item_id,
@@ -1791,6 +1906,21 @@ pub fn start_queued_turn(
     message_id: &str,
     now: &str,
 ) -> Vec<Event> {
+    start_idle_turn(model, thread_id, message_id, now)
+}
+
+/// Starts a turn the agent began by itself after its own turn completed, as a command it
+/// left running in the background ended. Nothing when the thread is gone or busy.
+pub fn start_woken_turn(
+    model: &ReadModel,
+    thread_id: &str,
+    turn_id: &str,
+    now: &str,
+) -> Vec<Event> {
+    start_idle_turn(model, thread_id, turn_id, now)
+}
+
+fn start_idle_turn(model: &ReadModel, thread_id: &str, message_id: &str, now: &str) -> Vec<Event> {
     match model.threads.get(thread_id) {
         Some(thread) if thread.active_turn_id.is_none() => vec![Event::TurnStarted {
             thread_id: thread_id.to_owned(),
@@ -1954,6 +2084,63 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
         }
+    }
+
+    #[test]
+    fn task_preview_keeps_one_short_line() {
+        assert_eq!(
+            task_preview(
+                "  Found it.
+
+- one
+- two  "
+            ),
+            "Found it. - one - two"
+        );
+        let long = "word ".repeat(100);
+        let preview = task_preview(&long);
+        assert_eq!(preview.chars().count(), TASK_PREVIEW_CHARS);
+        assert!(preview.ends_with("word…"));
+    }
+
+    #[test]
+    fn keeps_the_latest_message_of_delegated_tasks_only() {
+        let mut model = model_with_thread();
+        run(&mut model, create_thread("task", "p")).unwrap();
+        model.apply(&Event::ThreadDelegated {
+            thread_id: "task".into(),
+            parent_thread_id: "t".into(),
+            shares_worktree: false,
+        });
+        let say = |thread_id: &str, id: &str, text: &str| Event::ItemAdded {
+            item: ThreadItem {
+                id: id.into(),
+                thread_id: thread_id.into(),
+                created_at: NOW.into(),
+                content: ItemContent::AssistantMessage { text: text.into() },
+            },
+        };
+
+        model.apply(&say("t", "m1", "the parent talks"));
+        model.apply(&say("task", "m2", "Looking"));
+        model.apply(&say(
+            "task",
+            "m3",
+            "Counted
+42 files",
+        ));
+
+        assert_eq!(
+            model.task_previews(),
+            [TaskPreview {
+                thread_id: "task".into(),
+                text: "Counted 42 files".into(),
+            }]
+        );
+        model.apply(&Event::ThreadDeleted {
+            thread_id: "task".into(),
+        });
+        assert!(model.task_previews().is_empty());
     }
 
     fn model_with_thread() -> ReadModel {
@@ -2312,6 +2499,36 @@ const a = 1
                 thread_id: "t".into()
             }
         );
+    }
+
+    #[test]
+    fn a_command_left_running_can_be_stopped_once_the_turn_ended_but_a_subagent_cannot() {
+        let mut model = model_with_thread();
+        let stop_command = Command::BackgroundTaskStop {
+            thread_id: "t".into(),
+            task_id: "b1".into(),
+        };
+        let stop_subagent = Command::SubagentStop {
+            thread_id: "t".into(),
+            tool_use_id: "toolu_1".into(),
+        };
+
+        assert_eq!(run(&mut model, stop_command), Ok(Vec::new()));
+        assert!(run(&mut model, stop_subagent).is_err());
+    }
+
+    #[test]
+    fn the_agent_wakes_into_a_turn_of_its_own_only_on_an_idle_thread() {
+        let mut model = model_with_thread();
+
+        let woken = start_woken_turn(&model, "t", "w1", NOW);
+        assert!(matches!(
+            woken.as_slice(),
+            [Event::TurnStarted { turn_id, .. }] if turn_id == "w1"
+        ));
+        apply_all(&mut model, &woken);
+        assert!(start_woken_turn(&model, "t", "w2", NOW).is_empty());
+        assert!(start_woken_turn(&model, "gone", "w3", NOW).is_empty());
     }
 
     #[test]
@@ -3089,5 +3306,86 @@ Blue"
     #[test]
     fn windows_paths_compare_case_and_separator_insensitively() {
         assert!(same_path(r"C:\Repo\Hoshi", "c:/repo/hoshi/"));
+    }
+
+    fn set_setup(files: &[&str], command: &str) -> Command {
+        Command::ProjectWorktreeSetupSet {
+            project_id: "p".into(),
+            setup: Some(WorktreeSetup {
+                files: files.iter().map(|&file| file.to_owned()).collect(),
+                command: command.into(),
+                wait: true,
+            }),
+        }
+    }
+
+    fn setup_of(model: &ReadModel) -> Option<WorktreeSetup> {
+        model.project("p").and_then(|p| p.worktree_setup.clone())
+    }
+
+    #[test]
+    fn a_worktree_setup_keeps_its_files_relative_and_once_each() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+
+        run(
+            &mut model,
+            set_setup(
+                &[
+                    " .env ",
+                    "",
+                    r"config\local.properties",
+                    "./.env",
+                    "secrets//*.env/",
+                ],
+                "  ",
+            ),
+        )
+        .unwrap();
+
+        let setup = setup_of(&model).unwrap();
+        assert_eq!(
+            setup.files,
+            [".env", "config/local.properties", "secrets/*.env"]
+        );
+        assert_eq!(setup.command, "");
+    }
+
+    #[test]
+    fn a_worktree_setup_without_files_or_command_is_none() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+        run(&mut model, set_setup(&["x"], "bun install")).unwrap();
+
+        run(&mut model, set_setup(&[" ", ""], " ")).unwrap();
+
+        assert_eq!(setup_of(&model), None);
+    }
+
+    #[test]
+    fn a_worktree_setup_refuses_files_outside_the_project() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+
+        for path in [
+            "/etc/passwd",
+            r"\\server\share",
+            r"C:\Users\nxtvoid\.env",
+            "d:secrets",
+            "../other/.env",
+            "config/../../.env",
+            ".git/config",
+            ".GIT",
+        ] {
+            let error = run(&mut model, set_setup(&[".env", path], "")).unwrap_err();
+            assert_eq!(
+                error,
+                CommandError::SetupFileInvalid {
+                    path: path.to_owned()
+                },
+                "{path}"
+            );
+        }
+        assert_eq!(setup_of(&model), None);
     }
 }

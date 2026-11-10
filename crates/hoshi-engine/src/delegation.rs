@@ -14,7 +14,8 @@ use std::thread;
 /// What the agent reads with every running task: its answer comes on its own.
 /// Kept short: a page of the transcript keeps only the start of a tool's output, which must
 /// still hold the task id.
-const NEXT: &str = "End your turn now; the answer arrives here as a message.";
+pub(crate) const NEXT: &str =
+    "Its answer arrives here as a message, so end your turn. Don't wait on it or poll it.";
 /// What the agent reads of a task whose plan the user is still changing.
 const PLANNING: &str =
     "The user is changing its plan in the task's thread; the answer arrives here as a message.";
@@ -51,20 +52,56 @@ pub(crate) fn delegate_task(
 /// more.
 pub(crate) const MAX_DEPTH: usize = 2;
 
-/// Added to the system prompt of a delegated task's agent, after [`INSTRUCTIONS`].
-pub(crate) const TASK_INSTRUCTIONS: &str =
-    "You are a delegated task: do the work yourself. Delegate only what your task asks you to.";
+/// Added to the system prompt of a delegated task's agent, after the rest of [`instructions`].
+pub(crate) const TASK_INSTRUCTIONS: &str = "You are a delegated task: do the work yourself; delegate only what it asks. Await or stop your background commands before your last message, unless told not to.";
 
-/// Added to the system prompt of agents that can delegate.
-pub(crate) const INSTRUCTIONS: &str = "hoshi, the app running you, gives you tools on its MCP server (load one with ToolSearch, \"select:mcp__hoshi__<name>\"). Ordinary coding needs none. Before you improvise around a missing credential, CLI or browser, check whether one of them covers it.\n- Subagents: your own Agent tool with run_in_background: false, and wait; start several in one message to run them in parallel. Never a background Agent: work that should go on in the background, as a thread of its own or in its own checkout and branch (isolation: \"worktree\"), goes to delegate_task.\n- delegate_task gives the child only `task`: include everything it needs. It returns at once and the answer arrives later as a message here, so end your turn; don't wait, sleep or poll task_status. task_cancel stops a task.\n- A token, password, PIN or pairing code only the user can give: request_secret, never a chat ask, and never search files or the environment for one. Use the file it returns only inside commands; never print it.\n- The user's other threads: thread_list finds them, thread_read reads one (always before you answer about it), thread_send messages one, thread_wait waits for its turn.\n- Asked to monitor or babysit a pull request, or when your work still waits on its checks or reviews: push, call watch_pull_request, end your turn; never sleep, loop or poll. Call unwatch_pull_request before you hand the work back. Delegated tasks never watch.\n- To check web work: preview_open in your thread's own browser, which the user sees in hoshi; preview_snapshot reads it, preview_act uses it. Don't start another browser.";
+/// When to use each of hoshi's tools; their descriptions say how.
+const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. Work that should go on in the background: delegate_task, never a background Agent. Work in a branch or checkout of its own, as each of several variants to compare: delegate_task with isolation \"worktree\", one per branch, however small; never git worktree or a second checkout yourself. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
+- A credential only the user has: request_secret.\n\
+- The user's other hoshi threads: thread_list, thread_read (before you answer about one), thread_send. Not ListAgents or SendMessage.";
 
-/// Added after [`INSTRUCTIONS`] for agents of threads on Bitbucket.
-pub(crate) const BITBUCKET_INSTRUCTIONS: &str = "- This repository is on Bitbucket: open its pull requests with create_pull_request, which signs in as the user. Never look for, ask for or use Bitbucket tokens, nor call its API yourself. If it fails, tell the user what it says.";
+/// For threads the user started, which own their pull request.
+const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.";
+
+const BROWSER_AND_BACKGROUND: &str = "- Web previews only when the user asks for browser work: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
+- Background Bash or Monitor commands don't hold your turn. To wait for one (tests, a build, a sleep, which only runs in the background): await_background_tasks with its id, then end your turn. Never for dev servers.";
+
+/// Added after the rest of [`instructions`] for agents of threads on Bitbucket.
+pub(crate) const BITBUCKET_INSTRUCTIONS: &str = "- On Bitbucket, open pull requests with create_pull_request, signed in as the user. Never look for or use a Bitbucket token, nor call its API yourself. If it fails, tell the user what it says.";
+
+/// Added to the system prompt of agents that have hoshi's tools, of a thread `depth`
+/// delegations deep.
+/// `in_project` is false for a chat, which has no repository to open pull requests on.
+pub(crate) fn instructions(depth: usize, in_project: bool, bitbucket: bool) -> String {
+    let mut parts = vec![
+        format!(
+            "hoshi, the app running you, has tools on its MCP server{}. Ordinary coding needs none.",
+            hoshi_providers::DEFERRED_TOOLS
+        ),
+        TOOLS.to_owned(),
+    ];
+    if depth == 0 && in_project {
+        parts.push(PULL_REQUESTS.to_owned());
+    }
+    parts.push(BROWSER_AND_BACKGROUND.to_owned());
+    if bitbucket {
+        parts.push(BITBUCKET_INSTRUCTIONS.to_owned());
+    }
+    if depth > 0 {
+        parts.push(TASK_INSTRUCTIONS.to_owned());
+    }
+    parts.join("\n")
+}
 
 /// A task a thread delegated, until its answer goes back.
 pub(crate) struct Delegation {
     pub parent: String,
     pub title: String,
+    /// For a task that works again after it answered: what it said then.
+    pub previous_answer: Option<String>,
+    /// Read back at startup: the restart cut it short, and it answers once the user has
+    /// it finish.
+    pub restored: bool,
 }
 
 /// A fresh id in UUID form, which agents accept as a message id.
@@ -160,6 +197,8 @@ impl State {
                     Delegation {
                         parent,
                         title: thread.title.clone(),
+                        previous_answer: None,
+                        restored: true,
                     },
                 ))
             })
@@ -171,6 +210,19 @@ impl State {
         match &self.adapter {
             Some(adapter) => pick_model(&adapter.models().models, wanted),
             None => Ok(wanted.to_owned()),
+        }
+    }
+
+    /// Whether the agent of thread `caller` is offered a tool only some threads have.
+    pub(crate) fn offers_tool(&self, caller: &str, tool: &str) -> bool {
+        match tool {
+            crate::pull_request_tool::TOOL => self.opens_pull_requests(caller),
+            "watch_pull_request" | "unwatch_pull_request" => {
+                self.model.thread(caller).is_some_and(|thread| {
+                    thread.parent_thread_id.is_none() && thread.project_id.is_some()
+                })
+            }
+            _ => true,
         }
     }
 
@@ -190,6 +242,7 @@ impl State {
             "thread_send" => self.send_to_thread(caller, arguments),
             "watch_pull_request" => self.watch_pull_request(caller),
             "unwatch_pull_request" => self.unwatch_pull_request(caller),
+            crate::background::TOOL => self.await_background_tasks(caller, arguments),
             _ => Err(format!("hoshi has no tool named {tool}")),
         }
     }
@@ -246,6 +299,9 @@ impl State {
             .take(TITLE_MAX_CHARS)
             .collect();
         let isolated = arguments["isolation"] == "worktree";
+        if isolated && parent.project_id.is_none() {
+            return Err("a chat has no repository: leave `isolation` out".into());
+        }
         let workspace = match (&parent.worktree_path, isolated) {
             (_, true) => ThreadWorkspace::NewWorktree,
             (Some(path), false) => ThreadWorkspace::Worktree {
@@ -353,6 +409,8 @@ impl State {
             Delegation {
                 parent: caller.to_owned(),
                 title: title.clone(),
+                previous_answer: None,
+                restored: false,
             },
         );
         let send = Command::MessageSend {
@@ -420,20 +478,99 @@ impl State {
         Ok(json!({ "taskId": child.id, "status": status }))
     }
 
-    /// Cancels a delegated task: it stops if it runs, and its answer never goes back.
-    /// `true` when it was running.
+    /// Whether a task's answer is on its way: owed, and not left behind by a restart with
+    /// nothing running to give it.
+    pub(crate) fn awaited(&self, thread_id: &str) -> bool {
+        self.delegations.get(thread_id).is_some_and(|delegation| {
+            !delegation.restored
+                || self.turns.contains_key(thread_id)
+                || self
+                    .model
+                    .thread(thread_id)
+                    .is_some_and(|thread| thread.plan_mode)
+        })
+    }
+
+    /// Whether a task that answered will answer again: a command its answer left running
+    /// still goes on, or a task of its own is in flight.
+    fn answers_again(&self, thread_id: &str) -> bool {
+        let cancelled = self
+            .model
+            .thread(thread_id)
+            .is_none_or(|thread| thread.task_cancelled);
+        !cancelled
+            && (self
+                .lingering
+                .get(thread_id)
+                .is_some_and(|lingering| lingering.owes_answer)
+                || self.model.threads().any(|task| {
+                    task.parent_thread_id.as_deref() == Some(thread_id) && self.in_flight(&task.id)
+                }))
+    }
+
+    /// Whether a task is still to answer the thread that delegated it.
+    fn in_flight(&self, thread_id: &str) -> bool {
+        self.awaited(thread_id) || self.answers_again(thread_id)
+    }
+
+    /// The user stopped a task: it is cancelled, and the thread still waiting for its answer
+    /// hears so, to go on without it.
+    pub(crate) fn stop_task(&mut self, child: &str) {
+        let awaited = self.in_flight(child);
+        let delegated = self
+            .model
+            .thread(child)
+            .and_then(|thread| Some((thread.parent_thread_id.clone()?, thread.title.clone())));
+        self.cancel_task(child);
+        let Some((parent, title)) = delegated.filter(|_| awaited) else {
+            return;
+        };
+        let text = format!(
+            "Delegated task {child} ({title}) [stopped]:\n{STOPPED_BY_USER}\n\n{}",
+            self.what_next(child, &parent)
+        );
+        self.reopen_task(&parent);
+        let now = now();
+        let Ok(events) = send_task_result(&self.model, &parent, child, &new_id(), &text, &now)
+        else {
+            return;
+        };
+        if let Err(error) = self.commit(&events, &now) {
+            eprintln!("hoshi: failed to tell of a stopped task: {error}");
+            return;
+        }
+        self.react(&events);
+    }
+
+    /// Cancels a delegated task: it stops if it runs, with the commands it left running and
+    /// the tasks of its own in flight, and its answer never goes back. `true` when anything
+    /// was running.
     pub(crate) fn cancel_task(&mut self, child: &str) -> bool {
+        let own: Vec<String> = self
+            .model
+            .threads()
+            .filter(|task| {
+                task.parent_thread_id.as_deref() == Some(child) && self.in_flight(&task.id)
+            })
+            .map(|task| task.id.clone())
+            .collect();
+        let mut stopped = false;
+        for task in own {
+            stopped |= self.cancel_task(&task);
+        }
         self.delegations.remove(child);
         let now = now();
         let events = hoshi_core::cancel_task(&self.model, child);
         if let Err(error) = self.commit(&events, &now) {
             eprintln!("hoshi: failed to record a cancelled task: {error}");
         }
+        let kept = self.lingering.contains_key(child);
+        self.close_lingering(child);
         let running = self.turns.get(child);
         if let Some(turn) = running {
             turn.running.interrupt();
         }
-        running.is_some()
+        running.is_some() || kept || stopped
     }
 
     fn answer_of(&self, thread_id: &str) -> String {
@@ -472,24 +609,62 @@ impl State {
         self.hand_back(child, outcome);
     }
 
+    /// An answered task that works again, as its agent woke for a command its answer left
+    /// running or its own task answered it: the turn it runs answers its parent again.
+    pub(crate) fn reopen_task(&mut self, child: &str) {
+        if self.delegations.contains_key(child) {
+            return;
+        }
+        let events = hoshi_core::reopen_task(&self.model, child);
+        let Some(thread) = self.model.thread(child).filter(|_| !events.is_empty()) else {
+            return;
+        };
+        let delegation = Delegation {
+            parent: thread.parent_thread_id.clone().unwrap_or_default(),
+            title: thread.title.clone(),
+            previous_answer: self.store.last_answer(child).ok().flatten(),
+            restored: false,
+        };
+        if let Err(error) = self.commit(&events, &now()) {
+            eprintln!("hoshi: failed to reopen a task: {error}");
+            return;
+        }
+        self.delegations.insert(child.to_owned(), delegation);
+    }
+
     /// Gives a delegated task's answer to its parent: into the turn it runs, or as the start
     /// of a new one.
     pub(crate) fn hand_back(&mut self, child: &str, outcome: &TurnOutcome) {
         let Some(delegation) = self.delegations.remove(child) else {
             return;
         };
+        let now = now();
+        let said = self.store.last_answer(child).ok().flatten();
+        // A reopened task that woke and said nothing new has nothing more to tell.
+        if *outcome == TurnOutcome::Completed
+            && delegation.previous_answer.is_some()
+            && said == delegation.previous_answer
+        {
+            let answered = hoshi_core::answer_task(&self.model, child);
+            if let Err(error) = self.commit(&answered, &now) {
+                eprintln!("hoshi: failed to record a task's answer: {error}");
+            }
+            return;
+        }
         let status = match outcome {
             TurnOutcome::Completed => "completed",
             TurnOutcome::Interrupted => "stopped",
             TurnOutcome::Failed { .. } => "failed",
         };
         let text = format!(
-            "Delegated task {child} ({}) [{status}]:\n{}",
+            "Delegated task {child} ({}) [{status}]:\n{}\n\n{}",
             delegation.title,
-            self.answer_of(child)
+            self.answer_of(child),
+            self.what_next(child, &delegation.parent)
         );
+        // The parent is itself a task that already answered: what it says now goes up too.
+        self.reopen_task(&delegation.parent);
         let message_id = new_id();
-        let now = now();
         let Ok(mut events) = send_task_result(
             &self.model,
             &delegation.parent,
@@ -507,7 +682,41 @@ impl State {
         }
         self.react(&events);
     }
+
+    /// What the parent should do with a task's answer, from how its other tasks stand.
+    fn what_next(&self, child: &str, parent: &str) -> String {
+        let others = self
+            .model
+            .threads()
+            .filter(|thread| {
+                thread.id != child
+                    && thread.parent_thread_id.as_deref() == Some(parent)
+                    && self.in_flight(&thread.id)
+            })
+            .count();
+        let mut next = Vec::new();
+        if self.answers_again(child) {
+            next.push(ANSWERS_AGAIN.to_owned());
+        }
+        next.push(match others {
+            0 if next.is_empty() => ALL_ANSWERED.to_owned(),
+            0 => ONE_LEFT.to_owned(),
+            1 => format!("1 other task still runs. {ONE_LINE}"),
+            n => format!("{n} other tasks still run. {ONE_LINE}"),
+        });
+        next.join(" ")
+    }
 }
+
+/// After a task's answer, for its parent.
+pub(crate) const ANSWERS_AGAIN: &str =
+    "It isn't finished: it answers again once the command or task it still waits on ends.";
+const ONE_LINE: &str = "Reply in one line about this task only, in the user's language; summarize once all have answered.";
+const ONE_LEFT: &str =
+    "Reply in one line, in the user's language; summarize once it answers again.";
+pub(crate) const ALL_ANSWERED: &str = "None of the tasks you delegated is still running.";
+pub(crate) const STOPPED_BY_USER: &str =
+    "The user stopped this task before it answered. Don't start it again unless they ask.";
 
 #[cfg(test)]
 mod tests {
@@ -526,6 +735,20 @@ mod tests {
             fast_mode: false,
             ultracode: false,
         }
+    }
+
+    #[test]
+    fn the_instructions_stay_within_their_budget() {
+        let worst = [instructions(0, true, true), instructions(1, true, true)]
+            .iter()
+            .map(String::len)
+            .max()
+            .unwrap();
+        assert!(worst <= 1_550, "{worst} bytes");
+        assert!(instructions(0, true, false).contains("watch_pull_request"));
+        assert!(!instructions(0, false, false).contains("watch_pull_request"));
+        assert!(!instructions(1, true, false).contains("watch_pull_request"));
+        assert!(instructions(1, true, false).ends_with(TASK_INSTRUCTIONS));
     }
 
     #[test]

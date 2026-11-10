@@ -15,6 +15,7 @@ import {
 import { m } from '@/paraglide/messages'
 import { Transcript } from './Transcript'
 import { DelegatedBanner } from './DelegationRows'
+import { SubagentTitle, SubagentView } from './SubagentView'
 import { ThreadGitChip } from './ThreadGitChip'
 import { useAppStore } from '@/state/app-store'
 import type { Thread } from '@/bindings/Thread'
@@ -30,6 +31,7 @@ import { LogoMark } from '@/components/brand/Logo'
 import { usePanelStore } from '@/state/panel-store'
 import { useTerminalStore } from '@/state/terminal-store'
 import { RightPanel } from '@/components/panel/RightPanel'
+import { useSubagentStore } from '@/state/subagent-store'
 import { useTranscriptStore } from '@/state/transcript-store'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import { WindowControls } from '@/components/window/WindowControls'
@@ -77,6 +79,10 @@ export function ThreadView() {
     thread?.status === 'working' || thread?.status === 'waitingForInput'
   const draft = !loading && empty && !working
   const composerDraft = draftKey(thread?.id ?? null, scopeProjectId, chat)
+  const inSubagent = useSubagentStore(
+    (state) => Boolean(thread) && state.viewing.length > 0
+  )
+  const leaveSubagents = useSubagentStore((state) => state.leaveAll)
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -117,11 +123,29 @@ export function ThreadView() {
                 <ChatsCrumb />
               )
             ) : null}
+            {inSubagent ? (
+              <>
+                <button
+                  type='button'
+                  onClick={leaveSubagents}
+                  className='text-muted-foreground hover:text-foreground focus-visible:ring-ring max-w-[30%] min-w-0 shrink cursor-pointer truncate rounded-md text-sm outline-none focus-visible:ring-2'
+                >
+                  {thread.title || m.untitled_thread()}
+                </button>
+                <span aria-hidden className='text-muted-foreground/60 text-sm'>
+                  /
+                </span>
+              </>
+            ) : null}
             <h1
               data-tauri-drag-region
               className='max-w-[40%] min-w-0 truncate text-sm font-medium'
             >
-              {thread.title || m.untitled_thread()}
+              {inSubagent ? (
+                <SubagentTitle threadId={thread.id} />
+              ) : (
+                thread.title || m.untitled_thread()
+              )}
             </h1>
             <ThreadGitChip threadId={thread.id} />
           </>
@@ -178,11 +202,18 @@ export function ThreadView() {
             <div className='flex-1' />
           ) : draft ? (
             <div className='flex flex-1 flex-col items-center justify-center gap-8 px-4 pb-[12vh]'>
-              <h2 className='text-foreground max-w-3xl text-center text-3xl font-normal tracking-tight text-balance'>
-                {projectTitle === undefined
-                  ? m.new_chat_prompt()
-                  : m.new_thread_prompt({ project: projectTitle })}
-              </h2>
+              <div className='w-full'>
+                <h2
+                  className={cn(
+                    CHAT_LANE,
+                    'text-foreground text-center text-3xl font-normal tracking-tight text-balance'
+                  )}
+                >
+                  {projectTitle === undefined
+                    ? m.new_chat_prompt()
+                    : m.new_thread_prompt({ project: projectTitle })}
+                </h2>
+              </div>
               <div className='w-full'>
                 <Composer
                   key={composerDraft}
@@ -194,37 +225,51 @@ export function ThreadView() {
             </div>
           ) : (
             <>
-              {thread?.parentThreadId ? (
-                <div className={cn(CHAT_LANE, 'w-full px-4 pt-3')}>
-                  <DelegatedBanner parentThreadId={thread.parentThreadId} />
-                </div>
-              ) : null}
-              <Transcript
-                working={working}
-                cwd={thread?.worktreePath ?? workspaceRoot ?? null}
-              />
-              <div className='relative px-4 pb-3'>
-                <div
-                  aria-hidden
-                  className='pointer-events-none absolute inset-x-4 bottom-full'
-                >
-                  <div
-                    className={cn(
-                      CHAT_LANE,
-                      'from-background h-8 bg-linear-to-t to-transparent'
-                    )}
-                  />
-                </div>
-                {thread ? <WorktreeSetupBar threadId={thread.id} /> : null}
-                {thread ? <ReviewCommentsBar threadId={thread.id} /> : null}
-                <Composer
-                  key={composerDraft}
-                  draftKey={composerDraft}
+              <div
+                className={cn(
+                  'flex min-h-0 flex-1 flex-col',
+                  inSubagent && 'hidden'
+                )}
+              >
+                {thread?.parentThreadId ? (
+                  <div className={cn(CHAT_LANE, 'w-full px-4 pt-3')}>
+                    <DelegatedBanner parentThreadId={thread.parentThreadId} />
+                  </div>
+                ) : null}
+                <Transcript
                   working={working}
-                  variant='docked'
                   cwd={thread?.worktreePath ?? workspaceRoot ?? null}
                 />
+                <div className='relative px-4 pb-3'>
+                  <div
+                    aria-hidden
+                    className='pointer-events-none absolute inset-x-4 bottom-full'
+                  >
+                    <div
+                      className={cn(
+                        CHAT_LANE,
+                        'from-background h-8 bg-linear-to-t to-transparent'
+                      )}
+                    />
+                  </div>
+                  {thread ? <WorktreeSetupBar threadId={thread.id} /> : null}
+                  {thread ? <ReviewCommentsBar threadId={thread.id} /> : null}
+                  <Composer
+                    key={composerDraft}
+                    draftKey={composerDraft}
+                    working={working}
+                    variant='docked'
+                    cwd={thread?.worktreePath ?? workspaceRoot ?? null}
+                  />
+                </div>
               </div>
+              {thread && inSubagent ? (
+                <SubagentView
+                  threadId={thread.id}
+                  threadTitle={thread.title || m.untitled_thread()}
+                  cwd={thread.worktreePath ?? workspaceRoot ?? null}
+                />
+              ) : null}
             </>
           )}
           {thread ? <TerminalDrawer threadId={thread.id} /> : null}

@@ -3,4 +3,4 @@
 /**
  * Where hoshi can open a thread's folder: a code editor, or the system's file manager.
  */
-export type Editor = "vscode" | "cursor" | "windsurf" | "zed" | "fileManager";
+export type Editor = "vscode" | "cursor" | "windsurf" | "zed" | "idea" | "webstorm" | "pycharm" | "goland" | "rider" | "clion" | "phpstorm" | "rubymine" | "rustrover" | "fileManager";

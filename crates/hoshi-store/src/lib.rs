@@ -6,8 +6,8 @@
 
 use hoshi_core::{
     ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, PullRequestWatch,
-    Snapshot, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome,
-    UsageLimits,
+    Snapshot, TaskPreview, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus,
+    TurnOutcome, UsageLimits, task_preview,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, types::Type};
 use std::path::Path;
@@ -486,6 +486,17 @@ impl Store {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        let task_previews = threads
+            .iter()
+            .filter(|thread| thread.parent_thread_id.is_some())
+            .map(|thread| {
+                Ok(self.last_answer(&thread.id)?.map(|text| TaskPreview {
+                    thread_id: thread.id.clone(),
+                    text: task_preview(&text),
+                }))
+            })
+            .filter_map(Result::transpose)
+            .collect::<Result<Vec<_>, StoreError>>()?;
         Ok(Snapshot {
             sequence: sequence as u64,
             projects,
@@ -497,6 +508,7 @@ impl Store {
             // The engine knows which tasks still owe an answer.
             pending_tasks: Vec::new(),
             background_tasks: Vec::new(),
+            task_previews,
         })
     }
 
@@ -1072,6 +1084,18 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 params![thread_id, enum_text(status)?, at],
             )?;
         }
+        Event::ToolCallDetailSet {
+            thread_id,
+            item_id,
+            detail,
+        } => {
+            execute(
+                tx,
+                "UPDATE thread_items SET content_json = json_set(content_json, '$.detail', json(?3))
+                 WHERE thread_id = ?1 AND id = ?2",
+                params![thread_id, item_id, serde_json::to_string(detail)?],
+            )?;
+        }
         Event::ToolCallInterrupted { thread_id, item_id } => {
             execute(
                 tx,
@@ -1104,6 +1128,13 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
             execute(
                 tx,
                 "UPDATE threads SET task_answered = 1 WHERE id = ?1",
+                [thread_id],
+            )?;
+        }
+        Event::TaskReopened { thread_id } => {
+            execute(
+                tx,
+                "UPDATE threads SET task_answered = 0 WHERE id = ?1",
                 [thread_id],
             )?;
         }
@@ -1153,9 +1184,9 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
 mod tests {
     use super::*;
     use hoshi_core::{
-        AccessMode, ChecksState, Command, ForgeKind, ItemContent, Mergeability, ProviderOutput,
-        PullRequest, PullRequestState, ReadModel, ToolDetail, UsageWindow, UsageWindowKind, decide,
-        record_output,
+        AccessMode, BankedResets, ChecksState, Command, ForgeKind, ItemContent, Mergeability,
+        ProviderOutput, PullRequest, PullRequestState, ReadModel, ToolDetail, UsageWindow,
+        UsageWindowKind, decide, record_output,
     };
 
     const NOW: &str = "2026-11-07T12:00:00.000Z";
@@ -1174,9 +1205,32 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_setup_saved_before_files_existed_still_loads() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.append(&[project_created("p")], NOW).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE projects SET worktree_setup = ?1 WHERE id = 'p'",
+                [r#"{"command":"bun install","wait":true}"#],
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.snapshot().unwrap().projects[0].worktree_setup,
+            Some(hoshi_core::WorktreeSetup {
+                files: Vec::new(),
+                command: "bun install".into(),
+                wait: true,
+            })
+        );
+    }
+
+    #[test]
     fn a_project_keeps_its_worktree_setup() {
         let mut store = Store::open_in_memory().unwrap();
         let setup = hoshi_core::WorktreeSetup {
+            files: vec![".env".into(), "secrets/*.env".into()],
             command: "bun install".into(),
             wait: true,
         };
@@ -1334,6 +1388,47 @@ mod tests {
                 updated_at: NOW.into(),
             },
         }
+    }
+
+    #[test]
+    fn snapshot_previews_the_latest_message_of_delegated_tasks() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .append(
+                &[
+                    project_created("p"),
+                    thread_created("t", "p"),
+                    thread_created("task", "p"),
+                    Event::ThreadDelegated {
+                        thread_id: "task".into(),
+                        parent_thread_id: "t".into(),
+                        shares_worktree: false,
+                    },
+                    answer("t", "parent says"),
+                    answer("task", "first"),
+                    item(
+                        "task",
+                        "m2",
+                        ItemContent::AssistantMessage {
+                            text: "Counted
+  42 files"
+                                .into(),
+                        },
+                    ),
+                ],
+                NOW,
+            )
+            .unwrap();
+
+        let snapshot = store.snapshot().unwrap();
+
+        assert_eq!(
+            snapshot.task_previews,
+            [TaskPreview {
+                thread_id: "task".into(),
+                text: "Counted 42 files".into(),
+            }]
+        );
     }
 
     #[test]
@@ -1534,6 +1629,12 @@ mod tests {
                 window_minutes: 300,
                 resets_at: Some("2026-11-08T12:00:00Z".into()),
             }],
+            banked_resets: Some(BankedResets {
+                count: 1,
+                next_grant_id: Some("grant_a".into()),
+                expires_at: vec!["2026-12-01T00:00:00Z".into()],
+            }),
+            account: None,
         };
 
         store.save_usage_limits(&window(20)).unwrap();
@@ -1688,6 +1789,57 @@ mod tests {
                 output_omitted: false,
                 interrupted: false,
             }
+        );
+    }
+
+    #[test]
+    fn a_subagent_call_keeps_its_model_and_effort_as_they_are_corrected() {
+        let (mut store, mut model) = store_with_thread();
+        let events = send(&model);
+        commit(&mut store, &mut model, events);
+        let subagent = |model: &str, effort| ToolDetail::Subagent {
+            model: model.into(),
+            effort,
+        };
+        let outputs = [
+            ProviderOutput::ToolCallStarted {
+                item_id: "toolu_agent".into(),
+                name: "Agent".into(),
+                input: "{}".into(),
+            },
+            ProviderOutput::ToolCallDetail {
+                item_id: "toolu_agent".into(),
+                detail: subagent("claude-opus-5-5", Some(Effort::Max)),
+            },
+            ProviderOutput::ToolCallDetail {
+                item_id: "toolu_agent".into(),
+                detail: subagent("claude-haiku-5-5", Some(Effort::Low)),
+            },
+        ];
+        for output in outputs {
+            let events = record_output(&model, "t", "m1", output, NOW);
+            commit(&mut store, &mut model, events);
+        }
+        let detail = |store: &Store| match &store.thread_items("t").unwrap()[1].content {
+            ItemContent::ToolCall { detail, .. } => detail.clone(),
+            _ => None,
+        };
+        assert_eq!(
+            detail(&store),
+            Some(subagent("claude-haiku-5-5", Some(Effort::Low)))
+        );
+
+        let done = ProviderOutput::ToolCallCompleted {
+            item_id: "toolu_agent".into(),
+            output: "found it".into(),
+            is_error: false,
+            detail: Some(subagent("claude-haiku-5-5", Some(Effort::Low))),
+        };
+        let events = record_output(&model, "t", "m1", done, NOW);
+        commit(&mut store, &mut model, events);
+        assert_eq!(
+            detail(&store),
+            Some(subagent("claude-haiku-5-5", Some(Effort::Low)))
         );
     }
 

@@ -18,7 +18,11 @@ pub(crate) type ToolHandler = dyn Fn(&str, &str, &Value) -> Result<Value, String
 pub(crate) type ToolFilter = dyn Fn(&str, &str) -> bool + Send + Sync;
 
 /// Tools only some threads' agents see.
-const CONDITIONAL_TOOLS: [&str; 1] = ["create_pull_request"];
+const CONDITIONAL_TOOLS: [&str; 3] = [
+    "create_pull_request",
+    "watch_pull_request",
+    "unwatch_pull_request",
+];
 
 pub(crate) struct McpServer {
     pub url: String,
@@ -159,7 +163,7 @@ pub(crate) fn reply(
                             json!({ "type": "image", "data": data, "mimeType": "image/png" }),
                         );
                     }
-                    json!({ "content": content, "structuredContent": value })
+                    json!({ "content": content })
                 }
                 Err(error) => json!({
                     "content": [{ "type": "text", "text": error }],
@@ -198,7 +202,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "delegate_task",
-            "description": "Start a child agent in a thread of its own the user can open, for work that should go on in the background or needs its own checkout and branch (isolation \"worktree\"). For help within this turn, use your own Agent tool instead. The child sees only `task`, none of this conversation. Returns at once; the answer arrives later as a message in this thread, so end your turn instead of waiting or polling.",
+            "description": "Start a child agent in a thread of its own, for background work; it sees only `task`. isolation \"worktree\" gives it its own checkout and branch. For help within this turn, use your Agent tool.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -209,11 +213,11 @@ fn tools() -> Value {
                         "enum": ["shared", "worktree"],
                         "description": "shared (default) works in this thread's checkout; worktree in a new one from it.",
                     },
-                    "model": { "type": "string", "description": "The child's model, by slug or name, only when the user asked for one; this thread's model otherwise." },
+                    "model": { "type": "string", "description": "The child's model, by slug or name; this thread's when omitted. Set only when the user or your instructions ask for one." },
                     "effort": {
                         "type": "string",
                         "enum": ["low", "medium", "high", "xhigh", "max"],
-                        "description": "The child's reasoning effort, only when the user asked for one; this thread's otherwise.",
+                        "description": "The child's reasoning effort; this thread's when omitted. Set only when the user or your instructions ask for one.",
                     },
                     "plan": { "type": "boolean", "description": "Start the child in plan mode: it proposes a plan for the user to approve before changing anything." },
                 },
@@ -222,7 +226,7 @@ fn tools() -> Value {
         },
         {
             "name": "task_status",
-            "description": "Where a delegated task stands, with its answer once it finished. Reading a finished answer means it won't arrive as a message.",
+            "description": "Read a delegated task you started. Don't call it while it runs: its answer arrives as a message. A finished answer read here won't arrive again.",
             "inputSchema": task_id,
         },
         {
@@ -232,15 +236,15 @@ fn tools() -> Value {
         },
         {
             "name": "request_secret",
-            "description": "Ask the user for one secret only they can give, such as a token, password, PIN or pairing code, in a card they type it into; one secret per call. Use it when a command needs a credential you lack, instead of asking in chat or searching files and the environment for one; not for access you already have. Waits for the answer and returns a file holding the value: read it only inside the command that needs it, such as `curl -H \"Authorization: Bearer $(cat <file>)\"`, and never print it. A secret the user already pasted in this thread goes in `value`, with no card.",
+            "description": "Ask the user for one secret (token, password, PIN, pairing code) in a card; one per call. Use it instead of a chat ask or searching files and env; not for access you have. Waits, then returns a file: read it only inside the command, e.g. `$(cat <file>)`; never print it. Already pasted here: pass `value`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "label": { "type": "string", "description": "Card title, such as \"GitHub token\"." },
-                    "reason": { "type": "string", "description": "What it is for and where to get it." },
-                    "placeholder": { "type": "string", "description": "Hint in the empty field, such as \"ghp_…\"." },
-                    "value": { "type": "string", "description": "A secret the user pasted in this thread, saved with no card." },
-                    "timeoutMs": { "type": "integer", "description": "How long to wait for the user; 10 minutes by default, at most an hour." },
+                    "label": { "type": "string", "description": "Card title." },
+                    "reason": { "type": "string", "description": "What for, where to get it." },
+                    "placeholder": { "type": "string", "description": "Empty-field hint." },
+                    "value": { "type": "string", "description": "A secret pasted here." },
+                    "timeoutMs": { "type": "integer", "description": "Default 10 min, max 1 h." },
                 },
                 "required": ["label", "reason"],
             },
@@ -260,20 +264,20 @@ fn tools() -> Value {
         },
         {
             "name": "thread_read",
-            "description": "Read another hoshi thread: its status and latest messages from the user and its agent, oldest first. Read a thread before you answer about it. Keep reads small with limit and maxCharsPerItem.",
+            "description": "Read another hoshi thread: its status and latest messages from the user and its agent, oldest first. Read a thread before you answer about it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "threadId": { "type": "string" },
-                    "limit": { "type": "integer", "description": "The latest messages to read, 1 to 100; 20 by default." },
-                    "maxCharsPerItem": { "type": "integer", "description": "Longer messages are cut, 1 to 50000; 2000 by default." },
+                    "limit": { "type": "integer", "description": "The latest messages to read, 1 to 100; 10 by default." },
+                    "maxCharsPerItem": { "type": "integer", "description": "Longer messages are cut, 1 to 50000; 1500 by default." },
                 },
                 "required": ["threadId"],
             },
         },
         {
             "name": "thread_send",
-            "description": "Send a message to another hoshi thread, as if the user wrote it there: it starts the thread's turn, or joins the turn that runs. Its answer stays in that thread; read it with thread_read, or thread_wait first.",
+            "description": "Send a message to another hoshi thread, as if the user wrote it there: it starts the thread's turn, or joins the turn that runs. Its answer stays in that thread; read it with thread_read.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -285,7 +289,7 @@ fn tools() -> Value {
         },
         {
             "name": "thread_wait",
-            "description": "Wait until another hoshi thread's turn ends, then get its status and latest answer. Returns at once when it is idle; on timedOut, call again only if still needed.",
+            "description": "Wait until another hoshi thread's turn ends, then get its status and latest answer. Only when you need its answer this turn. Returns at once when it is idle; on timedOut it still runs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -320,8 +324,25 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} },
         },
         {
+            "name": "await_background_tasks",
+            "description": "Keep this turn going until background Bash or Monitor commands you started finish, such as tests or a build: pass their ids right after starting them, then end your turn. Not a delegate_task taskId. Never for work left running, such as a dev server or a watcher. waiting false stops waiting; it doesn't stop a command.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "backgroundTaskIds": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1,
+                        "description": "The ids the background Bash or Monitor commands reported.",
+                    },
+                    "waiting": { "type": "boolean", "description": "true (default) waits for them; false stops waiting." },
+                },
+                "required": ["backgroundTaskIds"],
+            },
+        },
+        {
             "name": "preview_open",
-            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. Use it to check web work instead of a browser, Playwright or screenshot tool of your own; then preview_snapshot reads the page and preview_act uses it.",
+            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. Only when the user asks for browser work, and instead of a browser, Playwright or screenshot tool of your own; then preview_snapshot reads the page and preview_act uses it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -444,11 +465,32 @@ mod tests {
         let reply = reply("t1", &call, &echo, &everything).unwrap();
 
         assert_eq!(reply["id"], 7);
-        assert_eq!(reply["result"]["structuredContent"]["caller"], "t1");
-        assert_eq!(
-            reply["result"]["structuredContent"]["arguments"]["taskId"],
-            "c1"
-        );
+        assert_eq!(reply["result"].get("structuredContent"), None);
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        let result: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(result["caller"], "t1");
+        assert_eq!(result["arguments"]["taskId"], "c1");
+        assert!(!text.contains(' '), "{text}");
+    }
+
+    #[test]
+    fn the_tools_loaded_every_turn_stay_within_their_budget() {
+        let Value::Array(tools) = tools() else {
+            panic!("no tools");
+        };
+        let always: Vec<&Value> = tools
+            .iter()
+            .filter(|tool| tool["_meta"]["anthropic/alwaysLoad"] == true)
+            .collect();
+        let names: Vec<&str> = always
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, ["request_secret"]);
+        let size = Value::Array(always.into_iter().cloned().collect())
+            .to_string()
+            .len();
+        assert!(size <= 850, "{size} bytes");
     }
 
     #[test]
@@ -478,6 +520,13 @@ mod tests {
         let on_github = names(&|_, tool| tool != "create_pull_request");
         assert!(!on_github.iter().any(|name| name == "create_pull_request"));
         assert_eq!(on_github.len() + 1, names(&everything).len());
+        let nothing_conditional = names(&|_, _| false);
+        assert_eq!(nothing_conditional.len() + 3, names(&everything).len());
+        assert!(
+            !nothing_conditional
+                .iter()
+                .any(|name| name.contains("watch"))
+        );
         let names = names(&everything);
         assert_eq!(
             names,
@@ -493,6 +542,7 @@ mod tests {
                 "create_pull_request",
                 "watch_pull_request",
                 "unwatch_pull_request",
+                "await_background_tasks",
                 "preview_open",
                 "preview_navigate",
                 "preview_snapshot",
