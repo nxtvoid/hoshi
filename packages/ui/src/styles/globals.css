@@ -447,3 +447,14 @@ html[data-terminal-font="system"] {
     box-shadow: 0 0 0 5px color-mix(in oklab, var(--signal) 0%, transparent);
   }
 }
+
+/* List numbers without the space browsers put after the period, which is a whole character
+   wide in a monospace font and pushes the number out of its gutter. The list sets the gap. */
+@counter-style tight-decimal {
+  system: extends decimal;
+  suffix: ".";
+}
+@counter-style tight-lower-alpha {
+  system: extends lower-alpha;
+  suffix: ".";
+}

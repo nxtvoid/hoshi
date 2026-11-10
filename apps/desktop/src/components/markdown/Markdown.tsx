@@ -45,7 +45,7 @@ const COMPONENTS: Components = {
   ),
   ol: ({ node: _, ...props }) => (
     <ol
-      className='my-2.5 list-decimal ps-5 marker:tabular-nums [&_ol]:my-1 [&_ol]:list-[lower-alpha]'
+      className='my-2.5 list-[tight-decimal] ps-5 marker:tabular-nums [&_ol]:my-1 [&_ol]:list-[tight-lower-alpha] [&>li]:ps-1.5'
       {...props}
     />
   ),
