@@ -1574,6 +1574,7 @@ mod tests {
                 next_grant_id: Some("grant_a".into()),
                 expires_at: vec!["2026-12-01T00:00:00Z".into()],
             }),
+            account: None,
         };
 
         store.save_usage_limits(&window(20)).unwrap();

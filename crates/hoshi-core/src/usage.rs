@@ -1,3 +1,4 @@
+use crate::ProviderAccount;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -53,6 +54,9 @@ pub struct UsageLimits {
     /// `None` when the plan can't bank resets or they couldn't be read.
     #[serde(default)]
     pub banked_resets: Option<BankedResets>,
+    /// `None` when the provider's login couldn't be read.
+    #[serde(default)]
+    pub account: Option<ProviderAccount>,
 }
 
 impl UsageLimits {
@@ -61,6 +65,9 @@ impl UsageLimits {
     pub fn merge(&mut self, update: UsageLimits) {
         if update.banked_resets.is_some() {
             self.banked_resets = update.banked_resets;
+        }
+        if update.account.is_some() {
+            self.account = update.account;
         }
         for window in update.windows {
             match self
@@ -189,17 +196,23 @@ mod tests {
                 window(UsageWindowKind::Weekly, Some("Fable"), 0),
             ],
             banked_resets: Some(banked.clone()),
+            account: Some(ProviderAccount {
+                email: Some("nxtvoid@example.com".into()),
+                plan: Some(crate::ProviderPlan::Max),
+            }),
         };
 
         limits.merge(UsageLimits {
             windows: vec![window(UsageWindowKind::Session, None, 35)],
             banked_resets: None,
+            account: None,
         });
 
         assert_eq!(limits.windows[0].used_percent, 35);
         assert_eq!(limits.windows[1].used_percent, 20);
         assert_eq!(limits.windows[2].model.as_deref(), Some("Fable"));
         assert_eq!(limits.banked_resets, Some(banked));
+        assert!(limits.account.is_some());
     }
 
     #[test]

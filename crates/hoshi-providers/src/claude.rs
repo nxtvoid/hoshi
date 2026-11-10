@@ -1,6 +1,7 @@
 use crate::claude_account;
 use crate::claude_commands;
 use crate::claude_install;
+use crate::claude_login;
 use crate::claude_models::{TurnModel, Version, manifest, parse_version};
 use crate::claude_output::LiveOutput;
 use crate::claude_prompt;
@@ -98,6 +99,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         {
             limits.banked_resets = claude_resets::read(&version);
         }
+        limits.account = claude_login::account();
         Some(limits)
     }
 

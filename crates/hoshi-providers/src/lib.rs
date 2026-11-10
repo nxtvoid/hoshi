@@ -6,6 +6,7 @@ mod claude_account;
 mod claude_commands;
 mod claude_control;
 mod claude_install;
+mod claude_login;
 mod claude_models;
 mod claude_output;
 mod claude_prompt;

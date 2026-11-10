@@ -40,7 +40,7 @@ pub use project::{
     setup_file_path, setup_file_paths,
 };
 pub use provider::ProviderOutput;
-pub use provider_account::ProviderAccountStatus;
+pub use provider_account::{ProviderAccount, ProviderAccountStatus, ProviderPlan};
 pub use provider_update::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion};
 pub use pull_request::{
     ChecksState, ForgeAccount, ForgeKind, MergeMethod, Mergeability, PullRequest,

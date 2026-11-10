@@ -1,10 +1,9 @@
 //! Session resets a Claude plan banked: read with the limits, and spent on request.
 
+use crate::claude_login::{access_token, config_dir, organization_id};
 use chrono::{DateTime, SecondsFormat, Utc};
 use hoshi_core::{BankedResetFailure, BankedResetSpend, BankedResets};
 use serde_json::{Value, json};
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const API_BASE: &str = "https://api.anthropic.com";
@@ -215,60 +214,6 @@ fn encode_segment(text: &str) -> String {
             _ => format!("%{byte:02X}"),
         })
         .collect()
-}
-
-fn configured_dir() -> Option<PathBuf> {
-    std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .map(|dir| dir.trim().to_owned())
-        .filter(|dir| !dir.is_empty())
-        .map(PathBuf::from)
-}
-
-fn config_dir() -> Option<PathBuf> {
-    configured_dir().or_else(|| std::env::home_dir().map(|home| home.join(".claude")))
-}
-
-/// The account file sits in the configured folder, or in the home folder by default.
-fn account_config_path() -> Option<PathBuf> {
-    match configured_dir() {
-        Some(dir) => Some(dir.join(".claude.json")),
-        None => std::env::home_dir().map(|home| home.join(".claude.json")),
-    }
-}
-
-/// `Ok(None)` when there's no file to read; `Err` when it can't be read or parsed.
-fn read_json(path: &Path) -> Result<Option<Value>, ()> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).map(Some).map_err(|_| ()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(()),
-    }
-}
-
-fn non_empty(value: &Value) -> Option<String> {
-    value
-        .as_str()
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
-}
-
-/// The macOS CLI keeps its login in the keychain, out of reach.
-fn access_token(config_dir: &Path) -> Result<Option<String>, ()> {
-    if cfg!(target_os = "macos") {
-        return Ok(None);
-    }
-    let credentials = read_json(&config_dir.join(".credentials.json"))?;
-    Ok(credentials.and_then(|credentials| non_empty(&credentials["claudeAiOauth"]["accessToken"])))
-}
-
-fn organization_id() -> Result<Option<String>, ()> {
-    let Some(path) = account_config_path() else {
-        return Ok(None);
-    };
-    let config = read_json(&path)?;
-    Ok(config.and_then(|config| non_empty(&config["oauthAccount"]["organizationUuid"])))
 }
 
 fn send(request: &Request, timeout: Duration) -> Option<Response> {

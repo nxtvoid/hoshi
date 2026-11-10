@@ -4117,6 +4117,7 @@ mod tests {
                     resets_at: None,
                 }],
                 banked_resets: None,
+                account: None,
             })
         }
 
@@ -4148,6 +4149,7 @@ mod tests {
                     next_grant_id: Some("grant_a".into()),
                     expires_at: Vec::new(),
                 }),
+                account: None,
             })
         }
 

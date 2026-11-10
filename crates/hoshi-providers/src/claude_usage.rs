@@ -52,6 +52,7 @@ fn usage_limits(usage: &Value) -> UsageLimits {
     UsageLimits {
         windows,
         banked_resets: None,
+        account: None,
     }
 }
 
@@ -77,6 +78,7 @@ pub(crate) fn rate_limit_event(info: &Value) -> Option<UsageLimits> {
     (!windows.is_empty()).then_some(UsageLimits {
         windows,
         banked_resets: None,
+        account: None,
     })
 }
 
