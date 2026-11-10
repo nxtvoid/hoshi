@@ -56,6 +56,7 @@ impl State {
                 if let Some(lingering) = self.lingering.remove(thread_id) {
                     self.clear_background(thread_id, lingering.background.as_ref());
                 }
+                self.release_held_answer(thread_id);
             }
             _ => {}
         }
@@ -133,6 +134,7 @@ impl State {
         if let Some(lingering) = self.lingering.remove(thread_id) {
             self.end_lingering(thread_id, lingering);
         }
+        self.release_held_answer(thread_id);
     }
 
     pub(crate) fn end_lingering(&self, thread_id: &str, lingering: Lingering) {

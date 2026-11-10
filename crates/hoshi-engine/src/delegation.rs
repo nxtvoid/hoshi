@@ -513,13 +513,26 @@ impl State {
     /// Once a delegated task's turn ends, its answer goes to the parent: into the turn it
     /// runs, or as the start of a new one.
     pub(crate) fn deliver_task_result(&mut self, child: &str, outcome: &TurnOutcome) {
-        // The user sent the task's plan back: it answers once they approve one or stop it.
-        if *outcome == TurnOutcome::Completed
-            && self.store.plan_declined_last(child).unwrap_or(false)
-        {
-            return;
+        self.held_answers.remove(child);
+        if *outcome == TurnOutcome::Completed {
+            // The user sent the task's plan back: it answers once they approve one or stop it.
+            if self.store.plan_declined_last(child).unwrap_or(false) {
+                return;
+            }
+            // What it left running may still change its answer: the turn it wakes for gives it.
+            if self.lingering.contains_key(child) && self.delegations.contains_key(child) {
+                self.held_answers.insert(child.to_owned());
+                return;
+            }
         }
         self.hand_back(child, outcome);
+    }
+
+    /// The process a task kept ended without waking it: its last answer goes back.
+    pub(crate) fn release_held_answer(&mut self, child: &str) {
+        if self.held_answers.remove(child) {
+            self.hand_back(child, &TurnOutcome::Completed);
+        }
     }
 
     /// Gives a delegated task's answer to its parent: into the turn it runs, or as the start

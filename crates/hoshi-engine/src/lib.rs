@@ -160,6 +160,9 @@ struct State {
     /// Agent processes kept after their turn for the commands it left running in the
     /// background, by thread id.
     lingering: HashMap<String, Lingering>,
+    /// Delegated tasks whose turn ended with commands still running: their answer waits for
+    /// the turn those commands wake, or for the process to end.
+    held_answers: HashSet<String>,
     /// How many agent processes the engine started, which numbers each one.
     processes: u64,
     /// `None` when the provider is disabled.
@@ -440,6 +443,7 @@ impl Engine {
             store,
             turns: HashMap::new(),
             lingering: HashMap::new(),
+            held_answers: HashSet::new(),
             processes: 0,
             adapter: None,
             notify,
@@ -5079,6 +5083,36 @@ Blue"
         assert_eq!(requests.len(), 3);
         assert!(requests[2].prompt.starts_with("Delegated task"));
         assert!(harness.thread("t").active_turn_id.is_some());
+    }
+
+    #[test]
+    fn a_task_that_leaves_a_command_running_answers_once_its_process_ends() {
+        let harness = Harness::in_memory("delegate-held", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let task = delegate(&harness, serde_json::json!({ "task": "wait a minute" }));
+        let child = task["taskId"].as_str().unwrap().to_owned();
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        lock(&harness.engine.state).lingering.insert(
+            child.clone(),
+            Lingering {
+                process: 99,
+                running: Box::new(KeptTurn(Arc::default())),
+                background: None,
+            },
+        );
+
+        child_turn_ends(&harness, &adapter, 1);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+        assert!(lock(&harness.engine.state).delegations.contains_key(&child));
+
+        lock(&harness.engine.state).receive_from(&child, 99, ProviderOutput::ProcessEnded);
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].prompt.starts_with("Delegated task"));
     }
 
     #[test]
