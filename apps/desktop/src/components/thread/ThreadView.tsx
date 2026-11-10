@@ -178,11 +178,18 @@ export function ThreadView() {
             <div className='flex-1' />
           ) : draft ? (
             <div className='flex flex-1 flex-col items-center justify-center gap-8 px-4 pb-[12vh]'>
-              <h2 className='text-foreground max-w-3xl text-center text-3xl font-normal tracking-tight text-balance'>
-                {projectTitle === undefined
-                  ? m.new_chat_prompt()
-                  : m.new_thread_prompt({ project: projectTitle })}
-              </h2>
+              <div className='w-full'>
+                <h2
+                  className={cn(
+                    CHAT_LANE,
+                    'text-foreground text-center text-3xl font-normal tracking-tight text-balance'
+                  )}
+                >
+                  {projectTitle === undefined
+                    ? m.new_chat_prompt()
+                    : m.new_thread_prompt({ project: projectTitle })}
+                </h2>
+              </div>
               <div className='w-full'>
                 <Composer
                   key={composerDraft}
