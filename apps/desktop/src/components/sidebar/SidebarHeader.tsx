@@ -6,6 +6,8 @@ import { usePaletteStore } from '@/state/palette-store'
 import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Wordmark } from '@/components/brand/Logo'
+import { useNotesStore } from '@/state/notes-store'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import { PALETTE_SHORTCUT } from '@/components/palette/CommandPalette'
 import {
@@ -16,8 +18,15 @@ import {
 } from '@hugeicons/core-free-icons'
 
 export function SidebarHeader() {
-  const search = useAppStore((state) => state.search)
-  const setSearch = useAppStore((state) => state.setSearch)
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
+  const threadSearch = useAppStore((state) => state.search)
+  const setThreadSearch = useAppStore((state) => state.setSearch)
+  const noteSearch = useNotesStore((state) => state.query)
+  const setNoteSearch = useNotesStore((state) => state.setQuery)
+  const openNote = useNotesStore((state) => state.open)
+  const search = notesOpen ? noteSearch : threadSearch
+  const setSearch = notesOpen ? setNoteSearch : setThreadSearch
+  const searchLabel = notesOpen ? m.notes_search() : m.search_threads()
   const toggleSidebar = useAppStore((state) => state.toggleSidebar)
   const newThread = useNewThread()
   const hasProjects = useAppStore((state) => state.projects.length > 0)
@@ -49,8 +58,8 @@ export function SidebarHeader() {
             type='search'
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
-            placeholder={m.search_threads()}
-            aria-label={m.search_threads()}
+            placeholder={searchLabel}
+            aria-label={searchLabel}
             className='placeholder:text-sidebar-foreground/50 min-w-0 flex-1 bg-transparent outline-none'
           />
           {search === '' ? (
@@ -65,20 +74,29 @@ export function SidebarHeader() {
             </button>
           ) : null}
         </label>
-        <SortMenu />
+        {notesOpen ? null : <SortMenu />}
         <IconButton
           label={m.add_project()}
           onClick={() => openPalette(true, 'addProject')}
         >
           <HugeiconsIcon icon={FolderAddIcon} strokeWidth={2} />
         </IconButton>
-        <IconButton
-          label={m.new_thread()}
-          onClick={() => void newThread()}
-          disabled={!hasProjects}
-        >
-          <HugeiconsIcon icon={PencilEdit02Icon} strokeWidth={2} />
-        </IconButton>
+        {notesOpen ? (
+          <IconButton
+            label={m.notes_new()}
+            onClick={() => openNote(crypto.randomUUID())}
+          >
+            <HugeiconsIcon icon={PencilEdit02Icon} strokeWidth={2} />
+          </IconButton>
+        ) : (
+          <IconButton
+            label={m.new_thread()}
+            onClick={() => void newThread()}
+            disabled={!hasProjects}
+          >
+            <HugeiconsIcon icon={PencilEdit02Icon} strokeWidth={2} />
+          </IconButton>
+        )}
       </div>
     </header>
   )

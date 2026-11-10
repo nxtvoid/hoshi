@@ -2,7 +2,7 @@
 import type { PullRequestState } from "./PullRequestState";
 
 /**
- * Something sent along with a message's text: an image, or what a `#123` or
+ * Something sent along with a message's text: an image, a note, or what a `#123` or
  * `$name` mention in the text stands for.
  */
-export type MessageAttachment = { "type": "image", id: string, name: string, mimeType: string, size: number, } | { "type": "pullRequest", number: number, title: string, url: string, headBranch: string, baseBranch: string, state: PullRequestState, } | { "type": "skill", name: string, };
+export type MessageAttachment = { "type": "image", id: string, name: string, mimeType: string, size: number, } | { "type": "pullRequest", number: number, title: string, url: string, headBranch: string, baseBranch: string, state: PullRequestState, } | { "type": "skill", name: string, } | { "type": "note", id: string, title: string, text: string, hidden: number, };

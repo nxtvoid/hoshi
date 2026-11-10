@@ -2,6 +2,10 @@ import { m } from '@/paraglide/messages'
 import type { Terminal } from '@xterm/xterm'
 import { invoke } from '@tauri-apps/api/core'
 import { terminalAt } from './edit-terminals'
+import { saveNote, useNotesStore } from '@/state/notes-store'
+import { useAppStore } from '@/state/app-store'
+import { scopeProjectId } from '@/state/scope'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { useEffect, useMemo, useState } from 'react'
 import { isMac } from '@/components/brand/EditorIcon'
 import {
@@ -16,6 +20,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuShortcut
 } from '@hoshi/ui/components/dropdown-menu'
 
@@ -33,6 +38,8 @@ type Opened = {
   run: Record<EditAction, () => void>
   /** Where focus goes back when the menu closes from the keyboard. */
   focus: HTMLElement | null
+  /** The selected text, to keep as a note; empty when none is, or it is a password. */
+  selection: string
 }
 
 /** hoshi's right-click menu over text, in place of the webview's; dev builds keep the webview's. */
@@ -105,9 +112,36 @@ export function EditContextMenu() {
             </DropdownMenuShortcut>
           </DropdownMenuItem>
         ))}
+        {opened.selection ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => void saveToNotes(opened.selection)}
+            >
+              {m.edit_save_to_notes()}
+            </DropdownMenuItem>
+          </>
+        ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
   )
+}
+
+/** Keeps the selection as a note of the open thread's project, or a general one. */
+async function saveToNotes(text: string) {
+  const state = useAppStore.getState()
+  const thread = state.threads.find(
+    (candidate) => candidate.id === state.selectedThreadId
+  )
+  const projectId = thread
+    ? thread.projectId
+    : scopeProjectId(state, useSidebarStore.getState().view)
+  try {
+    await saveNote(crypto.randomUUID(), projectId, text)
+    useNotesStore.getState().captured()
+  } catch (error) {
+    console.error('hoshi: failed to save a note', error)
+  }
 }
 
 function editTarget(element: Element): Omit<Opened, 'x' | 'y'> | null {
@@ -118,7 +152,8 @@ function editTarget(element: Element): Omit<Opened, 'x' | 'y'> | null {
       menu && {
         menu,
         run: terminalActions(terminal),
-        focus: terminal.textarea ?? null
+        focus: terminal.textarea ?? null,
+        selection: terminal.getSelection().trim()
       }
     )
   }
@@ -132,7 +167,14 @@ function editTarget(element: Element): Omit<Opened, 'x' | 'y'> | null {
       field.selectionStart !== null &&
       field.selectionStart !== field.selectionEnd
     const menu = editMenu(editable ? 'text' : 'readOnly', selected)
-    return menu && { menu, run: textActions(field), focus: field }
+    const secret =
+      field instanceof HTMLInputElement && field.type === 'password'
+    const selection = secret
+      ? ''
+      : field.value
+          .slice(field.selectionStart ?? 0, field.selectionEnd ?? 0)
+          .trim()
+    return menu && { menu, run: textActions(field), focus: field, selection }
   }
   const host = element.closest(
     '[contenteditable]:not([contenteditable="false"])'
@@ -146,7 +188,12 @@ function editTarget(element: Element): Omit<Opened, 'x' | 'y'> | null {
   const menu = editMenu(editable ? 'text' : 'readOnly', selected)
   if (!menu) return null
   const focus = editable ? host : null
-  return { menu, run: textActions(focus), focus }
+  return {
+    menu,
+    run: textActions(focus),
+    focus,
+    selection: selected ? (selection?.toString().trim() ?? '') : ''
+  }
 }
 
 /** Puts focus and the selection back where the right-click found them. */

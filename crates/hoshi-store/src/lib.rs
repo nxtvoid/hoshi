@@ -4,6 +4,10 @@
 //! transaction, so the projections never disagree with the event log. The
 //! thread projection must match `ReadModel::apply`; a test checks that.
 
+mod personal;
+
+pub use personal::PersonalStore;
+
 use hoshi_core::{
     ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, PullRequestWatch,
     Snapshot, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome,

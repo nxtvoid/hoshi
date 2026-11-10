@@ -2,8 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import {
   activateSurface,
   closeSurface,
+  knownSurfaces,
   NO_SURFACES,
   openSurface,
+  showNote,
   showTurnDiff,
   type ThreadSurfaces,
   updateSurface
@@ -36,6 +38,48 @@ describe('openSurface', () => {
 
     expect(kinds(panel)).toEqual(['pullRequest', 'diff'])
     expect(panel.activeId).toBe('s1')
+  })
+})
+
+describe('showNote', () => {
+  test('opens the note a message carried, and moves to another one in place', () => {
+    const makeId = ids()
+    let panel = showNote(NO_SURFACES, 'm1', 'n1', makeId)
+    panel = openSurface(panel, 'diff', makeId)
+
+    panel = showNote(panel, 'm2', 'n2', makeId)
+
+    expect(kinds(panel)).toEqual(['note', 'diff'])
+    expect(panel.surfaces[0]).toEqual({
+      id: 's1',
+      kind: 'note',
+      itemId: 'm2',
+      noteId: 'n2'
+    })
+    expect(panel.activeId).toBe('s1')
+  })
+})
+
+describe('knownSurfaces', () => {
+  test('a surface of a kind this version lacks is dropped, and focus moves on', () => {
+    const saved = {
+      surfaces: [
+        { id: 's1', kind: 'notes', scope: 'general', noteId: null },
+        { id: 's2', kind: 'diff', scope: 'uncommitted' }
+      ],
+      activeId: 's1'
+    } as unknown as ThreadSurfaces
+
+    expect(knownSurfaces(saved)).toEqual({
+      surfaces: [{ id: 's2', kind: 'diff', scope: 'uncommitted' }],
+      activeId: 's2'
+    })
+  })
+
+  test('a panel of known surfaces stays as it is', () => {
+    const panel = openSurface(NO_SURFACES, 'diff', ids())
+
+    expect(knownSurfaces(panel)).toBe(panel)
   })
 })
 

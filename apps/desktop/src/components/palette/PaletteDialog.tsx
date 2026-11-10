@@ -4,6 +4,8 @@ import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { Thread } from '@/bindings/Thread'
 import { usePaletteStore } from '@/state/palette-store'
+import { showNotes } from '@/state/notes-hub'
+import { useQuickNoteStore } from '@/state/quick-note-store'
 import { viewOf } from '@/state/scope'
 import { useSidebarStore } from '@/state/sidebar-store'
 import { useNavigate } from '@tanstack/react-router'
@@ -30,6 +32,8 @@ import {
   GitForkIcon,
   GitPullRequestIcon,
   InboxIcon,
+  Note01Icon,
+  NoteAddIcon,
   PencilEdit02Icon,
   Settings02Icon
 } from '@hugeicons/core-free-icons'
@@ -38,6 +42,8 @@ const ACTION_LABELS: Record<PaletteAction, () => string> = {
   newThread: m.new_thread,
   newThreadFromPullRequest: m.new_thread_from_pull_request,
   addProject: m.add_project,
+  newNote: m.notes_new,
+  notes: m.notes,
   inbox: m.inbox,
   settings: m.settings,
   usage: m.usage
@@ -47,6 +53,8 @@ const ACTION_ICONS = {
   newThread: PencilEdit02Icon,
   newThreadFromPullRequest: GitPullRequestIcon,
   addProject: FolderAddIcon,
+  newNote: NoteAddIcon,
+  notes: Note01Icon,
   inbox: InboxIcon,
   settings: Settings02Icon,
   usage: BarChartIcon
@@ -135,6 +143,10 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
         case 'addProject':
           setPaletteOpen(true, 'addProject')
           return Promise.resolve(false)
+        case 'newNote':
+          return useQuickNoteStore.getState().setOpen(true)
+        case 'notes':
+          return showNotes()
         case 'inbox':
           return setView('inbox')
         case 'settings':

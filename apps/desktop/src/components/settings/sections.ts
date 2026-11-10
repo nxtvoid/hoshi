@@ -2,6 +2,7 @@ import { m } from '@/paraglide/messages'
 import {
   GitBranchIcon,
   InformationCircleIcon,
+  Key01Icon,
   PaintBoardIcon,
   PlugSocketIcon,
   Settings02Icon
@@ -12,6 +13,7 @@ export const SETTINGS_SECTIONS = [
   'appearance',
   'providers',
   'forges',
+  'vault',
   'about'
 ] as const
 
@@ -29,6 +31,7 @@ export const SECTION_META: Record<
   appearance: { label: m.settings_appearance, icon: PaintBoardIcon },
   providers: { label: m.settings_providers, icon: PlugSocketIcon },
   forges: { label: m.settings_source_control, icon: GitBranchIcon },
+  vault: { label: m.settings_vault, icon: Key01Icon },
   about: { label: m.settings_about, icon: InformationCircleIcon }
 }
 
@@ -38,7 +41,10 @@ export const NAV_GROUPS: {
   sections: SettingsSection[]
 }[] = [
   { heading: null, sections: ['general', 'appearance'] },
-  { heading: m.settings_group_agents, sections: ['providers', 'forges'] },
+  {
+    heading: m.settings_group_agents,
+    sections: ['providers', 'forges', 'vault']
+  },
   { heading: null, sections: ['about'] }
 ]
 
@@ -54,6 +60,8 @@ export const SEARCH_ITEMS: { title: () => string; section: SettingsSection }[] =
     { title: m.binary_path, section: 'providers' },
     { title: m.plan_mode_setting, section: 'providers' },
     { title: m.github, section: 'forges' },
+    { title: m.vault_secrets, section: 'vault' },
+    { title: m.vault_always_allow, section: 'vault' },
     { title: m.app_version_label, section: 'about' }
   ]
 

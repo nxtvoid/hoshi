@@ -27,7 +27,7 @@ import { ReviewCommentsBar } from './ReviewCommentsBar'
 import { WorktreeSetupBar } from './WorktreeSetupBar'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { LogoMark } from '@/components/brand/Logo'
-import { usePanelStore } from '@/state/panel-store'
+import { usePanelOpen, usePanelStore } from '@/state/panel-store'
 import { useTerminalStore } from '@/state/terminal-store'
 import { RightPanel } from '@/components/panel/RightPanel'
 import { useTranscriptStore } from '@/state/transcript-store'
@@ -57,7 +57,7 @@ export function ThreadView() {
       state.projects.find((project) => project.id === thread?.projectId)
         ?.workspaceRoot
   )
-  const panelOpen = usePanelStore((state) => state.open)
+  const panelOpen = usePanelOpen(thread?.id)
   const togglePanel = usePanelStore((state) => state.toggle)
   const panelMaximized = usePanelStore((state) => state.maximized)
   const detailsOpen = usePanelStore((state) => state.detailsOpen)
@@ -82,7 +82,7 @@ export function ThreadView() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.altKey && event.code === 'KeyB') {
         event.preventDefault()
-        togglePanel()
+        if (threadId) togglePanel(threadId)
       } else if (
         threadId &&
         event.ctrlKey &&
@@ -143,7 +143,7 @@ export function ThreadView() {
             <IconButton
               label={m.toggle_panel()}
               active={panelOpen}
-              onClick={togglePanel}
+              onClick={() => togglePanel(thread.id)}
             >
               <HugeiconsIcon icon={SidebarRightIcon} strokeWidth={2} />
             </IconButton>

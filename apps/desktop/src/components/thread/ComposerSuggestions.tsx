@@ -9,6 +9,7 @@ import { PullRequestIcon } from '@/components/pull-request/PullRequestIcon'
 import type { ComposerAction, Suggestion } from './use-composer-suggestions'
 import {
   AiBrain01Icon,
+  Note01Icon,
   PencilEdit02Icon,
   SlashIcon,
   SparklesIcon,
@@ -25,7 +26,8 @@ const LABELS: Record<ComposerTrigger['kind'], () => string> = {
   path: m.composer_suggestions_files,
   command: m.composer_suggestions_commands,
   pullRequest: m.composer_suggestions_pull_requests,
-  skill: m.composer_suggestions_skills
+  skill: m.composer_suggestions_skills,
+  note: m.notes
 }
 
 export const suggestionOptionId = (listId: string, index: number) =>
@@ -42,7 +44,7 @@ type ComposerSuggestionsProps = {
   onPick: (item: Suggestion) => void
 }
 
-/** The `@`, `/`, `#` and `$` menu floating above the composer. */
+/** The `@`, `/`, `#`, `$` and `!` menu floating above the composer. */
 export function ComposerSuggestions({
   listId,
   kind,
@@ -184,6 +186,13 @@ function describe(item: Suggestion): {
         description: title
       }
     }
+    case 'note':
+      return {
+        icon: iconOf(Note01Icon),
+        label: item.note.title || m.notes_untitled(),
+        hint: item.note.projectId === null ? m.notes_general() : null,
+        description: item.note.preview
+      }
     case 'skill':
       return {
         icon: iconOf(SparklesIcon),

@@ -35,7 +35,7 @@ pub struct SlashCommand {
     pub custom: bool,
 }
 
-/// Something sent along with a message's text: an image, or what a `#123` or
+/// Something sent along with a message's text: an image, a note, or what a `#123` or
 /// `$name` mention in the text stands for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
@@ -62,4 +62,12 @@ pub enum MessageAttachment {
     },
     /// A provider command or skill mentioned as `$name`.
     Skill { name: String },
+    /// One of the user's notes, as it stood when sent: `text` without the credentials it
+    /// seemed to hold, `hidden` of them.
+    Note {
+        id: String,
+        title: String,
+        text: String,
+        hidden: u32,
+    },
 }

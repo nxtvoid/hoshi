@@ -3,12 +3,14 @@ import { ProjectRail } from './ProjectRail'
 import { m } from '@/paraglide/messages'
 import { SidebarFooter } from './SidebarFooter'
 import { SidebarHeader } from './SidebarHeader'
+import { NotesSidebar } from '@/components/notes/NotesSidebar'
 import { ResizeHandle } from '@hoshi/ui/components/resize-handle'
 import { SIDEBAR_WIDTH, useSidebarStore } from '@/state/sidebar-store'
 
 export function Sidebar() {
   const width = useSidebarStore((state) => state.width)
   const setWidth = useSidebarStore((state) => state.setWidth)
+  const notesOpen = useSidebarStore((state) => state.notesOpen)
 
   return (
     <aside
@@ -18,7 +20,7 @@ export function Sidebar() {
       <SidebarHeader />
       <div className='flex min-h-0 flex-1'>
         <ProjectRail />
-        <ThreadList />
+        {notesOpen ? <NotesSidebar /> : <ThreadList />}
       </div>
       <SidebarFooter />
       <ResizeHandle

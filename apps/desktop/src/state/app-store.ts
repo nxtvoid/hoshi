@@ -37,6 +37,8 @@ import { useWorktreeSetupStore } from './worktree-setup-store'
 import type { WorktreeSetupRun } from '@/bindings/WorktreeSetupRun'
 import { COMPACT_COMMAND } from '@/lib/compaction'
 import { useBrowserStore } from './browser-store'
+import { useVaultStore } from './vault-store'
+import { useNotesStore } from './notes-store'
 import type { BrowserPage } from '@/bindings/BrowserPage'
 import type { BrowserFrame } from '@/bindings/BrowserFrame'
 import type { GitActionProgress } from '@/bindings/GitActionProgress'
@@ -439,6 +441,7 @@ function receive({ sequence, event }: EventEnvelope) {
         : removed
     )
   }
+  if (event.type === 'projectRemoved') useNotesStore.getState().touch()
   const { selectedThreadId } = useAppStore.getState()
   if (selectedThreadId !== useTranscriptStore.getState().threadId) {
     void useTranscriptStore.getState().load(selectedThreadId)
@@ -448,6 +451,7 @@ function receive({ sequence, event }: EventEnvelope) {
 /** Drops what the app kept on this machine for threads that are gone. */
 function forgetThreads(threadIds: string[], drafts: string[]) {
   useDraftStore.getState().forget(drafts)
+  for (const draft of drafts) useNotesStore.getState().clearAttached(draft)
   if (threadIds.length === 0) return
   usePanelStore.getState().forget(threadIds)
   useTerminalStore.getState().forget(threadIds)
@@ -517,7 +521,12 @@ async function startSync() {
     ),
     listen<StreamDelta>('hoshi://stream', (message) =>
       useTranscriptStore.getState().applyDelta(message.payload)
-    )
+    ),
+    listen('hoshi://vault', () => {
+      if (useVaultStore.getState().secrets !== null) {
+        void useVaultStore.getState().load()
+      }
+    })
   ])
   const stopAppUpdates = watchAppUpdates()
   // Read after the sequenced listeners exist, or events in between would be lost.

@@ -1,7 +1,7 @@
 //! What Claude Code's tools did, read from the structured result the CLI sends with each
 //! tool result (`tool_use_result`).
 
-use crate::truncate;
+use crate::{MCP_SERVER_NAME, truncate};
 use hoshi_core::{Task, TaskStatus, ToolDetail};
 use serde_json::Value;
 use std::path::Path;
@@ -64,6 +64,27 @@ fn file_change(result: &Value) -> Option<ToolDetail> {
 }
 
 /// The list `TodoWrite` sets, which older Claude Code versions use.
+/// Stands in a recorded tool call for a value the user pasted.
+const PASTED: &str = "[pasted value]";
+
+/// A tool call's input as the transcript keeps it. `request_secret` carries values the
+/// user pasted to a file; they are left out, so the call doesn't keep them too.
+pub(crate) fn recorded_input(name: &str, input: &Value) -> String {
+    if name != format!("mcp__{MCP_SERVER_NAME}__request_secret") {
+        return input.to_string();
+    }
+    let mut kept = input.clone();
+    if kept["value"].is_string() {
+        kept["value"] = PASTED.into();
+    }
+    for field in kept["fields"].as_array_mut().into_iter().flatten() {
+        if field["value"].is_string() {
+            field["value"] = PASTED.into();
+        }
+    }
+    kept.to_string()
+}
+
 pub(crate) fn todo_list(input: &Value) -> Option<Vec<Task>> {
     let todos = input["todos"].as_array()?;
     Some(
@@ -122,6 +143,26 @@ fn task_status(status: &Value) -> TaskStatus {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_recorded_secret_request_leaves_out_what_the_user_pasted() {
+        let pasted = json!({
+            "label": "Test login",
+            "keep": true,
+            "fields": [
+                { "label": "Email", "secret": false, "value": "a@b.dev" },
+                { "label": "Password", "value": "hunter2" },
+            ],
+        });
+        let single = json!({ "value": "tok-123" });
+
+        let login = recorded_input("mcp__hoshi__request_secret", &pasted);
+
+        assert!(login.contains("Test login") && login.contains("Email"));
+        assert!(!login.contains("hunter2") && !login.contains("a@b.dev"));
+        assert!(!recorded_input("mcp__hoshi__request_secret", &single).contains("tok-123"));
+        assert_eq!(recorded_input("Bash", &single), single.to_string());
+    }
 
     #[test]
     fn an_edit_becomes_its_hunks() {

@@ -4,7 +4,11 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import { formatClockTime } from '@hoshi/utils'
 import { getLocale } from '@/paraglide/runtime'
 import { CopyButton } from '@hoshi/ui/components/copy-button'
-import { ArrowTurnForwardIcon, Copy01Icon } from '@hugeicons/core-free-icons'
+import {
+  ArrowTurnForwardIcon,
+  Copy01Icon,
+  Note01Icon
+} from '@hugeicons/core-free-icons'
 import { knownMentions } from '@/lib/prompt-segments'
 import { useImageStore } from '@/state/image-store'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
@@ -12,6 +16,7 @@ import { Dialog, DialogContent, DialogTitle } from '@hoshi/ui/components/dialog'
 import { Markdown } from '@/components/markdown/Markdown'
 
 type Image = Extract<MessageAttachment, { type: 'image' }>
+type SentNote = Extract<MessageAttachment, { type: 'note' }>
 
 type UserMessageProps = {
   text: string
@@ -22,6 +27,8 @@ type UserMessageProps = {
   createdAt?: string
   /** Shown before the copy button while it is hovered, such as editing from here. */
   action?: ReactNode
+  /** Shows a note the message carried, as the agent read it. */
+  onOpenNote?: (noteId: string) => void
 }
 
 export function UserMessage({
@@ -29,10 +36,14 @@ export function UserMessage({
   attachments,
   steer,
   createdAt,
-  action
+  action,
+  onOpenNote
 }: UserMessageProps) {
   const images = attachments.filter(
     (attachment): attachment is Image => attachment.type === 'image'
+  )
+  const notes = attachments.filter(
+    (attachment): attachment is SentNote => attachment.type === 'note'
   )
   const time = createdAt ? formatClockTime(createdAt, getLocale()) : ''
 
@@ -53,6 +64,18 @@ export function UserMessage({
           {images.map((image) => (
             <li key={image.id}>
               <MessageImage image={image} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {notes.length > 0 ? (
+        <ul className='flex max-w-[85%] flex-wrap justify-end gap-1.5'>
+          {notes.map((note) => (
+            <li key={note.id} className='min-w-0'>
+              <MessageNote
+                note={note}
+                onOpen={onOpenNote && (() => onOpenNote(note.id))}
+              />
             </li>
           ))}
         </ul>
@@ -83,6 +106,34 @@ export function UserMessage({
         </div>
       ) : null}
     </div>
+  )
+}
+
+/** A note the message carried, which opens beside the thread as the agent read it. */
+function MessageNote({
+  note,
+  onOpen
+}: {
+  note: SentNote
+  onOpen: (() => void) | undefined
+}) {
+  const title = note.title || m.notes_untitled()
+
+  return (
+    <button
+      type='button'
+      aria-label={m.message_note_open({ title })}
+      disabled={!onOpen}
+      onClick={onOpen}
+      className='border-border bg-background hover:bg-muted focus-visible:ring-ring flex h-7 max-w-full items-center gap-1.5 rounded-lg border px-2 text-xs outline-none focus-visible:ring-2'
+    >
+      <HugeiconsIcon
+        icon={Note01Icon}
+        strokeWidth={2}
+        className='text-muted-foreground size-3.5 shrink-0'
+      />
+      <span className='min-w-0 truncate'>{title}</span>
+    </button>
   )
 }
 

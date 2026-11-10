@@ -6,8 +6,10 @@ import { useTerminalStore } from './terminal-store'
 import {
   activateSurface,
   closeSurface,
+  knownSurfaces,
   NO_SURFACES,
   openSurface,
+  showNote,
   showTurnDiff,
   type Surface,
   type SurfaceKind,
@@ -18,7 +20,8 @@ import {
 export const PANEL_WIDTH = { min: 320, max: 760, default: 440 } as const
 
 type PanelState = {
-  open: boolean
+  /** The threads whose panel is open: each thread keeps its own, with its surfaces. */
+  opened: Record<string, true>
   /** The thread details card, floating over the chat or as a popover when it doesn't fit. */
   detailsOpen: boolean
   /** The panel takes the chat's place, for a wide diff or a terminal. */
@@ -26,15 +29,17 @@ type PanelState = {
   width: number
   /** Open surfaces by thread id. */
   threads: Record<string, ThreadSurfaces>
-  toggle: () => void
+  toggle: (threadId: string) => void
   setDetailsOpen: (detailsOpen: boolean) => void
-  close: () => void
+  close: (threadId: string) => void
   toggleMaximized: () => void
   setWidth: (width: number) => void
   /** Opens the panel on a surface of that kind, reusing a single-instance one. */
   openSurface: (threadId: string, kind: SurfaceKind) => void
   /** Opens the panel on what a turn changed, at `focusPath` when given. */
   openTurnDiff: (threadId: string, turnId: string, focusPath?: string) => void
+  /** Opens the panel on a note as the message `itemId` carried it. */
+  openNote: (threadId: string, itemId: string, noteId: string) => void
   activateSurface: (threadId: string, surfaceId: string) => void
   /** Closing the last surface closes the panel too. */
   closeSurface: (threadId: string, surfaceId: string) => void
@@ -61,15 +66,27 @@ export const usePanelStore = create<PanelState>()(
             [threadId]: change(state.threads[threadId] ?? NO_SURFACES)
           }
         }))
+      const show = (threadId: string) =>
+        set((state) =>
+          state.opened[threadId]
+            ? state
+            : { opened: { ...state.opened, [threadId]: true } }
+        )
+      const hide = (threadId: string) =>
+        set((state) => ({
+          opened: withoutKeys(state.opened, [threadId]),
+          maximized: false
+        }))
       return {
-        open: false,
+        opened: {},
         detailsOpen: false,
         maximized: false,
         width: PANEL_WIDTH.default,
         threads: {},
-        toggle: () => set((state) => ({ open: !state.open })),
+        toggle: (threadId) =>
+          get().opened[threadId] ? hide(threadId) : show(threadId),
         setDetailsOpen: (detailsOpen) => set({ detailsOpen }),
-        close: () => set({ open: false, maximized: false }),
+        close: hide,
         toggleMaximized: () =>
           set((state) => ({ maximized: !state.maximized })),
         setWidth: (width) =>
@@ -80,7 +97,7 @@ export const usePanelStore = create<PanelState>()(
           }),
         openSurface: (threadId, kind) => {
           changeThread(threadId, (panel) => openSurface(panel, kind, makeId))
-          set({ open: true })
+          show(threadId)
           const activeId = get().threads[threadId]?.activeId
           if (kind === 'terminal' && activeId) {
             useTerminalStore.getState().requestFocus(activeId)
@@ -90,7 +107,13 @@ export const usePanelStore = create<PanelState>()(
           changeThread(threadId, (panel) =>
             showTurnDiff(panel, turnId, focusPath, makeId)
           )
-          set({ open: true })
+          show(threadId)
+        },
+        openNote: (threadId, itemId, noteId) => {
+          changeThread(threadId, (panel) =>
+            showNote(panel, itemId, noteId, makeId)
+          )
+          show(threadId)
         },
         activateSurface: (threadId, surfaceId) =>
           changeThread(threadId, (panel) => activateSurface(panel, surfaceId)),
@@ -102,11 +125,7 @@ export const usePanelStore = create<PanelState>()(
             void invoke('close_terminal', { terminalId: surfaceId })
           }
           changeThread(threadId, (panel) => closeSurface(panel, surfaceId))
-          set((state) =>
-            state.threads[threadId]?.surfaces.length === 0
-              ? { open: false, maximized: false }
-              : {}
-          )
+          if (get().threads[threadId]?.surfaces.length === 0) hide(threadId)
         },
         updateSurface: (threadId, surfaceId, change) =>
           changeThread(threadId, (panel) =>
@@ -115,22 +134,42 @@ export const usePanelStore = create<PanelState>()(
         forget: (threadIds) =>
           set((state) => {
             const threads = withoutKeys(state.threads, threadIds)
-            return threads === state.threads ? state : { threads }
+            const opened = withoutKeys(state.opened, threadIds)
+            return threads === state.threads && opened === state.opened
+              ? state
+              : { threads, opened }
           })
       }
     },
     {
       name: 'hoshi-panel',
-      partialize: ({ open, detailsOpen, maximized, width, threads }) => ({
-        open,
+      partialize: ({ opened, detailsOpen, maximized, width, threads }) => ({
+        opened,
         detailsOpen,
         maximized,
         width,
         threads
-      })
+      }),
+      merge: (saved, current) => {
+        const kept = { ...current, ...(saved as Partial<PanelState>) }
+        const threads = Object.fromEntries(
+          Object.entries(kept.threads).map(([threadId, panel]) => [
+            threadId,
+            knownSurfaces(panel)
+          ])
+        )
+        return { ...kept, threads }
+      }
     }
   )
 )
+
+/** Whether the panel is open in the thread; never with no thread. */
+export function usePanelOpen(threadId: string | undefined): boolean {
+  return usePanelStore((state) =>
+    threadId ? state.opened[threadId] === true : false
+  )
+}
 
 /** The surfaces of a thread; stable while nothing changes, so selecting it is cheap. */
 export function useThreadSurfaces(threadId: string): ThreadSurfaces {

@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import { withoutKeys } from '@/lib/records'
 import { persist } from 'zustand/middleware'
 import { useAppStore } from './app-store'
+import { useSidebarStore } from './sidebar-store'
 import { finishedTurns } from './thread-signals'
 import { unlistedTaskIds } from './thread-sections'
 import { removedThreadIds } from './orchestration'
@@ -53,9 +54,16 @@ export const useUnseenStore = create<UnseenState>()(
   )
 )
 
-/** The open thread shows: the window has focus and no overlay, such as settings, covers it. */
+/**
+ * The open thread shows: the window has focus, and neither an overlay, such as settings,
+ * nor the notes cover it.
+ */
 function onScreen() {
-  return document.hasFocus() && window.location.pathname === '/'
+  return (
+    document.hasFocus() &&
+    window.location.pathname === '/' &&
+    !useSidebarStore.getState().notesOpen
+  )
 }
 
 /**
@@ -85,9 +93,13 @@ export function trackUnseen(): () => void {
     }
     if (state.selectedThreadId !== previous.selectedThreadId) seeSelected()
   })
+  const unsubscribeNotes = useSidebarStore.subscribe((state, previous) => {
+    if (previous.notesOpen && !state.notesOpen) seeSelected()
+  })
   window.addEventListener('focus', seeSelected)
   return () => {
     unsubscribe()
+    unsubscribeNotes()
     window.removeEventListener('focus', seeSelected)
   }
 }

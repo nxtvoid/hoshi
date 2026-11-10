@@ -11,7 +11,9 @@ import {
 } from '@hoshi/ui/components/tooltip'
 
 function useInbox() {
-  const open = useSidebarStore((state) => state.view === 'inbox')
+  const open = useSidebarStore(
+    (state) => state.view === 'inbox' && !state.notesOpen
+  )
   const setView = useSidebarStore((state) => state.setView)
   const { count, waiting } = useInboxBadge()
   return {

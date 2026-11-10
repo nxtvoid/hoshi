@@ -66,6 +66,8 @@ const source = (changes: Partial<PaletteSource> = {}): PaletteSource => ({
     newThread: 'New thread',
     newThreadFromPullRequest: 'New thread from pull request',
     addProject: 'Add project',
+    newNote: 'New note',
+    notes: 'Notes',
     inbox: 'Inbox',
     settings: 'Settings',
     usage: 'Usage'

@@ -1,10 +1,10 @@
 use hoshi_core::{
     AppSettings, BrowserInput, ChangesSummary, Command, CommandError, DiffFile, DiffScope, Editor,
     FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest, GitActionResult, GitStatus,
-    MessageAttachment, ProviderAccountStatus, ProviderModels, ProviderVersion, PullRequest,
-    PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand,
-    Snapshot, TerminalAttach, TerminalEvent, ThreadItem, TranscriptPage, UsageLimits,
-    WorkspaceEntry,
+    MessageAttachment, Note, NoteSummary, ProviderAccountStatus, ProviderModels, ProviderVersion,
+    PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel, RemoteRepository,
+    SecretAnswer, SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem,
+    TranscriptPage, UsageLimits, VaultSecret, VaultSecretInput, WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
@@ -35,6 +35,8 @@ const BROWSER_FRAME_CHANNEL: &str = "hoshi://browser-frame";
 /// Where a thread's browser page is, and what the agent just did on it.
 const BROWSER_PAGE_CHANNEL: &str = "hoshi://browser-page";
 const WORKTREE_SETUP_CHANNEL: &str = "hoshi://worktree-setup";
+/// The vault's secrets changed; the UI reads them again.
+const VAULT_CHANNEL: &str = "hoshi://vault";
 
 pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
@@ -56,6 +58,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
             Notification::BrowserFrame(frame) => handle.emit(BROWSER_FRAME_CHANNEL, frame),
             Notification::BrowserPage(page) => handle.emit(BROWSER_PAGE_CHANNEL, page),
             Notification::WorktreeSetup(run) => handle.emit(WORKTREE_SETUP_CHANNEL, run),
+            Notification::VaultChanged => handle.emit(VAULT_CHANNEL, ()),
         };
         if let Err(error) = result {
             eprintln!("hoshi: failed to emit to the UI: {error}");
@@ -65,6 +68,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
     let settings = crate::settings::load(&crate::settings::settings_path(app.handle())?);
     engine.set_adapter(adapter_for(&settings));
     engine.set_thread_titles(settings.thread_titles.clone());
+    engine.set_vault(settings.vault);
     engine.set_forges(hoshi_engine::default_forges());
     app.manage(engine);
     Ok(())
@@ -571,16 +575,116 @@ pub fn skip_worktree_setup(
     engine.skip_worktree_setup(&thread_id)
 }
 
-/// The user's answer to an agent's secret request; `None` declines. The value only reaches
-/// a file the agent's commands read.
+/// The user's answer to an agent's secret request: a value they typed, one the vault
+/// holds, or none. The value only reaches a file the agent's commands read.
 #[tauri::command(async)]
 pub fn answer_secret_request(
     engine: State<'_, Engine>,
     thread_id: String,
     request_id: String,
-    secret: Option<String>,
+    answer: SecretAnswer,
 ) -> Result<(), CommandError> {
-    engine.answer_secret_request(&thread_id, &request_id, secret.as_deref())
+    engine.answer_secret_request(&thread_id, &request_id, answer)
+}
+
+/// A project's notes holding `query`, or the general ones without a project.
+#[tauri::command(async)]
+pub fn list_notes(
+    engine: State<'_, Engine>,
+    project_id: Option<String>,
+    query: String,
+) -> Result<Vec<NoteSummary>, CommandError> {
+    engine.notes(project_id.as_deref(), &query)
+}
+
+#[tauri::command(async)]
+pub fn get_note(engine: State<'_, Engine>, note_id: String) -> Result<Note, CommandError> {
+    engine.note(&note_id)
+}
+
+/// Writes a note's text, as its editor shows it in `document`, and where it belongs,
+/// adding the note if its id is new.
+#[tauri::command(async)]
+pub fn save_note(
+    engine: State<'_, Engine>,
+    note_id: String,
+    project_id: Option<String>,
+    text: String,
+    document: Option<String>,
+) -> Result<Note, CommandError> {
+    engine.save_note(&note_id, project_id, text, document)
+}
+
+#[tauri::command(async)]
+pub fn delete_note(engine: State<'_, Engine>, note_id: String) -> Result<(), CommandError> {
+    engine.delete_note(&note_id)
+}
+
+/// The user says the note's `index`th credential is none.
+#[tauri::command(async)]
+pub fn ignore_note_credential(
+    engine: State<'_, Engine>,
+    note_id: String,
+    index: usize,
+) -> Result<Note, CommandError> {
+    engine.ignore_note_credential(&note_id, index)
+}
+
+/// Moves the note's `index`th credential into the vault; `secret` describes it, and its
+/// value comes from the note.
+#[tauri::command(async)]
+pub fn move_note_credential_to_vault(
+    engine: State<'_, Engine>,
+    note_id: String,
+    index: usize,
+    secret: VaultSecretInput,
+) -> Result<Note, CommandError> {
+    engine.move_note_credential_to_vault(&note_id, index, secret)
+}
+
+/// The note as a message carries it to an agent, without its credentials.
+#[tauri::command(async)]
+pub fn get_note_attachment(
+    engine: State<'_, Engine>,
+    note_id: String,
+) -> Result<MessageAttachment, CommandError> {
+    engine.note_attachment(&note_id)
+}
+
+/// The vault's secrets, without their values.
+#[tauri::command(async)]
+pub fn list_vault_secrets(engine: State<'_, Engine>) -> Result<Vec<VaultSecret>, CommandError> {
+    engine.vault_secrets()
+}
+
+/// Adds a secret, or changes the one with `secret_id`.
+#[tauri::command(async)]
+pub fn save_vault_secret(
+    engine: State<'_, Engine>,
+    secret_id: Option<String>,
+    secret: VaultSecretInput,
+) -> Result<VaultSecret, CommandError> {
+    engine.save_vault_secret(secret_id.as_deref(), secret)
+}
+
+#[tauri::command(async)]
+pub fn delete_vault_secret(
+    engine: State<'_, Engine>,
+    secret_id: String,
+) -> Result<(), CommandError> {
+    engine.delete_vault_secret(&secret_id)
+}
+
+/// Copies the value of one of a secret's fields to the system clipboard, without it
+/// reaching the webview.
+#[tauri::command(async)]
+pub fn copy_vault_secret(
+    engine: State<'_, Engine>,
+    secret_id: String,
+    field_id: String,
+) -> Result<(), CommandError> {
+    let value = engine.reveal_vault_secret(&secret_id, &field_id)?;
+    crate::clipboard::copy_secret(value).map_err(|detail| CommandError::Internal { detail })
 }
 
 #[tauri::command(async)]

@@ -66,4 +66,17 @@ describe('pull request and skill triggers', () => {
     })
     expect(detectTrigger('costs $5', 8)).toBeNull()
   })
+
+  test('! offers notes, but not where it ends a sentence or negates', () => {
+    expect(detectTrigger('with !dep', 9)).toEqual({
+      kind: 'note',
+      query: 'dep',
+      start: 5,
+      end: 9
+    })
+    expect(detectTrigger('!', 1)?.kind).toBe('note')
+    expect(detectTrigger('hola!', 5)).toBeNull()
+    expect(detectTrigger('a != b', 4)).toBeNull()
+    expect(detectTrigger('wow!!', 5)).toBeNull()
+  })
 })

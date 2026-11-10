@@ -7,6 +7,8 @@ export type PaletteAction =
   | 'newThread'
   | 'newThreadFromPullRequest'
   | 'addProject'
+  | 'newNote'
+  | 'notes'
   | 'inbox'
   | 'settings'
   | 'usage'
@@ -15,6 +17,8 @@ export const PALETTE_ACTIONS: PaletteAction[] = [
   'newThread',
   'newThreadFromPullRequest',
   'addProject',
+  'newNote',
+  'notes',
   'inbox',
   'settings',
   'usage'

@@ -3,6 +3,7 @@ import type { FavoriteModel } from "./FavoriteModel";
 import type { GeneralSettings } from "./GeneralSettings";
 import type { ProviderSettings } from "./ProviderSettings";
 import type { ThreadTitleSettings } from "./ThreadTitleSettings";
+import type { VaultSettings } from "./VaultSettings";
 
 export type AppSettings = { providers: ProviderSettings, 
 /**
@@ -12,7 +13,7 @@ planModeEnabled: boolean,
 /**
  * Listed first in the model picker.
  */
-favoriteModels: Array<FavoriteModel>, threadTitles: ThreadTitleSettings, general: GeneralSettings, 
+favoriteModels: Array<FavoriteModel>, threadTitles: ThreadTitleSettings, general: GeneralSettings, vault: VaultSettings, 
 /**
  * When the first-run setup was finished or skipped; `None` until then.
  */
