@@ -110,11 +110,7 @@ export function ProvidersSection() {
               >
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent
-                align='end'
-                alignItemWithTrigger={false}
-                className='w-72'
-              >
+              <SelectContent align='end' className='w-72'>
                 {subagentEffortItems.map(({ value, label, description }) => (
                   <SelectItem key={value} value={value} className='py-1.5'>
                     <div className='flex min-w-0 flex-col gap-0.5'>
