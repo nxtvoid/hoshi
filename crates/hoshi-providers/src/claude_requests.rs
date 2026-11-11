@@ -1,7 +1,7 @@
 //! Requests Claude Code makes mid-turn over its control protocol, started by
 //! `--permission-prompt-tool stdio`: tool approvals, `AskUserQuestion` and `ExitPlanMode`.
 
-use crate::{MCP_SERVER_NAME, truncate};
+use crate::{MCP_SERVER_NAME, truncate_json};
 use hoshi_core::{
     AccessMode, ApprovalDecision, ItemContent, ProviderOutput, Question, QuestionOption,
     RequestResponse, RequestStatus,
@@ -190,7 +190,7 @@ pub(crate) fn receive(
         _ => ItemContent::Approval {
             tool_call_id: tool_use_id.clone(),
             tool_name: tool_name.clone(),
-            input: truncate(&input.to_string(), TOOL_INPUT_MAX_CHARS),
+            input: truncate_json(&input, TOOL_INPUT_MAX_CHARS),
             reason: request["decision_reason"]
                 .as_str()
                 .map(strip_ansi)

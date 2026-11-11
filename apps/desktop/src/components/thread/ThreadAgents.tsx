@@ -91,7 +91,9 @@ export function ThreadAgents({
           )}
         />
       </span>
-      <span className='min-w-0 flex-1 truncate'>{agent.title}</span>
+      <span className='min-w-0 flex-1 truncate'>
+        {agent.title || m.subagent()}
+      </span>
       <span className='text-muted-foreground shrink-0 text-xs font-normal tabular-nums'>
         {formatRelativeTime(agent.at, new Date(), getLocale())}
       </span>
