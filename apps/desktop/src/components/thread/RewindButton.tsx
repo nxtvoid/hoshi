@@ -1,3 +1,4 @@
+import { withCleanup } from '@hoshi/utils'
 import { useState } from 'react'
 import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
@@ -44,23 +45,30 @@ export function RewindButton({
     })
     if (!answer) return
     setRewinding(true)
-    try {
-      await invoke('rewind_thread', {
-        threadId,
-        messageId,
-        revertFiles: answer === 'alternative'
-      })
-      useComposerFillStore.getState().request({ threadId, text, attachments })
-    } catch (error) {
-      await notify({
-        title: m.rewind_failed(),
-        description: rewindFailure(error as CommandError, threadId),
-        confirmLabel: m.dialog_ok(),
-        tone: 'warning'
-      })
-    } finally {
-      setRewinding(false)
-    }
+    return await withCleanup(
+      async () => {
+        try {
+          await invoke('rewind_thread', {
+            threadId,
+            messageId,
+            revertFiles: answer === 'alternative'
+          })
+          useComposerFillStore
+            .getState()
+            .request({ threadId, text, attachments })
+        } catch (error) {
+          await notify({
+            title: m.rewind_failed(),
+            description: rewindFailure(error as CommandError, threadId),
+            confirmLabel: m.dialog_ok(),
+            tone: 'warning'
+          })
+        }
+      },
+      () => {
+        setRewinding(false)
+      }
+    )
   }
 
   return (

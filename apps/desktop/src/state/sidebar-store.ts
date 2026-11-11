@@ -18,11 +18,14 @@ type SidebarState = {
   width: number
   /** Sections the user folded; inactive and done start folded. */
   collapsed: Partial<Record<SectionId, boolean>>
+  /** Project ids in the order the user dragged them into on the rail. */
+  projectOrder: string[]
   setThreadSort: (threadSort: ThreadSort) => void
   setView: (view: SidebarView) => void
   setFilter: (filter: ThreadFilter) => void
   setWidth: (width: number) => void
   toggleSection: (section: SectionId) => void
+  setProjectOrder: (projectOrder: string[]) => void
 }
 
 export const useSidebarStore = create<SidebarState>()(
@@ -33,6 +36,7 @@ export const useSidebarStore = create<SidebarState>()(
       filter: 'all',
       width: SIDEBAR_WIDTH.default,
       collapsed: { inactive: true, done: true },
+      projectOrder: [],
       setThreadSort: (threadSort) => set({ threadSort }),
       setView: (view) => set({ view }),
       setFilter: (filter) => set({ filter }),
@@ -48,7 +52,8 @@ export const useSidebarStore = create<SidebarState>()(
             ...state.collapsed,
             [section]: !state.collapsed[section]
           }
-        }))
+        })),
+      setProjectOrder: (projectOrder) => set({ projectOrder })
     }),
     { name: 'hoshi-sidebar' }
   )

@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { useAppStore } from '@/state/app-store'
+import { selectQuietThreads } from '@/state/quiet-threads'
 import type { Thread } from '@/bindings/Thread'
 import { useUnseenStore } from '@/state/unseen-store'
 import { useSidebarStore } from '@/state/sidebar-store'
@@ -52,7 +53,7 @@ function inboxOf(
 
 /** The sections the sidebar lists right now, for its view, search, filter and sort. */
 export function useSidebarSections() {
-  const threads = useAppStore((state) => state.threads)
+  const threads = useAppStore(selectQuietThreads)
   const pullRequests = useAppStore((state) => state.pullRequests)
   const search = useAppStore((state) => state.search)
   const projectId = useAppStore((state) => state.selectedProjectId)
@@ -98,8 +99,8 @@ export function useSidebarSections() {
 
 /** The sidebar's sections as they are now, for a handler that runs outside rendering. */
 export function currentSidebarSections() {
-  const { threads, pullRequests, search, selectedProjectId } =
-    useAppStore.getState()
+  const { pullRequests, search, selectedProjectId } = useAppStore.getState()
+  const threads = selectQuietThreads(useAppStore.getState())
   const { unseen, held } = useUnseenStore.getState()
   const { view, filter, threadSort } = useSidebarStore.getState()
   const inactiveDays =
@@ -122,7 +123,7 @@ export function currentSidebarSections() {
 
 /** The inbox across every project, newest first, whatever the sidebar shows. */
 function useInboxSections() {
-  const threads = useAppStore((state) => state.threads)
+  const threads = useAppStore(selectQuietThreads)
   const pullRequests = useAppStore((state) => state.pullRequests)
   const unseen = useUnseenStore((state) => state.unseen)
 

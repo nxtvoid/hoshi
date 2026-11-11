@@ -7,7 +7,8 @@ import { fitInside } from '@/lib/browser-layout'
 import { useBrowserStore } from '@/state/browser-store'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import type { BrowserInput } from '@/bindings/BrowserInput'
-import { useEffect, useRef, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
+import { PanelShown } from './panel-shown'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -72,6 +73,7 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
   const viewport = useRef<HTMLDivElement>(null)
   const wheel = useRef<Wheel | null>(null)
   const wheelFrame = useRef<number | null>(null)
+  const shown = useContext(PanelShown)
 
   useEffect(
     () => () => {
@@ -119,11 +121,12 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
   }, [])
 
   useEffect(() => {
+    if (!shown) return
     void invoke('browser_view', { threadId, viewing: true })
     return () => {
       void invoke('browser_view', { threadId, viewing: false })
     }
-  }, [threadId])
+  }, [threadId, shown])
 
   useEffect(() => {
     if (page?.url) setAddress(page.url)
@@ -186,7 +189,7 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
     }
   }
   const marker =
-    agentActive && page?.agentPoint && frame && image.current
+    agentActive && page?.agentPoint && frame
       ? {
           left: (page.agentPoint.x / frame.width) * 100,
           top: (page.agentPoint.y / frame.height) * 100

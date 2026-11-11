@@ -1,6 +1,6 @@
 import { memo } from 'react'
 import { m } from '@/paraglide/messages'
-import { useDraftStore } from '@/state/draft-store'
+import { hasDraft, useDraftStore } from '@/state/draft-store'
 import { getLocale } from '@/paraglide/runtime'
 import type { Thread } from '@/bindings/Thread'
 import { useAppStore } from '@/state/app-store'
@@ -89,8 +89,8 @@ export const ThreadRow = memo(function ThreadRow({
             ?.title
   )
   const unseen = useUnseenStore((state) => state.unseen[thread.id] === true)
-  const draft = useDraftStore((state) => thread.id in state.drafts)
-  const saveDraft = useDraftStore((state) => state.save)
+  const draft = useDraftStore((state) => hasDraft(state, thread.id))
+  const forgetDrafts = useDraftStore((state) => state.forget)
   const status =
     thread.status !== 'idle' ? STATUS[thread.status] : unseen ? COMPLETED : null
   const canCleanUp = mergedCleanup(thread, pullRequest)
@@ -253,7 +253,7 @@ export const ThreadRow = memo(function ThreadRow({
           {m.regenerate_title()}
         </ContextMenuItem>
         {draft && !selected ? (
-          <ContextMenuItem onClick={() => saveDraft(thread.id, null)}>
+          <ContextMenuItem onClick={() => forgetDrafts([thread.id])}>
             {m.discard_draft()}
           </ContextMenuItem>
         ) : null}

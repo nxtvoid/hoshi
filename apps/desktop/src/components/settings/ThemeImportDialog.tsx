@@ -1,4 +1,4 @@
-import { cn } from '@hoshi/utils'
+import { cn, withCleanup } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -290,17 +290,22 @@ function ThemeImportBody({
     }
     const requestId = ++request.current
     setReading(true)
-    try {
-      const text = await file.text()
-      if (!current(requestId)) return
-      setJson(text)
-      setFileName(file.name)
-      setError(null)
-    } catch {
-      if (current(requestId)) setError(m.theme_file_unreadable())
-    } finally {
-      if (current(requestId)) setReading(false)
-    }
+    await withCleanup(
+      async () => {
+        try {
+          const text = await file.text()
+          if (!current(requestId)) return
+          setJson(text)
+          setFileName(file.name)
+          setError(null)
+        } catch {
+          if (current(requestId)) setError(m.theme_file_unreadable())
+        }
+      },
+      () => {
+        if (current(requestId)) setReading(false)
+      }
+    )
   }
 
   const installBatch = async (files: readonly ImportFile[]) => {
@@ -702,41 +707,51 @@ function ThemeSearchSection({ onInstalled }: { onInstalled: () => void }) {
     searchRequest.current += 1
     setSearching(false)
     setInstalling(extension.id)
-    try {
-      const files = await invoke<ExtensionTheme[]>('import_theme_extension', {
-        extension
-      })
-      if (!alive.current) return
-      const themes = extensionThemes(extension, files)
-      const {
-        customThemes: current,
-        theme: base,
-        halves,
-        setCustomThemes
-      } = useThemeStore.getState()
-      const stillInstalled = current.filter(
-        (candidate) => candidate.collection?.id === extension.collectionId
-      )
-      if (
-        JSON.stringify(stillInstalled) !== JSON.stringify(installedCollection)
-      ) {
-        throw new ThemeError('collection_changed')
+    await withCleanup(
+      async () => {
+        try {
+          const files = await invoke<ExtensionTheme[]>(
+            'import_theme_extension',
+            {
+              extension
+            }
+          )
+          if (!alive.current) return
+          const themes = extensionThemes(extension, files)
+          const {
+            customThemes: current,
+            theme: base,
+            halves,
+            setCustomThemes
+          } = useThemeStore.getState()
+          const stillInstalled = current.filter(
+            (candidate) => candidate.collection?.id === extension.collectionId
+          )
+          if (
+            JSON.stringify(stillInstalled) !==
+            JSON.stringify(installedCollection)
+          ) {
+            setError(importErrorMessage(new ThemeError('collection_changed')))
+            return
+          }
+          const removed = stillInstalled
+            .filter((old) => !themes.some((added) => added.id === old.id))
+            .map((old) => old.id)
+          setCustomThemes(
+            replaceCollection(current, extension.collectionId, themes),
+            removed.length > 0
+              ? selectionWithout({ theme: base, halves }, removed)
+              : undefined
+          )
+          onInstalled()
+        } catch (cause) {
+          if (alive.current) setError(importErrorMessage(cause))
+        }
+      },
+      () => {
+        if (alive.current) setInstalling(null)
       }
-      const removed = stillInstalled
-        .filter((old) => !themes.some((added) => added.id === old.id))
-        .map((old) => old.id)
-      setCustomThemes(
-        replaceCollection(current, extension.collectionId, themes),
-        removed.length > 0
-          ? selectionWithout({ theme: base, halves }, removed)
-          : undefined
-      )
-      onInstalled()
-    } catch (cause) {
-      if (alive.current) setError(importErrorMessage(cause))
-    } finally {
-      if (alive.current) setInstalling(null)
-    }
+    )
   }
 
   return (

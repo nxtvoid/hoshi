@@ -13,7 +13,7 @@ export default defineConfig({
   plugins: [
     paraglideVitePlugin({ project: './project.inlang' }),
     tanstackRouter({ target: 'react', autoCodeSplitting: true }),
-    react(),
+    react({ compiler: true }),
     tailwindcss()
   ],
   resolve: {

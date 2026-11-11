@@ -34,11 +34,12 @@ export function CodeBlock({
     <div className='border-border/70 bg-secondary/60 dark:bg-input/30 my-2.5 overflow-hidden rounded-lg border dark:border-transparent'>
       <div className='text-muted-foreground flex h-7 items-center justify-between gap-2 ps-3 pe-1.5 select-none'>
         <span className='flex min-w-0 items-center gap-1.5'>
-          {language ? (
-            <FileIcon path={languageFileName(language)} className='size-3.5' />
-          ) : null}
+          <FileIcon
+            path={languageFileName(language ?? '')}
+            className='size-3.5'
+          />
           <span className='truncate text-[11px]'>
-            {language ? codeLanguageLabel(language) : null}
+            {language ? codeLanguageLabel(language) : m.code_language_plain()}
           </span>
         </span>
         <CopyButton

@@ -21,6 +21,7 @@ import {
   RequestPanel
 } from './RequestPanel'
 import { ComposerImages } from './ComposerImages'
+import { ImageDialog } from '@/components/markdown/ImageMention'
 import { Button } from '@hoshi/ui/components/button'
 import { useComposerImages } from './use-composer-images'
 import type { CommandError } from '@/bindings/CommandError'
@@ -38,7 +39,8 @@ import {
   imageChipKeys,
   joinDocuments,
   numberImageChips,
-  withoutImageChips
+  keepImageChips,
+  withoutImageSources
 } from '@/lib/composer-markdown'
 import {
   type PastedImages,
@@ -138,9 +140,18 @@ export function Composer({
   const editorRef = useRef<ComposerEditorHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
-  const images = useComposerImages()
-  /** Images shown as a chip in the text; without its chip, such an image is left out. */
-  const chipped = useRef(new Set<string>())
+  const images = useComposerImages(draftKey)
+  /** The draft image shown large, by its key. */
+  const [viewing, setViewing] = useState<string | null>(null)
+  const viewed = images.images.find((image) => image.key === viewing)
+  const [initialContent] = useState(
+    () =>
+      initialDraft &&
+      keepImageChips(
+        initialDraft,
+        new Map(images.images.map((image) => [image.key, image.previewUrl]))
+      )
+  )
   const history = usePromptHistoryStore((state) => state.entries)
   const remember = usePromptHistoryStore((state) => state.add)
   const sendMessage = useAppStore((state) => state.sendMessage)
@@ -157,6 +168,15 @@ export function Composer({
     restoreImages(fill.attachments, useImageStore.getState().urls)
     useComposerFillStore.getState().done()
   }, [fill, threadId, restoreImages])
+  useEffect(() => {
+    editorRef.current?.setImageSources(
+      new Map(
+        images.images.flatMap((image) =>
+          image.previewUrl ? [[image.key, image.previewUrl]] : []
+        )
+      )
+    )
+  }, [images.images])
   const request = usePendingRequest()
   const requestActions = useRequestActions(request)
   const compaction = useCompactionDue()
@@ -164,7 +184,7 @@ export function Composer({
   const chipKeys = imageChipKeys(text)
   /** The images the message goes with: one whose chip was taken out of the text is left out. */
   const attached = images.images.filter(
-    (image) => !chipped.current.has(image.key) || chipKeys.includes(image.key)
+    (image) => !image.chipped || chipKeys.includes(image.key)
   )
   const savingImages = attached.some((image) => !image.saved && !image.failed)
   /** A secret is typed in its own card, so it never reaches the chat. */
@@ -253,7 +273,7 @@ export function Composer({
         previewUrl: image.previewUrl
       }))
     )
-    if (inText) for (const image of added) chipped.current.add(image.key)
+    if (inText) images.markChipped(added.map((image) => image.key))
   }
 
   /** A path that turns out to be no image file is pasted as the text it was. */
@@ -265,7 +285,6 @@ export function Composer({
 
   const removeImage = (key: string) => {
     images.remove(key)
-    chipped.current.delete(key)
     editorRef.current?.removeImage(key)
   }
 
@@ -393,11 +412,10 @@ export function Composer({
       remember(prompt)
       images.release(taken.filter((image) => ordered.includes(image)))
       images.discard(taken.filter((image) => !ordered.includes(image)))
-      chipped.current.clear()
       return
     }
     const restored = joinDocuments(doc, editorRef.current?.document() ?? null)
-    saveDraft(draftKey, restored)
+    saveDraft(draftKey, restored && withoutImageSources(restored))
     images.putBack(taken)
     if (restored) editorRef.current?.setDocument(restored)
   }
@@ -580,7 +598,11 @@ export function Composer({
           }}
         >
           {attached.length > 0 ? (
-            <ComposerImages images={attached} onRemove={removeImage} />
+            <ComposerImages
+              images={attached}
+              onOpen={setViewing}
+              onRemove={removeImage}
+            />
           ) : null}
           <div
             className={cn(
@@ -599,11 +621,14 @@ export function Composer({
                 className='max-h-60 overflow-y-auto'
                 contentClassName={hero ? 'min-h-16 py-2' : 'min-h-8 py-1.5'}
                 onChange={onChange}
-                initialContent={initialDraft && withoutImageChips(initialDraft)}
-                onDocument={(doc) => saveDraft(draftKey, doc)}
+                initialContent={initialContent}
+                onDocument={(doc) =>
+                  saveDraft(draftKey, doc && withoutImageSources(doc))
+                }
                 onBlur={flushDrafts}
                 onKeyDown={onKeyDown}
                 onImages={(pasted) => void addImages(pasted)}
+                onOpenImage={setViewing}
               />
             </div>
             {stacked ? (
@@ -629,6 +654,14 @@ export function Composer({
         </form>
       </div>
       <ComposerFooter />
+      <ImageDialog
+        name={viewed?.name ?? ''}
+        url={viewed?.previewUrl}
+        open={viewed !== undefined}
+        onOpenChange={(open) => {
+          if (!open) setViewing(null)
+        }}
+      />
     </div>
   )
 }

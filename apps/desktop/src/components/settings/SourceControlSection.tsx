@@ -1,3 +1,4 @@
+import { withCleanup } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
 import { Input } from '@hoshi/ui/components/input'
@@ -103,28 +104,38 @@ function BitbucketRow({
     event.preventDefault()
     setPending(true)
     setError(null)
-    try {
-      onChange(
-        await invoke<ForgeAccount>('connect_bitbucket', { email, token })
-      )
-      close()
-    } catch (failure) {
-      setError(connectErrorMessage(failure as CommandError))
-    } finally {
-      setPending(false)
-    }
+    return await withCleanup(
+      async () => {
+        try {
+          onChange(
+            await invoke<ForgeAccount>('connect_bitbucket', { email, token })
+          )
+          close()
+        } catch (failure) {
+          setError(connectErrorMessage(failure as CommandError))
+        }
+      },
+      () => {
+        setPending(false)
+      }
+    )
   }
 
   const disconnect = async () => {
     setPending(true)
-    try {
-      await invoke('disconnect_forge', { forge: 'bitbucket' })
-      onChange({ forge: 'bitbucket', login: null })
-    } catch (failure) {
-      setError(forgeErrorMessage(failure as CommandError))
-    } finally {
-      setPending(false)
-    }
+    return await withCleanup(
+      async () => {
+        try {
+          await invoke('disconnect_forge', { forge: 'bitbucket' })
+          onChange({ forge: 'bitbucket', login: null })
+        } catch (failure) {
+          setError(forgeErrorMessage(failure as CommandError))
+        }
+      },
+      () => {
+        setPending(false)
+      }
+    )
   }
 
   return (

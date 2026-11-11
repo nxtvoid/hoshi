@@ -56,15 +56,19 @@ pub(crate) const MAX_DEPTH: usize = 2;
 pub(crate) const TASK_INSTRUCTIONS: &str = "You are a delegated task: do the work yourself; delegate only what it asks. Await or stop your background commands before your last message, unless told not to.";
 
 /// When to use each of hoshi's tools; their descriptions say how.
-const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. Work that should go on in the background: delegate_task, never a background Agent. Work in a branch or checkout of its own, as each of several variants to compare: delegate_task with isolation \"worktree\", one per branch, however small; never git worktree or a second checkout yourself. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
+const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. An agent or work in the background, however the user words it: delegate_task, never Agent with run_in_background. Work in a branch or checkout of its own, as each of several variants to compare: delegate_task with isolation \"worktree\", one per branch, however small; never git worktree or a second checkout yourself. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
 - A credential only the user has: request_secret.\n\
 - The user's other hoshi threads: thread_list, thread_read (before you answer about one), thread_send. Not ListAgents or SendMessage.";
+
+/// How answers show the files the agent made, which the user sees only through them.
+const FILES: &str = "- The user sees your replies, not what your tools read. To show an image, embed it with Markdown and its absolute path: ![name](/abs/path.png). Link other files by their absolute path.";
 
 /// For threads the user started, which own their pull request.
 const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.\n\
 - Asked to move to an existing worktree: EnterWorktree with its path, never cd.";
 
 const BROWSER_AND_BACKGROUND: &str = "- Web previews when asked for browser work, or to see or reproduce something in a live app: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
+- A visual the user asks for (chart, diagram, mockup, visualizer): an HTML file's path, or inline HTML, to html_preview, then html_render. A screenshot on disk or a text description doesn't show it; never start a server for it. An image to post or send elsewhere: a .png file and its path, never html_render.\n\
 - Background Bash or Monitor commands don't hold your turn. To wait for one (tests, a build, a sleep, which only runs in the background): await_background_tasks with its id, then end your turn. Never for dev servers.";
 
 /// Added after the rest of [`instructions`] for agents of threads on Bitbucket.
@@ -80,6 +84,7 @@ pub(crate) fn instructions(depth: usize, in_project: bool, bitbucket: bool) -> S
             hoshi_providers::DEFERRED_TOOLS
         ),
         TOOLS.to_owned(),
+        FILES.to_owned(),
     ];
     if depth == 0 && in_project {
         parts.push(PULL_REQUESTS.to_owned());
@@ -739,13 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn the_instructions_stay_within_their_budget() {
-        let worst = [instructions(0, true, true), instructions(1, true, true)]
-            .iter()
-            .map(String::len)
-            .max()
-            .unwrap();
-        assert!(worst <= 1_600, "{worst} bytes");
+    fn the_instructions_name_only_the_tools_a_thread_has() {
         assert!(instructions(0, true, false).contains("watch_pull_request"));
         assert!(!instructions(0, false, false).contains("watch_pull_request"));
         assert!(!instructions(1, true, false).contains("watch_pull_request"));

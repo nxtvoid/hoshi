@@ -1,4 +1,4 @@
-import { cn } from '@hoshi/utils'
+import { cn, withCleanup } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -131,17 +131,22 @@ export function ThreadServers({ threadId }: { threadId: string }) {
     if (stopping) return
     setStopping(serverKey(server))
     setError(null)
-    try {
-      await invoke('stop_server', {
-        threadId,
-        pid: server.pid,
-        port: server.port
-      })
-    } catch (failure) {
-      setError(stopError(failure as CommandError))
-    } finally {
-      setStopping(null)
-    }
+    return await withCleanup(
+      async () => {
+        try {
+          await invoke('stop_server', {
+            threadId,
+            pid: server.pid,
+            port: server.port
+          })
+        } catch (failure) {
+          setError(stopError(failure as CommandError))
+        }
+      },
+      () => {
+        setStopping(null)
+      }
+    )
   }
 
   return (

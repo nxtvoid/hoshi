@@ -1,5 +1,6 @@
 import { cn } from '@hoshi/utils'
 import { lazy, Suspense } from 'react'
+import { PanelShown } from './panel-shown'
 import { usePanelStore } from '@/state/panel-store'
 
 const RightPanelView = lazy(() =>
@@ -8,11 +9,22 @@ const RightPanelView = lazy(() =>
   }))
 )
 
-export function RightPanel({ threadId }: { threadId: string }) {
+export function RightPanel({
+  threadId,
+  shown
+}: {
+  threadId: string
+  /** Kept mounted while closed, hidden, so it opens again as it was. */
+  shown: boolean
+}) {
   return (
-    <Suspense fallback={<PanelPlaceholder />}>
-      <RightPanelView threadId={threadId} />
-    </Suspense>
+    <div className={shown ? 'contents' : 'hidden'} inert={!shown}>
+      <PanelShown.Provider value={shown}>
+        <Suspense fallback={<PanelPlaceholder />}>
+          <RightPanelView threadId={threadId} />
+        </Suspense>
+      </PanelShown.Provider>
+    </div>
   )
 }
 

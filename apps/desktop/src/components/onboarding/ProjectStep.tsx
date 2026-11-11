@@ -1,3 +1,4 @@
+import { withCleanup } from '@hoshi/utils'
 import { useState } from 'react'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
@@ -37,26 +38,33 @@ export function ProjectStep({
     if (pending) return
     setPending(true)
     setError(null)
-    try {
-      const folder = (await loadedSettings())?.general.projectsFolder?.trim()
-      const picked = await open({
-        directory: true,
-        multiple: false,
-        defaultPath: folder || undefined
-      })
-      if (!picked) return
-      const failure = await addProjectAt(picked)
-      if (failure) {
-        setError(errorMessage(failure))
-        return
+    return await withCleanup(
+      async () => {
+        try {
+          const folder = (
+            await loadedSettings()
+          )?.general.projectsFolder?.trim()
+          const picked = await open({
+            directory: true,
+            multiple: false,
+            defaultPath: folder || undefined
+          })
+          if (!picked) return
+          const failure = await addProjectAt(picked)
+          if (failure) {
+            setError(errorMessage(failure))
+            return
+          }
+          useSidebarStore.getState().setView('project')
+          onAdded(useAppStore.getState().selectedProjectId)
+        } catch {
+          setError(m.error_generic())
+        }
+      },
+      () => {
+        setPending(false)
       }
-      useSidebarStore.getState().setView('project')
-      onAdded(useAppStore.getState().selectedProjectId)
-    } catch {
-      setError(m.error_generic())
-    } finally {
-      setPending(false)
-    }
+    )
   }
 
   return (

@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn the_subagent_instructions_stay_within_their_budget() {
+    fn the_subagent_instructions_match_their_budget() {
         let told = instructions(
             SubagentEffort::AgentDecides,
             Some("opus"),
@@ -286,7 +286,13 @@ mod tests {
             true,
         )
         .unwrap();
-        assert!(told.len() <= 550, "{} bytes", told.len());
+        let budget: serde_json::Value =
+            serde_json::from_str(include_str!("../../../agent-context-budget.json")).unwrap();
+        assert_eq!(
+            told.len() as u64,
+            budget["subagentInstructionsBytes"],
+            "set agent-context-budget.json to the measured value"
+        );
     }
 
     #[test]

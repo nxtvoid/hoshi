@@ -1,5 +1,6 @@
 import { cn, formatDuration } from '@hoshi/utils'
 import { CHAT_LANE } from '@/lib/chat-lane'
+import { Shimmer } from '@hoshi/ui/components/shimmer'
 import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -19,7 +20,10 @@ import { PullRequestUpdateRow } from './PullRequestUpdateRow'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { BackgroundWork } from './BackgroundWork'
 import { UserMessage } from './UserMessage'
+import { HtmlPageRow } from './HtmlPageRow'
 import { useWholeToolCall } from './use-whole-tool-call'
+import { useStableRows } from './use-stable-rows'
+import { useNow } from './use-now'
 import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
@@ -27,7 +31,7 @@ import { useAppStore } from '@/state/app-store'
 import { useStoppingStore } from '@/state/stopping-store'
 import { inFlight } from '@/lib/agents'
 import { foldTaskRuns } from '@/lib/task-runs'
-import { rowKey, stableRows } from '@/lib/stable-rows'
+import { rowKey } from '@/lib/stable-rows'
 import { useRequestStore } from '@/state/request-store'
 import { useBusyThreads } from './use-busy-threads'
 import { DelegationRow, TaskNote, TaskWaits } from './DelegationRows'
@@ -61,7 +65,6 @@ import {
   File01Icon,
   FileEditIcon,
   Globe02Icon,
-  Loading03Icon,
   Search01Icon,
   StopCircleIcon,
   Wrench01Icon
@@ -71,6 +74,9 @@ import {
   foldTurns,
   groupTranscript,
   isDelegation,
+  isHtmlRender,
+  readingChanges,
+  statusAnchor,
   staysInView,
   isSubagentCall,
   isToolCall,
@@ -80,6 +86,8 @@ import {
   toolName,
   toolTarget,
   withStreaming,
+  streamingShape,
+  fromStreamingShape,
   type ToolAction,
   type ToolCallItem,
   type FoldEnding,
@@ -93,21 +101,69 @@ import {
 
 /** Off-screen rows skip rendering but keep their last height, so scrolling never jumps. */
 const ROW = '[contain-intrinsic-size:auto_2.5rem] [content-visibility:auto]'
+/**
+ * The last rows, where a running turn adds and grows, render in full: with a placeholder
+ * height they would first take its size, then their own, and the end would follow twice.
+ */
+const LIVE_ROWS = 4
 const MESSAGE_ROW =
   '[contain-intrinsic-size:auto_120px] [content-visibility:auto]'
 
 const ENTRY_SUMMARY =
   'text-muted-foreground hover:text-foreground flex min-h-6 cursor-default list-none items-center gap-2 text-sm select-none [&::-webkit-details-marker]:hidden'
 
+/** A streaming item's text as it arrives; `text`, the item's own, once it is stored. */
+function useLiveText(item: TranscriptItem, text: string) {
+  return useTranscriptStore((state) =>
+    item.streaming ? (state.streaming[item.id]?.text ?? text) : text
+  )
+}
+
+/** The longest a finished turn waits for its changes before it settles without them. */
+const SETTLE_MS = 1000
+
+/**
+ * Whether the transcript still shows the turn as running. A turn that ended stays so until
+ * its changes are read, at most `SETTLE_MS`: its work folds, its status goes and its changes
+ * show in one step, not in two a moment apart.
+ */
+function useShownWorking(working: boolean) {
+  const reading = useTranscriptStore(
+    (state) => readingChanges(state.items) === true
+  )
+  const [settling, setSettling] = useState(false)
+  const wasWorking = useRef(working)
+
+  useLayoutEffect(() => {
+    if (wasWorking.current && !working && reading) setSettling(true)
+    if (working) setSettling(false)
+    wasWorking.current = working
+  }, [working, reading])
+
+  useEffect(() => {
+    if (!settling) return
+    if (!reading) {
+      setSettling(false)
+      return
+    }
+    const timer = setTimeout(() => setSettling(false), SETTLE_MS)
+    return () => clearTimeout(timer)
+  }, [settling, reading])
+
+  return working || settling
+}
+
 export const Transcript = memo(function Transcript({
-  working,
+  working: running,
   cwd
 }: {
   working: boolean
   cwd: string | null
 }) {
+  const working = useShownWorking(running)
   const items = useTranscriptStore((state) => state.items)
-  const streaming = useTranscriptStore((state) => state.streaming)
+  const shape = useTranscriptStore((state) => streamingShape(state.streaming))
+  const streaming = useMemo(() => fromStreamingShape(shape), [shape])
   const threadId = useTranscriptStore((state) => state.threadId)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
   const busy = useBusyThreads()
@@ -121,23 +177,18 @@ export const Transcript = memo(function Transcript({
       .map((thread) => thread.id)
       .join(' ')
   )
-  const shownRows = useRef<TranscriptRow[]>([])
-  const rows = useMemo(() => {
+  const folded = useMemo(() => {
     const active = new Set(activeTasks.split(' '))
-    const next = stableRows(
-      shownRows.current,
-      foldTaskRuns(
-        foldTurns(
-          groupTranscript(withStreaming(items, streaming)),
-          working,
-          staysInView
-        ),
-        (taskId) => active.has(taskId)
-      )
+    return foldTaskRuns(
+      foldTurns(
+        groupTranscript(withStreaming(items, streaming)),
+        working,
+        staysInView
+      ),
+      (taskId) => active.has(taskId)
     )
-    shownRows.current = next
-    return next
   }, [items, streaming, working, activeTasks])
+  const rows = useStableRows(folded)
   const approvals = useMemo(() => approvalsByCall(items), [items])
   const liveTasks = useMemo(
     () =>
@@ -157,8 +208,13 @@ export const Transcript = memo(function Transcript({
       liveTasks={liveTasks}
       loadOlder={hasOlder ? loadOlder : undefined}
       firstId={items[0]?.id}
+      status={
+        working
+          ? { after: statusAnchor(rows), node: <TurnStatus /> }
+          : undefined
+      }
     >
-      <BackgroundWork status={working ? <TurnStatus /> : null} />
+      <BackgroundWork status={null} />
       {working || !threadId ? null : <TaskWaits threadId={threadId} />}
     </TranscriptFrame>
   )
@@ -176,12 +232,15 @@ export function TranscriptFrame({
   loadOlder,
   firstId,
   lead,
+  status,
   children
 }: {
   rows: TranscriptRow[]
   approvals: Map<string, ApprovalContent>
   cwd: string | null
   liveTasks?: string
+  /** A running turn's status, shown where its work folds once it ends. */
+  status?: StatusSlot
   /** Loads what came before the first row, while there is more, as the reader nears it. */
   loadOlder?: () => Promise<void>
   firstId?: string
@@ -193,6 +252,7 @@ export function TranscriptFrame({
   const scrollRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const olderRef = useRef<HTMLDivElement>(null)
+  usePinnedEnd(scrollRef, listRef)
 
   useEffect(() => {
     const element = scrollRef.current
@@ -215,10 +275,8 @@ export function TranscriptFrame({
           ref={scrollRef}
           aria-label={m.transcript_label()}
           onClickCapture={(event) => {
-            const target = event.target as HTMLElement
-            if (target.closest('[aria-expanded="false"]')) {
-              keepInPlace(event.currentTarget)
-            }
+            const toggle = closedToggle(event.target as HTMLElement)
+            if (toggle) keepInPlace(event.currentTarget, toggle)
           }}
         >
           {loadOlder ? <div ref={olderRef} aria-hidden /> : null}
@@ -228,7 +286,12 @@ export function TranscriptFrame({
           >
             {lead}
             <ApprovalsContext.Provider value={approvals}>
-              <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
+              <Rows
+                rows={rows}
+                cwd={cwd}
+                liveTasks={liveTasks}
+                status={status}
+              />
             </ApprovalsContext.Provider>
             {children}
           </MessageScrollerContent>
@@ -250,6 +313,47 @@ export function TranscriptFrame({
       </MessageScroller>
     </MessageScrollerProvider>
   )
+}
+
+/** How near the end, in pixels, still counts as at it. */
+const END_SLACK_PX = 2
+
+/**
+ * Keeps the end in view as the rows grow, in the frame they grow: the scroller follows only
+ * a frame after the growth painted, so new text would show below the end, then snap up.
+ * Lets go once the reader scrolls away, or a row opening asks to stay in place.
+ */
+function usePinnedEnd(
+  scrollRef: RefObject<HTMLDivElement | null>,
+  listRef: RefObject<HTMLDivElement | null>
+) {
+  useLayoutEffect(() => {
+    const viewport = scrollRef.current
+    const list = listRef.current
+    if (!viewport || !list) return
+    let following = true
+    const atEnd = () =>
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
+      END_SLACK_PX
+    const onScroll = () => {
+      following = atEnd()
+    }
+    const onWheel = (event: WheelEvent) => {
+      if (!event.isTrusted || event.deltaY < 0) following = false
+    }
+    const observer = new ResizeObserver(() => {
+      if (following && !atEnd()) viewport.scrollTop = viewport.scrollHeight
+    })
+    viewport.addEventListener('scroll', onScroll, { passive: true })
+    viewport.addEventListener('wheel', onWheel, { passive: true })
+    observer.observe(list)
+    observer.observe(viewport)
+    return () => {
+      viewport.removeEventListener('scroll', onScroll)
+      viewport.removeEventListener('wheel', onWheel)
+      observer.disconnect()
+    }
+  }, [scrollRef, listRef])
 }
 
 /** Where a jump to a message leaves it, below the top of the transcript. */
@@ -313,20 +417,31 @@ function RowItem({
   )
 }
 
+/** The closed disclosure a click opens: a button that says so, or a `details` summary. */
+function closedToggle(target: HTMLElement): HTMLElement | null {
+  const button = target.closest<HTMLElement>('[aria-expanded="false"]')
+  if (button) return button
+  const summary = target.closest<HTMLElement>('summary')
+  const details = summary?.parentElement
+  return details instanceof HTMLDetailsElement && !details.open ? summary : null
+}
+
 /**
- * A row opening grows the transcript below the click, which should stay where it is. The
- * scroller lets go of the end only on wheel, touch or keys, and the browser's scroll
- * anchoring would keep the text under the row still instead, so both are told otherwise
- * until the row has opened.
+ * A row opening grows the transcript below the click, and the row should stay where it is.
+ * The scroller lets go of the end only on wheel, touch or keys, so it is sent a wheel; then,
+ * for two frames, any shift of the row is scrolled back before it paints.
  */
-function keepInPlace(viewport: HTMLElement) {
+function keepInPlace(viewport: HTMLElement, toggle: HTMLElement) {
   viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
-  viewport.style.overflowAnchor = 'none'
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() => {
-      viewport.style.overflowAnchor = ''
-    })
-  )
+  const top = toggle.getBoundingClientRect().top
+  const hold = () => {
+    const moved = toggle.getBoundingClientRect().top - top
+    if (Math.abs(moved) > 0.5) viewport.scrollTop += moved
+  }
+  requestAnimationFrame(() => {
+    hold()
+    requestAnimationFrame(hold)
+  })
 }
 
 type RowsProps = {
@@ -336,44 +451,86 @@ type RowsProps = {
   liveTasks: string | undefined
 }
 
+/** A row's place for a running turn's status: after `after`, or first when `null`. */
+type StatusSlot = { after: TranscriptRow | null; node: ReactNode }
+
+/** As tall as a fold's header, which takes its place when the turn ends. */
+function StatusRow({ node }: { node: ReactNode }) {
+  return (
+    <RowItem messageId='turn-status' className='scroll-mt-6'>
+      <div className='border-border/60 border-b pb-2'>
+        <div className='flex min-h-6 items-center'>{node}</div>
+      </div>
+    </RowItem>
+  )
+}
+
 function isAgent(row: TranscriptRow) {
   return (
     row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
   )
 }
 
-function Rows({ rows, cwd, liveTasks }: RowsProps) {
+function Rows({
+  rows,
+  cwd,
+  liveTasks,
+  status
+}: RowsProps & { status?: StatusSlot }) {
   const shown: React.ReactNode[] = []
+  const showStatus = () => {
+    if (status) shown.push(<StatusRow key='turn-status' node={status.node} />)
+  }
+  if (status?.after === null) showStatus()
+  const liveFrom = rows.length - LIVE_ROWS
   let agents: TranscriptRow[] = []
+  let agentsAt = 0
   const flushAgents = () => {
     const [first] = agents
+    const live = agentsAt + agents.length > liveFrom
     if (first?.kind === 'item' && agents.length > 1) {
-      shown.push(<AgentsRow key={`agents:${first.item.id}`} rows={agents} />)
+      shown.push(
+        <AgentsRow key={`agents:${first.item.id}`} rows={agents} live={live} />
+      )
     } else if (first) {
       shown.push(
-        <Row key={rowKey(first)} row={first} cwd={cwd} liveTasks={liveTasks} />
+        <Row
+          key={rowKey(first)}
+          row={first}
+          cwd={cwd}
+          liveTasks={liveTasks}
+          live={live}
+        />
       )
     }
     agents = []
   }
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     if (isAgent(row)) {
+      if (agents.length === 0) agentsAt = index
       agents.push(row)
-      continue
+      return
     }
     flushAgents()
     shown.push(
-      <Row key={rowKey(row)} row={row} cwd={cwd} liveTasks={liveTasks} />
+      <Row
+        key={rowKey(row)}
+        row={row}
+        cwd={cwd}
+        liveTasks={liveTasks}
+        live={index >= liveFrom}
+      />
     )
-  }
+    if (status && row === status.after) showStatus()
+  })
   flushAgents()
   return shown
 }
 
-type AgentsRowProps = { rows: TranscriptRow[] }
+type AgentsRowProps = { rows: TranscriptRow[]; live: boolean }
 
 /** Subagents and delegated tasks started one after another, shown as one group. */
-const AgentsRow = memo(function AgentsRow({ rows }: AgentsRowProps) {
+const AgentsRow = memo(function AgentsRow({ rows, live }: AgentsRowProps) {
   const items = rows.flatMap((row) =>
     row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
       ? [row.item]
@@ -383,7 +540,7 @@ const AgentsRow = memo(function AgentsRow({ rows }: AgentsRowProps) {
     <RowItem
       messageId={`agents:${items[0]?.id}`}
       itemId={items[0]?.id}
-      className={cn(ROW, 'scroll-mt-6')}
+      className={cn(!live && ROW, 'scroll-mt-6')}
     >
       <AgentGroup items={items} />
     </RowItem>
@@ -392,6 +549,7 @@ const AgentsRow = memo(function AgentsRow({ rows }: AgentsRowProps) {
 
 function sameAgents(previous: AgentsRowProps, next: AgentsRowProps) {
   return (
+    previous.live === next.live &&
     previous.rows.length === next.rows.length &&
     previous.rows.every((row, index) => row === next.rows[index])
   )
@@ -400,15 +558,19 @@ function sameAgents(previous: AgentsRowProps, next: AgentsRowProps) {
 const Row = memo(function Row({
   row,
   cwd,
-  liveTasks
-}: Omit<RowsProps, 'rows'> & { row: TranscriptRow }) {
+  liveTasks,
+  live
+}: Omit<RowsProps, 'rows'> & { row: TranscriptRow; live: boolean }) {
   switch (row.kind) {
     case 'item':
       return (
         <RowItem
           messageId={row.item.id}
           itemId={row.item.id}
-          className={cn(isMessage(row.item) ? MESSAGE_ROW : ROW, 'scroll-mt-6')}
+          className={cn(
+            !live && (isMessage(row.item) ? MESSAGE_ROW : ROW),
+            'scroll-mt-6'
+          )}
         >
           <Item
             item={row.item}
@@ -421,13 +583,13 @@ const Row = memo(function Row({
       )
     case 'work':
       return (
-        <RowItem messageId={row.id} className={ROW}>
+        <RowItem messageId={row.id} className={cn(!live && ROW)}>
           <WorkGroup entries={row.entries} cwd={cwd} />
         </RowItem>
       )
     default:
       return (
-        <RowItem messageId={row.id} className={ROW}>
+        <RowItem messageId={row.id} className={cn(!live && ROW)}>
           <TurnFold
             rows={row.rows}
             durationMs={row.durationMs}
@@ -545,30 +707,19 @@ const Item = memo(function Item({
         />
       )
     case 'assistantMessage':
-      if (note) {
-        return (
-          <>
-            <TaskNote
-              text={content.text}
-              outcome={note}
-              streaming={item.streaming === true}
-            />
-            {changes ? <TurnChangesCard changes={changes} /> : null}
-          </>
-        )
-      }
       return (
-        <>
-          <Markdown text={content.text} streaming={item.streaming === true} />
-          {changes ? <TurnChangesCard changes={changes} /> : null}
-        </>
+        <AssistantMessage
+          item={item}
+          text={content.text}
+          note={note}
+          changes={changes}
+        />
       )
     case 'reasoning':
-      return (
-        <ReasoningRow text={content.text} streaming={item.streaming === true} />
-      )
+      return <ReasoningRow item={item} text={content.text} />
     case 'toolCall':
       if (isDelegation(item)) return <DelegationRow item={item} />
+      if (isHtmlRender(item)) return <HtmlPageRow item={item} />
       return isSubagentCall(item) ? (
         <SubagentRow item={item} />
       ) : (
@@ -616,6 +767,37 @@ const Item = memo(function Item({
   }
 })
 
+/** The last line of reasoning still streaming, as a work group's line shows it. */
+function LivePreview({ item, text }: { item: TranscriptItem; text: string }) {
+  return reasoningPreview(useLiveText(item, text), true)
+}
+
+/** An answer, or a task's note, with its text as it streams in. */
+function AssistantMessage({
+  item,
+  text: stored,
+  note,
+  changes
+}: {
+  item: TranscriptItem
+  text: string
+  note: TaskOutcome | undefined
+  changes: TurnChanges | undefined
+}) {
+  const text = useLiveText(item, stored)
+  const streaming = item.streaming === true
+  return (
+    <>
+      {note ? (
+        <TaskNote text={text} outcome={note} streaming={streaming} />
+      ) : (
+        <Markdown text={text} streaming={streaming} />
+      )}
+      {changes ? <TurnChangesCard changes={changes} /> : null}
+    </>
+  )
+}
+
 const ACTION_ICONS: Record<ToolAction, typeof CommandLineIcon> = {
   command: CommandLineIcon,
   edit: FileEditIcon,
@@ -643,10 +825,44 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
   const failed = !active && last?.isError === true && !last.interrupted
   const actions = new Set(calls.map((call) => toolAction(call.content.name)))
   const [onlyAction] = actions
-  const icon =
-    calls.length === 0
+  const icon = active
+    ? active.content.kind === 'toolCall'
+      ? ACTION_ICONS[toolAction(active.content.name)]
+      : AiBrain01Icon
+    : calls.length === 0
       ? AiBrain01Icon
       : ACTION_ICONS[actions.size === 1 && onlyAction ? onlyAction : 'other']
+  const summary = (
+    <>
+      <HugeiconsIcon
+        icon={failed ? Cancel01Icon : icon}
+        strokeWidth={2}
+        aria-label={
+          active ? m.tool_running() : failed ? m.tool_failed() : undefined
+        }
+        className={cn('size-4 shrink-0', failed && 'text-destructive')}
+      />
+      <span className='shrink-0'>
+        {calls.length > 0
+          ? summaryText(summarizeToolCalls(calls))
+          : m.reasoning_thought()}
+      </span>
+      {active ? (
+        <span
+          className={cn(
+            'min-w-0 truncate opacity-70',
+            active.content.kind === 'toolCall' && 'font-mono text-xs'
+          )}
+        >
+          {active.content.kind === 'toolCall' ? (
+            toolTarget(active.content.name, active.content.input, cwd)
+          ) : (
+            <LivePreview item={active} text={active.content.text} />
+          )}
+        </span>
+      ) : null}
+    </>
+  )
 
   return (
     <div>
@@ -656,35 +872,11 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
         onClick={() => setOpen(!open)}
         className='group/tools text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-6 w-full min-w-0 items-center gap-2 rounded-md text-left text-sm outline-none focus-visible:ring-2'
       >
-        <HugeiconsIcon
-          icon={active ? Loading03Icon : failed ? Cancel01Icon : icon}
-          strokeWidth={2}
-          aria-label={
-            active ? m.tool_running() : failed ? m.tool_failed() : undefined
-          }
-          className={cn(
-            'size-4 shrink-0',
-            active && 'animate-spin',
-            failed && 'text-destructive'
-          )}
-        />
-        <span className='shrink-0'>
-          {calls.length > 0
-            ? summaryText(summarizeToolCalls(calls))
-            : m.reasoning_thought()}
-        </span>
         {active ? (
-          <span
-            className={cn(
-              'min-w-0 truncate opacity-70',
-              active.content.kind === 'toolCall' && 'font-mono text-xs'
-            )}
-          >
-            {active.content.kind === 'toolCall'
-              ? toolTarget(active.content.name, active.content.input, cwd)
-              : reasoningPreview(active.content.text, true)}
-          </span>
-        ) : null}
+          <Shimmer className='items-center gap-2'>{summary}</Shimmer>
+        ) : (
+          summary
+        )}
         <HugeiconsIcon
           icon={ArrowRight01Icon}
           strokeWidth={2}
@@ -720,18 +912,20 @@ function WorkEntry({ entry, cwd }: { entry: WorkItem; cwd: string | null }) {
   return content.kind === 'toolCall' ? (
     <ToolCallRow item={{ ...entry, content }} cwd={cwd} />
   ) : (
-    <ReasoningRow text={content.text} streaming={entry.streaming === true} />
+    <ReasoningRow item={entry} text={content.text} />
   )
 }
 
 /** The model's reasoning, folded into one line until opened. */
 function ReasoningRow({
-  text,
-  streaming
+  item,
+  text: stored
 }: {
+  item: TranscriptItem
   text: string
-  streaming: boolean
 }) {
+  const text = useLiveText(item, stored)
+  const streaming = item.streaming === true
   const [open, setOpen] = useState(false)
   return (
     <details
@@ -805,45 +999,48 @@ function ToolCallRow({
   const shown = toolName(name)
   const change = detail?.kind === 'fileChange' ? detail : null
   const expandable = Boolean(target || output || change || running)
+  const call = (
+    <>
+      <HugeiconsIcon
+        icon={
+          interrupted
+            ? StopCircleIcon
+            : isError
+              ? Cancel01Icon
+              : ACTION_ICONS[toolAction(name)]
+        }
+        strokeWidth={2}
+        aria-label={
+          running
+            ? m.tool_running()
+            : interrupted
+              ? m.tool_stopped()
+              : isError
+                ? m.tool_failed()
+                : undefined
+        }
+        className={cn('size-4 shrink-0', isError && 'text-destructive')}
+      />
+      <span className='text-foreground shrink-0 font-medium'>
+        {shown.label}
+      </span>
+      {shown.source ? (
+        <span className='shrink-0 text-xs'>{shown.source}</span>
+      ) : null}
+      <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+    </>
+  )
   return (
     <details
       className='group/call'
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary className={ENTRY_SUMMARY}>
-        <HugeiconsIcon
-          icon={
-            running
-              ? Loading03Icon
-              : interrupted
-                ? StopCircleIcon
-                : isError
-                  ? Cancel01Icon
-                  : ACTION_ICONS[toolAction(name)]
-          }
-          strokeWidth={2}
-          aria-label={
-            running
-              ? m.tool_running()
-              : interrupted
-                ? m.tool_stopped()
-                : isError
-                  ? m.tool_failed()
-                  : undefined
-          }
-          className={cn(
-            'size-4 shrink-0',
-            running && 'animate-spin',
-            isError && 'text-destructive'
-          )}
-        />
-        <span className='text-foreground shrink-0 font-medium'>
-          {shown.label}
-        </span>
-        {shown.source ? (
-          <span className='shrink-0 text-xs'>{shown.source}</span>
-        ) : null}
-        <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+        {running ? (
+          <Shimmer className='items-center gap-2'>{call}</Shimmer>
+        ) : (
+          call
+        )}
         <ApprovalBadge callId={item.id} />
         {change ? (
           <span className='shrink-0 font-mono text-xs tabular-nums'>
@@ -931,12 +1128,7 @@ function TurnStatus() {
     const asked = turnId ? itemById(state.items, turnId) : undefined
     return asked ? Date.parse(asked.createdAt) : undefined
   })
-  const [now, setNow] = useState(Date.now)
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(timer)
-  }, [])
-
+  const now = useNow()
   const since = stoppingSince ?? startedAt
   const duration =
     since === undefined || Number.isNaN(since)
@@ -944,12 +1136,14 @@ function TurnStatus() {
       : formatDuration(now - since, getLocale())
   const stopping = stoppingSince !== undefined
   return (
-    <span className='text-muted-foreground flex items-center gap-2 text-sm'>
-      <HugeiconsIcon
-        icon={stopping ? StopCircleIcon : Loading03Icon}
-        strokeWidth={2}
-        className={cn('size-4 shrink-0', !stopping && 'animate-spin')}
-      />
+    <span className='text-muted-foreground flex items-center gap-2 text-sm tabular-nums'>
+      {stopping ? (
+        <HugeiconsIcon
+          icon={StopCircleIcon}
+          strokeWidth={2}
+          className='size-4 shrink-0'
+        />
+      ) : null}
       {stopping
         ? m.stopping_for({ duration: duration ?? '' })
         : duration === null

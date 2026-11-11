@@ -3,6 +3,7 @@ import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamKind } from '@/bindings/StreamKind'
 import type { ItemContent } from '@/bindings/ItemContent'
 import { REQUEST_TOOLS } from './requests'
+import { HTML_RENDER_TOOL } from './html-page'
 
 export type ToolCallContent = Extract<ItemContent, { kind: 'toolCall' }>
 export type ReasoningContent = Extract<ItemContent, { kind: 'reasoning' }>
@@ -118,6 +119,16 @@ export function delegationOf(call: ToolCallContent): {
   }
 }
 
+/** A page the agent showed: its own row once it is kept, a tool call until then. */
+export function isHtmlRender(item: TranscriptItem): item is ToolCallItem {
+  return (
+    item.content.kind === 'toolCall' &&
+    item.content.name === HTML_RENDER_TOOL &&
+    item.content.output !== null &&
+    !item.content.isError
+  )
+}
+
 export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
   return (
     item.content.kind === 'toolCall' && SUBAGENT_TOOLS.has(item.content.name)
@@ -126,11 +137,11 @@ export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
 
 /**
  * Whether a row stays in view when its turn folds: a delegated task, which runs on its
- * own, or a subagent without its answer.
+ * own, a page the agent showed, or a subagent without its answer.
  */
 export function staysInView(row: TranscriptRow) {
   if (row.kind !== 'item' || row.item.content.kind !== 'toolCall') return false
-  if (isDelegation(row.item)) return true
+  if (isDelegation(row.item) || isHtmlRender(row.item)) return true
   const call = row.item.content
   return isSubagentCall(row.item) && call.output === null && !call.interrupted
 }
@@ -156,7 +167,8 @@ function isWork(item: TranscriptItem): item is WorkItem {
   return (
     (item.content.kind === 'toolCall' || item.content.kind === 'reasoning') &&
     !isSubagentCall(item) &&
-    !isDelegation(item)
+    !isDelegation(item) &&
+    !isHtmlRender(item)
   )
 }
 
@@ -198,6 +210,35 @@ export function withStreaming(
 }
 
 /**
+ * What streams, by id and kind but without its text, as one string: rows built from it only
+ * change as an item starts or ends streaming, not with each piece of its text.
+ */
+export function streamingShape(
+  streaming: Record<string, StreamingText>
+): string {
+  return Object.entries(streaming)
+    .filter(([, { kind }]) => kind !== 'toolOutput')
+    .map(([id, { kind }]) => `${kind}:${id}`)
+    .join('\n')
+}
+
+/** The streaming items a `streamingShape` names, their text left to those that show it. */
+export function fromStreamingShape(
+  shape: string
+): Record<string, StreamingText> {
+  if (!shape) return {}
+  return Object.fromEntries(
+    shape.split('\n').map((entry) => {
+      const at = entry.indexOf(':')
+      return [
+        entry.slice(at + 1),
+        { kind: entry.slice(0, at) as StreamingText['kind'], text: '' }
+      ]
+    })
+  )
+}
+
+/**
  * Runs of consecutive tool calls and reasoning become one row, so a busy turn reads as
  * one step.
  */
@@ -220,6 +261,19 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
     else rows.push({ kind: 'work', id: item.id, entries: [item] })
   }
   return rows
+}
+
+/**
+ * Whether the engine still reads the latest turn's changes: `true` while they are pending,
+ * `false` once read, `null` when that turn has none to read.
+ */
+export function readingChanges(items: TranscriptItem[]): boolean | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const { content } = items[index] as TranscriptItem
+    if (content.kind === 'userMessage' && !content.steer) return null
+    if (content.kind === 'turnChanges') return content.files === null
+  }
+  return null
 }
 
 const CHANGES_SUFFIX = ':changes'
@@ -388,6 +442,21 @@ export function foldTurns(
   }
   close(working)
   return folded
+}
+
+/**
+ * The row a running turn's status follows: what started its latest run, where its work
+ * folds once it ends, so the status and the fold take the same place. `null` puts it first.
+ */
+export function statusAnchor(rows: TranscriptRow[]): TranscriptRow | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index] as TranscriptRow
+    if (row.kind === 'fold') return row
+    if (row.kind !== 'item') continue
+    const { kind } = row.item.content
+    if (kind === 'userMessage' || kind === 'backgroundTaskEnded') return row
+  }
+  return null
 }
 
 /** Splits the id of a background task's end into its turn and the task; mirrors hoshi-core. */

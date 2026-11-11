@@ -1,4 +1,4 @@
-import { cn } from '@hoshi/utils'
+import { cn, withCleanup } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
 import { Kbd } from '@hoshi/ui/components/kbd'
@@ -240,13 +240,18 @@ export function AddProjectPalette({
     if (pending) return
     setPending(true)
     setError(null)
-    try {
-      await work()
-    } catch (failure) {
-      setError(errorMessage(failure as CommandError))
-    } finally {
-      setPending(false)
-    }
+    return await withCleanup(
+      async () => {
+        try {
+          await work()
+        } catch (failure) {
+          setError(errorMessage(failure as CommandError))
+        }
+      },
+      () => {
+        setPending(false)
+      }
+    )
   }
 
   const openSettings = () => {

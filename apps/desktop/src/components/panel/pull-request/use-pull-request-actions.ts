@@ -1,3 +1,4 @@
+import { withCleanup } from '@hoshi/utils'
 import { useState } from 'react'
 import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
@@ -39,16 +40,21 @@ export function usePullRequestActions(
   const run = async (action: PullRequestAction) => {
     setPending(true)
     setError(null)
-    try {
-      await invoke('run_pull_request_action', { threadId, forgeId, action })
-      reload()
-      return true
-    } catch (failure) {
-      setError(forgeErrorMessage(failure as CommandError))
-      return false
-    } finally {
-      setPending(false)
-    }
+    return await withCleanup(
+      async () => {
+        try {
+          await invoke('run_pull_request_action', { threadId, forgeId, action })
+          reload()
+          return true
+        } catch (failure) {
+          setError(forgeErrorMessage(failure as CommandError))
+          return false
+        }
+      },
+      () => {
+        setPending(false)
+      }
+    )
   }
 
   return { run, pending, error, clearError: () => setError(null) }

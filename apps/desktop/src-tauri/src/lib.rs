@@ -3,6 +3,7 @@ mod appearance;
 mod clipboard;
 mod fonts;
 mod home;
+mod html_pages;
 #[cfg(target_os = "linux")]
 mod linux;
 mod orchestration;
@@ -20,6 +21,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .register_asynchronous_uri_scheme_protocol(html_pages::SCHEME, html_pages::serve)
         .setup(setup)
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(true) = event {
@@ -56,6 +58,8 @@ pub fn run() {
             orchestration::get_thread_branches,
             orchestration::get_thread_changes,
             orchestration::open_in_editor,
+            orchestration::get_local_image,
+            orchestration::open_local_file,
             orchestration::get_thread_folder,
             orchestration::switch_branch,
             orchestration::open_terminal,

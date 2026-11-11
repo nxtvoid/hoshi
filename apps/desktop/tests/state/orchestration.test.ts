@@ -56,6 +56,24 @@ describe('applyEvent', () => {
     expect(next.threads.map((item) => item.id)).toEqual(['t2'])
   })
 
+  test('an event that changes nothing keeps the state', () => {
+    const state = { projects: [project('p')], threads: [thread('t', 'p')] }
+
+    const same = applyEvent(state, {
+      type: 'sessionAttached',
+      threadId: 't',
+      sessionId: null
+    } as never)
+    const elsewhere = applyEvent(state, {
+      type: 'sessionAttached',
+      threadId: 'gone',
+      sessionId: 's'
+    } as never)
+
+    expect(same).toBe(state)
+    expect(elsewhere).toBe(state)
+  })
+
   test('deleting a thread leaves projects untouched', () => {
     const state = { projects: [project('p')], threads: [thread('t', 'p')] }
 

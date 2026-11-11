@@ -295,3 +295,77 @@ pub(crate) fn truncate(text: &str, max_chars: usize) -> String {
         None => text.to_owned(),
     }
 }
+
+/// A tool input as JSON within `max_chars`: its texts are cut short, so it still parses.
+pub(crate) fn truncate_json(value: &serde_json::Value, max_chars: usize) -> String {
+    let fits = |text: &str| text.chars().nth(max_chars).is_none();
+    let whole = value.to_string();
+    if fits(&whole) {
+        return whole;
+    }
+    let (mut low, mut high) = (0, longest_text(value));
+    let mut best = None;
+    while low <= high {
+        let limit = low + (high - low) / 2;
+        let text = cut_texts(value, limit).to_string();
+        if fits(&text) {
+            best = Some(text);
+            low = limit + 1;
+        } else if limit == 0 {
+            break;
+        } else {
+            high = limit - 1;
+        }
+    }
+    best.unwrap_or_else(|| truncate(&whole, max_chars))
+}
+
+fn longest_text(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::String(text) => text.chars().count(),
+        serde_json::Value::Array(items) => items.iter().map(longest_text).max().unwrap_or(0),
+        serde_json::Value::Object(fields) => fields.values().map(longest_text).max().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn cut_texts(value: &serde_json::Value, limit: usize) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(text) => serde_json::Value::String(truncate(text, limit)),
+        serde_json::Value::Array(items) => {
+            items.iter().map(|item| cut_texts(item, limit)).collect()
+        }
+        serde_json::Value::Object(fields) => fields
+            .iter()
+            .map(|(key, field)| (key.clone(), cut_texts(field, limit)))
+            .collect(),
+        other => other.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_long_input_still_parses_and_keeps_its_short_fields() {
+        let input = json!({
+            "description": "List files",
+            "subagent_type": "Explore",
+            "prompt": "x".repeat(5_000),
+        });
+        let text = truncate_json(&input, 2_000);
+        assert!(text.chars().count() <= 2_000);
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["description"], "List files");
+        assert_eq!(parsed["subagent_type"], "Explore");
+        assert!(parsed["prompt"].as_str().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn a_short_input_stays_whole() {
+        let input = json!({ "command": "ls" });
+        assert_eq!(truncate_json(&input, 2_000), input.to_string());
+    }
+}

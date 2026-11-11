@@ -10,8 +10,9 @@ import type { TranscriptPage } from '@/bindings/TranscriptPage'
 import { applyDeltas, bufferDelta, type LiveText } from '@/lib/stream-deltas'
 
 type TranscriptState = {
-  /** The thread whose transcript is loaded; only one is kept in memory. */
+  /** The thread whose transcript is shown. */
   threadId: string | null
+  /** Its transcript is on its way; `items` may still be the previous thread's meanwhile. */
   loading: boolean
   /** The latest turns are loaded first; older ones as the reader scrolls up. */
   items: ThreadItem[]
@@ -56,6 +57,41 @@ function takeDeltas(live: LiveText): LiveText {
 const page = (threadId: string, before: string | null) =>
   invoke<TranscriptPage>('get_thread_items', { threadId, before })
 
+type Kept = { items: ThreadItem[]; hasOlder: boolean }
+
+/** How many transcripts besides the one shown stay in memory, to open again at once. */
+const KEPT_TRANSCRIPTS = 8
+/** How long the previous thread stays on screen while the next one's transcript loads. */
+const BLANK_AFTER_MS = 400
+
+/**
+ * Transcripts opened lately, the latest last, kept up to date with the events that reach
+ * the app, so going back to one shows it at once.
+ */
+const kept = new Map<string, Kept>()
+
+function keep(threadId: string, transcript: Kept) {
+  kept.delete(threadId)
+  kept.set(threadId, transcript)
+  while (kept.size > KEPT_TRANSCRIPTS) {
+    const [oldest] = kept.keys()
+    if (oldest === undefined) break
+    kept.delete(oldest)
+  }
+}
+
+/** Applies an event to the transcripts kept in memory that aren't on screen. */
+function applyToKept(event: Event, shown: string | null) {
+  if (event.type === 'threadDeleted') kept.delete(event.threadId)
+  for (const [threadId, transcript] of kept) {
+    if (threadId === shown) continue
+    const items = applyItemEvent(threadId, transcript.items, event)
+    if (items !== transcript.items) kept.set(threadId, { ...transcript, items })
+  }
+}
+
+let blankTimer: ReturnType<typeof setTimeout> | undefined
+
 export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   threadId: null,
   loading: false,
@@ -65,19 +101,42 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   streaming: {},
   toolOutput: {},
   load: async (threadId) => {
+    const previous = get()
+    if (previous.threadId && !previous.loading) {
+      keep(previous.threadId, {
+        items: previous.items,
+        hasOlder: previous.hasOlder
+      })
+    }
     pending = []
     flush.cancel()
     deltas.clear()
+    clearTimeout(blankTimer)
+    const known = threadId ? kept.get(threadId) : undefined
+    if (!threadId || known) {
+      set({
+        threadId,
+        loading: false,
+        items: known?.items ?? [],
+        hasOlder: known?.hasOlder ?? false,
+        loadingOlder: false,
+        streaming: {},
+        toolOutput: {}
+      })
+      return
+    }
     set({
       threadId,
-      loading: threadId !== null,
-      items: [],
-      hasOlder: false,
+      loading: true,
       loadingOlder: false,
       streaming: {},
       toolOutput: {}
     })
-    if (!threadId) return
+    blankTimer = setTimeout(() => {
+      if (get().threadId === threadId && get().loading) {
+        set({ items: [], hasOlder: false })
+      }
+    }, BLANK_AFTER_MS)
     try {
       const loaded = await page(threadId, null)
       if (get().threadId !== threadId) return
@@ -86,10 +145,14 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
         loaded.items
       )
       pending = []
+      clearTimeout(blankTimer)
       set({ items, hasOlder: loaded.hasOlder, loading: false })
     } catch (error) {
       console.error('hoshi: failed to load the transcript', error)
-      if (get().threadId === threadId) set({ loading: false })
+      if (get().threadId === threadId) {
+        clearTimeout(blankTimer)
+        set({ items: [], hasOlder: false, loading: false })
+      }
     }
   },
   loadOlder: async () => {
@@ -117,6 +180,7 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   applyEvent: (event) => {
     const state = get()
     const { threadId, loading, items } = state
+    applyToKept(event, threadId)
     if (!threadId) return
     if (loading) {
       pending.push(event)

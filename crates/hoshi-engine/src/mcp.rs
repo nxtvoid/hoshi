@@ -1,6 +1,7 @@
 //! The MCP server hoshi gives its agents, so they can hand work to child threads. JSON-RPC
 //! over HTTP on localhost; each thread's agent has a token of its own, which says who calls.
 
+use crate::html_pages;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -194,6 +195,8 @@ fn tools_for(caller: &str, offered: &ToolFilter) -> Vec<Value> {
 }
 
 fn tools() -> Value {
+    let page_path = json!({ "type": "string", "description": "An absolute path to an .html file; threads with full access only." });
+    let page_html = json!({ "type": "string", "description": format!("The page's HTML, up to {} bytes.", html_pages::MAX_HTML_BYTES) });
     let task_id = json!({
         "type": "object",
         "properties": { "taskId": { "type": "string", "description": "The taskId delegate_task returned." } },
@@ -342,7 +345,7 @@ fn tools() -> Value {
         },
         {
             "name": "preview_open",
-            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. When the user asks for browser work, or to see, reproduce or check something on a page of a running app, and instead of a browser, Playwright or screenshot tool of your own; sign-ins stay between pages; then preview_snapshot reads the page and preview_act uses it.",
+            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file by its absolute path. When the user asks for browser work, or to see, reproduce or check something on a page of a running app, and instead of a browser, Playwright or screenshot tool of your own; sign-ins stay between pages; then preview_snapshot reads the page and preview_act uses it. To show the user a page or chart you made, html_render it instead; never start a server for it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -438,6 +441,33 @@ fn tools() -> Value {
             "description": "Close this thread's page.",
             "inputSchema": { "type": "object", "properties": {} },
         },
+        {
+            "name": html_pages::PREVIEW_TOOL,
+            "description": format!("Check an HTML page before html_render: returns a PNG of it, its contentHeight and console output. It only checks the page: html_render then shows it to the user. {} Theme and layout rules are in html_render.", html_pages::PAGE_RULES),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": page_path,
+                    "html": page_html,
+                    "width": { "type": "integer", "description": format!("CSS pixels, {} to {}; {} by default. About 390 for phones.", html_pages::MIN_WIDTH, html_pages::MAX_WIDTH, html_pages::COLUMN_WIDTH) },
+                    "appearance": { "type": "string", "enum": ["dark", "light"], "description": "Dark by default." },
+                },
+            },
+        },
+        {
+            "name": html_pages::RENDER_TOOL,
+            "description": format!("Show a finished HTML page (chart, diagram, mockup) in this thread, above your final reply, once html_preview checked it. Don't announce or restate it. {} {} {}", html_pages::PAGE_RULES, html_pages::LAYOUT_GUIDE, html_pages::THEME_GUIDE),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": page_path,
+                    "html": page_html,
+                    "title": { "type": "string" },
+                    "height": { "type": "integer", "description": format!("Frame height in CSS pixels, {} to {}: the contentHeight html_preview gave.", html_pages::MIN_HEIGHT, html_pages::MAX_HEIGHT) },
+                },
+                "required": ["title", "height"],
+            },
+        },
     ])
 }
 
@@ -473,8 +503,12 @@ mod tests {
         assert!(!text.contains(' '), "{text}");
     }
 
+    /// What every agent reads, measured against `agent-context-budget.json` at the repo's
+    /// root, so any change to it, up or down, shows in that file.
     #[test]
-    fn the_tools_loaded_every_turn_stay_within_their_budget() {
+    fn the_agent_context_matches_its_budget() {
+        let budget: Value =
+            serde_json::from_str(include_str!("../../../agent-context-budget.json")).unwrap();
         let Value::Array(tools) = tools() else {
             panic!("no tools");
         };
@@ -487,10 +521,35 @@ mod tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         assert_eq!(names, ["request_secret"]);
-        let size = Value::Array(always.into_iter().cloned().collect())
-            .to_string()
-            .len();
-        assert!(size <= 850, "{size} bytes");
+        let listed: Vec<Value> = tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "inputSchema": tool["inputSchema"],
+                })
+            })
+            .collect();
+        let instructions = [true, false]
+            .into_iter()
+            .flat_map(|in_project| {
+                (0..=crate::delegation::MAX_DEPTH).map(move |depth| {
+                    crate::delegation::instructions(depth, in_project, true).len()
+                })
+            })
+            .max()
+            .unwrap();
+        let measured = json!({
+            "instructionsBytes": instructions,
+            "subagentInstructionsBytes": budget["subagentInstructionsBytes"],
+            "mcpToolListJsonBytes": Value::Array(listed).to_string().len(),
+            "alwaysLoadedToolsBytes": Value::Array(always.into_iter().cloned().collect()).to_string().len(),
+        });
+        assert_eq!(
+            measured, budget,
+            "set agent-context-budget.json to the measured values"
+        );
     }
 
     #[test]
@@ -552,7 +611,9 @@ mod tests {
                 "preview_resize",
                 "preview_set_appearance",
                 "preview_status",
-                "preview_close"
+                "preview_close",
+                "html_preview",
+                "html_render"
             ]
         );
 

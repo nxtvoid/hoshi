@@ -41,6 +41,13 @@ describe('Markdown', () => {
     expect(html).toContain('<code>const a = 1 &lt; 2</code>')
   })
 
+  test('a fenced block without a language shows it as plain text', () => {
+    const html = render('```\nhola\n```')
+
+    expect(html).toContain('>Plain text</span>')
+    expect(html).toContain('<code>hola</code>')
+  })
+
   test('web links carry their site icon; other links do not', () => {
     const web = render('[PR](https://github.com/nxtvoid/avzx/pull/3)')
     const local = render('[section](#usage)')
@@ -48,5 +55,24 @@ describe('Markdown', () => {
     expect(web).toContain('class="text-link')
     expect(web).toContain('<svg')
     expect(local).not.toContain('<svg')
+  })
+
+  test('an agent links files by their path; forge text cannot', () => {
+    const agent = render(
+      '[the log](C:/work/run.log) and [main](/repo/src/main.rs:12)'
+    )
+    const forge = render('[the log](C:/work/run.log)', 'forge')
+
+    expect(agent.match(/<button/g)?.length).toBe(2)
+    expect(agent).toContain('the log')
+    expect(forge).not.toContain('<button')
+    expect(forge).not.toContain('C:/work')
+  })
+
+  test('a local image waits for the engine to read it', () => {
+    expect(render('![shot](C:/work/shot.png)')).not.toContain('<img')
+    expect(render('![shot](https://example.com/shot.png)')).toContain(
+      'src="https://example.com/shot.png"'
+    )
   })
 })

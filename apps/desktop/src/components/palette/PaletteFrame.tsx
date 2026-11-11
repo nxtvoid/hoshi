@@ -1,4 +1,4 @@
-import { cn } from '@hoshi/utils'
+import { cn, offsets } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { Kbd } from '@hoshi/ui/components/kbd'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -105,7 +105,7 @@ export function PaletteFrame({
     setActive((current + step + entries.length) % entries.length)
   }
 
-  let index = 0
+  const firstIndex = offsets(groups.map((group) => group.entries.length))
   return (
     <>
       <label className='border-border flex h-12 items-center gap-2.5 border-b px-4'>
@@ -181,7 +181,7 @@ export function PaletteFrame({
             </div>
           ) : null
         ) : (
-          groups.map((group) => (
+          groups.map((group, groupAt) => (
             // biome-ignore lint/a11y/useSemanticElements: a listbox group, not a form fieldset
             <div
               key={group.label}
@@ -193,8 +193,8 @@ export function PaletteFrame({
                   {group.label}
                 </p>
               ) : null}
-              {group.entries.map((entry) => {
-                const at = index++
+              {group.entries.map((entry, entryAt) => {
+                const at = (firstIndex[groupAt] ?? 0) + entryAt
                 return (
                   // biome-ignore lint/a11y/useKeyWithClickEvents: the search input drives the keyboard
                   <div

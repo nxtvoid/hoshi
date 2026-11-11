@@ -4,14 +4,18 @@ import {
   activeEntry,
   foldTurns,
   groupTranscript,
+  readingChanges,
   reasoningPreview,
   relativePath,
   staysInView,
+  statusAnchor,
   summarizeToolCalls,
   subagentTranscriptId,
   toolName,
   toolTarget,
   withStreaming,
+  streamingShape,
+  fromStreamingShape,
   type ToolCallItem,
   type TranscriptRow
 } from '../../src/lib/tool-calls'
@@ -658,5 +662,106 @@ describe('turn changes', () => {
     ])
 
     expect(changed(rows)).toEqual([])
+  })
+})
+
+describe('readingChanges', () => {
+  const changes = (files: null | []): ThreadItem => ({
+    id: 'u1:changes',
+    threadId: 't',
+    createdAt: '',
+    content: { kind: 'turnChanges', files }
+  })
+  const asked: ThreadItem = {
+    id: 'u2',
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'userMessage',
+      text: 'again',
+      attachments: [],
+      steer: false,
+      taskResult: null,
+      pullRequestUpdate: null,
+      rewind: null
+    }
+  }
+
+  test("tells whether the latest turn's changes are still read", () => {
+    expect(readingChanges([text('a'), changes(null)])).toBe(true)
+    expect(readingChanges([text('a'), changes([])])).toBe(false)
+    expect(readingChanges([text('a')])).toBeNull()
+  })
+
+  test("an earlier turn's changes don't count", () => {
+    expect(readingChanges([changes(null), asked, text('b')])).toBeNull()
+  })
+})
+
+describe('statusAnchor', () => {
+  const asked = (id: string, steer = false): ThreadItem => ({
+    id,
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'userMessage',
+      text: id,
+      attachments: [],
+      steer,
+      taskResult: null,
+      pullRequestUpdate: null,
+      rewind: null
+    }
+  })
+  const item = (value: ThreadItem): TranscriptRow => ({
+    kind: 'item',
+    item: value
+  })
+  const work = (id: string): TranscriptRow => ({
+    kind: 'work',
+    id,
+    entries: [tool(id, 'Read')]
+  })
+
+  test('follows what started the latest run', () => {
+    const user = item(asked('u1'))
+    const steer = item(asked('u2', true))
+    expect(statusAnchor([user, work('w1'), item(text('a'))])).toBe(user)
+    expect(statusAnchor([user, work('w1'), steer, work('w2')])).toBe(steer)
+  })
+
+  test('follows the fold of a run that ended before it, or goes first', () => {
+    const fold: TranscriptRow = {
+      kind: 'fold',
+      id: 'fold:u1',
+      rows: [],
+      ending: 'answered',
+      after: 'start',
+      durationMs: null
+    } as TranscriptRow
+    expect(statusAnchor([item(asked('u1')), fold, work('w2')])).toBe(fold)
+    expect(statusAnchor([work('w1')])).toBeNull()
+  })
+})
+
+describe('streamingShape', () => {
+  test('names what streams but not its text, which grows on its own', () => {
+    const shape = streamingShape({
+      a: { kind: 'text', text: 'Hel' },
+      b: { kind: 'reasoning', text: 'Thinking' },
+      c: { kind: 'toolOutput', text: 'log' }
+    })
+    expect(
+      streamingShape({
+        a: { kind: 'text', text: 'Hello there' },
+        b: { kind: 'reasoning', text: 'Thinking more' },
+        c: { kind: 'toolOutput', text: 'log' }
+      })
+    ).toBe(shape)
+    expect(fromStreamingShape(shape)).toEqual({
+      a: { kind: 'text', text: '' },
+      b: { kind: 'reasoning', text: '' }
+    })
+    expect(fromStreamingShape('')).toEqual({})
   })
 })

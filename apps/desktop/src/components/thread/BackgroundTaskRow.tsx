@@ -38,7 +38,8 @@ export function BackgroundTaskRow({
     ? m.background_task()
     : subagent
       ? subagentInput(content.input).description ||
-        subagentInput(content.input).kind
+        subagentInput(content.input).kind ||
+        m.subagent()
       : toolTarget(content.name, content.input, cwd) ||
         toolName(content.name).label
 

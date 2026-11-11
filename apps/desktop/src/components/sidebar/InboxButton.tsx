@@ -53,7 +53,7 @@ export function RailInboxButton() {
             className={cn(
               'border-sidebar-border text-sidebar-foreground/80 hover:bg-sidebar-accent focus-visible:ring-sidebar-ring relative flex size-8 shrink-0 items-center justify-center rounded-lg border outline-none focus-visible:ring-2',
               inbox.open &&
-                'border-sidebar-foreground bg-sidebar-accent text-sidebar-accent-foreground',
+                'border-sidebar-ring bg-sidebar-accent text-sidebar-accent-foreground',
               inbox.count > 0 && [
                 'motion-safe:animate-signal',
                 inbox.waiting

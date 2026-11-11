@@ -18,6 +18,7 @@ use crate::{
     CommitMessage, CommitMessageRequest, DEFERRED_TOOLS, GeneratedTitle, Installation,
     MCP_SERVER_NAME, McpServer, OutputSink, ProviderAdapter, PullRequestText,
     PullRequestTextRequest, RunningTurn, TitleRequest, TurnAttachment, TurnRequest, truncate,
+    truncate_json,
 };
 use hoshi_core::{
     AccessMode, BackgroundTask, BankedResetSpend, ContextUsage, Effort, ProviderAccountStatus,
@@ -1104,7 +1105,7 @@ impl ClaudeParser {
                     outputs.push(ProviderOutput::ToolCallStarted {
                         item_id: call_id.clone(),
                         name: name.to_owned(),
-                        input: truncate(&block["input"].to_string(), TOOL_INPUT_MAX_CHARS),
+                        input: truncate_json(&block["input"], TOOL_INPUT_MAX_CHARS),
                     });
                     outputs.extend(subagent.map(|detail| ProviderOutput::ToolCallDetail {
                         item_id: call_id,
