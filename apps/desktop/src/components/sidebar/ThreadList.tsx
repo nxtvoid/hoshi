@@ -11,7 +11,7 @@ import { usePaletteStore } from '@/state/palette-store'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { Button } from '@hoshi/ui/components/button'
 import { useSidebarStore } from '@/state/sidebar-store'
-import { draftKey, useDraftStore } from '@/state/draft-store'
+import { draftKey, hasDraft, useDraftStore } from '@/state/draft-store'
 import { useSidebarSections } from './use-sidebar-sections'
 import type {
   SectionId,
@@ -127,7 +127,8 @@ export function ThreadList() {
  */
 function NewThreadDrafts({ view }: { view: SidebarView }) {
   const drafts = useDraftStore((state) => state.drafts)
-  const saveDraft = useDraftStore((state) => state.save)
+  const draftImages = useDraftStore((state) => state.images)
+  const forgetDrafts = useDraftStore((state) => state.forget)
   const projects = useAppStore((state) => state.projects)
   const selectedProjectId = useAppStore((state) => state.selectedProjectId)
   const threadOpen = useAppStore((state) => state.selectedThreadId !== null)
@@ -140,10 +141,14 @@ function NewThreadDrafts({ view }: { view: SidebarView }) {
 
   const wanted =
     view === 'inbox'
-      ? Object.keys(drafts).filter((key) => key.startsWith('new:'))
+      ? [
+          ...new Set([...Object.keys(drafts), ...Object.keys(draftImages)])
+        ].filter((key) => key.startsWith('new:'))
       : [draftKey(null, selectedProjectId, view === 'chats')]
   const rows = wanted.flatMap((key): DraftRow[] => {
-    if (!drafts[key] || key === shown) return []
+    if (!hasDraft({ drafts, images: draftImages }, key) || key === shown) {
+      return []
+    }
     if (key === 'new:chat') return [{ key, project: null }]
     const project = projects.find(({ id }) => `new:${id}` === key)
     return project ? [{ key, project }] : []
@@ -191,7 +196,7 @@ function NewThreadDrafts({ view }: { view: SidebarView }) {
                     variant='ghost'
                     size='icon-xs'
                     aria-label={m.discard_draft()}
-                    onClick={() => saveDraft(key, null)}
+                    onClick={() => forgetDrafts([key])}
                     className='absolute right-1 opacity-0 group-focus-within/draft:opacity-100 group-hover/draft:opacity-100'
                   />
                 }
@@ -206,7 +211,7 @@ function NewThreadDrafts({ view }: { view: SidebarView }) {
           <ContextMenuContent>
             <ContextMenuItem
               variant='destructive'
-              onClick={() => saveDraft(key, null)}
+              onClick={() => forgetDrafts([key])}
             >
               {m.discard_draft()}
             </ContextMenuItem>

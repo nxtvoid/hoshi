@@ -11,11 +11,16 @@ import {
 
 type ComposerImagesProps = {
   images: ComposerImage[]
+  onOpen: (key: string) => void
   onRemove: (key: string) => void
 }
 
-/** The draft's images, above the text. */
-export function ComposerImages({ images, onRemove }: ComposerImagesProps) {
+/** The draft's images, above the text; each opens large to check it. */
+export function ComposerImages({
+  images,
+  onOpen,
+  onRemove
+}: ComposerImagesProps) {
   return (
     <ul className='flex flex-wrap gap-2 px-2 pt-1 pb-1.5'>
       {images.map((image) => (
@@ -23,9 +28,12 @@ export function ComposerImages({ images, onRemove }: ComposerImagesProps) {
           <Tooltip>
             <TooltipTrigger
               render={
-                <div
+                <button
+                  type='button'
+                  aria-label={m.open_image({ name: image.name })}
+                  onClick={() => onOpen(image.key)}
                   className={cn(
-                    'border-border bg-muted relative size-14 overflow-hidden rounded-lg border',
+                    'border-border bg-muted focus-visible:ring-ring relative block size-14 cursor-zoom-in overflow-hidden rounded-lg border outline-none focus-visible:ring-2',
                     image.failed && 'border-destructive'
                   )}
                 />
@@ -34,6 +42,7 @@ export function ComposerImages({ images, onRemove }: ComposerImagesProps) {
               <img
                 src={image.previewUrl}
                 alt={image.name}
+                draggable={false}
                 className={cn(
                   'size-full object-cover',
                   !image.saved && 'opacity-50'

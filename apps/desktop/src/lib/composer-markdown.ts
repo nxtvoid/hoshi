@@ -43,15 +43,43 @@ export function numberImageChips(
     .trim()
 }
 
-/** A saved draft without its image chips: the images don't outlive the composer. */
-export function withoutImageChips(doc: JSONContent): JSONContent {
+/**
+ * A saved draft with the image chips of the images it still has, each showing `sources`'
+ * preview of it; the chips of images gone are left out.
+ */
+export function keepImageChips(
+  doc: JSONContent,
+  sources: ReadonlyMap<string, string>
+): JSONContent {
   const isImageChip = (node: JSONContent) =>
     node.type === 'mention' && node.attrs?.kind === 'image'
   return {
     ...doc,
     content: doc.content
-      ?.filter((node) => !isImageChip(node))
-      .map((node) => (node.content ? withoutImageChips(node) : node))
+      ?.filter(
+        (node) => !isImageChip(node) || sources.has(String(node.attrs?.value))
+      )
+      .map((node) => {
+        if (isImageChip(node)) {
+          const src = sources.get(String(node.attrs?.value))
+          return { ...node, attrs: { ...node.attrs, src } }
+        }
+        return node.content ? keepImageChips(node, sources) : node
+      })
+  }
+}
+
+/** A draft to save, its image chips without their preview, which can be a whole image. */
+export function withoutImageSources(doc: JSONContent): JSONContent {
+  return {
+    ...doc,
+    content: doc.content?.map((node) => {
+      if (node.type === 'mention' && node.attrs?.kind === 'image') {
+        const { src: _, ...attrs } = node.attrs
+        return { ...node, attrs }
+      }
+      return node.content ? withoutImageSources(node) : node
+    })
   }
 }
 

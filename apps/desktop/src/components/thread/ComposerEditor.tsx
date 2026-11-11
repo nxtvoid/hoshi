@@ -74,6 +74,8 @@ export type ComposerEditorHandle = {
   insertImages: (images: ImageChip[]) => boolean
   /** Takes away the chips of an image removed from the draft. */
   removeImage: (key: string) => void
+  /** Shows these previews in the chips of the images they belong to. */
+  setImageSources: (sources: ReadonlyMap<string, string>) => void
 }
 
 /** An image of the draft, as its chip in the text shows it. */
@@ -103,6 +105,8 @@ type ComposerEditorProps = {
   onKeyDown: (event: KeyboardEvent, context: KeyContext) => boolean
   /** Images pasted; the editor leaves them to the composer. */
   onImages: (pasted: PastedImages) => void
+  /** An image chip was clicked, to show its image large. */
+  onOpenImage?: (key: string) => void
 }
 
 const leafText = (node: ProseMirrorNode) =>
@@ -182,6 +186,7 @@ const Mention = Node.create({
           {
             src: node.attrs.src ?? '',
             alt: '',
+            draggable: 'false',
             class:
               'me-1 inline-block size-3.5 rounded-[3px] object-cover align-[-2px]'
           }
@@ -296,10 +301,25 @@ export function ComposerEditor({
   onDocument,
   onBlur,
   onKeyDown,
-  onImages
+  onImages,
+  onOpenImage
 }: ComposerEditorProps) {
-  const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onImages })
-  handlers.current = { onChange, onDocument, onBlur, onKeyDown, onImages }
+  const handlers = useRef({
+    onChange,
+    onDocument,
+    onBlur,
+    onKeyDown,
+    onImages,
+    onOpenImage
+  })
+  handlers.current = {
+    onChange,
+    onDocument,
+    onBlur,
+    onKeyDown,
+    onImages,
+    onOpenImage
+  }
   const shownPlaceholder = useRef(placeholder)
   shownPlaceholder.current = placeholder
   /** The last document read, so a caret move doesn't convert it again. */
@@ -377,6 +397,13 @@ export function ComposerEditor({
         handlers.current.onImages(pasted)
         return true
       },
+      handleClickOn: (_view, _position, node) => {
+        if (node.type.name !== 'mention' || node.attrs.kind !== 'image') {
+          return false
+        }
+        handlers.current.onOpenImage?.(String(node.attrs.value))
+        return true
+      },
       // The form around the editor takes dropped images; the editor only stays out of it.
       handleDrop: (_view, event) =>
         event.dataTransfer !== null &&
@@ -450,6 +477,20 @@ export function ComposerEditor({
           transaction.delete(position, position + 1)
         }
         editor.view.dispatch(transaction)
+      },
+      setImageSources: (sources) => {
+        if (!editor) return
+        const transaction = editor.state.tr
+        editor.state.doc.descendants((node, position) => {
+          if (node.type.name !== 'mention' || node.attrs.kind !== 'image')
+            return
+          const src = sources.get(node.attrs.value)
+          if (src && src !== node.attrs.src) {
+            transaction.setNodeAttribute(position, 'src', src)
+          }
+        })
+        if (!transaction.docChanged) return
+        editor.view.dispatch(transaction.setMeta('addToHistory', false))
       },
       setText: (text) => {
         if (!editor) return

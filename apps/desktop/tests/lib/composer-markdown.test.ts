@@ -6,7 +6,7 @@ import {
   joinDocuments,
   numberImageChips,
   toMarkdown,
-  withoutImageChips
+  keepImageChips
 } from '../../src/lib/composer-markdown'
 
 const text = (value: string, ...marks: string[]): JSONContent => ({
@@ -160,7 +160,7 @@ test('image chips are numbered as their images are sent', () => {
   ).toBe('compare [Image #1] with [Image #2] and [Image #1]')
 })
 
-test('a saved draft drops its image chips', () => {
+test('a saved draft keeps the chips of the images it still has', () => {
   const draft: JSONContent = {
     type: 'doc',
     content: [
@@ -175,7 +175,12 @@ test('a saved draft drops its image chips', () => {
     ]
   }
 
-  expect(toMarkdown(withoutImageChips(draft))).toBe('see @src/a.ts')
+  expect(toMarkdown(keepImageChips(draft, new Map()))).toBe('see @src/a.ts')
+  const kept = keepImageChips(draft, new Map([[A, 'data:image/png;base64,x']]))
+  expect(toMarkdown(kept)).toBe(`see [image:${A}]@src/a.ts`)
+  expect(kept.content?.[0]?.content?.[1]?.attrs?.src).toBe(
+    'data:image/png;base64,x'
+  )
 })
 
 test('a failed message goes back above what was typed since', () => {
