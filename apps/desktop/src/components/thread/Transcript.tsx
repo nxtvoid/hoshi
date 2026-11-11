@@ -1,5 +1,6 @@
 import { cn, formatDuration } from '@hoshi/utils'
 import { CHAT_LANE } from '@/lib/chat-lane'
+import { Shimmer } from '@hoshi/ui/components/shimmer'
 import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
@@ -62,7 +63,6 @@ import {
   File01Icon,
   FileEditIcon,
   Globe02Icon,
-  Loading03Icon,
   Search01Icon,
   StopCircleIcon,
   Wrench01Icon
@@ -646,10 +646,42 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
   const failed = !active && last?.isError === true && !last.interrupted
   const actions = new Set(calls.map((call) => toolAction(call.content.name)))
   const [onlyAction] = actions
-  const icon =
-    calls.length === 0
+  const icon = active
+    ? active.content.kind === 'toolCall'
+      ? ACTION_ICONS[toolAction(active.content.name)]
+      : AiBrain01Icon
+    : calls.length === 0
       ? AiBrain01Icon
       : ACTION_ICONS[actions.size === 1 && onlyAction ? onlyAction : 'other']
+  const summary = (
+    <>
+      <HugeiconsIcon
+        icon={failed ? Cancel01Icon : icon}
+        strokeWidth={2}
+        aria-label={
+          active ? m.tool_running() : failed ? m.tool_failed() : undefined
+        }
+        className={cn('size-4 shrink-0', failed && 'text-destructive')}
+      />
+      <span className='shrink-0'>
+        {calls.length > 0
+          ? summaryText(summarizeToolCalls(calls))
+          : m.reasoning_thought()}
+      </span>
+      {active ? (
+        <span
+          className={cn(
+            'min-w-0 truncate opacity-70',
+            active.content.kind === 'toolCall' && 'font-mono text-xs'
+          )}
+        >
+          {active.content.kind === 'toolCall'
+            ? toolTarget(active.content.name, active.content.input, cwd)
+            : reasoningPreview(active.content.text, true)}
+        </span>
+      ) : null}
+    </>
+  )
 
   return (
     <div>
@@ -659,35 +691,11 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
         onClick={() => setOpen(!open)}
         className='group/tools text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-6 w-full min-w-0 items-center gap-2 rounded-md text-left text-sm outline-none focus-visible:ring-2'
       >
-        <HugeiconsIcon
-          icon={active ? Loading03Icon : failed ? Cancel01Icon : icon}
-          strokeWidth={2}
-          aria-label={
-            active ? m.tool_running() : failed ? m.tool_failed() : undefined
-          }
-          className={cn(
-            'size-4 shrink-0',
-            active && 'animate-spin',
-            failed && 'text-destructive'
-          )}
-        />
-        <span className='shrink-0'>
-          {calls.length > 0
-            ? summaryText(summarizeToolCalls(calls))
-            : m.reasoning_thought()}
-        </span>
         {active ? (
-          <span
-            className={cn(
-              'min-w-0 truncate opacity-70',
-              active.content.kind === 'toolCall' && 'font-mono text-xs'
-            )}
-          >
-            {active.content.kind === 'toolCall'
-              ? toolTarget(active.content.name, active.content.input, cwd)
-              : reasoningPreview(active.content.text, true)}
-          </span>
-        ) : null}
+          <Shimmer className='items-center gap-2'>{summary}</Shimmer>
+        ) : (
+          summary
+        )}
         <HugeiconsIcon
           icon={ArrowRight01Icon}
           strokeWidth={2}
@@ -808,45 +816,48 @@ function ToolCallRow({
   const shown = toolName(name)
   const change = detail?.kind === 'fileChange' ? detail : null
   const expandable = Boolean(target || output || change || running)
+  const call = (
+    <>
+      <HugeiconsIcon
+        icon={
+          interrupted
+            ? StopCircleIcon
+            : isError
+              ? Cancel01Icon
+              : ACTION_ICONS[toolAction(name)]
+        }
+        strokeWidth={2}
+        aria-label={
+          running
+            ? m.tool_running()
+            : interrupted
+              ? m.tool_stopped()
+              : isError
+                ? m.tool_failed()
+                : undefined
+        }
+        className={cn('size-4 shrink-0', isError && 'text-destructive')}
+      />
+      <span className='text-foreground shrink-0 font-medium'>
+        {shown.label}
+      </span>
+      {shown.source ? (
+        <span className='shrink-0 text-xs'>{shown.source}</span>
+      ) : null}
+      <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+    </>
+  )
   return (
     <details
       className='group/call'
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary className={ENTRY_SUMMARY}>
-        <HugeiconsIcon
-          icon={
-            running
-              ? Loading03Icon
-              : interrupted
-                ? StopCircleIcon
-                : isError
-                  ? Cancel01Icon
-                  : ACTION_ICONS[toolAction(name)]
-          }
-          strokeWidth={2}
-          aria-label={
-            running
-              ? m.tool_running()
-              : interrupted
-                ? m.tool_stopped()
-                : isError
-                  ? m.tool_failed()
-                  : undefined
-          }
-          className={cn(
-            'size-4 shrink-0',
-            running && 'animate-spin',
-            isError && 'text-destructive'
-          )}
-        />
-        <span className='text-foreground shrink-0 font-medium'>
-          {shown.label}
-        </span>
-        {shown.source ? (
-          <span className='shrink-0 text-xs'>{shown.source}</span>
-        ) : null}
-        <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+        {running ? (
+          <Shimmer className='items-center gap-2'>{call}</Shimmer>
+        ) : (
+          call
+        )}
         <ApprovalBadge callId={item.id} />
         {change ? (
           <span className='shrink-0 font-mono text-xs tabular-nums'>
@@ -947,12 +958,14 @@ function TurnStatus() {
       : formatDuration(now - since, getLocale())
   const stopping = stoppingSince !== undefined
   return (
-    <span className='text-muted-foreground flex items-center gap-2 text-sm'>
-      <HugeiconsIcon
-        icon={stopping ? StopCircleIcon : Loading03Icon}
-        strokeWidth={2}
-        className={cn('size-4 shrink-0', !stopping && 'animate-spin')}
-      />
+    <span className='text-muted-foreground flex items-center gap-2 text-sm tabular-nums'>
+      {stopping ? (
+        <HugeiconsIcon
+          icon={StopCircleIcon}
+          strokeWidth={2}
+          className='size-4 shrink-0'
+        />
+      ) : null}
       {stopping
         ? m.stopping_for({ duration: duration ?? '' })
         : duration === null

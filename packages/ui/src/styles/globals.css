@@ -437,6 +437,64 @@ html[data-terminal-font="system"] {
     radial-gradient(90% 160% at 100% 0%, var(--header-glow), transparent 70%);
 }
 
+/* A highlight sweeping across live activity, as `Shimmer` draws it: the window moves while
+   its content holds still, so the highlight passes over the text. */
+@keyframes shimmer-sweep {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes shimmer-sweep-counter {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+
+@utility shimmer-sweep {
+  --shimmer-width: 4.5rem;
+  left: calc(-1 * var(--shimmer-width));
+  width: calc(100% + 2 * var(--shimmer-width));
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    rgb(0 0 0 / 12%) 0.675rem,
+    rgb(0 0 0 / 55%) 1.575rem,
+    black 2.25rem,
+    rgb(0 0 0 / 55%) 2.925rem,
+    rgb(0 0 0 / 12%) 3.825rem,
+    transparent var(--shimmer-width),
+    transparent 100%
+  );
+  mask-repeat: no-repeat;
+  animation: shimmer-sweep 2.2s steps(30) infinite;
+
+  @media (prefers-reduced-motion: reduce), (forced-colors: active) {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+@utility shimmer-sweep-counter {
+  width: 100%;
+  animation: shimmer-sweep-counter 2.2s steps(30) infinite;
+
+  @media (prefers-reduced-motion: reduce), (forced-colors: active) {
+    animation: none;
+  }
+}
+
+@utility shimmer-sweep-aligned {
+  width: calc(100% - 2 * var(--shimmer-width));
+  margin-left: var(--shimmer-width);
+}
+
 /* A ring in `--signal` that grows from an element and fades, for things that call for attention. */
 @keyframes signal {
   0% {
