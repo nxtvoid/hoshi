@@ -58,12 +58,22 @@ fn size(arguments: &Value, fallback: (u32, u32)) -> (u32, u32) {
     (side("width", fallback.0), side("height", fallback.1))
 }
 
-/// A bare host like `localhost:5173` gets `http://`; other addresses stay as written.
+/// A bare host like `localhost:5173` gets `http://`, an absolute file path `file://`; other
+/// addresses stay as written.
 fn address(url: &str) -> String {
     let local = ["localhost", "127.", "0.0.0.0", "[::1]"]
         .iter()
         .any(|host| url.starts_with(host));
-    if url.contains("://") || url.starts_with("about:") || url.starts_with("data:") {
+    let bytes = url.as_bytes();
+    let windows_path = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    if windows_path {
+        format!("file:///{}", url.replace('\\', "/"))
+    } else if url.starts_with('/') && !url.starts_with("//") {
+        format!("file://{url}")
+    } else if url.contains("://") || url.starts_with("about:") || url.starts_with("data:") {
         url.to_owned()
     } else if local {
         format!("http://{url}")
@@ -739,5 +749,7 @@ mod tests {
         assert_eq!(address("example.com"), "https://example.com");
         assert_eq!(address("file:///tmp/a.html"), "file:///tmp/a.html");
         assert_eq!(address("about:blank"), "about:blank");
+        assert_eq!(address("/tmp/a.html"), "file:///tmp/a.html");
+        assert_eq!(address("C:\\work\\a.html"), "file:///C:/work/a.html");
     }
 }

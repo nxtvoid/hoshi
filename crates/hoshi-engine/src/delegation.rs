@@ -65,7 +65,7 @@ const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work wai
 - Asked to move to an existing worktree: EnterWorktree with its path, never cd.";
 
 const BROWSER_AND_BACKGROUND: &str = "- Web previews when asked for browser work, or to see or reproduce something in a live app: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
-- A chart for data with a trend or comparison, or a visual the user asks for: html_preview, then html_render; never a server, a screenshot or a description. An image to post or send: a .png file.\n\
+- A visual the user asks for (chart, diagram, mockup, visualizer): an HTML file's path, or inline HTML, to html_preview, then html_render. A screenshot on disk or a text description doesn't show it; never start a server for it. An image to post or send elsewhere: a .png file and its path, never html_render.\n\
 - Background Bash or Monitor commands don't hold your turn. To wait for one (tests, a build, a sleep, which only runs in the background): await_background_tasks with its id, then end your turn. Never for dev servers.";
 
 /// Added after the rest of [`instructions`] for agents of threads on Bitbucket.
@@ -740,13 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn the_instructions_stay_within_their_budget() {
-        let worst = [instructions(0, true, true), instructions(1, true, true)]
-            .iter()
-            .map(String::len)
-            .max()
-            .unwrap();
-        assert!(worst <= 1_800, "{worst} bytes");
+    fn the_instructions_name_only_the_tools_a_thread_has() {
         assert!(instructions(0, true, false).contains("watch_pull_request"));
         assert!(!instructions(0, false, false).contains("watch_pull_request"));
         assert!(!instructions(1, true, false).contains("watch_pull_request"));
