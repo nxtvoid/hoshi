@@ -199,7 +199,7 @@ export function ThreadView() {
               <LogoMark className='text-muted-foreground/25 size-12' />
               <p>{m.no_project_selected()}</p>
             </div>
-          ) : loading ? (
+          ) : loading && empty ? (
             <div className='flex-1' />
           ) : draft ? (
             <div className='flex flex-1 flex-col items-center justify-center gap-8 px-4 pb-[12vh]'>
