@@ -765,4 +765,3 @@ describe('streamingShape', () => {
     expect(fromStreamingShape('')).toEqual({})
   })
 })
-
