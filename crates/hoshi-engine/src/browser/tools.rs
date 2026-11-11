@@ -671,13 +671,17 @@ mod tests {
             .call("t", "preview_open", &json!({ "url": page }))
             .unwrap();
         browsing.view("t", true).unwrap();
-        let frame = received
-            .iter()
-            .find_map(|notification| match notification {
-                Notification::BrowserFrame(frame) => Some(frame),
-                _ => None,
-            })
-            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let frame = std::iter::from_fn(|| {
+            received
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .ok()
+        })
+        .find_map(|notification| match notification {
+            Notification::BrowserFrame(frame) => Some(frame),
+            _ => None,
+        })
+        .expect("the panel got no frame of the page within 30 seconds");
         browsing
             .user_input("t", &BrowserInput::Click { x: 100.0, y: 100.0 })
             .unwrap();
