@@ -73,6 +73,7 @@ import {
   groupTranscript,
   isDelegation,
   isHtmlRender,
+  readingChanges,
   staysInView,
   isSubagentCall,
   isToolCall,
@@ -95,19 +96,59 @@ import {
 
 /** Off-screen rows skip rendering but keep their last height, so scrolling never jumps. */
 const ROW = '[contain-intrinsic-size:auto_2.5rem] [content-visibility:auto]'
+/**
+ * The last rows, where a running turn adds and grows, render in full: with a placeholder
+ * height they would first take its size, then their own, and the end would follow twice.
+ */
+const LIVE_ROWS = 4
 const MESSAGE_ROW =
   '[contain-intrinsic-size:auto_120px] [content-visibility:auto]'
 
 const ENTRY_SUMMARY =
   'text-muted-foreground hover:text-foreground flex min-h-6 cursor-default list-none items-center gap-2 text-sm select-none [&::-webkit-details-marker]:hidden'
 
+/** The longest a finished turn waits for its changes before it settles without them. */
+const SETTLE_MS = 1000
+
+/**
+ * Whether the transcript still shows the turn as running. A turn that ended stays so until
+ * its changes are read, at most `SETTLE_MS`: its work folds, its status goes and its changes
+ * show in one step, not in two a moment apart.
+ */
+function useShownWorking(working: boolean) {
+  const reading = useTranscriptStore(
+    (state) => readingChanges(state.items) === true
+  )
+  const [settling, setSettling] = useState(false)
+  const wasWorking = useRef(working)
+
+  useLayoutEffect(() => {
+    if (wasWorking.current && !working && reading) setSettling(true)
+    if (working) setSettling(false)
+    wasWorking.current = working
+  }, [working, reading])
+
+  useEffect(() => {
+    if (!settling) return
+    if (!reading) {
+      setSettling(false)
+      return
+    }
+    const timer = setTimeout(() => setSettling(false), SETTLE_MS)
+    return () => clearTimeout(timer)
+  }, [settling, reading])
+
+  return working || settling
+}
+
 export const Transcript = memo(function Transcript({
-  working,
+  working: running,
   cwd
 }: {
   working: boolean
   cwd: string | null
 }) {
+  const working = useShownWorking(running)
   const items = useTranscriptStore((state) => state.items)
   const streaming = useTranscriptStore((state) => state.streaming)
   const threadId = useTranscriptStore((state) => state.threadId)
@@ -195,6 +236,7 @@ export function TranscriptFrame({
   const scrollRef = useRef<HTMLDivElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const olderRef = useRef<HTMLDivElement>(null)
+  usePinnedEnd(scrollRef, listRef)
 
   useEffect(() => {
     const element = scrollRef.current
@@ -252,6 +294,47 @@ export function TranscriptFrame({
       </MessageScroller>
     </MessageScrollerProvider>
   )
+}
+
+/** How near the end, in pixels, still counts as at it. */
+const END_SLACK_PX = 2
+
+/**
+ * Keeps the end in view as the rows grow, in the frame they grow: the scroller follows only
+ * a frame after the growth painted, so new text would show below the end, then snap up.
+ * Lets go once the reader scrolls away, or a row opening asks to stay in place.
+ */
+function usePinnedEnd(
+  scrollRef: RefObject<HTMLDivElement | null>,
+  listRef: RefObject<HTMLDivElement | null>
+) {
+  useLayoutEffect(() => {
+    const viewport = scrollRef.current
+    const list = listRef.current
+    if (!viewport || !list) return
+    let following = true
+    const atEnd = () =>
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
+      END_SLACK_PX
+    const onScroll = () => {
+      following = atEnd()
+    }
+    const onWheel = (event: WheelEvent) => {
+      if (!event.isTrusted || event.deltaY < 0) following = false
+    }
+    const observer = new ResizeObserver(() => {
+      if (following && !atEnd()) viewport.scrollTop = viewport.scrollHeight
+    })
+    viewport.addEventListener('scroll', onScroll, { passive: true })
+    viewport.addEventListener('wheel', onWheel, { passive: true })
+    observer.observe(list)
+    observer.observe(viewport)
+    return () => {
+      viewport.removeEventListener('scroll', onScroll)
+      viewport.removeEventListener('wheel', onWheel)
+      observer.disconnect()
+    }
+  }, [scrollRef, listRef])
 }
 
 /** Where a jump to a message leaves it, below the top of the transcript. */
@@ -346,36 +429,54 @@ function isAgent(row: TranscriptRow) {
 
 function Rows({ rows, cwd, liveTasks }: RowsProps) {
   const shown: React.ReactNode[] = []
+  const liveFrom = rows.length - LIVE_ROWS
   let agents: TranscriptRow[] = []
+  let agentsAt = 0
   const flushAgents = () => {
     const [first] = agents
+    const live = agentsAt + agents.length > liveFrom
     if (first?.kind === 'item' && agents.length > 1) {
-      shown.push(<AgentsRow key={`agents:${first.item.id}`} rows={agents} />)
+      shown.push(
+        <AgentsRow key={`agents:${first.item.id}`} rows={agents} live={live} />
+      )
     } else if (first) {
       shown.push(
-        <Row key={rowKey(first)} row={first} cwd={cwd} liveTasks={liveTasks} />
+        <Row
+          key={rowKey(first)}
+          row={first}
+          cwd={cwd}
+          liveTasks={liveTasks}
+          live={live}
+        />
       )
     }
     agents = []
   }
-  for (const row of rows) {
+  rows.forEach((row, index) => {
     if (isAgent(row)) {
+      if (agents.length === 0) agentsAt = index
       agents.push(row)
-      continue
+      return
     }
     flushAgents()
     shown.push(
-      <Row key={rowKey(row)} row={row} cwd={cwd} liveTasks={liveTasks} />
+      <Row
+        key={rowKey(row)}
+        row={row}
+        cwd={cwd}
+        liveTasks={liveTasks}
+        live={index >= liveFrom}
+      />
     )
-  }
+  })
   flushAgents()
   return shown
 }
 
-type AgentsRowProps = { rows: TranscriptRow[] }
+type AgentsRowProps = { rows: TranscriptRow[]; live: boolean }
 
 /** Subagents and delegated tasks started one after another, shown as one group. */
-const AgentsRow = memo(function AgentsRow({ rows }: AgentsRowProps) {
+const AgentsRow = memo(function AgentsRow({ rows, live }: AgentsRowProps) {
   const items = rows.flatMap((row) =>
     row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
       ? [row.item]
@@ -385,7 +486,7 @@ const AgentsRow = memo(function AgentsRow({ rows }: AgentsRowProps) {
     <RowItem
       messageId={`agents:${items[0]?.id}`}
       itemId={items[0]?.id}
-      className={cn(ROW, 'scroll-mt-6')}
+      className={cn(!live && ROW, 'scroll-mt-6')}
     >
       <AgentGroup items={items} />
     </RowItem>
@@ -394,6 +495,7 @@ const AgentsRow = memo(function AgentsRow({ rows }: AgentsRowProps) {
 
 function sameAgents(previous: AgentsRowProps, next: AgentsRowProps) {
   return (
+    previous.live === next.live &&
     previous.rows.length === next.rows.length &&
     previous.rows.every((row, index) => row === next.rows[index])
   )
@@ -402,15 +504,19 @@ function sameAgents(previous: AgentsRowProps, next: AgentsRowProps) {
 const Row = memo(function Row({
   row,
   cwd,
-  liveTasks
-}: Omit<RowsProps, 'rows'> & { row: TranscriptRow }) {
+  liveTasks,
+  live
+}: Omit<RowsProps, 'rows'> & { row: TranscriptRow; live: boolean }) {
   switch (row.kind) {
     case 'item':
       return (
         <RowItem
           messageId={row.item.id}
           itemId={row.item.id}
-          className={cn(isMessage(row.item) ? MESSAGE_ROW : ROW, 'scroll-mt-6')}
+          className={cn(
+            !live && (isMessage(row.item) ? MESSAGE_ROW : ROW),
+            'scroll-mt-6'
+          )}
         >
           <Item
             item={row.item}
@@ -423,13 +529,13 @@ const Row = memo(function Row({
       )
     case 'work':
       return (
-        <RowItem messageId={row.id} className={ROW}>
+        <RowItem messageId={row.id} className={cn(!live && ROW)}>
           <WorkGroup entries={row.entries} cwd={cwd} />
         </RowItem>
       )
     default:
       return (
-        <RowItem messageId={row.id} className={ROW}>
+        <RowItem messageId={row.id} className={cn(!live && ROW)}>
           <TurnFold
             rows={row.rows}
             durationMs={row.durationMs}

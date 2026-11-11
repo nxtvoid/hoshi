@@ -5,6 +5,7 @@ import { cn, formatElapsed } from '@hoshi/utils'
 import { SubagentRow } from './SubagentRow'
 import { DelegationRow } from './DelegationRows'
 import { useAppStore } from '@/state/app-store'
+import { selectQuietThreads } from '@/state/quiet-threads'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { AgentAvatar, isActive } from './AgentLine'
 import { useBusyThreads } from './use-busy-threads'
@@ -40,7 +41,7 @@ function isTask(item: TranscriptItem): boolean {
  * that says how they stand and opens on each of them.
  */
 export function AgentGroup({ items }: { items: ToolCallItem[] }) {
-  const threads = useAppStore((state) => state.threads)
+  const threads = useAppStore(selectQuietThreads)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
   const busy = useBusyThreads()
   const [open, setOpen] = useState(false)

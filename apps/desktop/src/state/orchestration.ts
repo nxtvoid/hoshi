@@ -13,12 +13,19 @@ export function applyEvent(
   state: OrchestrationState,
   event: Event
 ): OrchestrationState {
-  const updateThread = (threadId: string, update: Partial<Thread>) => ({
-    ...state,
-    threads: state.threads.map((thread) =>
-      thread.id === threadId ? { ...thread, ...update } : thread
-    )
-  })
+  const updateThread = (
+    threadId: string,
+    update: Partial<Thread>
+  ): OrchestrationState => {
+    const index = state.threads.findIndex((thread) => thread.id === threadId)
+    const thread = state.threads[index]
+    if (!thread) return state
+    const keys = Object.keys(update) as (keyof Thread)[]
+    if (keys.every((key) => thread[key] === update[key])) return state
+    const threads = [...state.threads]
+    threads[index] = { ...thread, ...update }
+    return { ...state, threads }
+  }
   switch (event.type) {
     case 'projectCreated':
       return { ...state, projects: [...state.projects, event.project] }

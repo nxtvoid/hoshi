@@ -4,6 +4,7 @@ import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useAppStore } from '@/state/app-store'
+import { selectQuietThreads } from '@/state/quiet-threads'
 import { useRequestStore } from '@/state/request-store'
 import { useBusyThreads } from './use-busy-threads'
 import { useTranscriptStore } from '@/state/transcript-store'
@@ -40,7 +41,7 @@ export function ThreadAgents({
   threadId: string
   onNavigate?: () => void
 }) {
-  const threads = useAppStore((state) => state.threads)
+  const threads = useAppStore(selectQuietThreads)
   const selectThread = useAppStore((state) => state.selectThread)
   const items = useTranscriptStore((state) =>
     state.threadId === threadId ? state.items : NO_ITEMS

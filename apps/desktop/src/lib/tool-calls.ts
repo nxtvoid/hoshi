@@ -234,6 +234,19 @@ export function groupTranscript(items: TranscriptItem[]): TranscriptRow[] {
   return rows
 }
 
+/**
+ * Whether the engine still reads the latest turn's changes: `true` while they are pending,
+ * `false` once read, `null` when that turn has none to read.
+ */
+export function readingChanges(items: TranscriptItem[]): boolean | null {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const { content } = items[index] as TranscriptItem
+    if (content.kind === 'userMessage' && !content.steer) return null
+    if (content.kind === 'turnChanges') return content.files === null
+  }
+  return null
+}
+
 const CHANGES_SUFFIX = ':changes'
 
 /** Puts a turn's changes on its last answer; a turn that never answered shows none. */

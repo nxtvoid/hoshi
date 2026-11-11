@@ -4,6 +4,7 @@ import {
   activeEntry,
   foldTurns,
   groupTranscript,
+  readingChanges,
   reasoningPreview,
   relativePath,
   staysInView,
@@ -658,5 +659,38 @@ describe('turn changes', () => {
     ])
 
     expect(changed(rows)).toEqual([])
+  })
+})
+
+describe('readingChanges', () => {
+  const changes = (files: null | []): ThreadItem => ({
+    id: 'u1:changes',
+    threadId: 't',
+    createdAt: '',
+    content: { kind: 'turnChanges', files }
+  })
+  const asked: ThreadItem = {
+    id: 'u2',
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'userMessage',
+      text: 'again',
+      attachments: [],
+      steer: false,
+      taskResult: null,
+      pullRequestUpdate: null,
+      rewind: null
+    }
+  }
+
+  test("tells whether the latest turn's changes are still read", () => {
+    expect(readingChanges([text('a'), changes(null)])).toBe(true)
+    expect(readingChanges([text('a'), changes([])])).toBe(false)
+    expect(readingChanges([text('a')])).toBeNull()
+  })
+
+  test("an earlier turn's changes don't count", () => {
+    expect(readingChanges([changes(null), asked, text('b')])).toBeNull()
   })
 })

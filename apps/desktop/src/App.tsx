@@ -18,7 +18,7 @@ export function App() {
   useThreadNotifications()
 
   return (
-    <TooltipProvider delay={25}>
+    <TooltipProvider>
       <div className='bg-background text-foreground flex h-screen'>
         {sidebarOpen ? <Sidebar /> : null}
         <ThreadView />
