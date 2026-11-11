@@ -1865,19 +1865,7 @@ impl Engine {
     /// An image on this machine an agent's answer shows by its absolute path, as a data URL;
     /// `None` when it isn't there or isn't an image.
     pub fn local_image(&self, path: &str) -> Option<String> {
-        use base64::Engine as _;
-        const MAX_BYTES: u64 = 20 * 1024 * 1024;
-        let path = Path::new(path);
-        let metadata = std::fs::metadata(path).ok()?;
-        if !path.is_absolute() || !metadata.is_file() || metadata.len() > MAX_BYTES {
-            return None;
-        }
-        let bytes = std::fs::read(path).ok()?;
-        let mime_type = html_pages::image_type(&bytes)?;
-        Some(format!(
-            "data:{mime_type};base64,{}",
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        ))
+        html_pages::image_data_url(Path::new(path))
     }
 
     /// Opens a file an agent's answer links to by its absolute path: in `editor`, or else

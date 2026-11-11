@@ -6,8 +6,8 @@
 //!
 //! Model output varies, so each case runs `HOSHI_EVAL_SAMPLES` times (2 by default, a third
 //! when they disagree) and fails when half its samples or more do. `HOSHI_EVAL_MODEL` picks
-//! the model, `sonnet` by default, and `HOSHI_EVAL_EFFORT` its effort, `low` by default. Change a case only if it still fails on the text it was
-//! written against.
+//! the model, `sonnet` by default, and `HOSHI_EVAL_EFFORT` its effort, `low` by default.
+//! Change a case only if it still fails on the text it was written against.
 
 use hoshi_core::{AccessMode, Command, Effort, Event, ItemContent, ThreadStatus, ThreadWorkspace};
 use hoshi_engine::{Engine, Notification, Notify};
@@ -20,7 +20,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const THREAD: &str = "t";
-const TIMEOUT: Duration = Duration::from_secs(300);
+const TIMEOUT: Duration = Duration::from_secs(600);
 const QUIET: Duration = Duration::from_secs(4);
 
 enum Kind {
@@ -39,18 +39,32 @@ fn call(tool: &'static str) -> Call {
     Call { tool, input: &[] }
 }
 
+/// When the user writes again.
+enum After {
+    /// The agent's turn ended; its tasks may still run.
+    TurnEnd,
+    /// Everything came to rest: tasks answered and the agent replied to them.
+    Rest,
+}
+
 struct Case {
     name: &'static str,
     kind: Kind,
     /// The files of the project the agent works in.
     files: &'static [(&'static str, &'static str)],
     prompt: &'static str,
+    /// What the user writes next, and when; the checks look only at what follows the last.
+    then: Vec<(After, &'static str)>,
     calls: Vec<Call>,
     must_not: Vec<Call>,
     /// Calls that have to come in this order, each after the one before.
     order: &'static [&'static str],
     /// Text the last answer has to hold, in any case.
     answer: &'static [&'static str],
+    /// Tools called at most this many times.
+    at_most: &'static [(&'static str, usize)],
+    /// The agent's effort when the case needs one, over `HOSHI_EVAL_EFFORT`.
+    effort: Option<Effort>,
 }
 
 /// The tool calls of one run: name and input.
@@ -101,6 +115,15 @@ fn check(case: &Case, calls: &Calls, answer: &str) -> Vec<String> {
     for unwanted in &case.must_not {
         if calls.iter().any(|found| matches(found, unwanted)) {
             failures.push(format!("called {}", describe(unwanted)));
+        }
+    }
+    for (tool, most) in case.at_most {
+        let count = calls
+            .iter()
+            .filter(|(name, _)| name.ends_with(tool))
+            .count();
+        if count > *most {
+            failures.push(format!("called {tool} {count} times, past {most}"));
         }
     }
     for text in case.answer {
@@ -176,49 +199,73 @@ fn sample(case: &Case, number: usize) -> Result<Run, String> {
             title: "Eval".into(),
             workspace: ThreadWorkspace::Local,
             model: None,
-            effort: Some(
+            effort: Some(case.effort.unwrap_or_else(|| {
                 std::env::var("HOSHI_EVAL_EFFORT")
                     .ok()
                     .and_then(|effort| serde_json::from_value(serde_json::json!(effort)).ok())
-                    .unwrap_or(Effort::Low),
-            ),
+                    .unwrap_or(Effort::Low)
+            })),
             fast_mode: false,
             ultracode: false,
             access_mode: AccessMode::FullAccess,
             plan_mode: false,
         })
         .unwrap();
-    engine
-        .dispatch(Command::MessageSend {
-            thread_id: THREAD.into(),
-            message_id: "00000001-1111-4111-8111-111111111111".into(),
-            text: case.prompt.into(),
-            attachments: Vec::new(),
-        })
-        .unwrap();
-
+    let send = |number: usize, text: &str| {
+        ended.store(false, Ordering::Release);
+        engine
+            .dispatch(Command::MessageSend {
+                thread_id: THREAD.into(),
+                message_id: format!("{number:08}-1111-4111-8111-111111111111"),
+                text: text.into(),
+                attachments: Vec::new(),
+            })
+            .unwrap();
+    };
     let started = Instant::now();
-    let mut quiet_since = None::<Instant>;
-    let rested = loop {
-        thread::sleep(Duration::from_millis(250));
-        let snapshot = engine.snapshot();
-        let quiet = ended.load(Ordering::Acquire)
-            && snapshot.background_tasks.is_empty()
-            && snapshot
-                .threads
-                .iter()
-                .all(|thread| thread.status == ThreadStatus::Idle);
-        quiet_since = quiet.then(|| quiet_since.unwrap_or_else(Instant::now));
-        if quiet_since.is_some_and(|since| since.elapsed() >= QUIET) {
-            break true;
-        }
-        if started.elapsed() >= TIMEOUT {
-            break false;
+    let wait = |until: &After| {
+        let mut quiet_since = None::<Instant>;
+        loop {
+            thread::sleep(Duration::from_millis(250));
+            let snapshot = engine.snapshot();
+            let idle = |id: &str| {
+                snapshot
+                    .threads
+                    .iter()
+                    .filter(|thread| thread.id == id || matches!(until, After::Rest))
+                    .all(|thread| thread.status == ThreadStatus::Idle)
+            };
+            let quiet = ended.load(Ordering::Acquire)
+                && idle(THREAD)
+                && (matches!(until, After::TurnEnd)
+                    || (snapshot.background_tasks.is_empty() && snapshot.pending_tasks.is_empty()));
+            quiet_since = quiet.then(|| quiet_since.unwrap_or_else(Instant::now));
+            if quiet_since.is_some_and(|since| since.elapsed() >= QUIET) {
+                return true;
+            }
+            if started.elapsed() >= TIMEOUT {
+                return false;
+            }
         }
     };
+    send(1, case.prompt);
+    let mut rested = true;
+    let mut from = 0;
+    for (number, (after, text)) in case.then.iter().enumerate() {
+        rested = rested && wait(after);
+        from = engine.transcript(THREAD, None).unwrap().items.len();
+        send(number + 2, text);
+    }
+    rested = rested && wait(&After::Rest);
     let mut calls = Vec::new();
     let mut answer = String::new();
-    for item in engine.transcript(THREAD, None).unwrap().items {
+    for item in engine
+        .transcript(THREAD, None)
+        .unwrap()
+        .items
+        .into_iter()
+        .skip(from)
+    {
         match item.content {
             ItemContent::ToolCall { name, input, .. } => calls.push((name, input)),
             ItemContent::AssistantMessage { text } => answer = text,
@@ -306,6 +353,9 @@ fn inline_visual_is_previewed_then_rendered() {
         must_not: vec![call("preview_open")],
         order: &["html_preview", "html_render"],
         answer: &[],
+        then: Vec::new(),
+        at_most: &[],
+        effort: None,
     });
 }
 
@@ -334,6 +384,9 @@ fn a_visualizer_is_rendered_not_served() {
         ],
         order: &[],
         answer: &[],
+        then: Vec::new(),
+        at_most: &[],
+        effort: None,
     });
 }
 
@@ -355,6 +408,9 @@ fn a_page_on_disk_is_passed_by_path() {
         must_not: Vec::new(),
         order: &[],
         answer: &[],
+        then: Vec::new(),
+        at_most: &[],
+        effort: None,
     });
 }
 
@@ -370,6 +426,9 @@ fn an_image_to_post_is_a_png_file() {
         must_not: vec![call("html_render")],
         order: &[],
         answer: &["![", ".png)"],
+        then: Vec::new(),
+        at_most: &[],
+        effort: None,
     });
 }
 
@@ -392,6 +451,9 @@ fn refactoring_a_chart_component_is_ordinary_work() {
         ],
         order: &[],
         answer: &[],
+        then: Vec::new(),
+        at_most: &[],
+        effort: None,
     });
 }
 
@@ -414,6 +476,9 @@ fn explaining_preview_code_is_ordinary_work() {
         ],
         order: &[],
         answer: &[],
+        then: Vec::new(),
+        at_most: &[],
+        effort: None,
     });
 }
 
@@ -438,6 +503,174 @@ fn a_table_question_without_a_trend_stays_text() {
         must_not: vec![call("html_render")],
         order: &[],
         answer: &[],
+        then: Vec::new(),
+        at_most: &[],
+        effort: None,
+    });
+}
+
+const MATH: (&str, &str) = (
+    "src/math.ts",
+    "export function add(a: number, b: number) {\n  return a - b\n}\n\nexport function average(values: number[]) {\n  return values.reduce((sum, value) => sum + value, 0) / values.length\n}\n",
+);
+const STRINGS: (&str, &str) = (
+    "src/strings.ts",
+    "export function capitalize(text: string) {\n  return text[0].toUpperCase() + text.slice(1)\n}\n\nexport function words(text: string) {\n  return text.split(' ').length\n}\n",
+);
+const DOCS: [(&str, &str); 3] = [
+    (
+        "docs/intro.md",
+        "# Intro\n\nAcme keeps a list of the things you need to buy.\n",
+    ),
+    (
+        "docs/usage.md",
+        "# Usage\n\nAdd an item with `acme add milk` and list them with `acme list`.\n",
+    ),
+    (
+        "docs/faq.md",
+        "# FAQ\n\nIt stores the list in a plain text file in your home folder.\n",
+    ),
+];
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn a_new_review_round_is_a_new_task() {
+    run(Case {
+        name: "review-round-uses-thread-send",
+        kind: Kind::Bad,
+        files: &[MATH],
+        prompt: "Delegate a review of src/math.ts to a task and tell me what it finds. Don't fix anything yet.",
+        then: vec![(
+            After::Rest,
+            "I fixed what it found. Get another review round of src/math.ts.",
+        )],
+        calls: vec![call("delegate_task")],
+        must_not: vec![call("thread_send")],
+        order: &[],
+        answer: &[],
+        at_most: &[],
+        effort: None,
+    });
+}
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn stopping_every_task_cancels_each() {
+    run(Case {
+        name: "stop-all-delegates-uses-task-cancel",
+        kind: Kind::Guard,
+        files: &DOCS,
+        prompt: "Start two background tasks and end your turn: one waits 90 seconds (sleep 90), then writes the word count of each file in docs/ to docs/COUNT.md; the other waits 90 seconds, then writes a one-line summary of each file in docs/ to docs/SUMMARY.md.",
+        then: vec![(After::TurnEnd, "Stop all the delegates.")],
+        calls: vec![call("task_cancel")],
+        must_not: vec![call("thread_send")],
+        order: &[],
+        answer: &[],
+        at_most: &[],
+        effort: None,
+    });
+}
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn running_tasks_are_not_polled() {
+    run(Case {
+        name: "polling-after-async-delegates",
+        kind: Kind::Bad,
+        files: &DOCS,
+        prompt: "Kick off two background tasks: one counts the lines of each file in docs/, the other finds the longest file in docs/. Tell me both results once they're in.",
+        then: Vec::new(),
+        calls: vec![call("delegate_task")],
+        must_not: vec![call("thread_wait"), call("Monitor"), call("ScheduleWakeup")],
+        order: &[],
+        answer: &[],
+        at_most: &[("task_status", 1)],
+        effort: None,
+    });
+}
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn a_background_agent_is_a_task() {
+    run(Case {
+        name: "tt-background-agent",
+        // At low effort the agent takes its Agent tool at hand over loading delegate_task.
+        kind: Kind::Bad,
+        files: &DOCS,
+        prompt: "Spin up an agent in the background to check which files in docs/ lack a trailing newline. Meanwhile, what does docs/usage.md say?",
+        then: Vec::new(),
+        calls: vec![call("delegate_task")],
+        must_not: vec![Call {
+            tool: "Agent",
+            input: &["\"run_in_background\":true"],
+        }],
+        order: &[],
+        answer: &[],
+        at_most: &[],
+        effort: Some(Effort::High),
+    });
+}
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn subagents_asked_for_stay_native() {
+    run(Case {
+        name: "native-agents-for-parallel-audit",
+        kind: Kind::Guard,
+        files: &[MATH, STRINGS],
+        prompt: "Use subagents to audit src/math.ts and src/strings.ts for bugs in parallel, then give me one combined list. Don't fix anything.",
+        then: Vec::new(),
+        calls: vec![call("Agent")],
+        must_not: vec![call("delegate_task")],
+        order: &[],
+        answer: &[],
+        at_most: &[],
+        effort: None,
+    });
+}
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn tests_in_the_background_are_a_command() {
+    run(Case {
+        name: "control-background-test-run",
+        kind: Kind::Control,
+        files: &[
+            MATH,
+            (
+                "test.js",
+                "setTimeout(() => console.log('3 tests passed'), 3000)\n",
+            ),
+        ],
+        prompt: "Run the tests in the background (node test.js) while you rename add to sum in src/math.ts.",
+        then: Vec::new(),
+        calls: Vec::new(),
+        must_not: vec![call("delegate_task"), call("Agent")],
+        order: &[],
+        answer: &[],
+        at_most: &[],
+        effort: None,
+    });
+}
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn a_stop_button_bug_is_code_work() {
+    run(Case {
+        name: "control-stop-task-button",
+        kind: Kind::Control,
+        files: &[(
+            "src/TaskRow.tsx",
+            "export function TaskRow({ task, stop }: { task: { id: string; title: string }; stop: (id?: string) => void }) {\n  return (\n    <div>\n      {task.title}\n      <button onClick={() => stop()}>Stop</button>\n    </div>\n  )\n}\n",
+        )],
+        prompt: "The Stop button in src/TaskRow.tsx doesn't cancel the running task. Fix it.",
+        then: Vec::new(),
+        calls: Vec::new(),
+        must_not: vec![call("task_cancel"), call("delegate_task")],
+        order: &[],
+        answer: &[],
+        at_most: &[],
+        effort: None,
     });
 }
 
@@ -458,6 +691,9 @@ fn checks_read_calls_by_name_input_and_order() {
         }],
         order: &["html_preview", "html_render"],
         answer: &["![shot]"],
+        then: Vec::new(),
+        at_most: &[("html_preview", 1)],
+        effort: None,
     };
     let calls = |list: &[(&str, &str)]| -> Calls {
         list.iter()
@@ -474,4 +710,10 @@ fn checks_read_calls_by_name_input_and_order() {
         ("Bash", "{\"command\":\"python -m http.server\"}"),
     ]);
     assert_eq!(check(&case, &bad, "done").len(), 4);
+    let twice = calls(&[
+        ("mcp__hoshi__html_preview", "{}"),
+        ("mcp__hoshi__html_preview", "{}"),
+        ("mcp__hoshi__html_render", "{\"path\":\"/a.html\"}"),
+    ]);
+    assert_eq!(check(&case, &twice, "![shot]").len(), 1);
 }

@@ -56,7 +56,7 @@ pub(crate) const MAX_DEPTH: usize = 2;
 pub(crate) const TASK_INSTRUCTIONS: &str = "You are a delegated task: do the work yourself; delegate only what it asks. Await or stop your background commands before your last message, unless told not to.";
 
 /// When to use each of hoshi's tools; their descriptions say how.
-const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. Work that should go on in the background: delegate_task, never a background Agent. Work in a branch or checkout of its own, as each of several variants to compare: delegate_task with isolation \"worktree\", one per branch, however small; never git worktree or a second checkout yourself. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
+const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. An agent or work in the background, however the user words it: delegate_task, never Agent with run_in_background. Work in a branch or checkout of its own, as each of several variants to compare: delegate_task with isolation \"worktree\", one per branch, however small; never git worktree or a second checkout yourself. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
 - A credential only the user has: request_secret.\n\
 - The user's other hoshi threads: thread_list, thread_read (before you answer about one), thread_send. Not ListAgents or SendMessage.";
 

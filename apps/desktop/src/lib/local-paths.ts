@@ -19,12 +19,12 @@ function decoded(text: string) {
  */
 export function localPath(url: string | undefined): string | null {
   if (!url || /[\n\r]/.test(url)) return null
-  let path = url
-  if (/^file:\/\//i.test(path)) {
-    path = decoded(path.slice('file://'.length))
+  let path: string
+  if (/^file:\/\//i.test(url)) {
+    path = decoded(url.slice('file://'.length))
     if (/^\/[a-z]:\//i.test(path)) path = path.slice(1)
-  } else if (WINDOWS_PATH.test(path) || POSIX_PATH.test(path)) {
-    path = decoded(path)
+  } else if (/^(?:[a-z]:|\/(?!\/))/i.test(url)) {
+    path = decoded(url)
   } else {
     return null
   }

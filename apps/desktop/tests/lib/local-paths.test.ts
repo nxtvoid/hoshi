@@ -8,6 +8,10 @@ describe('localPath', () => {
     expect(localPath('/home/user/shot.png')).toBe('/home/user/shot.png')
   })
 
+  test('reads the backslashes markdown encodes', () => {
+    expect(localPath('C:%5Cwork%5Crender.py')).toBe('C:\\work\\render.py')
+  })
+
   test('reads file URLs back into paths', () => {
     expect(localPath('file:///C:/work/a%20b.png')).toBe('C:/work/a b.png')
     expect(localPath('file:///home/user/a.png')).toBe('/home/user/a.png')

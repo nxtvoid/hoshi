@@ -27,6 +27,7 @@ const MAX_IMAGE_PATH_CHARS: usize = 2048;
 /// The widths a page is measured at, so the transcript fits it at any width.
 const MEASURE_WIDTHS: [u32; 9] = [320, 375, 430, 520, 640, 768, 860, 1000, 1144];
 
+const PREVIEWED: &str = "Only you saw this; the user sees the page once you call html_render.";
 const RENDERED: &str = "Shown to the user above your reply. Don't mention or describe the page; reply with only what it doesn't already say.";
 
 pub(crate) const PAGE_RULES: &str = "Self-contained: inline <style> and <script>. Local images as absolute paths are inlined. Remote URLs load as-is.";
@@ -514,6 +515,22 @@ fn width(arguments: &Value) -> u32 {
     })
 }
 
+/// An image file on this machine as a data URL; `None` when it isn't there, is too large,
+/// or isn't an image.
+pub(crate) fn image_data_url(path: &Path) -> Option<String> {
+    const MAX_BYTES: u64 = 20 * MIB;
+    let metadata = std::fs::metadata(path).ok()?;
+    if !path.is_absolute() || !metadata.is_file() || metadata.len() > MAX_BYTES {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let mime_type = image_type(&bytes)?;
+    Some(format!(
+        "data:{mime_type};base64,{}",
+        STANDARD.encode(&bytes)
+    ))
+}
+
 /// `html_preview`: the page as the user would see it, for the agent to check.
 pub(crate) fn preview(arguments: &Value, full_access: bool) -> Result<Value, String> {
     let (page, missing) = prepare(&source(arguments, full_access)?)?;
@@ -529,6 +546,7 @@ pub(crate) fn preview(arguments: &Value, full_access: bool) -> Result<Value, Str
         "capturedHeight": shot.captured_height,
         "console": shot.console,
         "image": shot.image,
+        "next": PREVIEWED,
     });
     if !missing.is_empty() {
         result["missingImages"] = json!(missing);
@@ -620,6 +638,25 @@ mod tests {
         assert!(!page.contains(&path));
         assert!(page.contains("https://example.com/a.png"));
         assert_eq!(missing, [gone]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_images_become_data_urls() {
+        let dir = std::env::temp_dir().join(format!("hoshi-image-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let image = dir.join("dot.png");
+        std::fs::write(&image, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let text = dir.join("notes.png");
+        std::fs::write(&text, b"not an image").unwrap();
+        assert!(
+            image_data_url(&image)
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
+        assert_eq!(image_data_url(&text), None);
+        assert_eq!(image_data_url(&dir.join("gone.png")), None);
+        assert_eq!(image_data_url(Path::new("dot.png")), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
