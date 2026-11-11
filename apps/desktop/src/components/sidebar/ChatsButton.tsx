@@ -43,7 +43,7 @@ export function RailChatsButton() {
             className={cn(
               'border-sidebar-border text-sidebar-foreground/80 hover:bg-sidebar-accent focus-visible:ring-sidebar-ring relative flex size-8 shrink-0 items-center justify-center rounded-lg border outline-none focus-visible:ring-2',
               chats.open &&
-                'border-sidebar-foreground bg-sidebar-accent text-sidebar-accent-foreground',
+                'border-sidebar-ring bg-sidebar-accent text-sidebar-accent-foreground',
               chats.signal && [
                 SIGNAL_BORDER[chats.signal],
                 'motion-safe:animate-signal'

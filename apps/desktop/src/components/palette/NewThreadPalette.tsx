@@ -1,6 +1,8 @@
 import { type ReactNode, useState } from 'react'
 import { m } from '@/paraglide/messages'
 import { useAppStore } from '@/state/app-store'
+import { orderProjects } from '@/state/project-order'
+import { useSidebarStore } from '@/state/sidebar-store'
 import { useStartThreadIn } from './use-new-thread'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { ProjectIcon } from '@/components/sidebar/ProjectIcon'
@@ -23,7 +25,9 @@ export function NewThreadPalette({
   onClose: () => void
   onBack: () => void
 }) {
-  const projects = useAppStore((state) => state.projects)
+  const unordered = useAppStore((state) => state.projects)
+  const projectOrder = useSidebarStore((state) => state.projectOrder)
+  const projects = orderProjects(unordered, projectOrder)
   const selectedProjectId = useAppStore((state) => state.selectedProjectId)
   const startThreadIn = useStartThreadIn()
   const [query, setQuery] = useState('')
