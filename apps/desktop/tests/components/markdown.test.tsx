@@ -41,6 +41,13 @@ describe('Markdown', () => {
     expect(html).toContain('<code>const a = 1 &lt; 2</code>')
   })
 
+  test('a fenced block without a language shows it as plain text', () => {
+    const html = render('```\nhola\n```')
+
+    expect(html).toContain('>Plain text</span>')
+    expect(html).toContain('<code>hola</code>')
+  })
+
   test('web links carry their site icon; other links do not', () => {
     const web = render('[PR](https://github.com/nxtvoid/avzx/pull/3)')
     const local = render('[section](#usage)')
