@@ -585,6 +585,8 @@ mod tests {
             state,
             checks: None,
             unresolved_comments: 0,
+            changes_requested: false,
+            conflicts: false,
             additions: 1,
             deletions: 0,
             updated_at: "2026-11-08T10:00:00Z".into(),

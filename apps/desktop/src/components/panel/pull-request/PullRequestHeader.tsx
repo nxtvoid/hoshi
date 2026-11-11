@@ -9,6 +9,7 @@ import { Button } from '@hoshi/ui/components/button'
 import { relativeTime } from './shared'
 import type { MergeMethod } from '@/bindings/MergeMethod'
 import type { PullRequest } from '@/bindings/PullRequest'
+import { pullRequestProblem } from '@/lib/pull-request-problem'
 import type { PullRequestActions } from './use-pull-request-actions'
 import type { PullRequestDetail } from '@/bindings/PullRequestDetail'
 import { PullRequestIcon } from '@/components/pull-request/PullRequestIcon'
@@ -104,7 +105,11 @@ export function PullRequestHeader({
       </div>
       <Title pullRequest={pullRequest} detail={detail} actions={actions} />
       <div className='text-muted-foreground flex items-center gap-2 text-xs'>
-        <PullRequestIcon state={pullRequest.state} className='size-3.5' />
+        <PullRequestIcon
+          state={pullRequest.state}
+          problem={pullRequestProblem(pullRequest)}
+          className='size-3.5'
+        />
         <span className='min-w-0 flex-1 truncate'>
           {pullRequest.author ? (
             <span className='text-foreground font-medium'>

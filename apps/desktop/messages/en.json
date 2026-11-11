@@ -360,6 +360,8 @@
   "pr_state_draft": "Draft",
   "pr_state_merged": "Merged",
   "pr_state_closed": "Closed",
+  "pr_problem_conflicts": "Conflicts",
+  "pr_problem_changes_requested": "Changes requested",
   "checks_passing": "Checks passing",
   "checks_failing": "Checks failing",
   "checks_pending": "Checks running",

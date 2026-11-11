@@ -1567,6 +1567,8 @@ mod tests {
                 state: PullRequestState::Open,
                 checks: Some(ChecksState::Failing),
                 unresolved_comments: 3,
+                changes_requested: false,
+                conflicts: false,
                 additions: 1,
                 deletions: 2,
                 updated_at: NOW.into(),

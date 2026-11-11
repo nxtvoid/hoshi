@@ -38,6 +38,8 @@ const PENDING_CHECKS_FRESH_FOR: Duration = Duration::from_secs(30);
 const CHECKS_FRESH_FOR: Duration = Duration::from_secs(2 * 60);
 /// Comments bump `updated_on`; this only covers a missed bump.
 const COMMENTS_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
+/// Votes may not bump `updated_on`, and a moving base branch never does.
+const REVIEW_FRESH_FOR: Duration = Duration::from_secs(5 * 60);
 /// Diffs past this size come without patches, like GitHub's.
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
 const ALL_STATES: &str = "state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED";
@@ -150,6 +152,7 @@ struct Extras {
     summary: Summary,
     checks_read_at: Instant,
     comments_read_at: Instant,
+    review_read_at: Instant,
 }
 
 type PullRequestKey = (String, String, u32);
@@ -449,6 +452,22 @@ impl Bitbucket {
             summary.unresolved_comments = model::unresolved_threads(&comments);
             comments_read_at = now;
         }
+        let mut review_read_at = cached.as_ref().map_or(now, |extras| extras.review_read_at);
+        if !open {
+            summary.changes_requested = false;
+            summary.conflicts = false;
+        } else if !same_update
+            || !same_head
+            || now.duration_since(review_read_at) >= REVIEW_FRESH_FOR
+        {
+            let path = pull_request_path(repository, raw.id);
+            if let Some(full) = best_effort(self.get::<RawPullRequest>(&path))? {
+                summary.changes_requested = model::changes_requested(&full);
+            }
+            let conflicts = best_effort(self.get::<Page<Value>>(&format!("{path}/conflicts")))?;
+            summary.conflicts = mergeability(conflicts) == Mergeability::Conflicting;
+            review_read_at = now;
+        }
         lock(&self.extras).insert(
             key,
             Extras {
@@ -457,6 +476,7 @@ impl Bitbucket {
                 summary,
                 checks_read_at,
                 comments_read_at,
+                review_read_at,
             },
         );
         Ok(model::pull_request(raw, summary))

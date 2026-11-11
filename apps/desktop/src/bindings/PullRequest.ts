@@ -19,7 +19,15 @@ headSha: string | null, baseBranch: string, state: PullRequestState,
 /**
  * `None` when the pull request has no checks.
  */
-checks: ChecksState | null, unresolvedComments: number, additions: number, deletions: number, 
+checks: ChecksState | null, unresolvedComments: number, 
+/**
+ * A reviewer asked for changes and hasn't approved since.
+ */
+changesRequested: boolean, 
+/**
+ * It conflicts with its base branch; `false` while the forge hasn't worked that out.
+ */
+conflicts: boolean, additions: number, deletions: number, 
 /**
  * RFC 3339.
  */

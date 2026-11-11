@@ -124,11 +124,14 @@ impl RawPullRequest {
     }
 }
 
-/// What a listing leaves out and other endpoints add: checks, open threads and line counts.
+/// What a listing leaves out and other endpoints add: checks, open threads, votes, conflicts
+/// and line counts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Summary {
     pub checks: Option<ChecksState>,
     pub unresolved_comments: u32,
+    pub changes_requested: bool,
+    pub conflicts: bool,
     pub additions: u32,
     pub deletions: u32,
 }
@@ -146,6 +149,8 @@ pub fn pull_request(raw: &RawPullRequest, summary: Summary) -> PullRequest {
         state: raw.state(),
         checks: summary.checks,
         unresolved_comments: summary.unresolved_comments,
+        changes_requested: summary.changes_requested,
+        conflicts: summary.conflicts,
         additions: summary.additions,
         deletions: summary.deletions,
         updated_at: raw.updated_on.clone(),
@@ -548,6 +553,14 @@ fn created_at(item: &TimelineItem) -> &str {
     }
 }
 
+/// Whether a participant asked for changes; a listing leaves participants out.
+pub fn changes_requested(pull_request: &RawPullRequest) -> bool {
+    pull_request
+        .participants
+        .iter()
+        .any(|participant| vote(participant) == Some(ReviewState::ChangesRequested))
+}
+
 fn vote(participant: &Participant) -> Option<ReviewState> {
     if participant.approved {
         return Some(ReviewState::Approved);
@@ -717,6 +730,15 @@ mod tests {
                 ("dee", ReviewState::ChangesRequested),
             ]
         );
+    }
+
+    #[test]
+    fn a_vote_for_changes_marks_the_pull_request() {
+        let mut raw = raw();
+        assert!(changes_requested(&raw));
+        raw.participants
+            .retain(|participant| participant.state.as_deref() != Some("changes_requested"));
+        assert!(!changes_requested(&raw));
     }
 
     #[test]

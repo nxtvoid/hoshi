@@ -8,6 +8,7 @@ import { ThreadAgents } from './ThreadAgents'
 import { ServersNotice, ThreadServers } from './ThreadServers'
 import { GitActionsRow } from './GitActionsRow'
 import { useChangeKey } from './use-change-key'
+import { pullRequestProblem } from '@/lib/pull-request-problem'
 import { ICON, ROW, SPLIT_PRIMARY, SplitRow } from './details-rows'
 import { useEditorStore } from '@/state/editor-store'
 import { useDetailsStore } from '@/state/details-store'
@@ -358,7 +359,11 @@ function DetailsContent({
           onClick={() => show('pullRequest')}
           className={ROW}
         >
-          <PullRequestIcon state={pullRequest.state} className='size-4' />
+          <PullRequestIcon
+            state={pullRequest.state}
+            problem={pullRequestProblem(pullRequest)}
+            className='size-4'
+          />
           <span className='shrink-0 tabular-nums'>#{pullRequest.number}</span>
           <span className='text-muted-foreground min-w-0 flex-1 truncate font-normal'>
             {pullRequest.title}

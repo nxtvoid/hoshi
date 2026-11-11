@@ -197,6 +197,8 @@ mod tests {
             state,
             checks: None,
             unresolved_comments: 0,
+            changes_requested: false,
+            conflicts: false,
             additions: 0,
             deletions: 0,
             updated_at: updated_at.into(),

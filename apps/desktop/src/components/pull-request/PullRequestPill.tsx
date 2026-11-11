@@ -5,6 +5,7 @@ import { PullRequestIcon } from './PullRequestIcon'
 import { usePanelStore } from '@/state/panel-store'
 import { PullRequestHoverCard } from './PullRequestHoverCard'
 import type { ChecksState } from '@/bindings/ChecksState'
+import { pullRequestProblem } from '@/lib/pull-request-problem'
 
 const CHECKS_COLOR: Record<ChecksState, string> = {
   passing: 'text-pr-open',
@@ -38,7 +39,11 @@ export function PullRequestPill({
             className
           )}
         >
-          <PullRequestIcon state={pullRequest.state} className='size-3.5' />
+          <PullRequestIcon
+            state={pullRequest.state}
+            problem={pullRequestProblem(pullRequest)}
+            className='size-3.5'
+          />
           <span className='tabular-nums'>#{pullRequest.number}</span>
           {pullRequest.checks ? (
             <span

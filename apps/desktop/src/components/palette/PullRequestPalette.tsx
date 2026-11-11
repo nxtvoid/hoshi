@@ -7,6 +7,7 @@ import { GitBranchIcon } from '@hugeicons/core-free-icons'
 import type { PullRequest } from '@/bindings/PullRequest'
 import type { CommandError } from '@/bindings/CommandError'
 import { useSidebarStore } from '@/state/sidebar-store'
+import { pullRequestProblem } from '@/lib/pull-request-problem'
 import { PullRequestIcon } from '@/components/pull-request/PullRequestIcon'
 import { forgeErrorMessage } from '@/components/panel/pull-request/use-pull-request-actions'
 import { type PaletteGroup, PaletteFrame } from './PaletteFrame'
@@ -94,6 +95,7 @@ export function PullRequestPalette({ onClose }: { onClose: () => void }) {
               <>
                 <PullRequestIcon
                   state={pullRequest.state}
+                  problem={pullRequestProblem(pullRequest)}
                   className='size-4 shrink-0'
                 />
                 <span className='text-muted-foreground shrink-0 tabular-nums'>

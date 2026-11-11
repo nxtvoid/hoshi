@@ -7,6 +7,7 @@ import { useAppStore } from '@/state/app-store'
 import { usePanelStore } from '@/state/panel-store'
 import { useUnseenStore } from '@/state/unseen-store'
 import { mergedCleanup } from '@/state/merged-cleanup'
+import { pullRequestProblem } from '@/lib/pull-request-problem'
 import { runCleanupWithDialog } from '@/components/thread/use-workspace-cleanup'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { cn, formatRelativeTime } from '@hoshi/utils'
@@ -205,6 +206,7 @@ export const ThreadRow = memo(function ThreadRow({
                   >
                     <PullRequestIcon
                       state={pullRequest.state}
+                      problem={pullRequestProblem(pullRequest)}
                       className='size-3'
                     />
                     <span className='tabular-nums'>#{pullRequest.number}</span>
