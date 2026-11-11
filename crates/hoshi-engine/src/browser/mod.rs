@@ -2,6 +2,7 @@
 //! real input events, the accessibility tree with refs to act on, screenshots and console.
 
 mod cdp;
+pub(crate) mod html;
 mod launch;
 pub(crate) mod tools;
 

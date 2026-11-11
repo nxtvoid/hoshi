@@ -12,6 +12,7 @@ mod editors;
 mod folders;
 mod git;
 mod git_actions;
+mod html_pages;
 mod mcp;
 use delegation::Delegation;
 use mcp::{McpServer, ToolFilter, ToolHandler};
@@ -66,6 +67,7 @@ use hoshi_providers::{
     run_update,
 };
 use hoshi_store::{CachedPullRequestDetail, Store, StoreError};
+use html_pages::Pages;
 use pull_request_cache::{PullRequestCache, Version};
 use pull_request_watch::Wake;
 use pull_requests::PullRequestSync;
@@ -180,6 +182,8 @@ struct State {
     /// Each chat works in its own folder under here, named by its id.
     chats_dir: PathBuf,
     attachments: Attachments,
+    /// Pages agents showed in their threads.
+    pages: Pages,
     /// Lets background work (branch refreshes) reach the state without keeping it alive.
     this: Weak<Mutex<State>>,
     /// The projects' setup commands running in their new worktrees.
@@ -469,6 +473,7 @@ impl Engine {
             worktrees_dir: data_dir.join("worktrees"),
             chats_dir: data_dir.join("chats"),
             attachments: Attachments::new(data_dir.join("attachments")),
+            pages: Pages::new(data_dir.join("attachments").join("pages")),
             this: Weak::new(),
             watcher: None,
             sync_wake: None,
@@ -544,12 +549,26 @@ impl Engine {
             }
         });
         let pages = browsing.clone();
+        let html_pages = lock(&shared).pages.clone();
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
             if tool.starts_with("preview_") {
                 let mut pages = pages
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 return pages.call(caller, tool, arguments);
+            }
+            if matches!(tool, html_pages::PREVIEW_TOOL | html_pages::RENDER_TOOL) {
+                let shared = weak.upgrade().ok_or("hoshi is closing")?;
+                let full_access = lock(&shared)
+                    .model
+                    .thread(caller)
+                    .is_some_and(|thread| thread.access_mode == hoshi_core::AccessMode::FullAccess);
+                drop(shared);
+                return if tool == html_pages::PREVIEW_TOOL {
+                    html_pages::preview(arguments, full_access)
+                } else {
+                    html_pages::render(&html_pages, caller, arguments, full_access)
+                };
             }
             match tool {
                 "request_secret" => {
@@ -1843,6 +1862,12 @@ impl Engine {
         lock(&self.state).attachments.remove(image);
     }
 
+    /// A page an agent showed, by the id `html_render` gave it; `None` when it is gone.
+    pub fn html_page(&self, id: &str) -> Option<Vec<u8>> {
+        let pages = lock(&self.state).pages.clone();
+        pages.read(id)
+    }
+
     /// A sent image as a data URL; `None` when its file is gone.
     pub fn image_data_url(&self, id: &str, mime_type: &str) -> Option<String> {
         let path = lock(&self.state).attachments.path(id, mime_type)?;
@@ -2699,6 +2724,11 @@ impl State {
             });
         let freed_worktrees = self.worktrees_freed_by(&command);
         let freed_images = self.images_freed_by(&command);
+        let deleted_threads: Vec<String> = self
+            .threads_deleted_by(&command)
+            .into_iter()
+            .map(|thread| thread.id.clone())
+            .collect();
         let forgotten_checkpoints: Vec<(String, String)> = self
             .threads_deleted_by(&command)
             .into_iter()
@@ -2788,6 +2818,9 @@ impl State {
         }
         for image in &freed_images {
             self.attachments.remove(image);
+        }
+        for thread_id in &deleted_threads {
+            self.pages.remove_thread(thread_id);
         }
         for (root, thread_id) in forgotten_checkpoints {
             self.checkpoints.queue(&root.clone(), move || {

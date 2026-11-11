@@ -3,6 +3,7 @@ import type { ThreadItem } from '@/bindings/ThreadItem'
 import type { StreamKind } from '@/bindings/StreamKind'
 import type { ItemContent } from '@/bindings/ItemContent'
 import { REQUEST_TOOLS } from './requests'
+import { HTML_RENDER_TOOL } from './html-page'
 
 export type ToolCallContent = Extract<ItemContent, { kind: 'toolCall' }>
 export type ReasoningContent = Extract<ItemContent, { kind: 'reasoning' }>
@@ -118,6 +119,16 @@ export function delegationOf(call: ToolCallContent): {
   }
 }
 
+/** A page the agent showed: its own row once it is kept, a tool call until then. */
+export function isHtmlRender(item: TranscriptItem): item is ToolCallItem {
+  return (
+    item.content.kind === 'toolCall' &&
+    item.content.name === HTML_RENDER_TOOL &&
+    item.content.output !== null &&
+    !item.content.isError
+  )
+}
+
 export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
   return (
     item.content.kind === 'toolCall' && SUBAGENT_TOOLS.has(item.content.name)
@@ -126,11 +137,11 @@ export function isSubagentCall(item: TranscriptItem): item is ToolCallItem {
 
 /**
  * Whether a row stays in view when its turn folds: a delegated task, which runs on its
- * own, or a subagent without its answer.
+ * own, a page the agent showed, or a subagent without its answer.
  */
 export function staysInView(row: TranscriptRow) {
   if (row.kind !== 'item' || row.item.content.kind !== 'toolCall') return false
-  if (isDelegation(row.item)) return true
+  if (isDelegation(row.item) || isHtmlRender(row.item)) return true
   const call = row.item.content
   return isSubagentCall(row.item) && call.output === null && !call.interrupted
 }
@@ -156,7 +167,8 @@ function isWork(item: TranscriptItem): item is WorkItem {
   return (
     (item.content.kind === 'toolCall' || item.content.kind === 'reasoning') &&
     !isSubagentCall(item) &&
-    !isDelegation(item)
+    !isDelegation(item) &&
+    !isHtmlRender(item)
   )
 }
 

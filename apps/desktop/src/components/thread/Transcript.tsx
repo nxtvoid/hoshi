@@ -19,6 +19,7 @@ import { PullRequestUpdateRow } from './PullRequestUpdateRow'
 import { BackgroundTaskRow } from './BackgroundTaskRow'
 import { BackgroundWork } from './BackgroundWork'
 import { UserMessage } from './UserMessage'
+import { HtmlPageRow } from './HtmlPageRow'
 import { useWholeToolCall } from './use-whole-tool-call'
 import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
@@ -71,6 +72,7 @@ import {
   foldTurns,
   groupTranscript,
   isDelegation,
+  isHtmlRender,
   staysInView,
   isSubagentCall,
   isToolCall,
@@ -569,6 +571,7 @@ const Item = memo(function Item({
       )
     case 'toolCall':
       if (isDelegation(item)) return <DelegationRow item={item} />
+      if (isHtmlRender(item)) return <HtmlPageRow item={item} />
       return isSubagentCall(item) ? (
         <SubagentRow item={item} />
       ) : (
