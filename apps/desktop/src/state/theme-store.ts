@@ -120,12 +120,38 @@ function setColors(root: HTMLElement, colors: ThemeColors | undefined) {
 
 let mirrored: boolean | undefined
 
+/** The look last applied: appearance, palette and colors. */
+let appliedLook: readonly unknown[] | null = null
+
+/**
+ * Swaps the theme without transitions, for two frames: each element would otherwise fade
+ * from the old colors to the new at its own pace.
+ */
+function withoutTransitions(root: HTMLElement) {
+  root.classList.add('no-transitions')
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => root.classList.remove('no-transitions'))
+  )
+}
+
 function applyAppearance() {
   const state = useThemeStore.getState()
   const preview = useThemePreviewStore.getState().preview
   const root = document.documentElement
   const applied = rootAppearance(state, systemDark.matches)
   const dark = preview ? preview.appearance === 'dark' : applied.dark
+  const look = [
+    dark,
+    preview ? undefined : applied.palette,
+    preview ? preview.colors : applied.colors
+  ]
+  if (
+    appliedLook &&
+    look.some((part, index) => part !== appliedLook?.[index])
+  ) {
+    withoutTransitions(root)
+  }
+  appliedLook = look
   root.classList.toggle('dark', dark)
   setData(root, 'palette', preview ? undefined : applied.palette)
   setColors(root, preview ? preview.colors : applied.colors)

@@ -23,6 +23,7 @@ import { UserMessage } from './UserMessage'
 import { HtmlPageRow } from './HtmlPageRow'
 import { useWholeToolCall } from './use-whole-tool-call'
 import { useStableRows } from './use-stable-rows'
+import { useNow } from './use-now'
 import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
@@ -85,6 +86,8 @@ import {
   toolName,
   toolTarget,
   withStreaming,
+  streamingShape,
+  fromStreamingShape,
   type ToolAction,
   type ToolCallItem,
   type FoldEnding,
@@ -108,6 +111,13 @@ const MESSAGE_ROW =
 
 const ENTRY_SUMMARY =
   'text-muted-foreground hover:text-foreground flex min-h-6 cursor-default list-none items-center gap-2 text-sm select-none [&::-webkit-details-marker]:hidden'
+
+/** A streaming item's text as it arrives; `text`, the item's own, once it is stored. */
+function useLiveText(item: TranscriptItem, text: string) {
+  return useTranscriptStore((state) =>
+    item.streaming ? (state.streaming[item.id]?.text ?? text) : text
+  )
+}
 
 /** The longest a finished turn waits for its changes before it settles without them. */
 const SETTLE_MS = 1000
@@ -152,7 +162,8 @@ export const Transcript = memo(function Transcript({
 }) {
   const working = useShownWorking(running)
   const items = useTranscriptStore((state) => state.items)
-  const streaming = useTranscriptStore((state) => state.streaming)
+  const shape = useTranscriptStore((state) => streamingShape(state.streaming))
+  const streaming = useMemo(() => fromStreamingShape(shape), [shape])
   const threadId = useTranscriptStore((state) => state.threadId)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
   const busy = useBusyThreads()
@@ -264,10 +275,8 @@ export function TranscriptFrame({
           ref={scrollRef}
           aria-label={m.transcript_label()}
           onClickCapture={(event) => {
-            const target = event.target as HTMLElement
-            if (target.closest('[aria-expanded="false"]')) {
-              keepInPlace(event.currentTarget)
-            }
+            const toggle = closedToggle(event.target as HTMLElement)
+            if (toggle) keepInPlace(event.currentTarget, toggle)
           }}
         >
           {loadOlder ? <div ref={olderRef} aria-hidden /> : null}
@@ -408,20 +417,31 @@ function RowItem({
   )
 }
 
+/** The closed disclosure a click opens: a button that says so, or a `details` summary. */
+function closedToggle(target: HTMLElement): HTMLElement | null {
+  const button = target.closest<HTMLElement>('[aria-expanded="false"]')
+  if (button) return button
+  const summary = target.closest<HTMLElement>('summary')
+  const details = summary?.parentElement
+  return details instanceof HTMLDetailsElement && !details.open ? summary : null
+}
+
 /**
- * A row opening grows the transcript below the click, which should stay where it is. The
- * scroller lets go of the end only on wheel, touch or keys, and the browser's scroll
- * anchoring would keep the text under the row still instead, so both are told otherwise
- * until the row has opened.
+ * A row opening grows the transcript below the click, and the row should stay where it is.
+ * The scroller lets go of the end only on wheel, touch or keys, so it is sent a wheel; then,
+ * for two frames, any shift of the row is scrolled back before it paints.
  */
-function keepInPlace(viewport: HTMLElement) {
+function keepInPlace(viewport: HTMLElement, toggle: HTMLElement) {
   viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
-  viewport.style.overflowAnchor = 'none'
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() => {
-      viewport.style.overflowAnchor = ''
-    })
-  )
+  const top = toggle.getBoundingClientRect().top
+  const hold = () => {
+    const moved = toggle.getBoundingClientRect().top - top
+    if (Math.abs(moved) > 0.5) viewport.scrollTop += moved
+  }
+  requestAnimationFrame(() => {
+    hold()
+    requestAnimationFrame(hold)
+  })
 }
 
 type RowsProps = {
@@ -687,28 +707,16 @@ const Item = memo(function Item({
         />
       )
     case 'assistantMessage':
-      if (note) {
-        return (
-          <>
-            <TaskNote
-              text={content.text}
-              outcome={note}
-              streaming={item.streaming === true}
-            />
-            {changes ? <TurnChangesCard changes={changes} /> : null}
-          </>
-        )
-      }
       return (
-        <>
-          <Markdown text={content.text} streaming={item.streaming === true} />
-          {changes ? <TurnChangesCard changes={changes} /> : null}
-        </>
+        <AssistantMessage
+          item={item}
+          text={content.text}
+          note={note}
+          changes={changes}
+        />
       )
     case 'reasoning':
-      return (
-        <ReasoningRow text={content.text} streaming={item.streaming === true} />
-      )
+      return <ReasoningRow item={item} text={content.text} />
     case 'toolCall':
       if (isDelegation(item)) return <DelegationRow item={item} />
       if (isHtmlRender(item)) return <HtmlPageRow item={item} />
@@ -758,6 +766,37 @@ const Item = memo(function Item({
       )
   }
 })
+
+/** The last line of reasoning still streaming, as a work group's line shows it. */
+function LivePreview({ item, text }: { item: TranscriptItem; text: string }) {
+  return reasoningPreview(useLiveText(item, text), true)
+}
+
+/** An answer, or a task's note, with its text as it streams in. */
+function AssistantMessage({
+  item,
+  text: stored,
+  note,
+  changes
+}: {
+  item: TranscriptItem
+  text: string
+  note: TaskOutcome | undefined
+  changes: TurnChanges | undefined
+}) {
+  const text = useLiveText(item, stored)
+  const streaming = item.streaming === true
+  return (
+    <>
+      {note ? (
+        <TaskNote text={text} outcome={note} streaming={streaming} />
+      ) : (
+        <Markdown text={text} streaming={streaming} />
+      )}
+      {changes ? <TurnChangesCard changes={changes} /> : null}
+    </>
+  )
+}
 
 const ACTION_ICONS: Record<ToolAction, typeof CommandLineIcon> = {
   command: CommandLineIcon,
@@ -815,9 +854,11 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
             active.content.kind === 'toolCall' && 'font-mono text-xs'
           )}
         >
-          {active.content.kind === 'toolCall'
-            ? toolTarget(active.content.name, active.content.input, cwd)
-            : reasoningPreview(active.content.text, true)}
+          {active.content.kind === 'toolCall' ? (
+            toolTarget(active.content.name, active.content.input, cwd)
+          ) : (
+            <LivePreview item={active} text={active.content.text} />
+          )}
         </span>
       ) : null}
     </>
@@ -871,18 +912,20 @@ function WorkEntry({ entry, cwd }: { entry: WorkItem; cwd: string | null }) {
   return content.kind === 'toolCall' ? (
     <ToolCallRow item={{ ...entry, content }} cwd={cwd} />
   ) : (
-    <ReasoningRow text={content.text} streaming={entry.streaming === true} />
+    <ReasoningRow item={entry} text={content.text} />
   )
 }
 
 /** The model's reasoning, folded into one line until opened. */
 function ReasoningRow({
-  text,
-  streaming
+  item,
+  text: stored
 }: {
+  item: TranscriptItem
   text: string
-  streaming: boolean
 }) {
+  const text = useLiveText(item, stored)
+  const streaming = item.streaming === true
   const [open, setOpen] = useState(false)
   return (
     <details
@@ -1085,12 +1128,7 @@ function TurnStatus() {
     const asked = turnId ? itemById(state.items, turnId) : undefined
     return asked ? Date.parse(asked.createdAt) : undefined
   })
-  const [now, setNow] = useState(Date.now)
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1000)
-    return () => clearInterval(timer)
-  }, [])
-
+  const now = useNow()
   const since = stoppingSince ?? startedAt
   const duration =
     since === undefined || Number.isNaN(since)

@@ -14,6 +14,8 @@ import {
   toolName,
   toolTarget,
   withStreaming,
+  streamingShape,
+  fromStreamingShape,
   type ToolCallItem,
   type TranscriptRow
 } from '../../src/lib/tool-calls'
@@ -711,7 +713,10 @@ describe('statusAnchor', () => {
       rewind: null
     }
   })
-  const item = (value: ThreadItem): TranscriptRow => ({ kind: 'item', item: value })
+  const item = (value: ThreadItem): TranscriptRow => ({
+    kind: 'item',
+    item: value
+  })
   const work = (id: string): TranscriptRow => ({
     kind: 'work',
     id,
@@ -725,7 +730,7 @@ describe('statusAnchor', () => {
     expect(statusAnchor([user, work('w1'), steer, work('w2')])).toBe(steer)
   })
 
-  test("follows the fold of a run that ended before it, or goes first", () => {
+  test('follows the fold of a run that ended before it, or goes first', () => {
     const fold: TranscriptRow = {
       kind: 'fold',
       id: 'fold:u1',
@@ -736,6 +741,28 @@ describe('statusAnchor', () => {
     } as TranscriptRow
     expect(statusAnchor([item(asked('u1')), fold, work('w2')])).toBe(fold)
     expect(statusAnchor([work('w1')])).toBeNull()
+  })
+})
+
+describe('streamingShape', () => {
+  test('names what streams but not its text, which grows on its own', () => {
+    const shape = streamingShape({
+      a: { kind: 'text', text: 'Hel' },
+      b: { kind: 'reasoning', text: 'Thinking' },
+      c: { kind: 'toolOutput', text: 'log' }
+    })
+    expect(
+      streamingShape({
+        a: { kind: 'text', text: 'Hello there' },
+        b: { kind: 'reasoning', text: 'Thinking more' },
+        c: { kind: 'toolOutput', text: 'log' }
+      })
+    ).toBe(shape)
+    expect(fromStreamingShape(shape)).toEqual({
+      a: { kind: 'text', text: '' },
+      b: { kind: 'reasoning', text: '' }
+    })
+    expect(fromStreamingShape('')).toEqual({})
   })
 })
 

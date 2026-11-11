@@ -20,7 +20,7 @@ export function App() {
   return (
     <TooltipProvider>
       <div className='bg-background text-foreground flex h-screen'>
-        {sidebarOpen ? <Sidebar /> : null}
+        <Sidebar shown={sidebarOpen} />
         <ThreadView />
         <Outlet />
       </div>

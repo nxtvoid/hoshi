@@ -61,6 +61,8 @@ export function ThreadView() {
         ?.workspaceRoot
   )
   const panelOpen = usePanelStore((state) => state.open)
+  /** The thread whose panel stays mounted once opened, closed or not. */
+  const [panelKeptFor, setPanelKeptFor] = useState<string | null>(null)
   const togglePanel = usePanelStore((state) => state.toggle)
   const panelMaximized = usePanelStore((state) => state.maximized)
   const detailsOpen = usePanelStore((state) => state.detailsOpen)
@@ -70,10 +72,14 @@ export function ThreadView() {
   const toggleTerminal = useTerminalStore((state) => state.toggleDrawer)
   const threadId = thread?.id
   useOpenInShortcut(thread?.id)
+  useEffect(() => {
+    if (panelOpen && threadId) setPanelKeptFor(threadId)
+  }, [panelOpen, threadId])
   const chatRef = useRef<HTMLDivElement>(null)
   const chatWidth = useElementWidth(chatRef)
   const detailsInline = chatWidth >= DETAILS_INLINE_MIN_WIDTH
   const showDetailsCard = Boolean(thread && detailsOpen && detailsInline)
+  const ready = useAppStore((state) => state.ready)
   const loading = useTranscriptStore((state) => state.loading)
   const empty = useTranscriptStore((state) => state.items.length === 0)
   const working =
@@ -194,7 +200,9 @@ export function ThreadView() {
           {showDetailsCard && thread ? (
             <ThreadDetailsCard threadId={thread.id} />
           ) : null}
-          {!chat && projectTitle === undefined ? (
+          {!ready ? (
+            <div className='flex-1' />
+          ) : !chat && projectTitle === undefined ? (
             <div className='text-muted-foreground flex flex-1 flex-col items-center justify-center gap-4 text-sm'>
               <LogoMark className='text-muted-foreground/25 size-12' />
               <p>{m.no_project_selected()}</p>
@@ -276,7 +284,9 @@ export function ThreadView() {
           )}
           {thread ? <TerminalDrawer threadId={thread.id} /> : null}
         </div>
-        {thread && panelOpen ? <RightPanel threadId={thread.id} /> : null}
+        {thread && (panelOpen || panelKeptFor === thread.id) ? (
+          <RightPanel threadId={thread.id} shown={panelOpen} />
+        ) : null}
       </div>
     </main>
   )

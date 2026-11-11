@@ -210,6 +210,35 @@ export function withStreaming(
 }
 
 /**
+ * What streams, by id and kind but without its text, as one string: rows built from it only
+ * change as an item starts or ends streaming, not with each piece of its text.
+ */
+export function streamingShape(
+  streaming: Record<string, StreamingText>
+): string {
+  return Object.entries(streaming)
+    .filter(([, { kind }]) => kind !== 'toolOutput')
+    .map(([id, { kind }]) => `${kind}:${id}`)
+    .join('\n')
+}
+
+/** The streaming items a `streamingShape` names, their text left to those that show it. */
+export function fromStreamingShape(
+  shape: string
+): Record<string, StreamingText> {
+  if (!shape) return {}
+  return Object.fromEntries(
+    shape.split('\n').map((entry) => {
+      const at = entry.indexOf(':')
+      return [
+        entry.slice(at + 1),
+        { kind: entry.slice(0, at) as StreamingText['kind'], text: '' }
+      ]
+    })
+  )
+}
+
+/**
  * Runs of consecutive tool calls and reasoning become one row, so a busy turn reads as
  * one step.
  */
