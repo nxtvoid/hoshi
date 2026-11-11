@@ -383,6 +383,20 @@ pub fn open_in_editor(
 }
 
 #[tauri::command(async)]
+pub fn get_local_image(engine: State<'_, Engine>, path: String) -> Option<String> {
+    engine.local_image(&path)
+}
+
+#[tauri::command(async)]
+pub fn open_local_file(
+    engine: State<'_, Engine>,
+    path: String,
+    editor: Option<Editor>,
+) -> Result<(), CommandError> {
+    engine.open_local_file(&path, editor)
+}
+
+#[tauri::command(async)]
 pub fn open_terminal(
     engine: State<'_, Engine>,
     thread_id: String,

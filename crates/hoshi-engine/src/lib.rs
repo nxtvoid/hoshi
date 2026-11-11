@@ -1862,6 +1862,37 @@ impl Engine {
         lock(&self.state).attachments.remove(image);
     }
 
+    /// An image on this machine an agent's answer shows by its absolute path, as a data URL;
+    /// `None` when it isn't there or isn't an image.
+    pub fn local_image(&self, path: &str) -> Option<String> {
+        use base64::Engine as _;
+        const MAX_BYTES: u64 = 20 * 1024 * 1024;
+        let path = Path::new(path);
+        let metadata = std::fs::metadata(path).ok()?;
+        if !path.is_absolute() || !metadata.is_file() || metadata.len() > MAX_BYTES {
+            return None;
+        }
+        let bytes = std::fs::read(path).ok()?;
+        let mime_type = html_pages::image_type(&bytes)?;
+        Some(format!(
+            "data:{mime_type};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        ))
+    }
+
+    /// Opens a file an agent's answer links to by its absolute path: in `editor`, or else
+    /// in the app the system has for it.
+    pub fn open_local_file(&self, path: &str, editor: Option<Editor>) -> Result<(), CommandError> {
+        let file = Path::new(path);
+        if !file.is_absolute() || !file.exists() {
+            return Err(CommandError::Internal {
+                detail: format!("{path} isn't there"),
+            });
+        }
+        editors::open(editor.unwrap_or(Editor::FileManager), path)
+            .map_err(|detail| CommandError::Internal { detail })
+    }
+
     /// A page an agent showed, by the id `html_render` gave it; `None` when it is gone.
     pub fn html_page(&self, id: &str) -> Option<Vec<u8>> {
         let pages = lock(&self.state).pages.clone();

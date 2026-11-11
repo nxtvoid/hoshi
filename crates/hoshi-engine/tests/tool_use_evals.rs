@@ -49,6 +49,8 @@ struct Case {
     must_not: Vec<Call>,
     /// Calls that have to come in this order, each after the one before.
     order: &'static [&'static str],
+    /// Text the last answer has to hold, in any case.
+    answer: &'static [&'static str],
 }
 
 /// The tool calls of one run: name and input.
@@ -89,7 +91,7 @@ fn describe(wanted: &Call) -> String {
 }
 
 /// What a run did wrong; empty when it passed.
-fn check(case: &Case, calls: &Calls) -> Vec<String> {
+fn check(case: &Case, calls: &Calls, answer: &str) -> Vec<String> {
     let mut failures = Vec::new();
     for wanted in &case.calls {
         if !calls.iter().any(|found| matches(found, wanted)) {
@@ -99,6 +101,11 @@ fn check(case: &Case, calls: &Calls) -> Vec<String> {
     for unwanted in &case.must_not {
         if calls.iter().any(|found| matches(found, unwanted)) {
             failures.push(format!("called {}", describe(unwanted)));
+        }
+    }
+    for text in case.answer {
+        if !answer.to_lowercase().contains(&text.to_lowercase()) {
+            failures.push(format!("the answer doesn't hold {text:?}"));
         }
     }
     let mut from = 0;
@@ -246,7 +253,7 @@ fn run(case: Case) {
         number += 1;
         let failures = match sample(&case, number) {
             Ok(run) => {
-                let failures = check(&case, &run.calls);
+                let failures = check(&case, &run.calls, &run.answer);
                 let names: Vec<&str> = run.calls.iter().map(|(name, _)| name.as_str()).collect();
                 println!("{} #{number}: {names:?}", case.name);
                 if !failures.is_empty() {
@@ -298,6 +305,7 @@ fn inline_visual_is_previewed_then_rendered() {
         calls: vec![call("html_preview"), call("html_render")],
         must_not: vec![call("preview_open")],
         order: &["html_preview", "html_render"],
+        answer: &[],
     });
 }
 
@@ -325,6 +333,7 @@ fn a_visualizer_is_rendered_not_served() {
             },
         ],
         order: &[],
+        answer: &[],
     });
 }
 
@@ -345,6 +354,7 @@ fn a_page_on_disk_is_passed_by_path() {
         }],
         must_not: Vec::new(),
         order: &[],
+        answer: &[],
     });
 }
 
@@ -355,10 +365,11 @@ fn an_image_to_post_is_a_png_file() {
         name: "png-to-post-is-a-file",
         kind: Kind::Guard,
         files: &[],
-        prompt: "Make me a PNG card announcing \"Acme 1.0 is out\" that I can post on social media. Save it in this folder.",
+        prompt: "Make me a PNG card announcing \"Acme 1.0 is out\" that I can post on social media. Save it in this folder and show it to me.",
         calls: Vec::new(),
         must_not: vec![call("html_render")],
         order: &[],
+        answer: &["![", ".png)"],
     });
 }
 
@@ -380,6 +391,7 @@ fn refactoring_a_chart_component_is_ordinary_work() {
             call("preview_open"),
         ],
         order: &[],
+        answer: &[],
     });
 }
 
@@ -401,6 +413,7 @@ fn explaining_preview_code_is_ordinary_work() {
             call("html_render"),
         ],
         order: &[],
+        answer: &[],
     });
 }
 
@@ -424,6 +437,7 @@ fn a_table_question_without_a_trend_stays_text() {
         calls: Vec::new(),
         must_not: vec![call("html_render")],
         order: &[],
+        answer: &[],
     });
 }
 
@@ -443,6 +457,7 @@ fn checks_read_calls_by_name_input_and_order() {
             input: &["http.server"],
         }],
         order: &["html_preview", "html_render"],
+        answer: &["![shot]"],
     };
     let calls = |list: &[(&str, &str)]| -> Calls {
         list.iter()
@@ -453,10 +468,10 @@ fn checks_read_calls_by_name_input_and_order() {
         ("mcp__hoshi__html_preview", "{}"),
         ("mcp__hoshi__html_render", "{\"path\":\"/a.html\"}"),
     ]);
-    assert!(check(&case, &good).is_empty());
+    assert!(check(&case, &good, "Here: ![shot](/a.png)").is_empty());
     let bad = calls(&[
         ("mcp__hoshi__html_render", "{\"html\":\"<p>\"}"),
         ("Bash", "{\"command\":\"python -m http.server\"}"),
     ]);
-    assert_eq!(check(&case, &bad).len(), 3);
+    assert_eq!(check(&case, &bad, "done").len(), 4);
 }

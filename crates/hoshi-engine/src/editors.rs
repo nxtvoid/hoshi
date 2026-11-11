@@ -87,7 +87,14 @@ fn launchers() -> &'static [(Editor, Launcher)] {
 }
 
 /// Opens `folder` in `editor`, without waiting for it.
-pub fn open(editor: Editor, folder: &str) -> Result<(), String> {
+/// Opens `path`, a folder or a file, in `editor`; the file manager opens a file in the app the
+/// system has for it.
+pub fn open(editor: Editor, path: &str) -> Result<(), String> {
+    let folder = match Path::new(path).parent() {
+        Some(parent) if Path::new(path).is_file() => parent.to_string_lossy().into_owned(),
+        _ => path.to_owned(),
+    };
+    let folder = folder.as_str();
     let launcher = launchers()
         .iter()
         .find(|(found, _)| *found == editor)
@@ -96,12 +103,12 @@ pub fn open(editor: Editor, folder: &str) -> Result<(), String> {
     let mut command = match launcher {
         Launcher::Program(program) => {
             let mut command = Command::new(program);
-            command.arg(folder);
+            command.arg(path);
             command
         }
         Launcher::MacApp(app) => {
             let mut command = Command::new("open");
-            command.arg("-na").arg(app).arg("--args").arg(folder);
+            command.arg("-na").arg(app).arg("--args").arg(path);
             command
         }
     };

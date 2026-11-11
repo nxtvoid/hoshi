@@ -60,6 +60,9 @@ const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. Work
 - A credential only the user has: request_secret.\n\
 - The user's other hoshi threads: thread_list, thread_read (before you answer about one), thread_send. Not ListAgents or SendMessage.";
 
+/// How answers show the files the agent made, which the user sees only through them.
+const FILES: &str = "- The user sees your replies, not what your tools read. To show an image, embed it with Markdown and its absolute path: ![name](/abs/path.png). Link other files by their absolute path.";
+
 /// For threads the user started, which own their pull request.
 const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.\n\
 - Asked to move to an existing worktree: EnterWorktree with its path, never cd.";
@@ -81,6 +84,7 @@ pub(crate) fn instructions(depth: usize, in_project: bool, bitbucket: bool) -> S
             hoshi_providers::DEFERRED_TOOLS
         ),
         TOOLS.to_owned(),
+        FILES.to_owned(),
     ];
     if depth == 0 && in_project {
         parts.push(PULL_REQUESTS.to_owned());

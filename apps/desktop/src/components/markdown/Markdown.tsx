@@ -6,11 +6,13 @@ import { MarkdownLink } from './MarkdownLink'
 import { MarkdownImage } from './MarkdownImage'
 import { ImageMention } from './ImageMention'
 import { IMAGE_MENTION_TAG, rehypeMentions } from './rehype-mentions'
+import { rehypeLocalPaths } from './rehype-local-paths'
 import type { KnownMentions } from '@/lib/prompt-segments'
 import { splitMarkdownBlocks } from '@/lib/markdown-blocks'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import ReactMarkdown, {
   type Components,
+  defaultUrlTransform,
   type ExtraProps,
   type Options
 } from 'react-markdown'
@@ -142,8 +144,24 @@ const SCHEMA = {
   }
 }
 
+/** An agent's answer may also show and link files on this machine, by their path. */
+const AGENT_SCHEMA = {
+  ...SCHEMA,
+  protocols: {
+    ...defaultSchema.protocols,
+    href: [...(defaultSchema.protocols?.href ?? []), 'file'],
+    src: [...(defaultSchema.protocols?.src ?? []), 'file']
+  }
+}
+
 /** Raw HTML is allowed, as on GitHub, and then cleaned of scripts and handlers. */
-const REHYPE_PLUGINS: PluggableList = [rehypeRaw, [rehypeSanitize, SCHEMA]]
+const REHYPE_PLUGINS: Record<MarkdownSource, PluggableList> = {
+  agent: [rehypeRaw, rehypeLocalPaths, [rehypeSanitize, AGENT_SCHEMA]],
+  forge: [rehypeRaw, [rehypeSanitize, SCHEMA]]
+}
+
+const urlTransform = (url: string) =>
+  url.startsWith('file:') ? url : defaultUrlTransform(url)
 
 const REMARK_PLUGINS: Record<MarkdownSource, PluggableList> = {
   agent: [remarkGfm],
@@ -172,9 +190,9 @@ export const Markdown = memo(function Markdown({
   const rehypePlugins = useMemo<PluggableList>(
     () =>
       mentions
-        ? [...REHYPE_PLUGINS, [rehypeMentions, mentions]]
-        : REHYPE_PLUGINS,
-    [mentions]
+        ? [...REHYPE_PLUGINS[source], [rehypeMentions, mentions]]
+        : REHYPE_PLUGINS[source],
+    [mentions, source]
   )
   const blocks = (streaming && splitMarkdownBlocks(text)) || [text]
   let offset = 0
@@ -215,6 +233,7 @@ const MarkdownBlock = memo(function MarkdownBlock({
       remarkPlugins={remarkPlugins}
       rehypePlugins={rehypePlugins}
       components={COMPONENTS}
+      urlTransform={urlTransform}
     >
       {text}
     </ReactMarkdown>

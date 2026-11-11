@@ -58,6 +58,8 @@ pub fn run() {
             orchestration::get_thread_branches,
             orchestration::get_thread_changes,
             orchestration::open_in_editor,
+            orchestration::get_local_image,
+            orchestration::open_local_file,
             orchestration::get_thread_folder,
             orchestration::switch_branch,
             orchestration::open_terminal,

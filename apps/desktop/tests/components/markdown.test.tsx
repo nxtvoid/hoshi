@@ -49,4 +49,23 @@ describe('Markdown', () => {
     expect(web).toContain('<svg')
     expect(local).not.toContain('<svg')
   })
+
+  test('an agent links files by their path; forge text cannot', () => {
+    const agent = render(
+      '[the log](C:/work/run.log) and [main](/repo/src/main.rs:12)'
+    )
+    const forge = render('[the log](C:/work/run.log)', 'forge')
+
+    expect(agent.match(/<button/g)?.length).toBe(2)
+    expect(agent).toContain('the log')
+    expect(forge).not.toContain('<button')
+    expect(forge).not.toContain('C:/work')
+  })
+
+  test('a local image waits for the engine to read it', () => {
+    expect(render('![shot](C:/work/shot.png)')).not.toContain('<img')
+    expect(render('![shot](https://example.com/shot.png)')).toContain(
+      'src="https://example.com/shot.png"'
+    )
+  })
 })
