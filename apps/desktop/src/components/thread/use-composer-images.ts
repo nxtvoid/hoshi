@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { prepareImage } from '@/lib/images'
 import { useImageStore } from '@/state/image-store'
@@ -76,7 +76,9 @@ function keepInDraft(draftKey: string, image: ComposerImage) {
 export function useComposerImages(draftKey: string) {
   const [images, setImages] = useState(() => resumed(draftKey))
   const imagesRef = useRef(images)
-  imagesRef.current = images
+  useLayoutEffect(() => {
+    imagesRef.current = images
+  }, [images])
   const mounted = useRef(true)
 
   const update = (key: string, change: Partial<ComposerImage>) =>

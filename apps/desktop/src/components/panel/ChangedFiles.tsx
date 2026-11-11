@@ -1,7 +1,7 @@
 import { cn } from '@hoshi/utils'
 import { DiffView } from './DiffView'
 import { m } from '@/paraglide/messages'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { FileIcon } from '@/components/files/FileIcon'
 import type { DiffFile } from '@/bindings/DiffFile'
@@ -137,7 +137,9 @@ function FileDiffBlock({
 }) {
   const [diff, setDiff] = useState<DiffState>({ kind: 'loading' })
   const fileRef = useRef(file)
-  fileRef.current = file
+  useLayoutEffect(() => {
+    fileRef.current = file
+  }, [file])
   const fileKey = `${file.path}|${file.oldPath}|${file.status}|${file.additions}|${file.deletions}`
 
   useEffect(() => {

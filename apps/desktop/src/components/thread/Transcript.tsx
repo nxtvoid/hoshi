@@ -22,6 +22,7 @@ import { BackgroundWork } from './BackgroundWork'
 import { UserMessage } from './UserMessage'
 import { HtmlPageRow } from './HtmlPageRow'
 import { useWholeToolCall } from './use-whole-tool-call'
+import { useStableRows } from './use-stable-rows'
 import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
@@ -29,7 +30,7 @@ import { useAppStore } from '@/state/app-store'
 import { useStoppingStore } from '@/state/stopping-store'
 import { inFlight } from '@/lib/agents'
 import { foldTaskRuns } from '@/lib/task-runs'
-import { rowKey, stableRows } from '@/lib/stable-rows'
+import { rowKey } from '@/lib/stable-rows'
 import { useRequestStore } from '@/state/request-store'
 import { useBusyThreads } from './use-busy-threads'
 import { DelegationRow, TaskNote, TaskWaits } from './DelegationRows'
@@ -74,6 +75,7 @@ import {
   isDelegation,
   isHtmlRender,
   readingChanges,
+  statusAnchor,
   staysInView,
   isSubagentCall,
   isToolCall,
@@ -164,23 +166,18 @@ export const Transcript = memo(function Transcript({
       .map((thread) => thread.id)
       .join(' ')
   )
-  const shownRows = useRef<TranscriptRow[]>([])
-  const rows = useMemo(() => {
+  const folded = useMemo(() => {
     const active = new Set(activeTasks.split(' '))
-    const next = stableRows(
-      shownRows.current,
-      foldTaskRuns(
-        foldTurns(
-          groupTranscript(withStreaming(items, streaming)),
-          working,
-          staysInView
-        ),
-        (taskId) => active.has(taskId)
-      )
+    return foldTaskRuns(
+      foldTurns(
+        groupTranscript(withStreaming(items, streaming)),
+        working,
+        staysInView
+      ),
+      (taskId) => active.has(taskId)
     )
-    shownRows.current = next
-    return next
   }, [items, streaming, working, activeTasks])
+  const rows = useStableRows(folded)
   const approvals = useMemo(() => approvalsByCall(items), [items])
   const liveTasks = useMemo(
     () =>
@@ -200,8 +197,13 @@ export const Transcript = memo(function Transcript({
       liveTasks={liveTasks}
       loadOlder={hasOlder ? loadOlder : undefined}
       firstId={items[0]?.id}
+      status={
+        working
+          ? { after: statusAnchor(rows), node: <TurnStatus /> }
+          : undefined
+      }
     >
-      <BackgroundWork status={working ? <TurnStatus /> : null} />
+      <BackgroundWork status={null} />
       {working || !threadId ? null : <TaskWaits threadId={threadId} />}
     </TranscriptFrame>
   )
@@ -219,12 +221,15 @@ export function TranscriptFrame({
   loadOlder,
   firstId,
   lead,
+  status,
   children
 }: {
   rows: TranscriptRow[]
   approvals: Map<string, ApprovalContent>
   cwd: string | null
   liveTasks?: string
+  /** A running turn's status, shown where its work folds once it ends. */
+  status?: StatusSlot
   /** Loads what came before the first row, while there is more, as the reader nears it. */
   loadOlder?: () => Promise<void>
   firstId?: string
@@ -272,7 +277,12 @@ export function TranscriptFrame({
           >
             {lead}
             <ApprovalsContext.Provider value={approvals}>
-              <Rows rows={rows} cwd={cwd} liveTasks={liveTasks} />
+              <Rows
+                rows={rows}
+                cwd={cwd}
+                liveTasks={liveTasks}
+                status={status}
+              />
             </ApprovalsContext.Provider>
             {children}
           </MessageScrollerContent>
@@ -421,14 +431,37 @@ type RowsProps = {
   liveTasks: string | undefined
 }
 
+/** A row's place for a running turn's status: after `after`, or first when `null`. */
+type StatusSlot = { after: TranscriptRow | null; node: ReactNode }
+
+/** As tall as a fold's header, which takes its place when the turn ends. */
+function StatusRow({ node }: { node: ReactNode }) {
+  return (
+    <RowItem messageId='turn-status' className='scroll-mt-6'>
+      <div className='border-border/60 border-b pb-2'>
+        <div className='flex min-h-6 items-center'>{node}</div>
+      </div>
+    </RowItem>
+  )
+}
+
 function isAgent(row: TranscriptRow) {
   return (
     row.kind === 'item' && (isSubagentCall(row.item) || isDelegation(row.item))
   )
 }
 
-function Rows({ rows, cwd, liveTasks }: RowsProps) {
+function Rows({
+  rows,
+  cwd,
+  liveTasks,
+  status
+}: RowsProps & { status?: StatusSlot }) {
   const shown: React.ReactNode[] = []
+  const showStatus = () => {
+    if (status) shown.push(<StatusRow key='turn-status' node={status.node} />)
+  }
+  if (status?.after === null) showStatus()
   const liveFrom = rows.length - LIVE_ROWS
   let agents: TranscriptRow[] = []
   let agentsAt = 0
@@ -468,6 +501,7 @@ function Rows({ rows, cwd, liveTasks }: RowsProps) {
         live={index >= liveFrom}
       />
     )
+    if (status && row === status.after) showStatus()
   })
   flushAgents()
   return shown

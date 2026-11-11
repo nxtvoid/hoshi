@@ -186,7 +186,7 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
     }
   }
   const marker =
-    agentActive && page?.agentPoint && frame && image.current
+    agentActive && page?.agentPoint && frame
       ? {
           left: (page.agentPoint.x / frame.width) * 100,
           top: (page.agentPoint.y / frame.height) * 100

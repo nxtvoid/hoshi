@@ -415,6 +415,21 @@ export function foldTurns(
   return folded
 }
 
+/**
+ * The row a running turn's status follows: what started its latest run, where its work
+ * folds once it ends, so the status and the fold take the same place. `null` puts it first.
+ */
+export function statusAnchor(rows: TranscriptRow[]): TranscriptRow | null {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index] as TranscriptRow
+    if (row.kind === 'fold') return row
+    if (row.kind !== 'item') continue
+    const { kind } = row.item.content
+    if (kind === 'userMessage' || kind === 'backgroundTaskEnded') return row
+  }
+  return null
+}
+
 /** Splits the id of a background task's end into its turn and the task; mirrors hoshi-core. */
 const TASK_ENDED = ':ended:'
 

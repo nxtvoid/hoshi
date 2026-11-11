@@ -1,4 +1,4 @@
-import { cn } from '@hoshi/utils'
+import { cn, offsets } from '@hoshi/utils'
 import { type ComponentProps, memo, useMemo } from 'react'
 import { useThemeStore } from '@/state/theme-store'
 import { CodeBlock } from './CodeBlock'
@@ -195,7 +195,7 @@ export const Markdown = memo(function Markdown({
     [mentions, source]
   )
   const blocks = (streaming && splitMarkdownBlocks(text)) || [text]
-  let offset = 0
+  const starts = offsets(blocks.map((block) => block.length))
   return (
     <div
       className={cn(
@@ -203,12 +203,10 @@ export const Markdown = memo(function Markdown({
         className
       )}
     >
-      {blocks.map((block) => {
-        const start = offset
-        offset += block.length
+      {blocks.map((block, index) => {
         return (
           <MarkdownBlock
-            key={start}
+            key={starts[index]}
             text={block}
             remarkPlugins={REMARK_PLUGINS[source]}
             rehypePlugins={rehypePlugins}

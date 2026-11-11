@@ -61,6 +61,7 @@
     "@types/react-dom": "catalog:",
     "@vitejs/plugin-react": "^6.0.2",
     "happy-dom": "21.0.4",
+    "oxc-transform-react": "~0.156.0",
     "tailwindcss": "catalog:",
     "typescript": "catalog:",
     "vite": "^8.0.16"

@@ -244,9 +244,7 @@ export function ThemeGrid() {
               themes={themes}
               pickedModes={pickedModes}
               onUseMode={(theme, appearance) =>
-                setSelection(
-                  chooseHalf(useSelectionNow(), appearance, theme.id)
-                )
+                setSelection(chooseHalf(selectionNow(), appearance, theme.id))
               }
               onDuplicate={duplicate}
               onEdit={edit}
@@ -367,7 +365,7 @@ export function ThemeGrid() {
   )
 }
 
-const useSelectionNow = () => {
+const selectionNow = () => {
   const { theme, halves } = useThemeStore.getState()
   return { theme, halves }
 }
@@ -382,8 +380,8 @@ function ThemeCard({
   onExport,
   onRemove,
   orbs,
-  name = theme.label,
-  removeLabel = m.remove_theme(),
+  name: givenName,
+  removeLabel: givenRemoveLabel,
   tooltip
 }: {
   theme: ThemeDefinition
@@ -399,6 +397,8 @@ function ThemeCard({
   removeLabel?: string
   tooltip?: string
 }) {
+  const name = givenName ?? theme.label
+  const removeLabel = givenRemoveLabel ?? m.remove_theme()
   const modes = themeModes(theme)
   return (
     <Tooltip>

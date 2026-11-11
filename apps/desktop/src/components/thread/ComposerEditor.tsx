@@ -1,4 +1,4 @@
-import { useEffect, useImperativeHandle, useRef } from 'react'
+import { useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react'
 import type { Ref } from 'react'
 import { cn } from '@hoshi/utils'
 import { type PastedImages, pastedImages } from '@/lib/pasted-images'
@@ -184,7 +184,7 @@ const Mention = Node.create({
         [
           'img',
           {
-            src: node.attrs.src ?? '',
+            src: node.attrs.src || null,
             alt: '',
             draggable: 'false',
             class:
@@ -304,6 +304,9 @@ export function ComposerEditor({
   onImages,
   onOpenImage
 }: ComposerEditorProps) {
+  // The editor's configuration reads the latest handlers through refs, which React
+  // Compiler can't tell apart from reading them while rendering.
+  'use no memo'
   const handlers = useRef({
     onChange,
     onDocument,
@@ -312,16 +315,18 @@ export function ComposerEditor({
     onImages,
     onOpenImage
   })
-  handlers.current = {
-    onChange,
-    onDocument,
-    onBlur,
-    onKeyDown,
-    onImages,
-    onOpenImage
-  }
   const shownPlaceholder = useRef(placeholder)
-  shownPlaceholder.current = placeholder
+  useLayoutEffect(() => {
+    handlers.current = {
+      onChange,
+      onDocument,
+      onBlur,
+      onKeyDown,
+      onImages,
+      onOpenImage
+    }
+    shownPlaceholder.current = placeholder
+  })
   /** The last document read, so a caret move doesn't convert it again. */
   const lastRead = useRef<{
     doc: ProseMirrorNode

@@ -40,7 +40,7 @@ export function ComposerImages({
               }
             >
               <img
-                src={image.previewUrl}
+                src={image.previewUrl || undefined}
                 alt={image.name}
                 draggable={false}
                 className={cn(

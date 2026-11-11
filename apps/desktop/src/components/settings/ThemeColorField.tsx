@@ -4,6 +4,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState
 } from 'react'
@@ -62,7 +63,9 @@ function useFrameCommit(onChange: (value: string) => void) {
   const pending = useRef<string | null>(null)
   const frame = useRef<number | null>(null)
   const latest = useRef(onChange)
-  latest.current = onChange
+  useLayoutEffect(() => {
+    latest.current = onChange
+  }, [onChange])
   const flush = () => {
     if (frame.current !== null) cancelAnimationFrame(frame.current)
     frame.current = null
@@ -72,7 +75,7 @@ function useFrameCommit(onChange: (value: string) => void) {
   }
   const schedule = (value: string) => {
     pending.current = value
-    frame.current ??= requestAnimationFrame(flush)
+    if (frame.current === null) frame.current = requestAnimationFrame(flush)
   }
   useEffect(() => () => flush(), [])
   return { schedule, flush }

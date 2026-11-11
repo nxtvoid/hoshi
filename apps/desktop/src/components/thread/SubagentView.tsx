@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { CHAT_LANE } from '@/lib/chat-lane'
 import { AgentStatus } from './AgentLine'
-import { stableRows } from '@/lib/stable-rows'
+import { useStableRows } from './use-stable-rows'
 import { subagentState } from '@/lib/agents'
 import { subagentRun } from '@/lib/model-runs'
 import { TranscriptFrame } from './Transcript'
@@ -23,8 +23,7 @@ import {
   isSubagentCall,
   subagentInput,
   subagentTranscriptId,
-  type ToolCallItem,
-  type TranscriptRow
+  type ToolCallItem
 } from '@/lib/tool-calls'
 import { ArrowUpLeft01Icon, BotIcon } from '@hugeicons/core-free-icons'
 
@@ -142,15 +141,12 @@ function SubagentTranscript({
   const running = subagentState(item.content) === 'running'
   const report = item.content.interrupted ? null : whole.output
   const { prompt } = subagentInput(item.content.input)
-  const shown = useRef<TranscriptRow[]>([])
-  const rows = useMemo(() => {
-    const next = stableRows(
-      shown.current,
-      subagentRows(item, items ?? [], report, running)
+  const rows = useStableRows(
+    useMemo(
+      () => subagentRows(item, items ?? [], report, running),
+      [item, items, report, running]
     )
-    shown.current = next
-    return next
-  }, [item, items, report, running])
+  )
 
   return (
     <TranscriptFrame

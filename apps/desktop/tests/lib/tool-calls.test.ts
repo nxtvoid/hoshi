@@ -8,6 +8,7 @@ import {
   reasoningPreview,
   relativePath,
   staysInView,
+  statusAnchor,
   summarizeToolCalls,
   subagentTranscriptId,
   toolName,
@@ -694,3 +695,47 @@ describe('readingChanges', () => {
     expect(readingChanges([changes(null), asked, text('b')])).toBeNull()
   })
 })
+
+describe('statusAnchor', () => {
+  const asked = (id: string, steer = false): ThreadItem => ({
+    id,
+    threadId: 't',
+    createdAt: '',
+    content: {
+      kind: 'userMessage',
+      text: id,
+      attachments: [],
+      steer,
+      taskResult: null,
+      pullRequestUpdate: null,
+      rewind: null
+    }
+  })
+  const item = (value: ThreadItem): TranscriptRow => ({ kind: 'item', item: value })
+  const work = (id: string): TranscriptRow => ({
+    kind: 'work',
+    id,
+    entries: [tool(id, 'Read')]
+  })
+
+  test('follows what started the latest run', () => {
+    const user = item(asked('u1'))
+    const steer = item(asked('u2', true))
+    expect(statusAnchor([user, work('w1'), item(text('a'))])).toBe(user)
+    expect(statusAnchor([user, work('w1'), steer, work('w2')])).toBe(steer)
+  })
+
+  test("follows the fold of a run that ended before it, or goes first", () => {
+    const fold: TranscriptRow = {
+      kind: 'fold',
+      id: 'fold:u1',
+      rows: [],
+      ending: 'answered',
+      after: 'start',
+      durationMs: null
+    } as TranscriptRow
+    expect(statusAnchor([item(asked('u1')), fold, work('w2')])).toBe(fold)
+    expect(statusAnchor([work('w1')])).toBeNull()
+  })
+})
+

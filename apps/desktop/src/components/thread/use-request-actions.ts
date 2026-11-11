@@ -28,23 +28,32 @@ export function usePendingRequest() {
 export function useDelegatedRequest(threadId: string | null) {
   const threads = useAppStore(selectQuietThreads)
   const pending = useRequestStore((state) => state.pending)
-  return useMemo(() => {
-    if (!threadId) return null
-    const byId = new Map(threads.map((thread) => [thread.id, thread]))
-    const worksFor = (task: Thread) => {
-      let parentId = task.parentThreadId
-      for (let depth = 0; parentId && depth < threads.length; depth++) {
-        if (parentId === threadId) return true
-        parentId = byId.get(parentId)?.parentThreadId ?? null
-      }
-      return false
+  return useMemo(
+    () => delegatedRequest(threadId, threads, pending),
+    [threadId, threads, pending]
+  )
+}
+
+function delegatedRequest(
+  threadId: string | null,
+  threads: Thread[],
+  pending: RequestItem[]
+) {
+  if (!threadId) return null
+  const byId = new Map(threads.map((thread) => [thread.id, thread]))
+  const worksFor = (task: Thread) => {
+    let parentId = task.parentThreadId
+    for (let depth = 0; parentId && depth < threads.length; depth++) {
+      if (parentId === threadId) return true
+      parentId = byId.get(parentId)?.parentThreadId ?? null
     }
-    for (const request of pending) {
-      const child = byId.get(request.threadId)
-      if (child && worksFor(child)) return { request, child }
-    }
-    return null
-  }, [threadId, threads, pending])
+    return false
+  }
+  for (const request of pending) {
+    const child = byId.get(request.threadId)
+    if (child && worksFor(child)) return { request, child }
+  }
+  return null
 }
 
 /** Answers `request`; shared by its panel and the composer, which takes typed answers. */
