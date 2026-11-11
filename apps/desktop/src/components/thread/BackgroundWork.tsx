@@ -1,14 +1,14 @@
 import { useNow } from './use-now'
 import type { ReactNode } from 'react'
 import { m } from '@/paraglide/messages'
-import { formatElapsed } from '@hoshi/utils'
 import { useAppStore } from '@/state/app-store'
 import { HugeiconsIcon } from '@hugeicons/react'
+import { cn, formatElapsed } from '@hoshi/utils'
 import { Button } from '@hoshi/ui/components/button'
 import { useStoppingStore } from '@/state/stopping-store'
-import { Loading03Icon } from '@hugeicons/core-free-icons'
 import type { BackgroundTask } from '@/bindings/BackgroundTask'
 import { useBackgroundTaskStore } from '@/state/background-task-store'
+import { CommandLineIcon, Loading03Icon } from '@hugeicons/core-free-icons'
 
 /**
  * The commands the agent left running in the background, at the end of the transcript, also
@@ -56,6 +56,7 @@ function BackgroundTaskLine({
       label={waiting ? m.background_waiting() : m.background_running()}
       title={task.description || m.background_task()}
       elapsed={formatElapsed(now - task.startedAt)}
+      held={waiting}
     >
       <Button
         size='xs'
@@ -70,24 +71,29 @@ function BackgroundTaskLine({
   )
 }
 
-/** One line of work still going at the end of the transcript, with its actions. */
+/**
+ * One line of work still going at the end of the transcript, with its actions. It spins
+ * while the turn is `held` for it; a command only left running shows as a command.
+ */
 export function WorkLine({
   label,
   title,
   elapsed,
+  held = true,
   children
 }: {
   label: string
   title: string
   elapsed: string
+  held?: boolean
   children: ReactNode
 }) {
   return (
     <span className='text-muted-foreground flex min-w-0 items-center gap-2 text-sm'>
       <HugeiconsIcon
-        icon={Loading03Icon}
+        icon={held ? Loading03Icon : CommandLineIcon}
         strokeWidth={2}
-        className='size-4 shrink-0 animate-spin'
+        className={cn('size-4 shrink-0', held && 'animate-spin')}
       />
       <span className='shrink-0'>{label}</span>
       <span aria-hidden className='shrink-0'>

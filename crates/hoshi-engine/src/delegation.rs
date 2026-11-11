@@ -61,9 +61,10 @@ const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. Work
 - The user's other hoshi threads: thread_list, thread_read (before you answer about one), thread_send. Not ListAgents or SendMessage.";
 
 /// For threads the user started, which own their pull request.
-const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.";
+const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.\n\
+- Asked to move to an existing worktree: EnterWorktree with its path, never cd.";
 
-const BROWSER_AND_BACKGROUND: &str = "- Web previews only when the user asks for browser work: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
+const BROWSER_AND_BACKGROUND: &str = "- Web previews when asked for browser work, or to see or reproduce something in a live app: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
 - Background Bash or Monitor commands don't hold your turn. To wait for one (tests, a build, a sleep, which only runs in the background): await_background_tasks with its id, then end your turn. Never for dev servers.";
 
 /// Added after the rest of [`instructions`] for agents of threads on Bitbucket.
@@ -744,7 +745,7 @@ mod tests {
             .map(String::len)
             .max()
             .unwrap();
-        assert!(worst <= 1_550, "{worst} bytes");
+        assert!(worst <= 1_600, "{worst} bytes");
         assert!(instructions(0, true, false).contains("watch_pull_request"));
         assert!(!instructions(0, false, false).contains("watch_pull_request"));
         assert!(!instructions(1, true, false).contains("watch_pull_request"));

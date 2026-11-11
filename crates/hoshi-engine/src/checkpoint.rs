@@ -155,8 +155,63 @@ fn index_lock(index: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// The files that differ between two checkpoints.
-pub fn changes(dir: &str, from: &str, to: &str) -> Result<Vec<DiffFile>, String> {
+/// What moves `HEAD` to commits the turn didn't write, as its reflog names them.
+const BROUGHT_BY: [&str; 5] = [
+    "checkout: moving",
+    "pull",
+    "merge",
+    "rebase",
+    "reset: moving",
+];
+
+/// The commit `HEAD` was last moved to between the two checkpoints by something other than
+/// a commit of the turn's own, such as another branch being checked out; `None` when it
+/// stayed, or moved only to where it already was.
+fn moved_to(dir: &str, from: &str, to: &str) -> Option<String> {
+    let parent = |reference: &str| {
+        git::stdout(
+            dir,
+            &["rev-parse", "--verify", "--quiet", &format!("{reference}^")],
+        )
+        .ok()
+        .map(|commit| commit.trim().to_owned())
+    };
+    let (before, after) = (parent(from)?, parent(to)?);
+    if before == after {
+        return None;
+    }
+    let since: u64 = git::stdout(dir, &["log", "-1", "--format=%ct", from, "--"])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let log = git::stdout(
+        dir,
+        &[
+            "reflog",
+            "show",
+            "--date=unix",
+            "--format=%H%x09%gd%x09%gs",
+            "HEAD",
+        ],
+    )
+    .ok()?;
+    let arrived = log.lines().find_map(|line| {
+        let mut fields = line.splitn(3, '\t');
+        let (commit, selector, subject) = (fields.next()?, fields.next()?, fields.next()?);
+        let at: u64 = selector
+            .split_once("@{")?
+            .1
+            .trim_end_matches('}')
+            .parse()
+            .ok()?;
+        (at >= since && BROUGHT_BY.iter().any(|kind| subject.starts_with(kind)))
+            .then(|| commit.to_owned())
+    })?;
+    (arrived != before).then_some(arrived)
+}
+
+fn diff_tree(dir: &str, from: &str, to: &str) -> Result<Vec<DiffFile>, String> {
     let output = git::stdout(
         dir,
         &[
@@ -174,8 +229,26 @@ pub fn changes(dir: &str, from: &str, to: &str) -> Result<Vec<DiffFile>, String>
     Ok(diff::parse_changes(&output))
 }
 
+/// The files the turn changed between its two checkpoints. What a checkout, pull or reset
+/// brought meanwhile is left out: the files are counted from the commit it arrived at, and
+/// only those that also differ from how the turn found them.
+pub fn changes(dir: &str, from: &str, to: &str) -> Result<Vec<DiffFile>, String> {
+    let since = diff_tree(dir, from, to)?;
+    let Some(arrived) = moved_to(dir, from, to) else {
+        return Ok(since);
+    };
+    let changed: std::collections::HashSet<String> =
+        since.into_iter().map(|file| file.path).collect();
+    Ok(diff_tree(dir, &arrived, to)?
+        .into_iter()
+        .filter(|file| changed.contains(&file.path))
+        .collect())
+}
+
 /// The unified diff of one file listed by [`changes`].
 pub fn file_diff(dir: &str, from: &str, to: &str, file: &DiffFile) -> Result<FileDiff, String> {
+    let arrived = moved_to(dir, from, to);
+    let from = arrived.as_deref().unwrap_or(from);
     let mut args = vec![
         "diff-tree",
         "-r",
@@ -372,6 +445,99 @@ mod tests {
         forget(&dir, "t").unwrap();
         let left = git::stdout(&dir, &["for-each-ref", REFS]).unwrap();
         assert!(left.trim().is_empty());
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_branch_checked_out_during_the_turn_is_not_the_turn_s_change() {
+        let repo = git::tests::temp_repository("switch");
+        let dir = repo.to_string_lossy().into_owned();
+        let write = |name: &str, text: &str| std::fs::write(repo.join(name), text).unwrap();
+        write(
+            "shared.txt",
+            "one
+",
+        );
+        git::stdout(&dir, &["add", "."]).unwrap();
+        git::stdout(&dir, &["commit", "-m", "base"]).unwrap();
+        git::stdout(&dir, &["checkout", "-q", "-b", "other"]).unwrap();
+        write(
+            "theirs-1.txt",
+            "a
+",
+        );
+        write(
+            "theirs-2.txt",
+            "b
+",
+        );
+        git::stdout(&dir, &["add", "."]).unwrap();
+        git::stdout(&dir, &["commit", "-m", "other"]).unwrap();
+        git::stdout(&dir, &["checkout", "-q", "-"]).unwrap();
+        write(
+            "draft.txt",
+            "mine
+",
+        );
+        let before = reference("t", "m1", Moment::Before);
+        let after = reference("t", "m1", Moment::After);
+
+        capture(&dir, &before).unwrap();
+        git::stdout(&dir, &["checkout", "-q", "other"]).unwrap();
+        write(
+            "shared.txt",
+            "one
+agent
+",
+        );
+        write(
+            "committed.txt",
+            "kept
+",
+        );
+        git::stdout(&dir, &["add", "committed.txt"]).unwrap();
+        git::stdout(&dir, &["commit", "-m", "by the agent"]).unwrap();
+        capture(&dir, &after).unwrap();
+
+        let files = changes(&dir, &before, &after).unwrap();
+        let listed: Vec<_> = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.additions))
+            .collect();
+        assert_eq!(
+            listed,
+            [("committed.txt", Some(1)), ("shared.txt", Some(1))]
+        );
+        let shared = files.into_iter().nth(1).unwrap();
+        let patch = file_diff(&dir, &before, &after, &shared).unwrap().text;
+        assert!(patch.contains("+agent"));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn a_branch_made_where_the_turn_started_brings_nothing() {
+        let repo = git::tests::temp_repository("branch-off");
+        let dir = repo.to_string_lossy().into_owned();
+        let write = |name: &str, text: &str| std::fs::write(repo.join(name), text).unwrap();
+        write("kept.txt", "one");
+        write("other.txt", "one");
+        git::stdout(&dir, &["add", "."]).unwrap();
+        git::stdout(&dir, &["commit", "-m", "base"]).unwrap();
+        write("kept.txt", "mine");
+        let before = reference("t", "m1", Moment::Before);
+        let after = reference("t", "m1", Moment::After);
+
+        capture(&dir, &before).unwrap();
+        git::stdout(&dir, &["checkout", "-q", "-b", "work"]).unwrap();
+        write("other.txt", "agent");
+        capture(&dir, &after).unwrap();
+
+        let paths: Vec<_> = changes(&dir, &before, &after)
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .collect();
+        assert_eq!(paths, ["other.txt"]);
         let _ = std::fs::remove_dir_all(&repo);
     }
 

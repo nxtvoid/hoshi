@@ -33,11 +33,17 @@ let pending: Event[] = []
 /** Deltas not shown yet, applied together once a frame. */
 const deltas = new Map<string, StreamingText>()
 
-const flush = frameScheduler(() => {
-  const state = useTranscriptStore.getState()
-  const live = takeDeltas(state)
-  if (live !== state) useTranscriptStore.setState(live)
-})
+/** Streaming text may take this much of the thread's time; the rest stays for the user. */
+const STREAMING_SHARE = 0.25
+
+const flush = frameScheduler(
+  () => {
+    const state = useTranscriptStore.getState()
+    const live = takeDeltas(state)
+    if (live !== state) useTranscriptStore.setState(live)
+  },
+  { share: STREAMING_SHARE }
+)
 
 function takeDeltas(live: LiveText): LiveText {
   flush.cancel()

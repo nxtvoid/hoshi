@@ -1,4 +1,4 @@
-import { useImperativeHandle, useRef } from 'react'
+import { useEffect, useImperativeHandle, useRef } from 'react'
 import type { Ref } from 'react'
 import { cn } from '@hoshi/utils'
 import { type PastedImages, pastedImages } from '@/lib/pasted-images'
@@ -67,8 +67,11 @@ export type ComposerEditorHandle = {
   setMenu: (menu: { listId: string | null; activeId: string | null }) => void
   /** Pastes `text` at the caret as if the user had. */
   paste: (text: string) => void
-  /** Shows images just added as chips at the caret, when the prompt has text to place them in. */
-  insertImages: (images: ImageChip[]) => void
+  /**
+   * Shows images just added as chips at the caret, when the prompt has text to place them
+   * in. Says whether it did.
+   */
+  insertImages: (images: ImageChip[]) => boolean
   /** Takes away the chips of an image removed from the draft. */
   removeImage: (key: string) => void
 }
@@ -297,6 +300,8 @@ export function ComposerEditor({
 }: ComposerEditorProps) {
   const handlers = useRef({ onChange, onDocument, onBlur, onKeyDown, onImages })
   handlers.current = { onChange, onDocument, onBlur, onKeyDown, onImages }
+  const shownPlaceholder = useRef(placeholder)
+  shownPlaceholder.current = placeholder
   /** The last document read, so a caret move doesn't convert it again. */
   const lastRead = useRef<{
     doc: ProseMirrorNode
@@ -346,7 +351,7 @@ export function ComposerEditor({
       CodeBlockHighlight,
       Placeholder.configure({
         placeholder: ({ node }) =>
-          node.type.name === 'paragraph' ? placeholder : ''
+          node.type.name === 'paragraph' ? shownPlaceholder.current : ''
       }),
       Mention,
       LeadingCommand,
@@ -392,6 +397,12 @@ export function ComposerEditor({
     }
   })
 
+  // The placeholder is drawn from the editor's state, which a new text alone doesn't change.
+  useEffect(() => {
+    if (!editor || editor.isDestroyed) return
+    editor.view.dispatch(editor.state.tr.setMeta('placeholder', placeholder))
+  }, [editor, placeholder])
+
   useImperativeHandle(
     ref,
     () => ({
@@ -402,8 +413,8 @@ export function ComposerEditor({
         editor?.view.pasteText(text)
       },
       insertImages: (images) => {
-        if (!editor || editor.isEmpty || images.length === 0) return
-        editor
+        if (!editor || editor.isEmpty || images.length === 0) return false
+        return editor
           .chain()
           .focus()
           .insertContent(

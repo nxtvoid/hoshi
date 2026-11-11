@@ -150,6 +150,13 @@ export function threadAgents(
   return [...tasks, ...subagents].sort((a, b) => b.at.localeCompare(a.at))
 }
 
+/** The tasks a thread delegated, and those they delegated in turn, which go with it. */
+export function delegatedTasks(threadId: string, threads: Thread[]): Thread[] {
+  return threads
+    .filter((thread) => thread.parentThreadId === threadId)
+    .flatMap((task) => [task, ...delegatedTasks(task.id, threads)])
+}
+
 /** When a task's row places it: how long it has run, or when it ended. */
 export type TaskTime =
   | { kind: 'elapsed'; milliseconds: number }

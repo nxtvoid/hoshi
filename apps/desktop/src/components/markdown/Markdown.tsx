@@ -3,6 +3,7 @@ import { type ComponentProps, memo, useMemo } from 'react'
 import { useThemeStore } from '@/state/theme-store'
 import { CodeBlock } from './CodeBlock'
 import { MarkdownLink } from './MarkdownLink'
+import { MarkdownImage } from './MarkdownImage'
 import { ImageMention } from './ImageMention'
 import { IMAGE_MENTION_TAG, rehypeMentions } from './rehype-mentions'
 import type { KnownMentions } from '@/lib/prompt-segments'
@@ -96,9 +97,7 @@ const COMPONENTS: Components = {
       {...props}
     />
   ),
-  img: ({ node: _, alt, ...props }) => (
-    <img alt={alt} className='inline max-w-full align-middle' {...props} />
-  ),
+  img: ({ node: _, ...props }) => <MarkdownImage {...props} />,
   input: ({ node: _, ...props }) => (
     <input className='me-1.5 align-middle' disabled {...props} />
   ),

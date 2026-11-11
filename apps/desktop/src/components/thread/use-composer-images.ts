@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { prepareImage } from '@/lib/images'
+import { useImageStore } from '@/state/image-store'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
 
 export type ComposerImage = {
@@ -16,6 +17,12 @@ export type ComposerImage = {
 }
 
 type SavedImage = Extract<MessageAttachment, { type: 'image' }>
+
+/** Removes a saved image that no message will carry. */
+function discardSaved(saved: MessageAttachment) {
+  if (saved.type === 'image') useImageStore.getState().forget(saved.id)
+  void invoke('discard_image', { image: saved })
+}
 
 /** Images added to the draft, saved by the engine as soon as they are added. */
 export function useComposerImages() {
@@ -45,19 +52,25 @@ export function useComposerImages() {
       }
       setImages((current) => [...current, image])
       prepareImage(file)
-        .then((prepared) =>
-          invoke<MessageAttachment>('save_image', {
+        .then(async (prepared) => {
+          const saved = await invoke<MessageAttachment>('save_image', {
             name: prepared.name || image.name,
             mimeType: prepared.mimeType,
             data: prepared.data
           })
-        )
-        .then((saved) => {
+          if (saved.type === 'image') {
+            useImageStore
+              .getState()
+              .keep(
+                saved.id,
+                `data:${prepared.mimeType};base64,${prepared.data}`
+              )
+          }
           const kept = imagesRef.current.some(
             (candidate) => candidate.key === key
           )
           if (kept) update(key, { saved })
-          else void invoke('discard_image', { image: saved })
+          else discardSaved(saved)
         })
         .catch((error) => {
           console.error('hoshi: failed to attach an image', error)
@@ -90,7 +103,10 @@ export function useComposerImages() {
     const image = imagesRef.current.find((candidate) => candidate.key === key)
     if (!image) return
     URL.revokeObjectURL(image.previewUrl)
-    if (image.saved) void invoke('discard_image', { image: image.saved })
+    if (image.saved) discardSaved(image.saved)
+    imagesRef.current = imagesRef.current.filter(
+      (candidate) => candidate.key !== key
+    )
     setImages((current) => current.filter((candidate) => candidate.key !== key))
   }
 
@@ -110,7 +126,7 @@ export function useComposerImages() {
     }
     for (const image of taken) {
       URL.revokeObjectURL(image.previewUrl)
-      if (image.saved) void invoke('discard_image', { image: image.saved })
+      if (image.saved) discardSaved(image.saved)
     }
   }
 
@@ -119,13 +135,21 @@ export function useComposerImages() {
     for (const image of taken) URL.revokeObjectURL(image.previewUrl)
   }
 
+  /** After sending: images taken that the message left out, whose files go. */
+  const discard = (taken: ComposerImage[]) => {
+    for (const image of taken) {
+      URL.revokeObjectURL(image.previewUrl)
+      if (image.saved) discardSaved(image.saved)
+    }
+  }
+
   useEffect(() => {
     mounted.current = true
     return () => {
       mounted.current = false
       for (const image of imagesRef.current) {
         URL.revokeObjectURL(image.previewUrl)
-        if (image.saved) void invoke('discard_image', { image: image.saved })
+        if (image.saved) discardSaved(image.saved)
       }
     }
   }, [])
@@ -138,7 +162,6 @@ export function useComposerImages() {
     take,
     putBack,
     release,
-    saving: images.some((image) => !image.saved && !image.failed),
-    saved: images.flatMap((image) => (image.saved ? [image.saved] : []))
+    discard
   }
 }

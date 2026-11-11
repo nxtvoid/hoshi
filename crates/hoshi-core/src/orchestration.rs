@@ -389,6 +389,15 @@ pub enum CommandError {
     TerminalFailed { detail: String },
     #[error("terminal {terminal_id} is not open")]
     TerminalNotFound { terminal_id: String },
+    /// The port is no longer held by a process of the thread.
+    #[error("no server of thread {thread_id} listens on port {port}")]
+    ServerNotFound { thread_id: String, port: u16 },
+    /// Stopping it would also stop hoshi, an agent or a terminal's shell.
+    #[error("the server on port {port} shares its process with hoshi, an agent or a shell")]
+    ServerStopRefused { port: u16 },
+    /// The system refused to end the process; `detail` is its message, shown as is.
+    #[error("could not stop the server: {detail}")]
+    ServerStopFailed { detail: String },
     /// A chat has no repository, so it can't work in a worktree.
     #[error("chat {thread_id} can only work in its own folder")]
     ChatNotLocal { thread_id: String },
@@ -430,6 +439,28 @@ pub struct Snapshot {
     pub background_tasks: Vec<ThreadBackgroundTasks>,
     /// The latest message of each delegated task, shortened.
     pub task_previews: Vec<TaskPreview>,
+    /// The messages that wait for their thread to be compacted.
+    pub held_messages: Vec<HeldMessage>,
+}
+
+/// A message the user sent that waits for its thread's conversation to be compacted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct HeldMessage {
+    pub thread_id: String,
+    pub message_id: String,
+    pub text: String,
+    pub attachments: Vec<MessageAttachment>,
+}
+
+/// The message a thread holds until it is compacted; `None` once it went or was taken back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ThreadHeldMessage {
+    pub thread_id: String,
+    pub message: Option<HeldMessage>,
 }
 
 /// A delegated task's latest message, shortened to one line for its card.

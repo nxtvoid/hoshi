@@ -474,6 +474,47 @@ impl Bitbucket {
         Ok(members.into_iter().map(|member| member.user).collect())
     }
 
+    /// Who a comment may mention: the pull request's people, then the workspace's members.
+    fn mentionable(&self, repository: &RepositoryRef, number: Option<u32>) -> Vec<User> {
+        let mut users = Vec::new();
+        if let Some(number) = number
+            && let Ok(raw) = self.get::<RawPullRequest>(&pull_request_path(repository, number))
+        {
+            users.extend(raw.author.clone());
+            users.extend(raw.reviewers.iter().cloned());
+            users.extend(raw.participants.iter().filter_map(|each| each.user.clone()));
+        }
+        if let Ok(Some(members)) = best_effort(self.workspace_members(repository)) {
+            users.extend(members);
+        }
+        users
+    }
+
+    fn mentions_in(&self, repository: &RepositoryRef, number: Option<u32>, text: &str) -> String {
+        if !text.contains('@') {
+            return text.to_owned();
+        }
+        model::encode_mentions(text, &self.mentionable(repository, number))
+    }
+
+    fn with_mentions(
+        &self,
+        repository: &RepositoryRef,
+        number: Option<u32>,
+        action: &PullRequestAction,
+    ) -> PullRequestAction {
+        let mut action = action.clone();
+        match &mut action {
+            PullRequestAction::Comment { body }
+            | PullRequestAction::ReplyToThread { body, .. }
+            | PullRequestAction::Edit { body, .. } => {
+                *body = self.mentions_in(repository, number, body);
+            }
+            _ => {}
+        }
+        action
+    }
+
     fn change_reviewers(
         &self,
         repository: &RepositoryRef,
@@ -622,7 +663,7 @@ impl Forge for Bitbucket {
         let path = format!("{}/pullrequests", repository_path(repository));
         let body = json!({
             "title": pull_request.title,
-            "description": pull_request.body,
+            "description": self.mentions_in(repository, None, &pull_request.body),
             "source": { "branch": { "name": pull_request.head } },
             "destination": { "branch": { "name": pull_request.base } },
             "draft": pull_request.draft,
@@ -696,7 +737,7 @@ impl Forge for Bitbucket {
             merge_methods: vec![MergeMethod::Merge, MergeMethod::Squash, MergeMethod::Rebase],
             // Bitbucket doesn't say up front; the forge refuses what the account can't do.
             can_edit: true,
-            body: raw.description.clone(),
+            body: raw.body(),
             changed_files: stats.len() as u32,
             reviewers: model::reviewers(&raw),
             labels: Vec::new(),
@@ -742,7 +783,8 @@ impl Forge for Bitbucket {
         _forge_id: &str,
         action: &PullRequestAction,
     ) -> Result<(), ForgeError> {
-        let result = match actions::plan(action) {
+        let action = self.with_mentions(repository, Some(number), action);
+        let result = match actions::plan(&action) {
             Plan::Request { method, path, body } => self
                 .request(
                     method,

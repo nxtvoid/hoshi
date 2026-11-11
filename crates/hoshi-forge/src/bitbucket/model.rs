@@ -17,6 +17,7 @@ pub struct Page<T> {
 #[derive(Debug, Clone, Deserialize)]
 pub struct User {
     pub uuid: Option<String>,
+    pub account_id: Option<String>,
     pub nickname: Option<String>,
     pub display_name: Option<String>,
 }
@@ -76,6 +77,8 @@ pub struct RawPullRequest {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    /// The description again, with Bitbucket's rendering.
+    pub summary: Option<Content>,
     pub state: String,
     #[serde(default)]
     pub draft: bool,
@@ -110,6 +113,14 @@ impl RawPullRequest {
 
     pub fn url(&self) -> String {
         self.links.html().unwrap_or_default()
+    }
+
+    /// The description as markdown hoshi can show.
+    pub fn body(&self) -> String {
+        match &self.summary {
+            Some(summary) if summary.raw == self.description => summary.readable(),
+            _ => self.description.clone(),
+        }
     }
 }
 
@@ -204,6 +215,133 @@ pub fn checks_state(checks: &[PullRequestCheck]) -> Option<ChecksState> {
 pub struct Content {
     #[serde(default)]
     pub raw: String,
+    /// Bitbucket's rendering, the only place a mention's name appears.
+    pub html: Option<String>,
+}
+
+impl Content {
+    /// The markdown with mentions named and Bitbucket's attribute lists left out.
+    pub fn readable(&self) -> String {
+        let named = name_mentions(&self.raw, self.html.as_deref().unwrap_or_default());
+        strip_attribute_lists(&named)
+    }
+}
+
+/// `@{account_id}` as `@Display Name`, for the accounts the rendering names.
+fn name_mentions(raw: &str, html: &str) -> String {
+    const MARK: &str = "data-atlassian-id=\"";
+    let mut names = HashMap::new();
+    let mut rest = html;
+    while let Some(start) = rest.find(MARK) {
+        rest = &rest[start + MARK.len()..];
+        let Some(end) = rest.find('"') else { break };
+        let id = &rest[..end];
+        let Some(text) = rest[end..]
+            .split_once('>')
+            .and_then(|(_, after)| after.split_once('<'))
+            .map(|(text, _)| text)
+        else {
+            break;
+        };
+        if let Some(name) = text.strip_prefix('@').filter(|name| !name.is_empty()) {
+            names.insert(format!("@{{{id}}}"), format!("@{}", unescape_html(name)));
+        }
+    }
+    let mut text = raw.to_owned();
+    for (mention, name) in names {
+        text = text.replace(&mention, &name);
+    }
+    text
+}
+
+fn unescape_html(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&#x27;", "'")
+        .replace("&amp;", "&")
+}
+
+/// `@Display Name` or `@nickname` of one of `users` as the `@{account_id}` Bitbucket
+/// notifies; code spans and blocks stay as written.
+pub fn encode_mentions(text: &str, users: &[User]) -> String {
+    let mut names: Vec<(String, &str)> = Vec::new();
+    for user in users {
+        let Some(id) = user.account_id.as_deref() else {
+            continue;
+        };
+        for name in [&user.display_name, &user.nickname].into_iter().flatten() {
+            let name = name.trim();
+            if !name.is_empty() && !names.iter().any(|(known, _)| known == &name.to_lowercase()) {
+                names.push((name.to_lowercase(), id));
+            }
+        }
+    }
+    if names.is_empty() || !text.contains('@') {
+        return text.to_owned();
+    }
+    names.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    let word = |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '.';
+    let mut out = String::with_capacity(text.len());
+    let mut in_code = false;
+    let mut previous: Option<char> = None;
+    let mut index = 0;
+    while index < text.len() {
+        let rest = &text[index..];
+        let c = rest.chars().next().unwrap_or_default();
+        if c == '`' {
+            let ticks = rest.chars().take_while(|tick| *tick == '`').count();
+            out.push_str(&rest[..ticks]);
+            index += ticks;
+            in_code = !in_code;
+            previous = Some('`');
+            continue;
+        }
+        if c == '@' && !in_code && !previous.is_some_and(word) {
+            let after = &rest[1..];
+            let found = names.iter().find(|(name, _)| {
+                after
+                    .get(..name.len())
+                    .is_some_and(|head| head.to_lowercase() == *name)
+                    && !after[name.len()..]
+                        .chars()
+                        .next()
+                        .is_some_and(|next| next.is_alphanumeric() || next == '_')
+            });
+            if let Some((name, id)) = found {
+                out.push_str(&format!("@{{{id}}}"));
+                index += 1 + name.len();
+                previous = Some('}');
+                continue;
+            }
+        }
+        out.push(c);
+        index += c.len_utf8();
+        previous = Some(c);
+    }
+    out
+}
+
+/// Drops the `{: data-layout='center' }` Bitbucket writes after images.
+fn strip_attribute_lists(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("){: ") {
+        let after = &rest[start + 1..];
+        match after.find('}').filter(|end| !after[..*end].contains('\n')) {
+            Some(end) => {
+                out.push_str(&rest[..=start]);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push_str(&rest[..start + 4]);
+                rest = &rest[start + 4..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -243,7 +381,7 @@ impl RawComment {
     fn review_comment(&self, fallback_url: &str) -> ReviewComment {
         ReviewComment {
             author: self.user.as_ref().and_then(User::login),
-            body: self.content.raw.clone(),
+            body: self.content.readable(),
             created_at: self.created_on.clone(),
             url: self.links.html().unwrap_or_else(|| fallback_url.to_owned()),
         }
@@ -673,5 +811,83 @@ mod tests {
         assert_eq!(files[1].path, "b.rs");
         assert_eq!(files[1].status, DiffFileStatus::Deleted);
         assert_eq!(files[2].old_path.as_deref(), Some("c.rs"));
+    }
+
+    #[test]
+    fn mentions_read_as_the_names_bitbucket_renders() {
+        let content: Content = serde_json::from_value(serde_json::json!({
+            "raw": "@{70121:32bd} ready to review, cc @{1:unknown}",
+            "html": "<p><span class=\"ap-mention\" data-atlassian-id=\"70121:32bd\">@Ana O&#39;Neil</span> ready to review, cc @{1:unknown}</p>"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            content.readable(),
+            "@Ana O'Neil ready to review, cc @{1:unknown}"
+        );
+    }
+
+    #[test]
+    fn images_lose_the_attribute_list_bitbucket_adds() {
+        let content: Content = serde_json::from_value(serde_json::json!({
+            "raw": "error:
+![](https://bitbucket.org/x/images/1-image.png){: data-layout='center' }
+then `f(){:x}`"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            content.readable(),
+            "error:
+![](https://bitbucket.org/x/images/1-image.png)
+then `f(){:x}`"
+        );
+    }
+
+    #[test]
+    fn the_description_names_its_mentions() {
+        let mut pull_request = raw();
+        pull_request.description = "for @{7:a}".into();
+        pull_request.summary = Some(Content {
+            raw: "for @{7:a}".into(),
+            html: Some("<p>for <span data-atlassian-id=\"7:a\">@Bo</span></p>".into()),
+        });
+
+        assert_eq!(pull_request.body(), "for @Bo");
+    }
+
+    fn account(id: &str, display_name: &str, nickname: Option<&str>) -> User {
+        User {
+            uuid: None,
+            account_id: Some(id.into()),
+            nickname: nickname.map(Into::into),
+            display_name: Some(display_name.into()),
+        }
+    }
+
+    #[test]
+    fn names_written_after_an_at_become_mentions_bitbucket_notifies() {
+        let users = [
+            account("1:a", "Gabriel Jara", Some("gjara")),
+            account("2:b", "Gabriel", None),
+        ];
+
+        assert_eq!(
+            encode_mentions("@Gabriel Jara - ready, cc @gjara, @gabriel.", &users),
+            "@{1:a} - ready, cc @{1:a}, @{2:b}."
+        );
+    }
+
+    #[test]
+    fn mentions_skip_code_emails_and_unknown_names() {
+        let users = [account("1:a", "Gabriel Jara", None)];
+
+        assert_eq!(
+            encode_mentions(
+                "`@Gabriel Jara` me@Gabriel Jara.com @Gabriel Jaramillo @Nobody",
+                &users
+            ),
+            "`@Gabriel Jara` me@Gabriel Jara.com @Gabriel Jaramillo @Nobody"
+        );
     }
 }

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const WAIT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -29,7 +29,18 @@ pub(crate) struct Browsing {
     viewing: HashSet<String>,
     /// The panel's size for threads whose page fills it, until a size is picked.
     fits: HashMap<String, (u32, u32)>,
+    /// Threads whose page the user closed, until their agent opens one again.
+    closed_by_user: HashSet<String>,
+    /// Since when the browser has no page; it stays a while, keeping the sessions of the
+    /// sites signed in to.
+    idle_since: Option<Instant>,
 }
+
+/// How long a browser without pages is kept before it goes.
+const IDLE_BROWSER: Duration = Duration::from_secs(10 * 60);
+const NO_PAGE: &str = "this thread has no page open: call preview_open first";
+const CLOSED_BY_USER: &str =
+    "the user closed this thread's page: call preview_open if you still need it";
 
 fn text<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
     arguments[key]
@@ -70,6 +81,8 @@ impl Browsing {
             notify,
             viewing: HashSet::new(),
             fits: HashMap::new(),
+            closed_by_user: HashSet::new(),
+            idle_since: None,
         }
     }
 
@@ -113,6 +126,7 @@ impl Browsing {
             return;
         }
         self.browser = None;
+        self.idle_since = None;
         let closed: Vec<String> = self.pages.drain().map(|(thread_id, _)| thread_id).collect();
         for thread_id in closed {
             self.announce(&thread_id, false, None, false);
@@ -123,6 +137,7 @@ impl Browsing {
     pub(crate) fn close(&mut self) {
         self.pages.clear();
         self.browser = None;
+        self.idle_since = None;
     }
 
     fn resize_page(&mut self, thread_id: &str, wanted: (u32, u32)) -> Result<(), String> {
@@ -182,6 +197,8 @@ impl Browsing {
             page.start_screencast(page.size())?;
         }
         self.pages.insert(thread_id.to_owned(), page);
+        self.closed_by_user.remove(thread_id);
+        self.idle_since = None;
         Ok(true)
     }
 
@@ -302,22 +319,45 @@ impl Browsing {
     }
 
     fn page(&mut self, thread_id: &str) -> Result<&mut Page, String> {
+        let closed = self.closed_by_user.contains(thread_id);
         self.pages
             .get_mut(thread_id)
-            .ok_or_else(|| "this thread has no page open: call preview_open first".into())
+            .ok_or_else(|| if closed { CLOSED_BY_USER } else { NO_PAGE }.into())
     }
 
-    /// Closes the page of a thread that is gone.
+    /// Closes the thread's page. The browser stays a while after its last page.
     pub(crate) fn forget(&mut self, thread_id: &str) {
         if let Some(page) = self.pages.remove(thread_id) {
             page.close();
         }
         self.viewing.remove(thread_id);
         self.fits.remove(thread_id);
-        if self.pages.is_empty() {
-            self.browser = None;
+        self.closed_by_user.remove(thread_id);
+        if self.pages.is_empty() && self.browser.is_some() && self.idle_since.is_none() {
+            self.idle_since = Some(Instant::now());
         }
         self.announce(thread_id, false, None, false);
+    }
+
+    /// The user closed the thread's page from the panel, which its agent is told the next
+    /// time it reaches for it.
+    pub(crate) fn user_close(&mut self, thread_id: &str) {
+        let open = self.pages.contains_key(thread_id);
+        self.forget(thread_id);
+        if open {
+            self.closed_by_user.insert(thread_id.to_owned());
+        }
+    }
+
+    /// Ends a browser that has had no page for a while.
+    pub(crate) fn end_idle_browser(&mut self) {
+        let idle = self
+            .idle_since
+            .is_some_and(|since| since.elapsed() >= IDLE_BROWSER);
+        if idle && self.pages.is_empty() {
+            self.browser = None;
+            self.idle_since = None;
+        }
     }
 
     pub(crate) fn call(
@@ -386,7 +426,8 @@ impl Browsing {
 
     fn status(&mut self, caller: &str) -> Result<Value, String> {
         let Some(page) = self.pages.get(caller) else {
-            return Ok(json!({ "open": false }));
+            let closed_by_user = self.closed_by_user.contains(caller);
+            return Ok(json!({ "open": false, "closedByUser": closed_by_user }));
         };
         let mut status = describe(page)?;
         status["open"] = json!(true);
@@ -567,6 +608,37 @@ mod tests {
             browsing.call("t", "preview_status", &json!({})).unwrap()["open"],
             false
         );
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[test]
+    fn a_page_the_user_closed_says_so_and_opens_again_in_the_same_browser() {
+        if find_browser().is_none() {
+            eprintln!("no Chromium-based browser here; skipping");
+            return;
+        }
+        let profile = std::env::temp_dir().join(format!("hoshi-closed-{}", std::process::id()));
+        let mut browsing = Browsing::new(profile.clone(), Arc::new(|_| {}));
+        let page = "data:text/html,<p>Signed in</p>";
+        browsing
+            .call("t", "preview_open", &json!({ "url": page }))
+            .unwrap();
+
+        browsing.user_close("t");
+        let refused = browsing.call("t", "preview_snapshot", &json!({}));
+        let status = browsing.call("t", "preview_status", &json!({})).unwrap();
+        let kept = browsing.browser.is_some();
+        let again = browsing
+            .call("t", "preview_open", &json!({ "url": page }))
+            .unwrap();
+        let after = browsing.call("t", "preview_status", &json!({})).unwrap();
+
+        assert_eq!(refused.unwrap_err(), CLOSED_BY_USER);
+        assert_eq!(status["closedByUser"], true);
+        assert!(kept);
+        assert_eq!(again["opened"], true);
+        assert_eq!(after["open"], true);
+        browsing.close();
         let _ = std::fs::remove_dir_all(&profile);
     }
 

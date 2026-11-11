@@ -93,6 +93,11 @@ export const ThreadRow = memo(function ThreadRow({
   const saveDraft = useDraftStore((state) => state.save)
   const status =
     thread.status !== 'idle' ? STATUS[thread.status] : unseen ? COMPLETED : null
+  const canCleanUp = mergedCleanup(thread, pullRequest)
+  const canRelease =
+    Boolean(thread.worktreePath) &&
+    !thread.worktreeReleased &&
+    !thread.worktreeAdopted
 
   return (
     <ContextMenu>
@@ -252,25 +257,23 @@ export const ThreadRow = memo(function ThreadRow({
             {m.discard_draft()}
           </ContextMenuItem>
         ) : null}
-        {thread.worktreePath || mergedCleanup(thread, pullRequest) ? (
+        {canCleanUp || canRelease ? (
           <>
             <ContextMenuSeparator />
-            {mergedCleanup(thread, pullRequest) ? (
+            {canCleanUp ? (
               <ContextMenuItem
                 onClick={() => void runCleanupWithDialog('cleanUp', thread.id)}
               >
                 {m.clean_up_thread()}
               </ContextMenuItem>
             ) : null}
-            {!thread.worktreePath ||
-            thread.worktreeReleased ||
-            thread.worktreeAdopted ? null : (
+            {canRelease ? (
               <ContextMenuItem
                 onClick={() => void runCleanupWithDialog('release', thread.id)}
               >
                 {m.release_worktree()}
               </ContextMenuItem>
-            )}
+            ) : null}
           </>
         ) : null}
         <ContextMenuSeparator />

@@ -18,7 +18,7 @@
     "typescript": "~6.0.3"
   },
   "scripts": {
-    "dev": "bun run --cwd apps/desktop tauri dev",
+    "dev": "bun run --cwd apps/desktop tauri dev --config src-tauri/tauri.dev.conf.json",
     "build": "bun run --cwd apps/desktop tauri build",
     "typecheck": "bun run --filter './apps/*' --filter './packages/*' typecheck",
     "check": "biome check . && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",

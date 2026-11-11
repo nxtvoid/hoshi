@@ -1,15 +1,21 @@
-import { type ReactNode, useEffect, useState } from 'react'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { formatClockTime } from '@hoshi/utils'
+import { cn, formatClockTime } from '@hoshi/utils'
 import { getLocale } from '@/paraglide/runtime'
-import { CopyButton } from '@hoshi/ui/components/copy-button'
-import { ArrowTurnForwardIcon, Copy01Icon } from '@hugeicons/core-free-icons'
 import { knownMentions } from '@/lib/prompt-segments'
 import { useImageStore } from '@/state/image-store'
-import type { MessageAttachment } from '@/bindings/MessageAttachment'
+import { CopyButton } from '@hoshi/ui/components/copy-button'
 import { Markdown } from '@/components/markdown/Markdown'
+import type { MessageAttachment } from '@/bindings/MessageAttachment'
 import { ImageDialog } from '@/components/markdown/ImageMention'
+import { ArrowTurnForwardIcon, Copy01Icon } from '@hugeicons/core-free-icons'
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState
+} from 'react'
 
 type Image = Extract<MessageAttachment, { type: 'image' }>
 
@@ -58,13 +64,13 @@ export function UserMessage({
         </ul>
       ) : null}
       {text ? (
-        <div className='bg-muted max-w-[85%] rounded-xl px-3 py-2'>
+        <MessageBubble>
           <Markdown
             text={text}
             source='forge'
             mentions={knownMentions(attachments)}
           />
-        </div>
+        </MessageBubble>
       ) : null}
       {time || action || text ? (
         <div className='text-muted-foreground -mt-0.5 flex h-6 items-center gap-0.5 text-xs opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100'>
@@ -81,6 +87,51 @@ export function UserMessage({
             />
           ) : null}
         </div>
+      ) : null}
+    </div>
+  )
+}
+
+const COLLAPSED_HEIGHT = 320
+
+function MessageBubble({ children }: { children: ReactNode }) {
+  const content = useRef<HTMLDivElement>(null)
+  const [overflows, setOverflows] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+
+  useLayoutEffect(() => {
+    const element = content.current
+    if (!element) return
+    const measure = () =>
+      setOverflows(element.scrollHeight > COLLAPSED_HEIGHT + 48)
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+
+  const collapsed = overflows && !expanded
+
+  return (
+    <div className='bg-muted flex max-w-[85%] flex-col rounded-xl px-3 py-2'>
+      <div
+        ref={content}
+        className={cn(
+          collapsed &&
+            'max-h-80 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-4rem),transparent)]'
+        )}
+      >
+        {children}
+      </div>
+      {overflows ? (
+        <button
+          type='button'
+          aria-expanded={expanded}
+          onClick={() => setExpanded(!expanded)}
+          className='bg-background/70 text-foreground/80 hover:bg-background hover:text-foreground focus-visible:ring-ring mt-1 -mr-1 self-end rounded-md px-2 py-1 text-xs font-medium outline-none focus-visible:ring-2'
+        >
+          {expanded ? m.message_show_less() : m.message_show_full()}
+        </button>
       ) : null}
     </div>
   )
@@ -105,12 +156,7 @@ function MessageImage({ image }: { image: Image }) {
         className='border-border bg-muted block size-24 overflow-hidden rounded-lg border'
       >
         {url ? (
-          <img
-            src={url}
-            alt={image.name}
-            loading='lazy'
-            className='size-full object-cover'
-          />
+          <img src={url} alt={image.name} className='size-full object-cover' />
         ) : null}
       </button>
       <ImageDialog

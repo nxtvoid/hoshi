@@ -342,7 +342,7 @@ fn tools() -> Value {
         },
         {
             "name": "preview_open",
-            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. Only when the user asks for browser work, and instead of a browser, Playwright or screenshot tool of your own; then preview_snapshot reads the page and preview_act uses it.",
+            "description": "Open a page in this thread's own headless browser, which the user sees in hoshi, such as a dev server (`localhost:5173`) or a file. When the user asks for browser work, or to see, reproduce or check something on a page of a running app, and instead of a browser, Playwright or screenshot tool of your own; sign-ins stay between pages; then preview_snapshot reads the page and preview_act uses it.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -13,6 +13,7 @@ mod provider_account;
 mod provider_update;
 mod pull_request;
 mod request;
+mod server;
 mod settings;
 mod source_control;
 mod terminal;
@@ -28,10 +29,10 @@ pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};
 pub use fonts::{SystemFont, group_font_families};
 pub use model::{ModelInfo, ProviderModels};
 pub use orchestration::{
-    Command, CommandError, Event, EventEnvelope, ReadModel, Snapshot, StreamDelta, StreamKind,
-    TaskPreview, answer_task, answers_message, cancel_task, close_stale_turn, decide,
-    record_branch, record_conversation_cursor, record_delegation, record_output,
-    record_pull_request_watch, record_title, record_turn_changes, record_worktree,
+    Command, CommandError, Event, EventEnvelope, HeldMessage, ReadModel, Snapshot, StreamDelta,
+    StreamKind, TaskPreview, ThreadHeldMessage, answer_task, answers_message, cancel_task,
+    close_stale_turn, decide, record_branch, record_conversation_cursor, record_delegation,
+    record_output, record_pull_request_watch, record_title, record_turn_changes, record_worktree,
     record_worktree_left, reopen_task, send_pull_request_update, send_task_result,
     start_queued_turn, start_woken_turn, subagent_thread_id, task_preview, turn_failed,
 };
@@ -49,6 +50,7 @@ pub use pull_request::{
     ReviewThread, Reviewer, ThreadPullRequest, ThreadPullRequestDetail, TimelineItem,
 };
 pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
+pub use server::{LocalServer, ServerOrigin, ThreadServers};
 pub use settings::{
     AppSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
     SubagentEffort, ThreadTitleSettings,

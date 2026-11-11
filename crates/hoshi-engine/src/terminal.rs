@@ -83,7 +83,7 @@ impl Terminals {
     ) -> Result<TerminalAttach, CommandError> {
         let mut sessions = guard(&self.sessions);
         if !sessions.contains_key(terminal_id) {
-            let session = spawn(&launch, size, None)?;
+            let session = spawn(terminal_id, &launch, size, None)?;
             sessions.insert(terminal_id.to_owned(), session);
         }
         let session = &sessions[terminal_id];
@@ -107,7 +107,7 @@ impl Terminals {
         launch: Launch<'_>,
         observer: TerminalSink,
     ) -> Result<(), CommandError> {
-        let session = spawn(&launch, (120, 30), Some(observer))?;
+        let session = spawn(terminal_id, &launch, (120, 30), Some(observer))?;
         let replaced = guard(&self.sessions).insert(terminal_id.to_owned(), session);
         if let Some(replaced) = replaced {
             stop(replaced);
@@ -202,6 +202,7 @@ fn stop(mut session: Session) {
 }
 
 fn spawn(
+    terminal_id: &str,
     launch: &Launch<'_>,
     size: (u16, u16),
     observer: Option<TerminalSink>,
@@ -214,7 +215,7 @@ fn spawn(
         .map_err(|error| failed(&error))?;
     let mut child = pair
         .slave
-        .spawn_command(shell_command(launch))
+        .spawn_command(shell_command(terminal_id, launch))
         .map_err(|error| failed(&error))?;
     drop(pair.slave);
     let reader = pair
@@ -309,7 +310,7 @@ fn push_history(history: &mut String, data: &str) {
     history.drain(..cut);
 }
 
-fn shell_command(launch: &Launch<'_>) -> CommandBuilder {
+fn shell_command(terminal_id: &str, launch: &Launch<'_>) -> CommandBuilder {
     let mut command = default_shell();
     if let Some(script) = launch.command {
         command.args(script_args(script));
@@ -320,6 +321,9 @@ fn shell_command(launch: &Launch<'_>) -> CommandBuilder {
     command.env("HOSHI_PROJECT_ROOT", launch.project_root);
     if let Some(worktree) = launch.worktree_path {
         command.env("HOSHI_WORKTREE_PATH", worktree);
+    }
+    for (name, value) in crate::servers::terminal_environment(launch.thread_id, terminal_id) {
+        command.env(name, value);
     }
     command
 }

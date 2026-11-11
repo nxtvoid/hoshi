@@ -44,7 +44,7 @@ export function TurnChangesCard({ changes }: { changes: TurnChanges }) {
   const folders = hasFolders(tree)
 
   return (
-    <section className='bg-secondary dark:bg-card @container/changes mt-4 rounded-lg'>
+    <section className='bg-secondary dark:bg-card border-border @container/changes mt-4 rounded-lg border'>
       <header
         className={cn(
           'bg-secondary dark:bg-card sticky top-2 z-10 flex items-center justify-between gap-2 py-2 pr-3 pl-1.5',

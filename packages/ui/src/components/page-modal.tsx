@@ -53,7 +53,7 @@ export function PageModal({
       }}
     >
       <DialogPrimitive.Portal>
-        <DialogPrimitive.Backdrop className='bg-backdrop fixed inset-0 z-50 transition-opacity duration-150 data-ending-style:opacity-0 data-starting-style:opacity-0 supports-backdrop-filter:backdrop-blur-xs' />
+        <DialogPrimitive.Backdrop className='bg-backdrop fixed inset-0 z-50 transition-opacity duration-150 data-ending-style:opacity-0 data-starting-style:opacity-0' />
         <DialogPrimitive.Viewport
           className='fixed inset-0 z-50 flex items-center justify-center p-6 pt-12 lg:p-10 lg:pt-12'
           onPointerDown={(event) => {

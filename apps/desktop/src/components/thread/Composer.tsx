@@ -139,6 +139,8 @@ export function Composer({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
   const images = useComposerImages()
+  /** Images shown as a chip in the text; without its chip, such an image is left out. */
+  const chipped = useRef(new Set<string>())
   const history = usePromptHistoryStore((state) => state.entries)
   const remember = usePromptHistoryStore((state) => state.add)
   const sendMessage = useAppStore((state) => state.sendMessage)
@@ -159,16 +161,23 @@ export function Composer({
   const requestActions = useRequestActions(request)
   const compaction = useCompactionDue()
   const { text } = snapshot
+  const chipKeys = imageChipKeys(text)
+  /** The images the message goes with: one whose chip was taken out of the text is left out. */
+  const attached = images.images.filter(
+    (image) => !chipped.current.has(image.key) || chipKeys.includes(image.key)
+  )
+  const savingImages = attached.some((image) => !image.saved && !image.failed)
   /** A secret is typed in its own card, so it never reaches the chat. */
   const answering =
     request !== null &&
     request.content.kind !== 'secretRequest' &&
     text.trim() !== ''
-  const written = text.trim() !== '' || images.saved.length > 0
+  const written =
+    text.trim() !== '' || attached.some((image) => image.saved !== null)
   /** A message sent while the agent works joins its turn. */
   const canSend = request
     ? answering && !sending
-    : written && !images.saving && !sending
+    : written && !savingImages && !sending
   const hero = variant === 'hero'
   const stacked = hero || tall
 
@@ -236,7 +245,7 @@ export function Composer({
   const attach = (files: File[]) => {
     const added = images.add(files)
     const locale = getLocale()
-    editorRef.current?.insertImages(
+    const inText = editorRef.current?.insertImages(
       added.map((image) => ({
         key: image.key,
         name: image.name,
@@ -244,6 +253,7 @@ export function Composer({
         previewUrl: image.previewUrl
       }))
     )
+    if (inText) for (const image of added) chipped.current.add(image.key)
   }
 
   /** A path that turns out to be no image file is pasted as the text it was. */
@@ -255,6 +265,7 @@ export function Composer({
 
   const removeImage = (key: string) => {
     images.remove(key)
+    chipped.current.delete(key)
     editorRef.current?.removeImage(key)
   }
 
@@ -345,7 +356,7 @@ export function Composer({
     }
     const action = /^\/(\w+)$/.exec(text.trim())?.[1]
     const standalone = suggestions.actions.find((known) => known === action)
-    if (standalone && images.images.length === 0) {
+    if (standalone && attached.length === 0) {
       editor.setText('')
       runAction(standalone)
       return
@@ -353,13 +364,13 @@ export function Composer({
     if (!canSend) return
     // Images go in the order their chips show them, then the rest, so `[Image #n]` names
     // the image sent nth.
-    const saved = images.images.filter((image) => image.saved !== null)
-    const chipped = imageChipKeys(text).flatMap(
+    const saved = attached.filter((image) => image.saved !== null)
+    const inText = chipKeys.flatMap(
       (key) => saved.find((image) => image.key === key) ?? []
     )
     const ordered = [
-      ...chipped,
-      ...saved.filter((image) => !chipped.includes(image))
+      ...inText,
+      ...saved.filter((image) => !inText.includes(image))
     ]
     const prompt = numberImageChips(
       text,
@@ -380,7 +391,9 @@ export function Composer({
     setSending(false)
     if (sent) {
       remember(prompt)
-      images.release(taken)
+      images.release(taken.filter((image) => ordered.includes(image)))
+      images.discard(taken.filter((image) => !ordered.includes(image)))
+      chipped.current.clear()
       return
     }
     const restored = joinDocuments(doc, editorRef.current?.document() ?? null)
@@ -566,8 +579,8 @@ export function Composer({
             if (dropped) void addImages(dropped)
           }}
         >
-          {images.images.length > 0 ? (
-            <ComposerImages images={images.images} onRemove={removeImage} />
+          {attached.length > 0 ? (
+            <ComposerImages images={attached} onRemove={removeImage} />
           ) : null}
           <div
             className={cn(
