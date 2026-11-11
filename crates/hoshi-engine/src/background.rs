@@ -3,7 +3,7 @@
 //! commands its turn waits for instead.
 
 use crate::{Notification, State, Turn, delegation, now};
-use hoshi_core::{Event, ProviderOutput, ThreadBackgroundTasks, start_woken_turn};
+use hoshi_core::{BackgroundTask, Event, ProviderOutput, ThreadBackgroundTasks, start_woken_turn};
 use hoshi_providers::RunningTurn;
 use serde_json::{Value, json};
 
@@ -24,6 +24,53 @@ pub(crate) struct Lingering {
 }
 
 impl State {
+    /// The agent process of the thread: its turn's, or the one kept between turns.
+    fn agent_process(&self, thread_id: &str) -> Option<&dyn RunningTurn> {
+        match self.turns.get(thread_id) {
+            Some(turn) => Some(turn.running.as_ref()),
+            None => self
+                .lingering
+                .get(thread_id)
+                .map(|lingering| lingering.running.as_ref()),
+        }
+    }
+
+    /// The commands the thread's agent still runs in the background.
+    fn background_commands(&self, thread_id: &str) -> &[BackgroundTask] {
+        let background = match self.turns.get(thread_id) {
+            Some(turn) => turn.background.as_ref(),
+            None => self
+                .lingering
+                .get(thread_id)
+                .filter(|lingering| !lingering.ended)
+                .and_then(|lingering| lingering.background.as_ref()),
+        };
+        background.map_or(&[], |background| background.tasks.as_slice())
+    }
+
+    /// When `task_id` started, in Unix milliseconds, if it is the only command the thread's
+    /// agent runs in the background: whatever servers the agent started since are its.
+    pub(crate) fn sole_background_command(&self, thread_id: &str, task_id: &str) -> Option<u64> {
+        match self.background_commands(thread_id) {
+            [only] if only.task_id == task_id => Some(only.started_at),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn runs_background_command(&self, thread_id: &str, task_id: &str) -> bool {
+        self.background_commands(thread_id)
+            .iter()
+            .any(|task| task.task_id == task_id)
+    }
+
+    /// Has the thread's agent end a command it runs in the background, which it then takes
+    /// as stopped by the user and not as failed.
+    pub(crate) fn stop_background_command(&self, thread_id: &str, task_id: &str) {
+        if let Some(process) = self.agent_process(thread_id) {
+            process.stop_background_task(task_id);
+        }
+    }
+
     /// What agent process `process` reports: for the turn it runs, or for its thread between
     /// turns. A process the thread no longer has is not heard.
     pub(crate) fn receive_from(&mut self, thread_id: &str, process: u64, output: ProviderOutput) {

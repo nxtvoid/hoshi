@@ -171,6 +171,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             .arg("--replay-user-messages")
             // `-p` leaves the task list tools out unless asked for.
             .env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1")
+            .envs(request.environment.iter().map(|(key, value)| (key, value)))
             .args(["--permission-mode", access.permission_mode()]);
         // Also lets an accepted plan hand the session back to full access.
         if request.access_mode == AccessMode::FullAccess {
@@ -2377,6 +2378,7 @@ mod tests {
             mcp: None,
             instructions: None,
             subagent_effort: SubagentEffort::Thread,
+            environment: Vec::new(),
         }
     }
 

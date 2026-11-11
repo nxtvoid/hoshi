@@ -50,6 +50,8 @@ pub struct TurnRequest {
     pub instructions: Option<String>,
     /// How the agent chooses the model and effort of the subagents and tasks it starts.
     pub subagent_effort: SubagentEffort,
+    /// Set on the agent's process, so everything it starts inherits them.
+    pub environment: Vec<(String, String)>,
 }
 
 /// An MCP server reached over HTTP.

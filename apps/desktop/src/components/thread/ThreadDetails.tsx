@@ -5,6 +5,7 @@ import { HugeiconsIcon } from '@hugeicons/react'
 import type { Editor } from '@/bindings/Editor'
 import { usePanelStore } from '@/state/panel-store'
 import { ThreadAgents } from './ThreadAgents'
+import { ServersNotice, ThreadServers } from './ThreadServers'
 import { GitActionsRow } from './GitActionsRow'
 import { useChangeKey } from './use-change-key'
 import { ICON, ROW, SPLIT_PRIMARY, SplitRow } from './details-rows'
@@ -129,29 +130,57 @@ export function ThreadDetailsToggle({
   threadId: string
   inline: boolean
 }) {
-  return inline ? <DetailsCardToggle /> : <DetailsPopover threadId={threadId} />
+  return inline ? (
+    <DetailsCardToggle threadId={threadId} />
+  ) : (
+    <DetailsPopover threadId={threadId} />
+  )
 }
 
 const DETAILS_ICON = (
   <HugeiconsIcon icon={LeftToRightListBulletIcon} strokeWidth={2} />
 )
 
-function DetailsCardToggle() {
+function DetailsCardToggle({ threadId }: { threadId: string }) {
   const open = usePanelStore((state) => state.detailsOpen)
   const setOpen = usePanelStore((state) => state.setDetailsOpen)
   return (
-    <IconButton
-      label={m.thread_details()}
-      active={open}
-      onClick={() => setOpen(!open)}
-    >
-      {DETAILS_ICON}
-    </IconButton>
+    <>
+      {open ? null : (
+        <ServersNotice threadId={threadId} onOpen={() => setOpen(true)} />
+      )}
+      <IconButton
+        label={m.thread_details()}
+        active={open}
+        onClick={() => setOpen(!open)}
+      >
+        {DETAILS_ICON}
+      </IconButton>
+    </>
   )
 }
 
 function DetailsPopover({ threadId }: { threadId: string }) {
   const [open, setOpen] = useState(false)
+  return (
+    <>
+      {open ? null : (
+        <ServersNotice threadId={threadId} onOpen={() => setOpen(true)} />
+      )}
+      <DetailsPopoverBody threadId={threadId} open={open} setOpen={setOpen} />
+    </>
+  )
+}
+
+function DetailsPopoverBody({
+  threadId,
+  open,
+  setOpen
+}: {
+  threadId: string
+  open: boolean
+  setOpen: (open: boolean) => void
+}) {
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger
@@ -366,6 +395,7 @@ function DetailsContent({
         </button>
       ) : null}
       <ThreadAgents threadId={threadId} onNavigate={onNavigate} />
+      <ThreadServers threadId={threadId} />
       {error ? (
         <p role='alert' className='text-destructive px-2.5 pt-1 pb-1 text-xs'>
           {error}

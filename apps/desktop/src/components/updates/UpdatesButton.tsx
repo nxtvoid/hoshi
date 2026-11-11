@@ -206,7 +206,7 @@ function UpdateDetailsButton({
         </TooltipTrigger>
         <TooltipContent side='top'>{label}</TooltipContent>
       </Tooltip>
-      <PopoverContent side='top' align='end' className='w-80 gap-3'>
+      <PopoverContent side='top' align='center' className='w-80 gap-3'>
         {appUpdateShown(appUpdate) ? (
           <AppUpdateDetails update={appUpdate} />
         ) : null}
@@ -237,58 +237,76 @@ function AppUpdateDetails({ update }: { update: AppUpdate }) {
   const currentVersion = useAppUpdateStore((state) => state.currentVersion)
   const download = useAppUpdateStore((state) => state.download)
   const restart = useAppUpdateStore((state) => state.restart)
+  const latest = 'version' in update ? update.version : null
 
   return (
     <div className='flex flex-col gap-2.5'>
-      <UpdateRow
+      <UpdateHeader
         icon={
-          <span className='bg-muted flex size-7 shrink-0 items-center justify-center rounded-md'>
-            <LogoMark className='size-3.5' />
+          <span className='bg-muted flex size-8 shrink-0 items-center justify-center rounded-lg'>
+            <LogoMark className='size-4' />
           </span>
         }
         title={m.app_name()}
         summary={
-          currentVersion
-            ? m.provider_version_change({
-                installed: currentVersion,
-                latest: 'version' in update ? update.version : currentVersion
-              })
-            : null
-        }
-        action={
-          update.status === 'ready' ? (
-            <Button size='sm' variant='outline' onClick={() => void restart()}>
-              {m.app_update_restart()}
-            </Button>
-          ) : update.status === 'available' || update.status === 'failed' ? (
-            <Button size='sm' variant='outline' onClick={() => void download()}>
-              {update.status === 'failed'
-                ? m.provider_update_retry()
-                : m.app_update_download()}
-            </Button>
+          currentVersion && latest ? (
+            <VersionChange installed={currentVersion} latest={latest} />
           ) : null
         }
       />
       {update.status === 'downloading' ? (
-        <p className='text-muted-foreground flex items-center gap-1.5 text-xs'>
-          <ProgressRing value={update.percent} className='size-3.5 shrink-0' />
-          {update.percent === null
-            ? m.app_update_downloading()
-            : m.app_update_downloading_percent({ percent: update.percent })}
-        </p>
+        <UpdateAction>
+          <span className='flex items-center gap-1.5'>
+            <ProgressRing
+              value={update.percent}
+              className='size-3.5 shrink-0'
+            />
+            {update.percent === null
+              ? m.app_update_downloading()
+              : m.app_update_downloading_percent({ percent: update.percent })}
+          </span>
+        </UpdateAction>
       ) : update.status === 'failed' ? (
-        <p className='text-muted-foreground flex items-start gap-1.5 text-xs'>
-          <HugeiconsIcon
-            icon={Alert02Icon}
-            strokeWidth={2}
-            className='text-status-error mt-px size-3.5 shrink-0'
-          />
-          {m.app_update_failed()}
-        </p>
+        <UpdateAction
+          action={
+            <Button size='sm' variant='outline' onClick={() => void download()}>
+              {m.provider_update_retry()}
+            </Button>
+          }
+        >
+          <span className='flex items-start gap-1.5'>
+            <HugeiconsIcon
+              icon={Alert02Icon}
+              strokeWidth={2}
+              className='text-status-error mt-px size-3.5 shrink-0'
+            />
+            {m.app_update_failed()}
+          </span>
+        </UpdateAction>
       ) : (
-        <p className='text-muted-foreground text-xs'>
+        <UpdateAction
+          action={
+            update.status === 'ready' ? (
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => void restart()}
+              >
+                {m.app_update_restart()}
+              </Button>
+            ) : update.status === 'available' ? (
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => void download()}
+              >
+                {m.app_update_download()}
+              </Button>
+            ) : null
+          }
+        >
           {m.app_update_restarts()}
-        </p>
+        </UpdateAction>
       )}
       {currentVersion ? (
         <ReleaseNotes installed={currentVersion} update={update} />
@@ -382,28 +400,37 @@ function ProviderUpdateDetails({ version }: { version: ProviderVersion }) {
     version.updateAvailable &&
     version.updateCommand !== null &&
     status !== 'running'
+  const changing =
+    (status === 'running' || version.updateAvailable) && installed && latest
 
   return (
     <div className='flex flex-col gap-2.5'>
-      <UpdateRow
+      <UpdateHeader
         icon={
           <span
             className={cn(
-              'flex size-7 shrink-0 items-center justify-center rounded-md',
+              'flex size-8 shrink-0 items-center justify-center rounded-lg',
               meta.tile
             )}
           >
-            <meta.icon className='size-3.5' />
+            <meta.icon className='size-4' />
           </span>
         }
         title={meta.label()}
         summary={
-          status === 'running' && installed && latest
-            ? m.provider_version_change({ installed, latest })
-            : versionSummary(version)
+          changing ? (
+            <VersionChange installed={installed} latest={latest} />
+          ) : (
+            <span className='text-muted-foreground min-w-0 truncate text-xs tabular-nums'>
+              {versionSummary(version)}
+            </span>
+          )
         }
-        action={
-          canUpdate ? (
+      />
+      <ProviderUpdateStatus version={version} />
+      {canUpdate ? (
+        <UpdateAction
+          action={
             <Button
               size='sm'
               variant='outline'
@@ -414,43 +441,71 @@ function ProviderUpdateDetails({ version }: { version: ProviderVersion }) {
                 ? m.provider_update_retry()
                 : m.provider_update()}
             </Button>
-          ) : null
-        }
-      />
-      <ProviderUpdateStatus version={version} />
-      {canUpdate ? (
-        <p className='text-muted-foreground text-xs'>
-          {turnsRunning
-            ? m.provider_update_busy()
-            : m.provider_update_runs({ command: version.updateCommand ?? '' })}
-        </p>
+          }
+        >
+          {turnsRunning ? (
+            m.provider_update_busy()
+          ) : (
+            <span
+              title={m.provider_update_runs({
+                command: version.updateCommand ?? ''
+              })}
+              className='block truncate font-mono'
+            >
+              $ {version.updateCommand}
+            </span>
+          )}
+        </UpdateAction>
       ) : null}
     </div>
   )
 }
 
-function UpdateRow({
+function UpdateHeader({
   icon,
   title,
-  summary,
-  action
+  summary
 }: {
   icon: ReactNode
   title: string
-  summary: string | null
-  action: ReactNode
+  summary: ReactNode
 }) {
   return (
     <div className='flex items-center gap-2.5'>
       {icon}
-      <div className='flex min-w-0 flex-1 flex-col'>
-        <span className='truncate text-sm font-medium'>{title}</span>
-        {summary ? (
-          <span className='text-muted-foreground truncate text-xs tabular-nums'>
-            {summary}
-          </span>
-        ) : null}
-      </div>
+      <span className='flex-1 truncate text-sm font-medium'>{title}</span>
+      {summary}
+    </div>
+  )
+}
+
+function VersionChange({
+  installed,
+  latest
+}: {
+  installed: string
+  latest: string
+}) {
+  return (
+    <span className='text-muted-foreground flex shrink-0 items-center gap-1 text-xs tabular-nums'>
+      {installed}
+      <span aria-hidden>→</span>
+      <span className='text-foreground font-medium'>{latest}</span>
+    </span>
+  )
+}
+
+/** What updating does, beside the button that does it. */
+function UpdateAction({
+  action,
+  children
+}: {
+  action?: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <div className='bg-muted/50 text-muted-foreground flex min-h-10 items-center gap-2 rounded-lg py-1.5 pr-1.5 pl-2.5 text-xs'>
+      <div className='min-w-0 flex-1 text-pretty'>{children}</div>
       {action}
     </div>
   )

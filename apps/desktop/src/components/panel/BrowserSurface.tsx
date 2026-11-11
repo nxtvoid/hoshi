@@ -3,6 +3,7 @@ import { m } from '@/paraglide/messages'
 import { invoke } from '@tauri-apps/api/core'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { fitInside } from '@/lib/browser-layout'
 import { useBrowserStore } from '@/state/browser-store'
 import { IconButton } from '@hoshi/ui/components/icon-button'
 import type { BrowserInput } from '@/bindings/BrowserInput'
@@ -66,6 +67,7 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
   const [now, setNow] = useState(Date.now())
   /** The page takes the panel's size, until a size is picked here or by the agent. */
   const fill = page?.fitted ?? true
+  const [panel, setPanel] = useState({ width: 0, height: 0 })
   const image = useRef<HTMLImageElement>(null)
   const viewport = useRef<HTMLDivElement>(null)
   const wheel = useRef<Wheel | null>(null)
@@ -104,6 +106,17 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
       observer.disconnect()
     }
   }, [fill, threadId])
+
+  useEffect(() => {
+    const box = viewport.current
+    if (!box) return
+    const measure = () =>
+      setPanel({ width: box.clientWidth, height: box.clientHeight })
+    const observer = new ResizeObserver(measure)
+    observer.observe(box)
+    measure()
+    return () => observer.disconnect()
+  }, [])
 
   useEffect(() => {
     void invoke('browser_view', { threadId, viewing: true })
@@ -282,7 +295,9 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
         ref={viewport}
         className={cn(
           'relative min-h-0 flex-1',
-          fill ? 'bg-background overflow-hidden' : 'bg-muted/30 overflow-auto'
+          fill
+            ? 'bg-background overflow-hidden'
+            : 'bg-muted/30 flex items-center justify-center overflow-hidden'
         )}
       >
         {page && frame ? (
@@ -291,7 +306,11 @@ export function BrowserSurface({ threadId }: { threadId: string }) {
             aria-label={page.title || page.url}
             // biome-ignore lint/a11y/noNoninteractiveTabindex: the page takes the keyboard
             tabIndex={0}
-            className='focus-visible:ring-ring relative outline-none focus-visible:ring-2 focus-visible:ring-inset'
+            className={cn(
+              'focus-visible:ring-ring relative outline-none focus-visible:ring-2 focus-visible:ring-inset',
+              !fill && 'shrink-0 shadow-sm'
+            )}
+            style={fill ? undefined : fitInside(panel, frame)}
             onKeyDown={(event) => {
               if (event.ctrlKey || event.metaKey || event.altKey) return
               if (KEYS.has(event.key)) send({ kind: 'key', key: event.key })

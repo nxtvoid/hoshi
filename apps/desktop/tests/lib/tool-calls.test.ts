@@ -365,6 +365,70 @@ describe('foldTurns', () => {
     expect(second?.kind === 'fold' && second.durationMs).toBe(10_000)
   })
 
+  test('a background task that ended while its turn still ran folds with that turn', () => {
+    const ended = (id: string, createdAt: string) =>
+      marker(id, createdAt, {
+        kind: 'backgroundTaskEnded',
+        toolCallId: 'dev',
+        failed: true
+      })
+    const items = [
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('dev', 'Bash'),
+      tool('install', 'Bash'),
+      ended('u1:ended:b1', '2026-11-08T10:00:12Z'),
+      tool('dev2', 'Bash'),
+      answer('a1', '2026-11-08T10:00:28Z')
+    ]
+
+    const folded = foldTurns(groupTranscript(items), false)
+
+    expect(shape(folded)).toEqual(['u1', 'answered:start:3', 'a1'])
+    const fold = folded[1]
+    expect(fold?.kind === 'fold' && fold.durationMs).toBe(28_000)
+    expect(shape(foldTurns(groupTranscript(items.slice(0, 5)), true))).toEqual([
+      'u1',
+      'work',
+      'u1:ended:b1',
+      'work'
+    ])
+  })
+
+  test('a background task that ended after a run of its turn starts the next run', () => {
+    const rows = groupTranscript([
+      user('u1', '2026-11-08T10:00:00Z'),
+      tool('r', 'Read'),
+      answer('a1', '2026-11-08T10:00:10Z'),
+      marker('u1:run1', '2026-11-08T10:00:11Z', { kind: 'runEnded' }),
+      marker('u1:ended:b1', '2026-11-08T10:00:20Z', {
+        kind: 'backgroundTaskEnded',
+        toolCallId: 'dev',
+        failed: false
+      }),
+      tool('g', 'Grep'),
+      answer('a2', '2026-11-08T10:00:30Z'),
+      marker('woke:ended:b2', '2026-11-08T10:05:00Z', {
+        kind: 'backgroundTaskEnded',
+        toolCallId: 'dev',
+        failed: false
+      }),
+      tool('h', 'Grep'),
+      answer('a3', '2026-11-08T10:05:08Z')
+    ])
+
+    expect(shape(foldTurns(rows, false))).toEqual([
+      'u1',
+      'answered:start:1',
+      'a1',
+      'u1:ended:b1',
+      'answered:start:1',
+      'a2',
+      'woke:ended:b2',
+      'answered:start:1',
+      'a3'
+    ])
+  })
+
   test('folds what a steer cut once the turn is over, and what followed apart', () => {
     const steer = marker('s', '2026-11-08T10:00:20Z', {
       kind: 'userMessage',

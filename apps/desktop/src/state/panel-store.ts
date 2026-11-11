@@ -102,6 +102,9 @@ export const usePanelStore = create<PanelState>()(
           if (closing?.kind === 'terminal') {
             void invoke('close_terminal', { terminalId: surfaceId })
           }
+          if (closing?.kind === 'browser') {
+            void invoke('browser_close', { threadId })
+          }
           changeThread(threadId, (panel) => closeSurface(panel, surfaceId))
           set((state) =>
             state.threads[threadId]?.surfaces.length === 0

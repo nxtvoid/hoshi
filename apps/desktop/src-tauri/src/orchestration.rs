@@ -1,10 +1,10 @@
 use hoshi_core::{
     AppSettings, BankedResetSpend, BrowserInput, ChangesSummary, Command, CommandError, DiffFile,
     DiffScope, Editor, FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest,
-    GitActionResult, GitStatus, MessageAttachment, ProviderAccountStatus, ProviderModels,
-    ProviderVersion, PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel,
-    RemoteRepository, SlashCommand, Snapshot, TerminalAttach, TerminalEvent, ThreadItem,
-    TranscriptPage, UsageLimits, WorkspaceEntry,
+    GitActionResult, GitStatus, HeldMessage, LocalServer, MessageAttachment, ProviderAccountStatus,
+    ProviderModels, ProviderVersion, PullRequest, PullRequestAction, PullRequestDetail,
+    PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach, TerminalEvent,
+    ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
@@ -24,6 +24,7 @@ const PULL_REQUEST_DETAIL_CHANNEL: &str = "hoshi://pull-request-detail";
 const CONTEXT_USAGE_CHANNEL: &str = "hoshi://context-usage";
 /// The commands a thread's running turn waits for in the background.
 const BACKGROUND_TASKS_CHANNEL: &str = "hoshi://background-tasks";
+const HELD_MESSAGE_CHANNEL: &str = "hoshi://held-message";
 /// The provider plan's limits, as a running turn reported them.
 const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 /// The provider's CLI against its latest release, and how its update goes.
@@ -35,6 +36,8 @@ const BROWSER_FRAME_CHANNEL: &str = "hoshi://browser-frame";
 /// Where a thread's browser page is, and what the agent just did on it.
 const BROWSER_PAGE_CHANNEL: &str = "hoshi://browser-page";
 const WORKTREE_SETUP_CHANNEL: &str = "hoshi://worktree-setup";
+/// The servers of a thread a view watches, when they change.
+const SERVERS_CHANNEL: &str = "hoshi://servers";
 
 pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
@@ -55,7 +58,9 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
             Notification::GitActionProgress(progress) => handle.emit(GIT_ACTION_CHANNEL, progress),
             Notification::BrowserFrame(frame) => handle.emit(BROWSER_FRAME_CHANNEL, frame),
             Notification::BrowserPage(page) => handle.emit(BROWSER_PAGE_CHANNEL, page),
+            Notification::HeldMessage(held) => handle.emit(HELD_MESSAGE_CHANNEL, held),
             Notification::WorktreeSetup(run) => handle.emit(WORKTREE_SETUP_CHANNEL, run),
+            Notification::Servers(update) => handle.emit(SERVERS_CHANNEL, update),
         };
         if let Err(error) = result {
             eprintln!("hoshi: failed to emit to the UI: {error}");
@@ -425,6 +430,28 @@ pub fn close_terminal(engine: State<'_, Engine>, terminal_id: String) {
     engine.close_terminal(&terminal_id);
 }
 
+/// The thread's servers now; changes arrive on `hoshi://servers` until `unwatch_servers`.
+#[tauri::command(async)]
+pub fn watch_servers(engine: State<'_, Engine>, thread_id: String) -> Vec<LocalServer> {
+    engine.watch_servers(&thread_id)
+}
+
+#[tauri::command(async)]
+pub fn unwatch_servers(engine: State<'_, Engine>, thread_id: String) {
+    engine.unwatch_servers(&thread_id);
+}
+
+/// Takes up to a few seconds while the server shuts down.
+#[tauri::command(async)]
+pub fn stop_server(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    pid: u32,
+    port: u16,
+) -> Result<(), CommandError> {
+    engine.stop_server(&thread_id, pid, port)
+}
+
 #[tauri::command(async)]
 pub fn switch_branch(
     engine: State<'_, Engine>,
@@ -493,6 +520,25 @@ pub fn compact_then_send(
     attachments: Vec<MessageAttachment>,
 ) -> Result<(), CommandError> {
     engine.compact_then_send(&thread_id, &message_id, text, attachments)
+}
+
+/// Stops compacting the thread, so the message it holds goes at once.
+#[tauri::command(async)]
+pub fn send_held_message_now(
+    engine: State<'_, Engine>,
+    thread_id: String,
+) -> Result<(), CommandError> {
+    engine.send_held_message_now(&thread_id)
+}
+
+/// Takes back the message the thread holds until it is compacted; `discard` drops it.
+#[tauri::command(async)]
+pub fn take_held_message(
+    engine: State<'_, Engine>,
+    thread_id: String,
+    discard: bool,
+) -> Option<HeldMessage> {
+    engine.take_held_message(&thread_id, discard)
 }
 
 #[tauri::command(async)]

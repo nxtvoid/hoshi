@@ -3,7 +3,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use hoshi_core::MessageAttachment;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,15 @@ fn extension(mime_type: &str) -> Option<&'static str> {
         "image/webp" => Some("webp"),
         _ => None,
     }
+}
+
+/// The image at `path`, for the transcript to show it; `None` when its file is gone.
+pub(crate) fn data_url(path: &Path, mime_type: &str) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    Some(format!(
+        "data:{mime_type};base64,{}",
+        STANDARD.encode(bytes)
+    ))
 }
 
 impl Attachments {
@@ -71,15 +80,6 @@ impl Attachments {
         valid.then(|| self.dir.join(format!("{id}.{extension}")))
     }
 
-    /// For the transcript to show the image.
-    pub(crate) fn data_url(&self, id: &str, mime_type: &str) -> Option<String> {
-        let bytes = std::fs::read(self.path(id, mime_type)?).ok()?;
-        Some(format!(
-            "data:{mime_type};base64,{}",
-            STANDARD.encode(bytes)
-        ))
-    }
-
     pub(crate) fn remove(&self, attachment: &MessageAttachment) {
         if let MessageAttachment::Image { id, mime_type, .. } = attachment
             && let Some(path) = self.path(id, mime_type)
@@ -111,13 +111,14 @@ mod tests {
             panic!("not an image");
         };
 
+        let path = attachments.path(id, "image/png").unwrap();
         assert_eq!(*size, 3);
         assert_eq!(
-            attachments.data_url(id, "image/png").as_deref(),
+            data_url(&path, "image/png").as_deref(),
             Some("data:image/png;base64,cG5n")
         );
         attachments.remove(&image);
-        assert_eq!(attachments.data_url(id, "image/png"), None);
+        assert_eq!(data_url(&path, "image/png"), None);
     }
 
     #[test]

@@ -340,7 +340,8 @@ export function foldTurns(
   /** Parts of the turn a steer cut, folded only once the turn is over. */
   let held: { open: TranscriptRow[]; settled: TranscriptRow[] }[] = []
   let turnStart: number | null = null
-  const responseAt = working ? lastResponseStart(rows) : rows.length
+  const starts = responseStarts(rows)
+  const responseAt = working ? Math.max(-1, ...starts) : rows.length
   const close = (running: boolean) => {
     const end = endOf(turn)
     const wholeTurn = (row: TranscriptRow): TranscriptRow =>
@@ -369,7 +370,7 @@ export function foldTurns(
       turn = []
       started = row.item
       after = 'steer'
-    } else if (startsResponse(row)) {
+    } else if (starts.has(index)) {
       close(false)
       folded.push(row)
       started = row.item
@@ -389,13 +390,46 @@ export function foldTurns(
   return folded
 }
 
-function startsResponse(row: TranscriptRow) {
-  if (row.kind !== 'item') return false
-  const { content } = row.item
-  return (
-    (content.kind === 'userMessage' && !content.steer) ||
-    content.kind === 'backgroundTaskEnded'
-  )
+/** Splits the id of a background task's end into its turn and the task; mirrors hoshi-core. */
+const TASK_ENDED = ':ended:'
+
+/**
+ * Where each response starts: at a message from the user, or at a background task that
+ * ended and gets a run of its own. A task that ended while a run of its own turn went on
+ * is taken in by that run and starts nothing.
+ */
+function responseStarts(rows: TranscriptRow[]) {
+  const starts = new Set<number>()
+  let turn: string | null = null
+  let betweenRuns = false
+  for (const [index, row] of rows.entries()) {
+    const content = row.kind === 'item' ? row.item.content : null
+    if (row.kind !== 'item' || !content) {
+      betweenRuns = false
+    } else if (content.kind === 'userMessage') {
+      if (content.steer) continue
+      starts.add(index)
+      turn = row.item.id
+      betweenRuns = false
+    } else if (content.kind === 'backgroundTaskEnded') {
+      const at = row.item.id.indexOf(TASK_ENDED)
+      const endedIn = at < 0 ? null : row.item.id.slice(0, at)
+      if (endedIn !== null && endedIn === turn && !betweenRuns) continue
+      starts.add(index)
+      turn = endedIn
+      betweenRuns = false
+    } else if (content.kind === 'runEnded') {
+      betweenRuns = true
+    } else if (
+      content.kind === 'turnInterrupted' ||
+      content.kind === 'turnFailed'
+    ) {
+      turn = null
+    } else {
+      betweenRuns = false
+    }
+  }
+  return starts
 }
 
 function timeOf(item: TranscriptItem) {
@@ -423,13 +457,6 @@ function answered(part: TranscriptRow[]) {
   return part.some(
     (row) => row.kind === 'item' && row.item.content.kind === 'assistantMessage'
   )
-}
-
-function lastResponseStart(rows: TranscriptRow[]) {
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    if (startsResponse(rows[index] as TranscriptRow)) return index
-  }
-  return -1
 }
 
 /** The latest entry still going: a call without output, or reasoning still streaming. */

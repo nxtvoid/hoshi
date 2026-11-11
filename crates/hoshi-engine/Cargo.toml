@@ -23,5 +23,9 @@ serde_json.workspace = true
 tiny_http.workspace = true
 tungstenite.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+netstat2 = "0.11"
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
+
 [lints]
 workspace = true

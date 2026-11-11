@@ -6,6 +6,7 @@ import type { Thread } from '@/bindings/Thread'
 import type { Command } from '@/bindings/Command'
 import type { Project } from '@/bindings/Project'
 import type { Snapshot } from '@/bindings/Snapshot'
+import type { ThreadHeldMessage } from '@/bindings/ThreadHeldMessage'
 import type { PullRequest } from '@/bindings/PullRequest'
 import type { ThreadWorkspace } from '@/bindings/ThreadWorkspace'
 import {
@@ -13,6 +14,7 @@ import {
   type ModelChoice,
   useComposerStore
 } from './composer-store'
+import { delegatedTasks } from '@/lib/agents'
 import { confirm } from './dialog-store'
 import { startupSelection } from './startup'
 import { useSidebarStore } from './sidebar-store'
@@ -22,6 +24,8 @@ import { useTranscriptStore } from './transcript-store'
 import { useSubagentStore } from './subagent-store'
 import { useStoppingStore } from './stopping-store'
 import { useBackgroundTaskStore } from './background-task-store'
+import { useHeldMessageStore } from './held-message-store'
+import { useServerStore } from './server-store'
 import { usePullRequestStore } from './pull-request-store'
 import { draftKey, useDraftStore } from './draft-store'
 import { usePanelStore } from './panel-store'
@@ -51,6 +55,7 @@ import type { EventEnvelope } from '@/bindings/EventEnvelope'
 import type { ThreadPullRequest } from '@/bindings/ThreadPullRequest'
 import type { ThreadContextUsage } from '@/bindings/ThreadContextUsage'
 import type { ThreadBackgroundTasks } from '@/bindings/ThreadBackgroundTasks'
+import type { ThreadServers } from '@/bindings/ThreadServers'
 import type { ThreadPullRequestDetail } from '@/bindings/ThreadPullRequestDetail'
 import { inChat, scopeProjectId } from './scope'
 import {
@@ -291,11 +296,14 @@ export const useAppStore = create<AppState>()((set, get) => ({
   deleteThread: async (threadId) => {
     const thread = get().threads.find((candidate) => candidate.id === threadId)
     if (!thread) return
+    const title = thread.title || m.untitled_thread()
+    const tasks = delegatedTasks(threadId, get().threads).length
     const confirmed = await confirm({
       title: m.delete_thread(),
-      description: m.delete_thread_confirm({
-        title: thread.title || m.untitled_thread()
-      }),
+      description:
+        tasks > 0
+          ? m.delete_thread_with_tasks_confirm({ title, count: tasks })
+          : m.delete_thread_confirm({ title }),
       confirmLabel: m.delete_thread(),
       tone: 'destructive'
     })
@@ -499,6 +507,9 @@ async function startSync() {
     })
   ])
   const live = Promise.all([
+    listen<ThreadHeldMessage>('hoshi://held-message', (message) =>
+      useHeldMessageStore.getState().receive(message.payload)
+    ),
     listen<ThreadPullRequestDetail>('hoshi://pull-request-detail', (message) =>
       usePullRequestStore.getState().receive(message.payload)
     ),
@@ -519,6 +530,9 @@ async function startSync() {
     ),
     listen<GitActionProgress>('hoshi://git-action', (message) =>
       useGitActionStore.getState().receive(message.payload)
+    ),
+    listen<ThreadServers>('hoshi://servers', (message) =>
+      useServerStore.getState().receive(message.payload)
     ),
     listen<StreamDelta>('hoshi://stream', (message) =>
       useTranscriptStore.getState().applyDelta(message.payload)
@@ -551,6 +565,7 @@ async function startSync() {
       snapshot.taskPreviews
     )
   useBackgroundTaskStore.getState().seed(snapshot.backgroundTasks)
+  useHeldMessageStore.getState().seed(snapshot.heldMessages)
   useAppStore.setState({
     ready: true,
     sequence: snapshot.sequence,

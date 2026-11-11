@@ -509,6 +509,7 @@ impl Store {
             pending_tasks: Vec::new(),
             background_tasks: Vec::new(),
             task_previews,
+            held_messages: Vec::new(),
         })
     }
 

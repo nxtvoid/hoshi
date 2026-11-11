@@ -24,6 +24,7 @@ mod pull_requests;
 mod refreshing;
 mod secret_requests;
 mod secrets;
+mod servers;
 mod setup_files;
 mod source_control;
 mod terminal;
@@ -39,7 +40,7 @@ use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
 use hoshi_core::ProviderAccountStatus;
-use hoshi_core::{BankedResetFailure, BankedResetSpend};
+use hoshi_core::{BankedResetFailure, BankedResetSpend, HeldMessage, ThreadHeldMessage};
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, TranscriptPage,
@@ -103,8 +104,12 @@ pub enum Notification {
     BrowserFrame(BrowserFrame),
     /// Where a thread's browser page is, and whether the agent just acted on it.
     BrowserPage(BrowserPage),
+    /// The message a thread holds until it is compacted, or that it holds none any more.
+    HeldMessage(ThreadHeldMessage),
     /// A worktree's setup command started, wrote output, or ended.
     WorktreeSetup(hoshi_core::WorktreeSetupRun),
+    /// The servers of a thread a view watches, when they change.
+    Servers(hoshi_core::ThreadServers),
 }
 
 pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
@@ -127,6 +132,7 @@ pub struct Engine {
     reset_spend: Mutex<Option<(String, String)>>,
     /// Held while the provider's CLI is checked against its releases or updated.
     maintenance: Arc<Mutex<()>>,
+    servers: servers::Servers,
 }
 
 const LINKED_PULL_REQUEST_FRESH_FOR: Duration = Duration::from_secs(60);
@@ -136,6 +142,10 @@ const USAGE_LIMITS_FRESH_FOR: Duration = Duration::from_secs(60);
 const PROVIDER_VERSION_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const PROVIDER_VERSION_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 const UPDATE_PROGRESS_EVERY: Duration = Duration::from_millis(250);
+const IDLE_BROWSER_CHECK: Duration = Duration::from_secs(60);
+/// How long the agent gets to take a command it was told to stop as stopped.
+const STOPPED_WITHIN: Duration = Duration::from_secs(5);
+const STOPPED_POLL: Duration = Duration::from_millis(100);
 const PATH_SEARCH_LIMIT: usize = 50;
 /// A first title is tried this many times, waiting longer before each retry.
 const TITLE_ATTEMPTS: u32 = 3;
@@ -240,6 +250,15 @@ struct QueuedMessage {
     /// The user sent it, so a running turn reads it at once. News hoshi brings, such as a
     /// task's answer, waits for the agent to finish its step.
     from_user: bool,
+}
+
+fn held_message(thread_id: &str, message: &QueuedMessage) -> HeldMessage {
+    HeldMessage {
+        thread_id: thread_id.to_owned(),
+        message_id: message.id.clone(),
+        text: message.text.clone(),
+        attachments: message.attachments.clone(),
+    }
 }
 
 /// A thread whose pull request is due to be read.
@@ -436,6 +455,7 @@ impl Engine {
         });
         let terminals = Arc::new(Terminals::default());
         let setups = WorktreeSetups::new(terminals.clone(), notify.clone());
+        let notify_servers = notify.clone();
         let mut state = State {
             setups,
             model: ReadModel::from_snapshot(&snapshot),
@@ -512,6 +532,17 @@ impl Engine {
             data_dir.join("browser"),
             lock(&shared).notify.clone(),
         )));
+        let idle = Arc::downgrade(&browsing);
+        thread::spawn(move || {
+            while let Some(browsing) = idle.upgrade() {
+                browsing
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .end_idle_browser();
+                drop(browsing);
+                thread::sleep(IDLE_BROWSER_CHECK);
+            }
+        });
         let pages = browsing.clone();
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
             if tool.starts_with("preview_") {
@@ -567,6 +598,7 @@ impl Engine {
             usage_probe: Arc::default(),
             reset_spend: Mutex::default(),
             maintenance,
+            servers: servers::Servers::new(notify_servers),
         })
     }
 
@@ -1448,6 +1480,11 @@ impl Engine {
                 .filter(|background| !background.tasks.is_empty())
                 .collect(),
             task_previews: state.model.task_previews(),
+            held_messages: state
+                .after_compaction
+                .iter()
+                .map(|(thread_id, message)| held_message(thread_id, message))
+                .collect(),
         }
     }
 
@@ -1504,11 +1541,20 @@ impl Engine {
             .into_iter()
             .map(|thread| thread.id.clone())
             .collect();
+        let stopped = match &command {
+            Command::BackgroundTaskStop { thread_id, task_id } => state
+                .sole_background_command(thread_id, task_id)
+                .map(|since| (thread_id.clone(), task_id.clone(), since)),
+            _ => None,
+        };
         state.run_command(command)?;
         let model = &state.model;
         self.terminals
             .retain_threads(|thread_id| model.thread(thread_id).is_some());
         drop(state);
+        if let Some((thread_id, task_id, since)) = stopped {
+            self.end_servers_of(thread_id, task_id, since);
+        }
         if !deleted.is_empty() {
             let mut browsing = self.browsing();
             for thread_id in &deleted {
@@ -1685,8 +1731,9 @@ impl Engine {
             .map_err(|detail| CommandError::BrowserFailed { detail })
     }
 
+    /// The user closed the thread's page from the panel.
     pub fn browser_close(&self, thread_id: &str) {
-        self.browsing().forget(thread_id);
+        self.browsing().user_close(thread_id);
     }
 
     /// Closes every page and the headless browser, as when the app quits.
@@ -1728,8 +1775,8 @@ impl Engine {
         if busy {
             return state.run_command(send);
         }
-        state.after_compaction.insert(
-            thread_id.to_owned(),
+        state.hold_until_compacted(
+            thread_id,
             QueuedMessage {
                 id: message_id.to_owned(),
                 text,
@@ -1749,9 +1796,33 @@ impl Engine {
                 .get(thread_id)
                 .is_some_and(|message| message.id == message_id)
         {
-            state.after_compaction.remove(thread_id);
+            state.take_held(thread_id);
         }
         compacted
+    }
+
+    /// Stops compacting the thread, so the message it holds goes at once.
+    pub fn send_held_message_now(&self, thread_id: &str) -> Result<(), CommandError> {
+        let mut state = lock(&self.state);
+        if !state.after_compaction.contains_key(thread_id) {
+            return Ok(());
+        }
+        state.run_command(Command::TurnInterrupt {
+            thread_id: thread_id.to_owned(),
+        })
+    }
+
+    /// Takes back the message the thread holds until it is compacted, for the user to edit
+    /// it. `discard` drops it, with the images it carried.
+    pub fn take_held_message(&self, thread_id: &str, discard: bool) -> Option<HeldMessage> {
+        let mut state = lock(&self.state);
+        let message = state.take_held(thread_id)?;
+        if discard {
+            for attachment in &message.attachments {
+                state.attachments.remove(attachment);
+            }
+        }
+        Some(held_message(thread_id, &message))
     }
 
     /// Saves an image the user is about to send. `base64` holds its bytes.
@@ -1774,7 +1845,8 @@ impl Engine {
 
     /// A sent image as a data URL; `None` when its file is gone.
     pub fn image_data_url(&self, id: &str, mime_type: &str) -> Option<String> {
-        lock(&self.state).attachments.data_url(id, mime_type)
+        let path = lock(&self.state).attachments.path(id, mime_type)?;
+        attachments::data_url(&path, mime_type)
     }
 
     /// Pull requests of the project's repository matching `query`, for `#` mentions.
@@ -1877,6 +1949,46 @@ impl Engine {
 
     pub fn close_terminal(&self, terminal_id: &str) {
         self.terminals.close(terminal_id);
+    }
+
+    /// The thread's servers now; while watched, changes arrive as notifications.
+    pub fn watch_servers(&self, thread_id: &str) -> Vec<hoshi_core::LocalServer> {
+        self.servers.watch(thread_id)
+    }
+
+    pub fn unwatch_servers(&self, thread_id: &str) {
+        self.servers.unwatch(thread_id);
+    }
+
+    /// Ends the server on `port` and what its process started; never hoshi, an agent or
+    /// a shell.
+    pub fn stop_server(&self, thread_id: &str, pid: u32, port: u16) -> Result<(), CommandError> {
+        self.servers.stop(thread_id, pid, port)
+    }
+
+    /// The agent ends a command it is told to stop, but not always what the command
+    /// started: a server run through a script keeps listening. Once the agent has taken the
+    /// command as stopped, the servers it started since go too; ending them earlier would
+    /// have the agent take the command as failed and go on by itself.
+    fn end_servers_of(&self, thread_id: String, task_id: String, since: u64) {
+        let (state, servers) = (Arc::downgrade(&self.state), self.servers.clone());
+        thread::spawn(move || {
+            let deadline = Instant::now() + STOPPED_WITHIN;
+            loop {
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                if !lock(&state).runs_background_command(&thread_id, &task_id) {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return;
+                }
+                drop(state);
+                thread::sleep(STOPPED_POLL);
+            }
+            servers.stop_agent_servers_since(&thread_id, since);
+        });
     }
 }
 
@@ -2447,6 +2559,18 @@ impl State {
     /// Carries out a command: decides its events, records them, and starts what they call for.
     /// A message to a thread git works on waits for that work to end.
     fn run_command(&mut self, command: Command) -> Result<(), CommandError> {
+        // A thread goes with the tasks it delegated, which nothing else would list.
+        if let Command::ThreadDelete { thread_id } = &command {
+            let tasks: Vec<String> = self
+                .model
+                .threads()
+                .filter(|thread| thread.parent_thread_id.as_deref() == Some(thread_id))
+                .map(|thread| thread.id.clone())
+                .collect();
+            for task in tasks {
+                self.run_command(Command::ThreadDelete { thread_id: task })?;
+            }
+        }
         if let Command::MessageSend { thread_id, .. } = &command
             && let Some(held) = self.thread_ops.get_mut(thread_id)
         {
@@ -2620,16 +2744,7 @@ impl State {
             turn.running.stop_subagent(&tool_use_id);
         }
         if let Some((thread_id, task_id)) = stop_background {
-            let running = match self.turns.get(&thread_id) {
-                Some(turn) => Some(&turn.running),
-                None => self
-                    .lingering
-                    .get(&thread_id)
-                    .map(|lingering| &lingering.running),
-            };
-            if let Some(running) = running {
-                running.stop_background_task(&task_id);
-            }
+            self.stop_background_command(&thread_id, &task_id);
         }
         // A deleted thread (or a removed project's threads) must not keep an agent running.
         let orphaned: Vec<_> = self
@@ -2895,6 +3010,24 @@ impl State {
         }
     }
 
+    /// Keeps the message until the thread is compacted, where the user sees it wait.
+    fn hold_until_compacted(&mut self, thread_id: &str, message: QueuedMessage) {
+        (self.notify)(Notification::HeldMessage(ThreadHeldMessage {
+            thread_id: thread_id.to_owned(),
+            message: Some(held_message(thread_id, &message)),
+        }));
+        self.after_compaction.insert(thread_id.to_owned(), message);
+    }
+
+    fn take_held(&mut self, thread_id: &str) -> Option<QueuedMessage> {
+        let message = self.after_compaction.remove(thread_id)?;
+        (self.notify)(Notification::HeldMessage(ThreadHeldMessage {
+            thread_id: thread_id.to_owned(),
+            message: None,
+        }));
+        Some(message)
+    }
+
     /// The message the user sent to go once the context was compacted.
     fn send_after_compaction(&mut self, thread_id: &str) {
         let idle = self
@@ -2904,7 +3037,7 @@ impl State {
         if !idle {
             return;
         }
-        let Some(message) = self.after_compaction.remove(thread_id) else {
+        let Some(message) = self.take_held(thread_id) else {
             return;
         };
         let send = Command::MessageSend {
@@ -3716,6 +3849,7 @@ fn start_turn(
         mcp,
         instructions,
         subagent_effort: state.subagent_effort,
+        environment: servers::agent_environment(thread_id),
     };
     let (workspace, checkpointed) = state.turn_workspace(thread_id, turn_id, &cwd);
     if let Some(lingering) = state.lingering.remove(thread_id) {
@@ -5307,6 +5441,33 @@ Blue"
     }
 
     #[test]
+    fn deleting_a_thread_deletes_the_tasks_it_delegated_however_deep() {
+        let (harness, adapter, child, grandchild) =
+            task_with_a_task_of_its_own("delegate-nested-delete");
+        says(&harness, &child, "first", "Started my task.");
+        child_turn_ends(&harness, &adapter, 1);
+
+        harness
+            .engine
+            .dispatch(Command::ThreadDelete {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+
+        let left: Vec<String> = harness
+            .engine
+            .snapshot()
+            .threads
+            .into_iter()
+            .map(|thread| thread.id)
+            .collect();
+        assert!(!left.contains(&"t".to_owned()));
+        assert!(!left.contains(&child));
+        assert!(!left.contains(&grandchild));
+        assert!(lock(&harness.engine.state).delegations.is_empty());
+    }
+
+    #[test]
     fn cancelling_a_task_cancels_the_tasks_of_its_own() {
         let (harness, adapter, child, grandchild) =
             task_with_a_task_of_its_own("delegate-nested-cancel");
@@ -5978,6 +6139,54 @@ Blue"
         let now = Utc::now().timestamp_millis() as u64;
         let expires = usage.cache_expires_at.unwrap();
         assert!(expires > now + 3_500_000 && expires <= now + 3_600_000);
+    }
+
+    #[test]
+    fn a_message_held_while_compacting_shows_and_can_be_taken_back() {
+        let harness = Harness::in_memory("compact-held", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+
+        harness
+            .engine
+            .compact_then_send("t", "m1", "carry on".into(), Vec::new())
+            .unwrap();
+        let held = harness.engine.snapshot().held_messages;
+        let taken = harness.engine.take_held_message("t", false);
+        let left = harness.engine.snapshot().held_messages;
+        finish(&adapter, 0, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].text, "carry on");
+        assert_eq!(taken.map(|message| message.message_id), Some("m1".into()));
+        assert!(left.is_empty());
+        let prompts: Vec<_> = adapter
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.prompt.clone())
+            .collect();
+        assert_eq!(prompts, ["/compact"]);
+    }
+
+    #[test]
+    fn sending_a_held_message_now_stops_the_compaction_it_waited_for() {
+        let harness = Harness::in_memory("compact-skip", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness
+            .engine
+            .compact_then_send("t", "m1", "carry on".into(), Vec::new())
+            .unwrap();
+
+        harness.engine.send_held_message_now("t").unwrap();
+        harness.wait_for_turn_end();
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+
+        assert_eq!(harness.thread("t").active_turn_id.as_deref(), Some("m1"));
+        assert!(harness.engine.snapshot().held_messages.is_empty());
     }
 
     #[test]

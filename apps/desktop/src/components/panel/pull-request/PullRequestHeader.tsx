@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -13,12 +14,19 @@ import type { PullRequestDetail } from '@/bindings/PullRequestDetail'
 import { PullRequestIcon } from '@/components/pull-request/PullRequestIcon'
 import {
   ArrowDown01Icon,
+  CancelCircleIcon,
   Copy01Icon,
   File01Icon,
+  GitMergeConflictIcon,
+  GitMergeIcon,
   GitPullRequestClosedIcon,
+  GitPullRequestDraftIcon,
   LinkSquare02Icon,
+  Loading03Icon,
+  LockIcon,
   MoreHorizontalIcon,
-  PencilEdit02Icon
+  PencilEdit02Icon,
+  Tick02Icon
 } from '@hugeicons/core-free-icons'
 import {
   Tooltip,
@@ -106,11 +114,14 @@ export function PullRequestHeader({
           {pullRequest.author ? ' · ' : null}
           {m.pr_updated({ time: relativeTime(pullRequest.updatedAt) })}
         </span>
-        {checkout ? <CopyCommand command={checkout} /> : null}
       </div>
       <div className='text-muted-foreground flex items-center gap-2 text-xs'>
-        <span className='min-w-0 flex-1 truncate font-mono'>
-          {pullRequest.baseBranch} ← {pullRequest.headBranch}
+        <span className='flex min-w-0 flex-1 items-center gap-1 font-mono'>
+          <span className='shrink-0'>{pullRequest.baseBranch} ←</span>
+          <span className='text-foreground/85 truncate'>
+            {pullRequest.headBranch}
+          </span>
+          {checkout ? <CopyCheckout command={checkout} /> : null}
         </span>
         <span className='flex shrink-0 items-center gap-1 tabular-nums'>
           <HugeiconsIcon icon={File01Icon} strokeWidth={2} className='size-3' />
@@ -194,11 +205,28 @@ function Title({
   )
 }
 
+type MergeBlocker = 'permission' | 'draft' | 'conflicts'
+
+const MERGE_BLOCKER_LABEL: Record<MergeBlocker, () => string> = {
+  permission: m.merge_blocked_permission,
+  draft: m.merge_blocked_draft,
+  conflicts: m.merge_blocked_conflicts
+}
+
+const MERGE_BLOCKER_ICON: Record<MergeBlocker, typeof GitMergeIcon> = {
+  permission: LockIcon,
+  draft: GitPullRequestDraftIcon,
+  conflicts: GitMergeConflictIcon
+}
+
 /** Why the pull request can't be merged now, or `null` when it can. */
-function mergeBlocker(pullRequest: PullRequest, detail: PullRequestDetail) {
-  if (!detail.canEdit) return m.merge_blocked_permission()
-  if (pullRequest.state === 'draft') return m.merge_blocked_draft()
-  if (detail.mergeability === 'conflicting') return m.merge_blocked_conflicts()
+function mergeBlocker(
+  pullRequest: PullRequest,
+  detail: PullRequestDetail
+): MergeBlocker | null {
+  if (!detail.canEdit) return 'permission'
+  if (pullRequest.state === 'draft') return 'draft'
+  if (detail.mergeability === 'conflicting') return 'conflicts'
   return null
 }
 
@@ -215,15 +243,25 @@ function MergeMenu({
     pullRequest.state === 'merged' || pullRequest.state === 'closed'
   if (finished || detail.mergeMethods.length === 0) return null
   const blocker = mergeBlocker(pullRequest, detail)
+  const changesRequested = detail.reviewers
+    .filter((reviewer) => reviewer.state === 'changesRequested')
+    .map((reviewer) => reviewer.name)
+  const warning =
+    changesRequested.length > 0
+      ? m.merge_changes_requested({ names: changesRequested.join(', ') })
+      : null
+  const conflicts = blocker === 'conflicts'
+  const hint = blocker ? MERGE_BLOCKER_LABEL[blocker]() : warning
 
   const merge = async (method: MergeMethod) => {
+    const question = m.merge_confirm({
+      number: pullRequest.number,
+      base: pullRequest.baseBranch,
+      method: MERGE_METHOD_LABEL[method]()
+    })
     const confirmed = await confirm({
       title: MERGE_METHOD_LABEL[method](),
-      description: m.merge_confirm({
-        number: pullRequest.number,
-        base: pullRequest.baseBranch,
-        method: MERGE_METHOD_LABEL[method]()
-      }),
+      description: warning ? `${warning}. ${question}` : question,
       confirmLabel: m.merge()
     })
     if (confirmed) await actions.run({ type: 'merge', method })
@@ -232,8 +270,37 @@ function MergeMenu({
   const trigger = (
     <DropdownMenuTrigger
       disabled={blocker !== null || actions.pending}
-      render={<Button size='xs' className='bg-pr-open hover:bg-pr-open/90' />}
+      render={
+        conflicts ? (
+          <Button
+            size='xs'
+            variant='destructive'
+            className='disabled:opacity-100'
+          />
+        ) : warning ? (
+          <Button
+            size='xs'
+            variant='secondary'
+            className='bg-warning-surface text-warning hover:bg-warning/20'
+          />
+        ) : (
+          <Button size='xs' className='bg-pr-open hover:bg-pr-open/90' />
+        )
+      }
     >
+      {actions.pending ? (
+        <HugeiconsIcon
+          icon={Loading03Icon}
+          strokeWidth={2}
+          className='animate-spin'
+        />
+      ) : blocker ? (
+        <HugeiconsIcon icon={MERGE_BLOCKER_ICON[blocker]} strokeWidth={2} />
+      ) : warning ? (
+        <HugeiconsIcon icon={CancelCircleIcon} strokeWidth={2} />
+      ) : (
+        <HugeiconsIcon icon={GitMergeIcon} strokeWidth={2} />
+      )}
       {m.merge()}
       <HugeiconsIcon icon={ArrowDown01Icon} strokeWidth={2} />
     </DropdownMenuTrigger>
@@ -241,10 +308,10 @@ function MergeMenu({
 
   return (
     <DropdownMenu>
-      {blocker ? (
+      {hint ? (
         <Tooltip>
           <TooltipTrigger render={<span />}>{trigger}</TooltipTrigger>
-          <TooltipContent side='bottom'>{blocker}</TooltipContent>
+          <TooltipContent side='bottom'>{hint}</TooltipContent>
         </Tooltip>
       ) : (
         trigger
@@ -354,23 +421,35 @@ function PullRequestMenu({
   )
 }
 
-function CopyCommand({ command }: { command: string }) {
+function CopyCheckout({ command }: { command: string }) {
   const [copied, setCopied] = useState(false)
 
   return (
-    <button
-      type='button'
-      aria-label={m.copy_command({ command })}
-      onClick={() => {
-        void navigator.clipboard.writeText(command).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
-        })
-      }}
-      className='hover:text-foreground focus-visible:ring-ring flex shrink-0 items-center gap-1 rounded font-mono outline-none focus-visible:ring-2'
-    >
-      {copied ? m.copied() : command}
-      <HugeiconsIcon icon={Copy01Icon} strokeWidth={2} className='size-3' />
-    </button>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type='button'
+            aria-label={m.copy_checkout_command()}
+            onClick={() => {
+              void navigator.clipboard.writeText(command).then(() => {
+                setCopied(true)
+                setTimeout(() => setCopied(false), 1500)
+              })
+            }}
+            className='hover:bg-accent hover:text-foreground focus-visible:ring-ring flex size-5 shrink-0 items-center justify-center rounded outline-none focus-visible:ring-2'
+          />
+        }
+      >
+        <HugeiconsIcon
+          icon={copied ? Tick02Icon : Copy01Icon}
+          strokeWidth={2}
+          className={cn('size-3', copied && 'text-pr-open')}
+        />
+      </TooltipTrigger>
+      <TooltipContent side='bottom' sideOffset={8} className='font-mono'>
+        {command}
+      </TooltipContent>
+    </Tooltip>
   )
 }
