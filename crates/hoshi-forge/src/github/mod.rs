@@ -221,6 +221,10 @@ impl Forge for GitHub {
         ForgeKind::Github
     }
 
+    fn forget_credentials(&self) {
+        self.forget_token();
+    }
+
     fn viewer(&self) -> Result<String, ForgeError> {
         let data: ViewerData = self.graphql(VIEWER_QUERY, json!({}))?;
         Ok(data.viewer.login)

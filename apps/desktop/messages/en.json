@@ -27,6 +27,7 @@
   "section_inactive": "Inactive",
   "section_done": "Done",
   "section_review": "In review",
+  "section_reviewing": "Reviewing",
   "toggle_panel": "Toggle side panel (Ctrl+Alt+B)",
   "resize_panel": "Resize side panel",
   "surface_diff": "Diff",

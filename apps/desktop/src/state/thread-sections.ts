@@ -1,4 +1,5 @@
 import type { Thread } from '@/bindings/Thread'
+import type { ForgeKind } from '@/bindings/ForgeKind'
 import type { PullRequest } from '@/bindings/PullRequest'
 
 export type SectionId =
@@ -6,6 +7,8 @@ export type SectionId =
   | 'attention'
   | 'active'
   | 'review'
+  /** Someone else's open pull requests, which the user reviews. */
+  | 'reviewing'
   | 'inactive'
   | 'done'
   /** Inbox only: turns that finished while the user looked elsewhere. */
@@ -28,13 +31,18 @@ export type SidebarQuery = {
   sort: ThreadSort
   /** Defaults to `INACTIVE_AFTER_MS`. */
   inactiveAfterMs?: number
+  logins?: ForgeLogins
 }
+
+/** Who the user is signed in as on each forge; a forge left out is unknown or signed out. */
+export type ForgeLogins = Partial<Record<ForgeKind, string>>
 
 const INBOX_SECTIONS: SectionId[] = [
   'attention',
   'active',
   'completed',
-  'review'
+  'review',
+  'reviewing'
 ]
 
 const SECTION_ORDER: SectionId[] = [
@@ -42,6 +50,7 @@ const SECTION_ORDER: SectionId[] = [
   'attention',
   'active',
   'review',
+  'reviewing',
   'inactive',
   'done'
 ]
@@ -64,11 +73,24 @@ export function pullRequestNeedsAttention(pullRequest: PullRequest): boolean {
   )
 }
 
+/** Whether someone other than the user opened the pull request. `false` while the user's login is unknown. */
+export function isOthersPullRequest(
+  pullRequest: PullRequest,
+  logins: ForgeLogins
+): boolean {
+  const login = logins[pullRequest.forge]
+  return (
+    login !== undefined &&
+    pullRequest.author?.toLowerCase() !== login.toLowerCase()
+  )
+}
+
 export function sectionOf(
   thread: Thread,
   pullRequest: PullRequest | undefined,
   now: number,
-  inactiveAfter = INACTIVE_AFTER_MS
+  inactiveAfter = INACTIVE_AFTER_MS,
+  logins: ForgeLogins = {}
 ): SectionId {
   if (thread.archived) return 'done'
   if (thread.pinned) return 'pinned'
@@ -77,11 +99,12 @@ export function sectionOf(
   }
   if (thread.status === 'working') return 'active'
   if (pullRequest) {
-    if (pullRequestNeedsAttention(pullRequest)) return 'attention'
+    const theirs = isOthersPullRequest(pullRequest, logins)
+    if (!theirs && pullRequestNeedsAttention(pullRequest)) return 'attention'
     if (pullRequest.state === 'merged' || pullRequest.state === 'closed') {
       return 'done'
     }
-    return 'review'
+    return theirs ? 'reviewing' : 'review'
   }
   const idleFor = now - Date.parse(thread.updatedAt)
   return idleFor > inactiveAfter ? 'inactive' : 'active'
@@ -92,11 +115,18 @@ export function groupThreads(
   threads: Thread[],
   pullRequests: Record<string, PullRequest>,
   now: number,
-  inactiveAfter = INACTIVE_AFTER_MS
+  inactiveAfter = INACTIVE_AFTER_MS,
+  logins: ForgeLogins = {}
 ): ThreadSection[] {
   const bySection = new Map<SectionId, Thread[]>()
   for (const thread of threads) {
-    const id = sectionOf(thread, pullRequests[thread.id], now, inactiveAfter)
+    const id = sectionOf(
+      thread,
+      pullRequests[thread.id],
+      now,
+      inactiveAfter,
+      logins
+    )
     const section = bySection.get(id)
     if (section) section.push(thread)
     else bySection.set(id, [thread])
@@ -230,19 +260,27 @@ export function sidebarSections(
     )
     .sort((a, b) => newestFirst(a[key], b[key]))
   return query.view === 'inbox'
-    ? inboxSections(visible, pullRequests, now, unseen)
-    : groupThreads(visible, pullRequests, now, query.inactiveAfterMs)
+    ? inboxSections(visible, pullRequests, now, unseen, query.logins)
+    : groupThreads(
+        visible,
+        pullRequests,
+        now,
+        query.inactiveAfterMs,
+        query.logins
+      )
 }
 
 /**
  * What waits on the user in every project: needs attention, working now, finished but not
- * seen yet, and in review. Pins don't apply here, and idle threads stay out.
+ * seen yet, in review, and others' pull requests to review. Pins don't apply here, and
+ * idle threads stay out.
  */
 export function inboxSections(
   threads: Thread[],
   pullRequests: Record<string, PullRequest>,
   now: number,
-  unseen: Record<string, true> = {}
+  unseen: Record<string, true> = {},
+  logins: ForgeLogins = {}
 ): ThreadSection[] {
   const completed = threads.filter(
     (thread) =>
@@ -252,7 +290,13 @@ export function inboxSections(
     .filter((thread) => !completed.includes(thread))
     .map((thread) => (thread.pinned ? { ...thread, pinned: false } : thread))
   const original = new Map(threads.map((thread) => [thread.id, thread]))
-  const grouped = groupThreads(rest, pullRequests, now).flatMap((section) => {
+  const grouped = groupThreads(
+    rest,
+    pullRequests,
+    now,
+    INACTIVE_AFTER_MS,
+    logins
+  ).flatMap((section) => {
     if (!INBOX_SECTIONS.includes(section.id)) return []
     const kept = section.threads
       .filter(

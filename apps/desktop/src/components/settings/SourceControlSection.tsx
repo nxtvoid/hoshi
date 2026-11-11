@@ -7,6 +7,7 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import type { ForgeKind } from '@/bindings/ForgeKind'
 import type { ForgeAccount } from '@/bindings/ForgeAccount'
 import type { CommandError } from '@/bindings/CommandError'
+import { useForgeAccountsStore } from '@/state/forge-accounts-store'
 import { type FormEvent, useCallback, useEffect, useId, useState } from 'react'
 import { SettingsPage, SettingsRow, SettingsSection } from './SettingsLayout'
 import { forgeErrorMessage } from '@/components/panel/pull-request/use-pull-request-actions'
@@ -24,6 +25,7 @@ const BITBUCKET_SCOPES = [
 
 export function SourceControlSection() {
   const [accounts, setAccounts] = useState<ForgeAccount[] | null>(null)
+  const reloadAccounts = useForgeAccountsStore((state) => state.load)
 
   const load = useCallback(() => {
     invoke<ForgeAccount[]>('get_forge_accounts')
@@ -55,12 +57,13 @@ export function SourceControlSection() {
         <BitbucketRow
           checking={accounts === null}
           login={login('bitbucket')}
-          onChange={(account) =>
+          onChange={(account) => {
             setAccounts((current) => [
               ...(current ?? []).filter((each) => each.forge !== account.forge),
               account
             ])
-          }
+            void reloadAccounts()
+          }}
         />
       </SettingsSection>
     </SettingsPage>

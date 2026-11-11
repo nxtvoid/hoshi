@@ -44,6 +44,7 @@ const SECTION_LABELS: Record<SectionId, () => string> = {
   active: m.section_active,
   inactive: m.section_inactive,
   review: m.section_review,
+  reviewing: m.section_reviewing,
   done: m.section_done,
   completed: m.status_completed
 }

@@ -36,6 +36,7 @@ import { useRequestStore } from './request-store'
 import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
+import { watchForgeAccounts } from './forge-accounts-store'
 import { useGitActionStore } from './git-action-store'
 import { useWorktreeSetupStore } from './worktree-setup-store'
 import type { WorktreeSetupRun } from '@/bindings/WorktreeSetupRun'
@@ -539,6 +540,7 @@ async function startSync() {
     )
   ])
   const stopAppUpdates = watchAppUpdates()
+  const stopForgeAccounts = watchForgeAccounts()
   // Read after the sequenced listeners exist, or events in between would be lost.
   const unlistenSequenced = await sequenced
   const snapshotLoad = invoke<Snapshot>('get_snapshot')
@@ -548,6 +550,7 @@ async function startSync() {
   import.meta.hot?.dispose(() => {
     for (const unlisten of [...unlistenSequenced, ...unlistenLive]) unlisten()
     stopAppUpdates()
+    stopForgeAccounts()
   })
   const [snapshot, settings] = await Promise.all([snapshotLoad, settingsLoad])
   const start = startupSelection(

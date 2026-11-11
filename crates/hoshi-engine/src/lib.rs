@@ -1206,16 +1206,28 @@ impl Engine {
         adapter.repository(&repository).map_err(forge_error)
     }
 
-    /// Who each forge is signed in as. Asks the forges, so it can take a moment.
+    /// Who each forge is signed in as now, reading the credentials again in case the account
+    /// changed. Asks the forges, so it can take a moment.
     pub fn forge_accounts(&self) -> Vec<ForgeAccount> {
         let forges: Vec<_> = lock(&self.state).forges.values().cloned().collect();
-        forges
+        let accounts: Vec<ForgeAccount> = forges
             .into_iter()
-            .map(|forge| ForgeAccount {
-                forge: forge.kind(),
-                login: forge.viewer().ok(),
+            .map(|forge| {
+                forge.forget_credentials();
+                ForgeAccount {
+                    forge: forge.kind(),
+                    login: forge.viewer().ok(),
+                }
             })
-            .collect()
+            .collect();
+        let mut state = lock(&self.state);
+        for account in &accounts {
+            match &account.login {
+                Some(login) => state.viewers.insert(account.forge, login.clone()),
+                None => state.viewers.remove(&account.forge),
+            };
+        }
+        accounts
     }
 
     /// The project's icon as a data URL, found among its files. Reads the disk.

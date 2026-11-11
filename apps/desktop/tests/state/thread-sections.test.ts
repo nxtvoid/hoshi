@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { Thread } from '../../src/bindings/Thread'
 import type { PullRequest } from '../../src/bindings/PullRequest'
 import {
+  type ForgeLogins,
   groupThreads,
   INACTIVE_AFTER_MS,
   inactiveAfterMs,
@@ -168,6 +169,50 @@ const ids = (sections: { id: string; threads: Thread[] }[]) =>
     section.id,
     section.threads.map((each) => each.id)
   ])
+
+describe('pull requests by someone else', () => {
+  const logins: ForgeLogins = { github: 'Me' }
+  const theirs = (changes: Partial<PullRequest> = {}) =>
+    pullRequest({ author: 'ana', ...changes })
+  const section = (pr: PullRequest, known = logins) =>
+    sectionOf(thread('t'), pr, NOW, INACTIVE_AFTER_MS, known)
+
+  test('go to reviewing, apart from the user own ones', () => {
+    expect(section(theirs())).toBe('reviewing')
+    expect(section(theirs({ author: null }))).toBe('reviewing')
+    expect(section(pullRequest({ author: 'me' }))).toBe('review')
+  })
+
+  test('count as the user own while the login is unknown', () => {
+    expect(section(theirs(), {})).toBe('review')
+    expect(section(theirs({ forge: 'bitbucket' }))).toBe('review')
+  })
+
+  test('leave failing checks and open comments to their author', () => {
+    expect(section(theirs({ checks: 'failing' }))).toBe('reviewing')
+    expect(section(theirs({ unresolvedComments: 2 }))).toBe('reviewing')
+    expect(section(pullRequest({ checks: 'failing' }))).toBe('attention')
+  })
+
+  test('end up done once merged', () => {
+    expect(section(theirs({ state: 'merged' }))).toBe('done')
+  })
+
+  test('list right after the user own ones, in the sidebar and the inbox', () => {
+    const threads = [thread('mine'), thread('other')]
+    const pullRequests = { mine: pullRequest(), other: theirs() }
+    const expected = [
+      ['review', ['mine']],
+      ['reviewing', ['other']]
+    ]
+    expect(
+      ids(groupThreads(threads, pullRequests, NOW, INACTIVE_AFTER_MS, logins))
+    ).toEqual(expected)
+    expect(ids(inboxSections(threads, pullRequests, NOW, {}, logins))).toEqual(
+      expected
+    )
+  })
+})
 
 describe('matchesSearch', () => {
   const fix = thread('t', { title: 'Fix login', branch: 'feat/auth' })
