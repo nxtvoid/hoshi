@@ -113,38 +113,53 @@ function fileFrom(bytes: ArrayBuffer, path: string): File {
   })
 }
 
-async function readPaths(paths: string[]): Promise<File[] | null> {
+/** Files read from a paste, and the names of those that could not be read. */
+export type ReadFiles = { files: File[]; unreadable: string[] }
+
+const nameOf = (path: string) => path.split(/[\\/]/).pop() || path
+
+/** Reads at most `limit` paths, one past the room left so the overflow is reported. */
+async function readPaths(paths: string[], limit: number): Promise<ReadFiles> {
   const read = await Promise.all(
-    paths.map((path) =>
+    paths.slice(0, Math.max(limit, 0) + 1).map((path) =>
       invoke<ArrayBuffer>('read_pasted_file', { path })
         .then((bytes) => fileFrom(bytes, path))
-        .catch(() => null)
+        .catch(() => nameOf(path))
     )
   )
-  return read.every((file) => file !== null) ? read : null
+  return {
+    files: read.filter((file) => typeof file !== 'string'),
+    unreadable: read.filter((file) => typeof file === 'string')
+  }
 }
 
 /**
- * The files of `pasted`, read through hoshi where the page can't. `null` when a path is no
- * file after all, so its text is pasted instead.
+ * The files of `pasted`, read through hoshi where the page can't, for a draft with `limit`
+ * slots left. `null` when no path is a file after all, so its text is pasted instead.
  */
 export async function readPastedFiles(
-  pasted: PastedFiles
-): Promise<File[] | null> {
+  pasted: PastedFiles,
+  limit: number
+): Promise<ReadFiles | null> {
   switch (pasted.kind) {
     case 'files':
-      return pasted.files
-    case 'paths':
-      return readPaths(pasted.paths)
+      return { files: pasted.files, unreadable: [] }
+    case 'paths': {
+      const read = await readPaths(pasted.paths, limit)
+      return read.files.length > 0 ? read : null
+    }
     case 'clipboard': {
       const copied = await invoke<string[]>('read_clipboard_files').catch(
         () => []
       )
-      if (copied.length > 0) return (await readPaths(copied)) ?? []
+      if (copied.length > 0) return readPaths(copied, limit)
       const bytes = await invoke<ArrayBuffer>('read_clipboard_image').catch(
         () => null
       )
-      return bytes ? [fileFrom(bytes, 'image.png')] : []
+      return {
+        files: bytes ? [fileFrom(bytes, 'image.png')] : [],
+        unreadable: []
+      }
     }
   }
 }

@@ -50,6 +50,7 @@ import {
 } from '@/lib/pasted-files'
 import {
   type AttachmentProblem,
+  MAX_ATTACHMENTS,
   attachmentProblem,
   formatAttachmentLimit,
   pastedTextFileName
@@ -213,6 +214,7 @@ export function Composer({
   const saving = attached.some(
     (attachment) => !attachment.saved && !attachment.failed
   )
+  const failed = attached.some((attachment) => attachment.failed)
   /** A secret is typed in its own card, so it never reaches the chat. */
   const answering =
     request !== null &&
@@ -224,7 +226,7 @@ export function Composer({
   /** A message sent while the agent works joins its turn. */
   const canSend = request
     ? answering && !sending
-    : written && !saving && !sending
+    : written && !saving && !failed && !sending
   const hero = variant === 'hero'
   const stacked = hero || tall
 
@@ -328,9 +330,20 @@ export function Composer({
 
   /** A path that turns out to be no file is pasted as the text it was. */
   const addPasted = async (pasted: PastedFiles) => {
-    const read = await readPastedFiles(pasted)
-    if (read) attach(read)
-    else if (pasted.kind === 'paths') editorRef.current?.paste(pasted.text)
+    const read = await readPastedFiles(
+      pasted,
+      MAX_ATTACHMENTS - files.attachments.length
+    )
+    if (read) {
+      for (const name of read.unreadable) {
+        toastManager.add({
+          type: 'error',
+          title: m.composer_attachment_empty({ name }),
+          data: { scope: threadId }
+        })
+      }
+      attach(read.files)
+    } else if (pasted.kind === 'paths') editorRef.current?.paste(pasted.text)
   }
 
   /** A large paste joins the draft as a text file, unless a request waits for an answer. */
@@ -353,7 +366,7 @@ export function Composer({
         data: { hideCopyButton: true }
       })
     }
-    return true
+    return added !== undefined
   }
 
   const removeAttachment = (key: string) => {
@@ -763,8 +776,6 @@ function problemMessage(problem: AttachmentProblem) {
   switch (problem.kind) {
     case 'tooMany':
       return m.composer_attachments_too_many({ max: problem.max })
-    case 'unsupportedImage':
-      return m.composer_attachment_unsupported_image({ name: problem.name })
     case 'empty':
       return m.composer_attachment_empty({ name: problem.name })
     case 'tooLarge':

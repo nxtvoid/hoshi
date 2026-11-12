@@ -26,7 +26,10 @@ fn tail(output: &str) -> &str {
         start += 1;
     }
     let cut = &output[start..];
-    cut.find('\n').map_or(cut, |line_end| &cut[line_end + 1..])
+    match cut.find('\n') {
+        Some(line_end) if !cut[line_end + 1..].is_empty() => &cut[line_end + 1..],
+        _ => cut,
+    }
 }
 
 #[derive(Debug)]
@@ -171,6 +174,16 @@ mod tests {
 
         live.ended(&json!({ "task_id": "b1" }));
         assert_eq!(live.answer(&answer(14, "tick 1\r\ntick 2\r\n")), None);
+    }
+
+    #[test]
+    fn one_long_final_line_keeps_its_bounded_suffix() {
+        let output = format!("{}\n", "x".repeat(LIVE_TAIL_BYTES * 2));
+
+        let sent = tail(&output);
+
+        assert_eq!(sent.len(), LIVE_TAIL_BYTES);
+        assert!(sent.ends_with('\n'));
     }
 
     #[test]

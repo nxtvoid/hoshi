@@ -64,12 +64,18 @@ export function inactiveAfterMs(days: number | undefined): number {
   return days && days > 0 ? days * DAY_MS : INACTIVE_AFTER_MS
 }
 
-/** An open pull request with failing checks or unresolved review threads waits on the user. */
+/**
+ * An open pull request with failing checks, conflicts, requested changes or unresolved review
+ * threads waits on the user.
+ */
 export function pullRequestNeedsAttention(pullRequest: PullRequest): boolean {
   const open = pullRequest.state === 'open' || pullRequest.state === 'draft'
   return (
     open &&
-    (pullRequest.checks === 'failing' || pullRequest.unresolvedComments > 0)
+    (pullRequest.checks === 'failing' ||
+      pullRequest.conflicts ||
+      pullRequest.changesRequested ||
+      pullRequest.unresolvedComments > 0)
   )
 }
 

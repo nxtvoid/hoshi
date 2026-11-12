@@ -71,12 +71,24 @@ fn size(arguments: &Value, fallback: (u32, u32)) -> (u32, u32) {
 
 /// Whether the address bar's `input` is somewhere to go rather than words to search for.
 fn is_address(input: &str) -> bool {
-    !input.contains(char::is_whitespace)
-        && (input.contains("://")
-            || input.contains('.')
-            || input.contains(':')
-            || input.starts_with('/')
-            || input.starts_with("localhost"))
+    is_local_path(input)
+        || !input.contains(char::is_whitespace)
+            && (input.contains("://")
+                || input.contains('.')
+                || input.contains(':')
+                || input.starts_with('/')
+                || input.starts_with("localhost"))
+}
+
+fn is_local_path(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let windows_path = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    windows_path
+        || input.starts_with("file://")
+        || (input.starts_with('/') && !input.starts_with("//"))
 }
 
 /// `text` as a URL query value.
@@ -136,9 +148,11 @@ fn address(url: &str) -> String {
         && bytes[1] == b':'
         && matches!(bytes[2], b'\\' | b'/');
     if windows_path {
-        format!("file:///{}", url.replace('\\', "/"))
+        format!("file:///{}", url.replace('\\', "/").replace(' ', "%20"))
     } else if url.starts_with('/') && !url.starts_with("//") {
-        format!("file://{url}")
+        format!("file://{}", url.replace(' ', "%20"))
+    } else if url.starts_with("file://") {
+        url.replace(' ', "%20")
     } else if url.contains("://") || url.starts_with("about:") || url.starts_with("data:") {
         url.to_owned()
     } else if local {
@@ -877,6 +891,27 @@ mod tests {
         assert_eq!(address("about:blank"), "about:blank");
         assert_eq!(address("/tmp/a.html"), "file:///tmp/a.html");
         assert_eq!(address("C:\\work\\a.html"), "file:///C:/work/a.html");
+        assert_eq!(
+            address("/tmp/My Report.html"),
+            "file:///tmp/My%20Report.html"
+        );
+    }
+
+    #[test]
+    fn local_paths_with_spaces_are_not_searched_for() {
+        let settings = BrowserSettings::default();
+        assert_eq!(
+            address_or_search("/tmp/My Report.html", &settings),
+            "file:///tmp/My%20Report.html"
+        );
+        assert_eq!(
+            address_or_search("C:\\Program Files\\report.html", &settings),
+            "file:///C:/Program%20Files/report.html"
+        );
+        assert_eq!(
+            address_or_search("file:///tmp/My Report.html", &settings),
+            "file:///tmp/My%20Report.html"
+        );
     }
 
     #[test]

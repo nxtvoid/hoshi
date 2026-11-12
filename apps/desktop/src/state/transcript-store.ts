@@ -61,11 +61,15 @@ function takeDeltas(live: LiveText): LiveText {
 const page = (threadId: string, before: string | null) =>
   invoke<TranscriptPage>('get_thread_items', { threadId, before })
 
-/** Asks the engine to stream this thread's text, and no other's. */
+let streamed: Promise<unknown> = Promise.resolve()
+
+/** Asks the engine to stream this thread's text, and no other's, after the previous ask. */
 function streamThread(threadId: string | null) {
-  invoke('stream_thread', { threadId }).catch((error: unknown) =>
-    console.error('hoshi: failed to follow the thread', error)
-  )
+  streamed = streamed
+    .then(() => invoke('stream_thread', { threadId }))
+    .catch((error: unknown) =>
+      console.error('hoshi: failed to follow the thread', error)
+    )
 }
 
 type Kept = { items: ThreadItem[]; hasOlder: boolean }

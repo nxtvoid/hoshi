@@ -57,6 +57,8 @@ const pullRequest = (changes: Partial<PullRequest> = {}): PullRequest => ({
   state: 'open',
   checks: 'passing',
   unresolvedComments: 0,
+  changesRequested: false,
+  conflicts: false,
   additions: 1,
   deletions: 1,
   updatedAt: new Date(NOW).toISOString(),
@@ -121,12 +123,16 @@ describe('sectionOf', () => {
     expect(sectionOf(old, pullRequest({ state: 'draft' }), NOW)).toBe('review')
   })
 
-  test('failing checks or unresolved comments need attention', () => {
+  test('failing checks, conflicts, requested changes or unresolved comments need attention', () => {
     const failing = pullRequest({ checks: 'failing' })
     const commented = pullRequest({ unresolvedComments: 2 })
+    const conflicting = pullRequest({ conflicts: true })
+    const changes = pullRequest({ changesRequested: true })
 
     expect(sectionOf(thread('t'), failing, NOW)).toBe('attention')
     expect(sectionOf(thread('t'), commented, NOW)).toBe('attention')
+    expect(sectionOf(thread('t'), conflicting, NOW)).toBe('attention')
+    expect(sectionOf(thread('t'), changes, NOW)).toBe('attention')
   })
 
   test('a merged or closed pull request is done', () => {

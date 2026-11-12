@@ -22,12 +22,17 @@ const sameAccounts = (a: ForgeAccount[] | null, b: ForgeAccount[]) =>
 /** The window coming back reads the accounts again, at most this often: they may have changed outside hoshi. */
 const RECHECK_AFTER_MS = 30_000
 
+/** Reads started so far; only the latest one's answer is kept. */
+let loads = 0
+
 export const useForgeAccountsStore = create<ForgeAccountsState>()(
   (set, get) => ({
     accounts: null,
     load: async () => {
+      const request = ++loads
       try {
         const accounts = await invoke<ForgeAccount[]>('get_forge_accounts')
+        if (request !== loads) return
         if (!sameAccounts(get().accounts, accounts)) set({ accounts })
       } catch (error) {
         console.error('hoshi: forge accounts failed', error)

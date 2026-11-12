@@ -35,10 +35,8 @@ describe('classifyAttachment', () => {
     expect(classifyAttachment(named('notes'))).toBe('file')
   })
 
-  test('refuses image types neither the app nor the agent can show', () => {
-    expect(classifyAttachment(named('photo.heic', 'image/heic'))).toBe(
-      'unsupportedImage'
-    )
+  test('sends image types the app cannot draw as files', () => {
+    expect(classifyAttachment(named('photo.heic', 'image/heic'))).toBe('file')
   })
 })
 
@@ -78,7 +76,7 @@ describe('attachmentProblem', () => {
     })
     expect(
       attachmentProblem({ name: 'a.heic', type: 'image/heic', size: 1 }, 0)
-    ).toEqual({ kind: 'unsupportedImage', name: 'a.heic' })
+    ).toBeNull()
   })
 })
 

@@ -220,6 +220,9 @@ fn slides_text(archive: &mut Archive) -> Result<String, String> {
         .iter()
         .enumerate()
     {
+        if out.len() > MAX_TEXT_BYTES {
+            break;
+        }
         let xml = part(archive, name)?;
         out.push_str(&format!("--- Slide {} ---\n", index + 1));
         out.push_str(&drawing_text(&xml)?);
@@ -236,15 +239,20 @@ fn all_text(node: Node) -> String {
         .collect()
 }
 
-/// The zero-based column of a cell reference such as `C7`.
-fn column(reference: &str) -> usize {
-    reference
-        .chars()
-        .take_while(char::is_ascii_alphabetic)
-        .fold(0, |column, letter| {
-            column * 26 + (letter.to_ascii_uppercase() as usize - 'A' as usize + 1)
-        })
-        .saturating_sub(1)
+const MAX_COLUMN: usize = 16384;
+
+/// The zero-based column of a cell reference such as `C7`, or `None` past Excel's last column.
+fn column(reference: &str) -> Option<usize> {
+    let mut column: usize = 0;
+    for letter in reference.chars().take_while(char::is_ascii_alphabetic) {
+        column = column
+            .checked_mul(26)?
+            .checked_add(letter.to_ascii_uppercase() as usize - 'A' as usize + 1)?;
+        if column > MAX_COLUMN {
+            return None;
+        }
+    }
+    Some(column.saturating_sub(1))
 }
 
 /// The workbook's sheets, by name and part, in the order the workbook lists them.
@@ -305,6 +313,9 @@ fn workbook_text(archive: &mut Archive) -> Result<String, String> {
     };
     let mut out = String::new();
     for (name, sheet) in sheets(archive)? {
+        if out.len() > MAX_TEXT_BYTES {
+            break;
+        }
         let Ok(xml) = part(archive, &sheet) else {
             continue;
         };
@@ -332,7 +343,7 @@ fn workbook_text(archive: &mut Archive) -> Result<String, String> {
                     Some("b") => if value == "1" { "TRUE" } else { "FALSE" }.to_owned(),
                     _ => value.to_owned(),
                 };
-                let at = cell.attribute("r").map_or(cells.len(), column);
+                let at = cell.attribute("r").and_then(column).unwrap_or(cells.len());
                 if at >= cells.len() {
                     cells.resize(at, String::new());
                     cells.push(text);
@@ -415,6 +426,9 @@ fn book_text(archive: &mut Archive) -> Result<String, String> {
         .collect();
     let mut out = String::new();
     for chapter in chapters {
+        if out.len() > MAX_TEXT_BYTES {
+            break;
+        }
         if let Ok(html) = part(archive, &chapter) {
             out.push_str(&html_text(&html));
             out.push('\n');
@@ -840,6 +854,44 @@ mod tests {
         );
 
         assert_eq!(extracted(&path), "## Costs\nItem\t\tCost\nRent\t\t1200");
+    }
+
+    #[test]
+    fn cell_columns_stop_at_the_last_excel_column() {
+        assert_eq!(column("A1"), Some(0));
+        assert_eq!(column("AB12"), Some(27));
+        assert_eq!(column("XFD1"), Some(16383));
+        assert_eq!(column("XFE1"), None);
+        assert_eq!(column("ZZZZZZ1"), None);
+        assert_eq!(column("ZZZZZZZZZZZZZZZZZZZZ1"), None);
+    }
+
+    #[test]
+    fn a_book_that_repeats_a_chapter_stops_at_the_text_limit() {
+        let path = folder("epub-loop").join("loop.epub");
+        let chapter = format!("<html><body><p>{}</p></body></html>", "x".repeat(1 << 20));
+        let spine = r#"<itemref idref="c"/>"#.repeat(10_000);
+        archive(
+            &path,
+            &[
+                (
+                    "META-INF/container.xml",
+                    r#"<container><rootfiles><rootfile full-path="o.opf"/></rootfiles></container>"#,
+                ),
+                (
+                    "o.opf",
+                    &format!(
+                        r#"<package><manifest><item id="c" href="c.xhtml"/></manifest><spine>{spine}</spine></package>"#
+                    ),
+                ),
+                ("c.xhtml", &chapter),
+            ],
+        );
+        let mut archive = zip::ZipArchive::new(File::open(&path).unwrap()).unwrap();
+
+        let text = book_text(&mut archive).unwrap();
+
+        assert!(text.len() < 3 * MAX_TEXT_BYTES);
     }
 
     #[test]

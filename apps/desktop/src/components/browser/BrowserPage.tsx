@@ -30,6 +30,18 @@ const inputs = new Map<string, Promise<unknown>>()
 /** How many views show each thread's page; it streams while any does. */
 const viewers = new Map<string, number>()
 
+/** Each thread's last change of whether its page is viewed; the next one waits for it. */
+const viewChanges = new Map<string, Promise<unknown>>()
+
+function setViewing(threadId: string, viewing: boolean) {
+  const change = (viewChanges.get(threadId) ?? Promise.resolve())
+    .then(() => invoke('browser_view', { threadId, viewing }))
+    .catch((error: unknown) =>
+      console.error('hoshi: failed to change the browser view', error)
+    )
+  viewChanges.set(threadId, change)
+}
+
 type Wheel = { x: number; y: number; deltaX: number; deltaY: number }
 
 /** Streams the thread's page while `active`, however many views show it. */
@@ -38,7 +50,7 @@ export function useBrowserViewing(threadId: string, active: boolean) {
     if (!active) return
     const count = viewers.get(threadId) ?? 0
     viewers.set(threadId, count + 1)
-    if (count === 0) void invoke('browser_view', { threadId, viewing: true })
+    if (count === 0) setViewing(threadId, true)
     return () => {
       const left = (viewers.get(threadId) ?? 1) - 1
       if (left > 0) {
@@ -46,7 +58,7 @@ export function useBrowserViewing(threadId: string, active: boolean) {
         return
       }
       viewers.delete(threadId)
-      void invoke('browser_view', { threadId, viewing: false })
+      setViewing(threadId, false)
     }
   }, [threadId, active])
 }

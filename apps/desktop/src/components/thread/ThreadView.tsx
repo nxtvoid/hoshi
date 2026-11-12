@@ -299,6 +299,7 @@ export function ThreadView() {
               threadId={thread.id}
               chat={chatRef}
               obstaclesKey={`${showDetailsCard}:${draft}:${inSubagent}`}
+              hidden={panelOpen && panelMaximized}
             />
           ) : null}
           {thread ? <TerminalDrawer threadId={thread.id} /> : null}

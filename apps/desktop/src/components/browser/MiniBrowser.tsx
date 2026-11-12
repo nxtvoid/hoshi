@@ -140,19 +140,22 @@ function usePanelShowsBrowser(threadId: string) {
 export function MiniBrowser({
   threadId,
   chat,
-  obstaclesKey
+  obstaclesKey,
+  hidden
 }: {
   threadId: string
   chat: React.RefObject<HTMLElement | null>
   /** Changes when the details card or the composer comes or goes. */
   obstaclesKey: string
+  /** The chat it floats over is hidden, so its page needs no frames. */
+  hidden: boolean
 }) {
   const placed = useMiniBrowserStore((state) => state.threads[threadId])
   const pageOpen = useBrowserStore((state) =>
     Boolean(state.pages[threadId]?.open)
   )
   const inPanel = usePanelShowsBrowser(threadId)
-  if (!placed || !pageOpen || inPanel) return null
+  if (!placed || !pageOpen || inPanel || hidden) return null
   return <Player threadId={threadId} chat={chat} obstaclesKey={obstaclesKey} />
 }
 

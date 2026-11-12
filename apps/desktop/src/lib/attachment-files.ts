@@ -5,11 +5,8 @@ export const MAX_FILE_BYTES = 50 * 1024 * 1024
 /** A paste this large, in UTF-8, is attached as a text file rather than typed in. */
 export const PASTED_TEXT_ATTACHMENT_BYTES = 32 * 1024
 
-/**
- * How a file joins the draft: as an image the agent sees, as a file it reads from disk, or
- * not at all, for an image type neither the agent nor the app can show.
- */
-export type AttachmentKind = 'image' | 'file' | 'unsupportedImage'
+/** How a file joins the draft: as an image the agent sees, or as a file it reads from disk. */
+export type AttachmentKind = 'image' | 'file'
 
 /** Image types the app can draw and send as an image, redrawn as PNG when needed. */
 const DRAWABLE_IMAGES = new Set([
@@ -87,8 +84,7 @@ export function attachmentMimeType(file: NamedFile): string {
 export function classifyAttachment(file: NamedFile): AttachmentKind {
   const type = essence(attachmentMimeType(file))
   if (FILE_IMAGES.has(type)) return 'file'
-  if (!type.startsWith('image/')) return 'file'
-  return DRAWABLE_IMAGES.has(type) ? 'image' : 'unsupportedImage'
+  return DRAWABLE_IMAGES.has(type) ? 'image' : 'file'
 }
 
 /** `file` with the type it is sent as, so the image pipeline reads a typed file. */
@@ -101,7 +97,6 @@ export function withAttachmentType(file: File): File {
 /** Why `file` can't join a draft that already carries `count` attachments; `null` if it can. */
 export type AttachmentProblem =
   | { kind: 'tooMany'; max: number }
-  | { kind: 'unsupportedImage'; name: string }
   | { kind: 'empty'; name: string }
   | { kind: 'tooLarge'; name: string; max: number }
 
@@ -111,9 +106,6 @@ export function attachmentProblem(
 ): AttachmentProblem | null {
   if (count >= MAX_ATTACHMENTS) return { kind: 'tooMany', max: MAX_ATTACHMENTS }
   const kind = classifyAttachment(file)
-  if (kind === 'unsupportedImage') {
-    return { kind: 'unsupportedImage', name: file.name }
-  }
   if (kind === 'file') {
     if (file.size <= 0) return { kind: 'empty', name: file.name }
     if (file.size > MAX_FILE_BYTES) {

@@ -461,12 +461,16 @@ impl Bitbucket {
             || now.duration_since(review_read_at) >= REVIEW_FRESH_FOR
         {
             let path = pull_request_path(repository, raw.id);
-            if let Some(full) = best_effort(self.get::<RawPullRequest>(&path))? {
+            let full = best_effort(self.get::<RawPullRequest>(&path))?;
+            let conflicts = best_effort(self.get::<Page<Value>>(&format!("{path}/conflicts")))?;
+            let read_both = full.is_some() && conflicts.is_some();
+            if let Some(full) = full {
                 summary.changes_requested = model::changes_requested(&full);
             }
-            let conflicts = best_effort(self.get::<Page<Value>>(&format!("{path}/conflicts")))?;
-            summary.conflicts = mergeability(conflicts) == Mergeability::Conflicting;
-            review_read_at = now;
+            summary.conflicts = conflicts_after_read(summary.conflicts, conflicts);
+            if read_both {
+                review_read_at = now;
+            }
         }
         lock(&self.extras).insert(
             key,
@@ -896,9 +900,24 @@ fn mergeability(conflicts: Option<Page<Value>>) -> Mergeability {
     }
 }
 
+/// Whether the pull request conflicts after a read; an unreadable list keeps `previous`.
+fn conflicts_after_read(previous: bool, conflicts: Option<Page<Value>>) -> bool {
+    match mergeability(conflicts) {
+        Mergeability::Conflicting => true,
+        Mergeability::Mergeable => false,
+        Mergeability::Unknown => previous,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_conflicts_read_keeps_the_cached_answer() {
+        assert!(conflicts_after_read(true, None));
+        assert!(!conflicts_after_read(false, None));
+    }
 
     #[test]
     fn credentials_round_trip_and_refuse_unsafe_values() {
