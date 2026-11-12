@@ -34,6 +34,9 @@ pub struct TurnRequest {
     pub cwd: String,
     pub prompt: String,
     pub attachments: Vec<TurnAttachment>,
+    /// The images and files earlier messages carried since the conversation last compacted,
+    /// oldest first: what of them the provider took in counts against what it takes in now.
+    pub earlier_media: Vec<TurnAttachment>,
     pub resume_session_id: Option<String>,
     /// Resumes the session after this message of it, leaving out the rest, as a rewind asks.
     pub resume_session_at: Option<String>,
@@ -73,8 +76,10 @@ pub const DEFERRED_TOOLS: &str = ", deferred: load them with ToolSearch, several
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnAttachment {
     pub attachment: MessageAttachment,
-    /// Where an image's file is; `None` for other attachments.
+    /// Where an image's or file's file is; `None` for other attachments.
     pub path: Option<PathBuf>,
+    /// The text of a document file, where it was written beside it.
+    pub extracted_text: Option<PathBuf>,
 }
 
 /// What a thread's title is generated from.
@@ -85,7 +90,7 @@ pub struct TitleRequest {
     pub context: String,
     /// Set when regenerating, so an accurate title can stay.
     pub previous_title: Option<String>,
-    /// Names of the images the messages carry.
+    /// Names of the images and files the messages carry.
     pub images: Vec<String>,
     /// `None` uses the provider's quick model.
     pub model: Option<String>,

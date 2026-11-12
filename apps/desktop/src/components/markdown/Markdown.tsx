@@ -5,7 +5,12 @@ import { CodeBlock } from './CodeBlock'
 import { MarkdownLink } from './MarkdownLink'
 import { MarkdownImage } from './MarkdownImage'
 import { ImageMention } from './ImageMention'
-import { IMAGE_MENTION_TAG, rehypeMentions } from './rehype-mentions'
+import { FileMention } from './FileMention'
+import {
+  FILE_MENTION_TAG,
+  IMAGE_MENTION_TAG,
+  rehypeMentions
+} from './rehype-mentions'
 import { rehypeLocalPaths } from './rehype-local-paths'
 import type { KnownMentions } from '@/lib/prompt-segments'
 import { splitMarkdownBlocks } from '@/lib/markdown-blocks'
@@ -103,7 +108,10 @@ const COMPONENTS: Components = {
   input: ({ node: _, ...props }) => (
     <input className='me-1.5 align-middle' disabled {...props} />
   ),
-  ...({ [IMAGE_MENTION_TAG]: ImageMention } as Components)
+  ...({
+    [IMAGE_MENTION_TAG]: ImageMention,
+    [FILE_MENTION_TAG]: FileMention
+  } as Components)
 }
 
 /** The code and language of a fenced block; `null` for a `pre` written as raw HTML. */

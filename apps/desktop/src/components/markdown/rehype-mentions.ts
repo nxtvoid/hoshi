@@ -7,6 +7,8 @@ type HastChild = HastElement['children'][number]
 
 /** Where an `[Image #n]` chip goes, drawn by `ImageMention`. */
 export const IMAGE_MENTION_TAG = 'hoshi-image'
+/** Where a `[File #n]` chip goes, drawn by `FileMention`. */
+export const FILE_MENTION_TAG = 'hoshi-file'
 
 /** Mentions written inside these stay as they are. */
 const LITERAL = new Set(['code', 'pre', 'a'])
@@ -50,18 +52,32 @@ function withChips(node: HastChild, known: KnownMentions): HastChild[] {
               },
               children: []
             }
-          : {
-              type: 'element',
-              tagName: 'span',
-              properties: {
-                className: [
-                  'rounded-sm',
-                  'px-0.5',
-                  ...CHIP_CLASSES[segment.kind].split(' ')
-                ],
-                title: segment.label ? segment.text : undefined
-              },
-              children: [{ type: 'text', value: segment.label ?? segment.text }]
-            }
+          : segment.file
+            ? {
+                type: 'element',
+                tagName: FILE_MENTION_TAG,
+                properties: {
+                  dataId: segment.file.id,
+                  dataName: segment.file.name,
+                  dataMimeType: segment.file.mimeType,
+                  dataSize: segment.file.size
+                },
+                children: []
+              }
+            : {
+                type: 'element',
+                tagName: 'span',
+                properties: {
+                  className: [
+                    'rounded-sm',
+                    'px-0.5',
+                    ...CHIP_CLASSES[segment.kind].split(' ')
+                  ],
+                  title: segment.label ? segment.text : undefined
+                },
+                children: [
+                  { type: 'text', value: segment.label ?? segment.text }
+                ]
+              }
   )
 }

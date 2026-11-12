@@ -7,12 +7,14 @@ const MAX_CHARS: usize = 8_000;
 const FIRST_MESSAGE_CHARS: usize = 2_000;
 const OMITTED: &str = "[…]";
 
-/// The image names a message carries.
-pub(crate) fn image_names(attachments: &[MessageAttachment]) -> Vec<String> {
+/// The names of the images and files a message carries.
+pub(crate) fn attachment_names(attachments: &[MessageAttachment]) -> Vec<String> {
     attachments
         .iter()
         .filter_map(|attachment| match attachment {
-            MessageAttachment::Image { name, .. } => Some(name.clone()),
+            MessageAttachment::Image { name, .. } | MessageAttachment::File { name, .. } => {
+                Some(name.clone())
+            }
             _ => None,
         })
         .collect()
@@ -28,7 +30,7 @@ pub(crate) fn conversation(items: &[ThreadItem]) -> (String, Vec<String>) {
             ItemContent::UserMessage {
                 text, attachments, ..
             } => {
-                let names = image_names(attachments);
+                let names = attachment_names(attachments);
                 let mut body = text.trim().to_owned();
                 if !names.is_empty() {
                     body.push_str(&format!("\n[Attachments: {}]", names.join(", ")));

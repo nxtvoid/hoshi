@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  fileUris,
   imagePaths,
-  pastedImages,
+  pastedFiles,
   type Transfer
-} from '../../src/lib/pasted-images'
+} from '../../src/lib/pasted-files'
 
 const transfer = (
   data: Record<string, string>,
@@ -42,15 +43,29 @@ describe('imagePaths', () => {
   })
 })
 
-describe('pastedImages', () => {
+describe('fileUris', () => {
+  test('takes a list of file URIs of any type', () => {
+    expect(
+      fileUris(
+        ['file:///home/nxtvoid/notes.txt', 'file:///C:/x/report%20Q3.pdf'].join(
+          '\r\n'
+        )
+      )
+    ).toEqual(['/home/nxtvoid/notes.txt', 'C:/x/report Q3.pdf'])
+    expect(fileUris('https://example.com/a.pdf')).toBeNull()
+    expect(fileUris('')).toBeNull()
+  })
+})
+
+describe('pastedFiles', () => {
   test('takes image files, or image items when the files are empty', () => {
-    expect(pastedImages(transfer({}, [png]), { orClipboard: true })).toEqual({
+    expect(pastedFiles(transfer({}, [png]), { orClipboard: true })).toEqual({
       kind: 'files',
       files: [png]
     })
     const item = { kind: 'file', type: 'image/png', getAsFile: () => png }
     expect(
-      pastedImages(transfer({}, [], [item]), { orClipboard: true })
+      pastedFiles(transfer({}, [], [item]), { orClipboard: true })
     ).toEqual({ kind: 'files', files: [png] })
   })
 
@@ -59,7 +74,7 @@ describe('pastedImages', () => {
       'text/plain': '/home/nxtvoid/Pictures/screenshot.png',
       'text/uri-list': 'file:///home/nxtvoid/Pictures/screenshot.png'
     })
-    expect(pastedImages(copied, { orClipboard: true })).toEqual({
+    expect(pastedFiles(copied, { orClipboard: true })).toEqual({
       kind: 'paths',
       paths: ['/home/nxtvoid/Pictures/screenshot.png'],
       text: '/home/nxtvoid/Pictures/screenshot.png'
@@ -68,15 +83,50 @@ describe('pastedImages', () => {
 
   test('looks at the system clipboard only for a paste without text', () => {
     const image = transfer({ 'text/html': '<img src="cid:1">' })
-    expect(pastedImages(image, { orClipboard: true })).toEqual({
+    expect(pastedFiles(image, { orClipboard: true })).toEqual({
       kind: 'clipboard'
     })
-    expect(pastedImages(image, { orClipboard: false })).toBeNull()
+    expect(pastedFiles(image, { orClipboard: false })).toBeNull()
     expect(
-      pastedImages(transfer({ 'text/plain': 'hola' }), { orClipboard: true })
+      pastedFiles(transfer({ 'text/plain': 'hola' }), { orClipboard: true })
     ).toBeNull()
     expect(
-      pastedImages(transfer({ 'text/html': '<b>hola</b>' }), {
+      pastedFiles(transfer({ 'text/html': '<b>hola</b>' }), {
+        orClipboard: true
+      })
+    ).toBeNull()
+  })
+
+  test('takes other files only when no text comes with them', () => {
+    const pdf = new File(['%PDF-'], 'report.pdf', { type: 'application/pdf' })
+    expect(pastedFiles(transfer({}, [pdf]), { orClipboard: true })).toEqual({
+      kind: 'files',
+      files: [pdf]
+    })
+    expect(
+      pastedFiles(transfer({ 'text/plain': 'a table' }, [pdf]), {
+        orClipboard: true
+      })
+    ).toBeNull()
+    expect(
+      pastedFiles(transfer({ 'text/plain': 'a chart' }, [png, pdf]), {
+        orClipboard: true
+      })
+    ).toEqual({ kind: 'files', files: [png, pdf] })
+  })
+
+  test('takes the file URIs a file manager copied, of any type', () => {
+    const copied = transfer({
+      'text/plain': '/home/nxtvoid/notes.txt',
+      'text/uri-list': 'file:///home/nxtvoid/notes.txt'
+    })
+    expect(pastedFiles(copied, { orClipboard: true })).toEqual({
+      kind: 'paths',
+      paths: ['/home/nxtvoid/notes.txt'],
+      text: '/home/nxtvoid/notes.txt'
+    })
+    expect(
+      pastedFiles(transfer({ 'text/plain': '/home/nxtvoid/notes.txt' }), {
         orClipboard: true
       })
     ).toBeNull()

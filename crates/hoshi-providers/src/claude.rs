@@ -4,7 +4,7 @@ use crate::claude_install;
 use crate::claude_login;
 use crate::claude_models::{TurnModel, Version, manifest, parse_version};
 use crate::claude_output::LiveOutput;
-use crate::claude_prompt;
+use crate::claude_prompt::{self, MediaBudget};
 use crate::claude_requests::{self, Access, Grants, Requests};
 use crate::claude_resets;
 use crate::claude_subagents::{self, Subagents};
@@ -201,7 +201,8 @@ impl ProviderAdapter for ClaudeCodeAdapter {
                 command.args(["--add-dir", &directory]);
             }
         }
-        let message = user_message(&request.prompt, &request.attachments);
+        let mut media = MediaBudget::after(&request.earlier_media);
+        let message = user_message(&request.prompt, &request.attachments, &mut media);
         // Over stdin rather than argv, which keeps the token out of the process list. The CLI
         // connects before it reads the message, so the first turn has the tools.
         let input = match &request.mcp {
@@ -212,6 +213,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         let live_output = LiveOutput::default();
         let queue = Queue::default();
         queue.state().access = access;
+        queue.state().media = media;
         let mut parser = ClaudeParser {
             requests: requests.clone(),
             live_output: live_output.clone(),
@@ -297,12 +299,12 @@ fn access(request: &TurnRequest) -> Access {
     }
 }
 
-fn user_message(prompt: &str, attachments: &[TurnAttachment]) -> String {
+fn user_message(prompt: &str, attachments: &[TurnAttachment], media: &mut MediaBudget) -> String {
     json!({
         "type": "user",
         "message": {
             "role": "user",
-            "content": claude_prompt::message_content(prompt, attachments),
+            "content": claude_prompt::message_content(prompt, attachments, media),
         },
     })
     .to_string()
@@ -338,6 +340,8 @@ struct QueueState {
     access: Access,
     /// Where the session works, as last reported.
     cwd: Option<String>,
+    /// The images and documents the conversation holds, as this process sent them.
+    media: MediaBudget,
 }
 
 impl Default for QueueState {
@@ -352,6 +356,7 @@ impl Default for QueueState {
             awaited: HashSet::new(),
             access: Access::default(),
             cwd: None,
+            media: MediaBudget::default(),
         }
     }
 }
@@ -435,7 +440,13 @@ fn next_turn(
         lines.push(mode.to_string());
         queue.access = access;
     }
-    lines.push(user_message(&request.prompt, &request.attachments));
+    let mut media = MediaBudget::after(&request.earlier_media);
+    lines.push(user_message(
+        &request.prompt,
+        &request.attachments,
+        &mut media,
+    ));
+    queue.media = media;
     queue.turn_open = true;
     queue.answering = false;
     queue.interrupted = false;
@@ -509,7 +520,7 @@ impl RunningTurn for ClaudeTurn {
             "type": "user",
             "message": {
                 "role": "user",
-                "content": claude_prompt::message_content(prompt, attachments),
+                "content": claude_prompt::message_content(prompt, attachments, &mut queue.media),
             },
             "parent_tool_use_id": null,
             "uuid": message_id,
@@ -2368,6 +2379,7 @@ mod tests {
             cwd: cwd.into(),
             prompt: prompt.into(),
             attachments: Vec::new(),
+            earlier_media: Vec::new(),
             resume_session_id: Some("s1".into()),
             resume_session_at: None,
             model: Some("claude-opus-5-5".into()),

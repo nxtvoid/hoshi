@@ -9,7 +9,7 @@ use hoshi_core::{
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
 use std::sync::Arc;
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeBody, Request};
 use tauri::{App, AppHandle, Emitter, Manager, State};
 
 /// Every committed event reaches the UI here, in sequence order.
@@ -208,10 +208,71 @@ pub fn save_image(
     engine.save_image(&name, &mime_type, &data)
 }
 
-/// An image removed from the composer before it was sent.
+/// Saves a file the user is about to send. Its bytes are the request's body; its name and
+/// type come percent-encoded in the `x-name` and `x-mime-type` headers.
 #[tauri::command(async)]
-pub fn discard_image(engine: State<'_, Engine>, image: MessageAttachment) {
-    engine.discard_image(&image);
+pub fn save_file(
+    engine: State<'_, Engine>,
+    request: Request<'_>,
+) -> Result<MessageAttachment, CommandError> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err(CommandError::Internal {
+            detail: "the file's bytes are missing".into(),
+        });
+    };
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(percent_decoded)
+            .unwrap_or_default()
+    };
+    let mime_type = header("x-mime-type");
+    let mime_type = if mime_type.is_empty() {
+        "application/octet-stream".to_owned()
+    } else {
+        mime_type
+    };
+    engine.save_file(&header("x-name"), &mime_type, bytes)
+}
+
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escaped = (bytes[index] == b'%')
+            .then(|| text.get(index + 1..index + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                index += 3;
+            }
+            None => {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// An image or file removed from the composer before it was sent.
+#[tauri::command(async)]
+pub fn discard_attachment(engine: State<'_, Engine>, attachment: MessageAttachment) {
+    engine.discard_attachment(&attachment);
+}
+
+/// Where a sent image or file is saved, to open it; `None` when it is gone.
+#[tauri::command(async)]
+pub fn get_attachment_path(
+    engine: State<'_, Engine>,
+    attachment: MessageAttachment,
+) -> Option<String> {
+    engine.attachment_path(&attachment)
 }
 
 /// A sent image as a data URL, read when the transcript shows it.

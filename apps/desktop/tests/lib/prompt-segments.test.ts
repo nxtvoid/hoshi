@@ -9,10 +9,19 @@ const screenshot = {
   size: 2048
 }
 
+const report = {
+  type: 'file' as const,
+  id: 'file-1',
+  name: 'report.pdf',
+  mimeType: 'application/pdf',
+  size: 4096
+}
+
 const known = {
   pullRequests: new Set([12]),
   skills: new Set(['pdf', 'anthropic-skills:docx']),
-  images: [screenshot]
+  images: [screenshot],
+  files: [report]
 }
 
 const chips = (text: string) =>
@@ -64,4 +73,20 @@ test('an image the message sent shows as a chip with its name', () => {
       image: screenshot
     }
   ])
+})
+
+test('a file the message sent shows as a chip with its name', () => {
+  const segments = promptSegments('read [File #1], not [File #2]', known)
+  expect(segments.filter((segment) => segment.kind === 'attachedFile')).toEqual(
+    [
+      {
+        kind: 'attachedFile',
+        text: '[File #1]',
+        start: 5,
+        end: 14,
+        label: 'report.pdf',
+        file: report
+      }
+    ]
+  )
 })

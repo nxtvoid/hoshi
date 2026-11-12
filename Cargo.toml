@@ -31,6 +31,8 @@ tungstenite = { version = "0.27", default-features = false, features = ["handsha
 getrandom = "0.4"
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
+roxmltree = "0.20"
+zip = { version = "9", default-features = false, features = ["deflate"] }
 tauri-plugin-dialog = "2"
 
 [workspace.lints.rust]

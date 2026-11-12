@@ -35,7 +35,7 @@ pub struct SlashCommand {
     pub custom: bool,
 }
 
-/// Something sent along with a message's text: an image, or what a `#123` or
+/// Something sent along with a message's text: an image, a file, or what a `#123` or
 /// `$name` mention in the text stands for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
@@ -47,6 +47,13 @@ pub struct SlashCommand {
 pub enum MessageAttachment {
     /// Saved by the engine; `id` names its file.
     Image {
+        id: String,
+        name: String,
+        mime_type: String,
+        size: u64,
+    },
+    /// Any other file, saved by the engine as it was added; `id` names its folder.
+    File {
         id: String,
         name: String,
         mime_type: String,

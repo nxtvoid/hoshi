@@ -1,10 +1,25 @@
 import type { JSONContent } from '@tiptap/core'
 
-/** The composer's chips: what they stand for, and how the prompt writes them. */
-export type MentionKind = 'file' | 'pullRequest' | 'skill' | 'image'
+/**
+ * The composer's chips: what they stand for, and how the prompt writes them. A `file` is a
+ * path of the workspace; an `attachedFile` is a file attached to the draft.
+ */
+export type MentionKind =
+  | 'file'
+  | 'pullRequest'
+  | 'skill'
+  | 'image'
+  | 'attachedFile'
 
-/** An image chip in the draft's text, until sending numbers it. Its value is the image's key. */
-const IMAGE_CHIP = /\[image:([0-9a-f-]+)\]/g
+/**
+ * An image or file chip in the draft's text, until sending numbers it. Its value is the
+ * attachment's key.
+ */
+const ATTACHMENT_CHIP = /\[(?:image|file):([0-9a-f-]+)\]/g
+
+const isAttachmentChip = (node: JSONContent) =>
+  node.type === 'mention' &&
+  (node.attrs?.kind === 'image' || node.attrs?.kind === 'attachedFile')
 
 export function mentionSource(kind: MentionKind, value: string) {
   switch (kind) {
@@ -16,55 +31,59 @@ export function mentionSource(kind: MentionKind, value: string) {
       return `$${value}`
     case 'image':
       return `[image:${value}]`
+    case 'attachedFile':
+      return `[file:${value}]`
   }
 }
 
-/** The keys of the images the prompt's chips show, in order, each once. */
-export function imageChipKeys(text: string): string[] {
+/** The keys of the images and files the prompt's chips show, in order, each once. */
+export function attachmentChipKeys(text: string): string[] {
   return [
-    ...new Set(Array.from(text.matchAll(IMAGE_CHIP), (match) => match[1] ?? ''))
+    ...new Set(
+      Array.from(text.matchAll(ATTACHMENT_CHIP), (match) => match[1] ?? '')
+    )
   ]
 }
 
 /**
- * The prompt as sent: each image chip becomes `[Image #n]`, numbered as its image is among
- * those sent, the way Claude Code names pasted images. A chip whose image is gone goes too.
+ * The prompt as sent: each image or file chip becomes its label in brackets, such as
+ * `[Image #1]` or `[File #2]`, the way Claude Code names pasted images. A chip whose
+ * attachment is gone goes too.
  */
-export function numberImageChips(
+export function numberAttachmentChips(
   text: string,
-  numbers: ReadonlyMap<string, number>
+  labels: ReadonlyMap<string, string>
 ): string {
   return text
-    .replace(IMAGE_CHIP, (_, key: string) => {
-      const number = numbers.get(key)
-      return number === undefined ? '' : `[Image #${number}]`
+    .replace(ATTACHMENT_CHIP, (_, key: string) => {
+      const label = labels.get(key)
+      return label === undefined ? '' : `[${label}]`
     })
     .replace(/[ \t]{2,}/g, ' ')
     .trim()
 }
 
 /**
- * A saved draft with the image chips of the images it still has, each showing `sources`'
- * preview of it; the chips of images gone are left out.
+ * A saved draft with the chips of the images and files it still has, by key; an image's
+ * chip shows `sources`' preview of it. The chips of attachments gone are left out.
  */
-export function keepImageChips(
+export function keepAttachmentChips(
   doc: JSONContent,
   sources: ReadonlyMap<string, string>
 ): JSONContent {
-  const isImageChip = (node: JSONContent) =>
-    node.type === 'mention' && node.attrs?.kind === 'image'
   return {
     ...doc,
     content: doc.content
       ?.filter(
-        (node) => !isImageChip(node) || sources.has(String(node.attrs?.value))
+        (node) =>
+          !isAttachmentChip(node) || sources.has(String(node.attrs?.value))
       )
       .map((node) => {
-        if (isImageChip(node)) {
+        if (isAttachmentChip(node) && node.attrs?.kind === 'image') {
           const src = sources.get(String(node.attrs?.value))
           return { ...node, attrs: { ...node.attrs, src } }
         }
-        return node.content ? keepImageChips(node, sources) : node
+        return node.content ? keepAttachmentChips(node, sources) : node
       })
   }
 }

@@ -1353,10 +1353,13 @@ fn message_events(
         return Err(CommandError::ThreadNotFound { thread_id });
     };
     let text = text.trim().to_owned();
-    let images = attachments
-        .iter()
-        .filter(|attachment| matches!(attachment, MessageAttachment::Image { .. }));
-    if text.is_empty() && images.count() == 0 {
+    let carried = attachments.iter().any(|attachment| {
+        matches!(
+            attachment,
+            MessageAttachment::Image { .. } | MessageAttachment::File { .. }
+        )
+    });
+    if text.is_empty() && !carried {
         return Err(CommandError::EmptyMessage);
     }
     let mut events = Vec::with_capacity(5);
@@ -1992,7 +1995,7 @@ pub fn turn_failed(reason: TurnFailure) -> ProviderOutput {
 }
 
 /// The message's first line of prose, without its markdown, or the name of its
-/// first image when it has none. Stands until a generated title replaces it.
+/// first image or file when it has none. Stands until a generated title replaces it.
 fn title_from(text: &str, attachments: &[MessageAttachment]) -> String {
     let mut in_code = false;
     let prose = text.lines().find_map(|line| {
@@ -2017,12 +2020,14 @@ fn title_from(text: &str, attachments: &[MessageAttachment]) -> String {
         let line = line.trim();
         (!line.is_empty() && line != "---").then(|| line.to_owned())
     });
-    let image = attachments.iter().find_map(|attachment| match attachment {
-        MessageAttachment::Image { name, .. } => Some(name.clone()),
+    let attached = attachments.iter().find_map(|attachment| match attachment {
+        MessageAttachment::Image { name, .. } | MessageAttachment::File { name, .. } => {
+            Some(name.clone())
+        }
         _ => None,
     });
     prose
-        .or(image)
+        .or(attached)
         .unwrap_or_default()
         .chars()
         .take(TITLE_MAX_CHARS)
@@ -2399,6 +2404,27 @@ const a = 1
                 rewind: Some(Rewind::Start),
             }
         )));
+    }
+
+    #[test]
+    fn a_file_alone_is_a_message_named_after_it() {
+        let mut model = model_with_thread();
+        let file = MessageAttachment::File {
+            id: "f1".into(),
+            name: "report.pdf".into(),
+            mime_type: "application/pdf".into(),
+            size: 10,
+        };
+        let command = Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: "m1".into(),
+            text: String::new(),
+            attachments: vec![file],
+        };
+
+        run(&mut model, command).unwrap();
+
+        assert_eq!(model.thread("t").unwrap().title, "report.pdf");
     }
 
     fn rewind_of(events: &[Event]) -> Option<Rewind> {

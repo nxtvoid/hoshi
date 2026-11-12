@@ -128,7 +128,7 @@ export function ThreadList() {
  */
 function NewThreadDrafts({ view }: { view: SidebarView }) {
   const drafts = useDraftStore((state) => state.drafts)
-  const draftImages = useDraftStore((state) => state.images)
+  const draftAttachments = useDraftStore((state) => state.attachments)
   const forgetDrafts = useDraftStore((state) => state.forget)
   const projects = useAppStore((state) => state.projects)
   const selectedProjectId = useAppStore((state) => state.selectedProjectId)
@@ -143,11 +143,14 @@ function NewThreadDrafts({ view }: { view: SidebarView }) {
   const wanted =
     view === 'inbox'
       ? [
-          ...new Set([...Object.keys(drafts), ...Object.keys(draftImages)])
+          ...new Set([...Object.keys(drafts), ...Object.keys(draftAttachments)])
         ].filter((key) => key.startsWith('new:'))
       : [draftKey(null, selectedProjectId, view === 'chats')]
   const rows = wanted.flatMap((key): DraftRow[] => {
-    if (!hasDraft({ drafts, images: draftImages }, key) || key === shown) {
+    if (
+      !hasDraft({ drafts, attachments: draftAttachments }, key) ||
+      key === shown
+    ) {
       return []
     }
     if (key === 'new:chat') return [{ key, project: null }]

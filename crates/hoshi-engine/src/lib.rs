@@ -8,6 +8,7 @@ mod browser;
 mod checkpoint;
 mod delegation;
 mod diff;
+mod document_text;
 mod editors;
 mod folders;
 mod git;
@@ -1878,9 +1879,28 @@ impl Engine {
             .map_err(|detail| CommandError::Internal { detail })
     }
 
-    /// An image the user removed before sending it.
-    pub fn discard_image(&self, image: &MessageAttachment) {
-        lock(&self.state).attachments.remove(image);
+    /// Saves a file the user is about to send, and the text of a document beside it.
+    pub fn save_file(
+        &self,
+        name: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> Result<MessageAttachment, CommandError> {
+        let attachments = lock(&self.state).attachments.clone();
+        attachments
+            .save_file(name, mime_type, bytes)
+            .map_err(|detail| CommandError::Internal { detail })
+    }
+
+    /// An image or file the user removed before sending it.
+    pub fn discard_attachment(&self, attachment: &MessageAttachment) {
+        lock(&self.state).attachments.remove(attachment);
+    }
+
+    /// Where a saved image or file is, to open it; `None` when it is gone.
+    pub fn attachment_path(&self, attachment: &MessageAttachment) -> Option<String> {
+        let path = lock(&self.state).attachments.path_of(attachment)?;
+        path.is_file().then(|| path.to_string_lossy().into_owned())
     }
 
     /// An image on this machine an agent's answer shows by its absolute path, as a data URL;
@@ -2346,7 +2366,7 @@ impl State {
     }
 
     /// Worktrees (with their repository) that a deletion leaves without a thread.
-    /// The images in the transcripts of the threads `command` deletes.
+    /// The images and files in the transcripts of the threads `command` deletes.
     fn images_freed_by(&self, command: &Command) -> Vec<MessageAttachment> {
         self.threads_deleted_by(command)
             .into_iter()
@@ -2355,7 +2375,12 @@ impl State {
                 ItemContent::UserMessage { attachments, .. } => attachments,
                 _ => Vec::new(),
             })
-            .filter(|attachment| matches!(attachment, MessageAttachment::Image { .. }))
+            .filter(|attachment| {
+                matches!(
+                    attachment,
+                    MessageAttachment::Image { .. } | MessageAttachment::File { .. }
+                )
+            })
             .collect()
     }
 
@@ -2914,7 +2939,7 @@ impl State {
                         let request = TitleRequest {
                             context: text.clone(),
                             previous_title: None,
-                            images: titles::image_names(attachments),
+                            images: titles::attachment_names(attachments),
                             model: None,
                             instructions: String::new(),
                         };
@@ -3151,16 +3176,38 @@ impl State {
     fn turn_attachments(&self, attachments: Vec<MessageAttachment>) -> Vec<TurnAttachment> {
         attachments
             .into_iter()
-            .map(|attachment| TurnAttachment {
-                path: match &attachment {
-                    MessageAttachment::Image { id, mime_type, .. } => {
-                        self.attachments.path(id, mime_type)
+            .map(|attachment| {
+                let path = self.attachments.path_of(&attachment);
+                let extracted_text = match &attachment {
+                    MessageAttachment::File { .. } => {
+                        path.as_deref().and_then(document_text::sidecar)
                     }
                     _ => None,
-                },
-                attachment,
+                };
+                TurnAttachment {
+                    path,
+                    extracted_text,
+                    attachment,
+                }
             })
             .collect()
+    }
+
+    /// The images and files the thread's earlier messages carried since its conversation
+    /// last compacted, leaving out those of the message about to go, `current`.
+    fn earlier_media(&self, thread_id: &str, current: &[TurnAttachment]) -> Vec<TurnAttachment> {
+        let earlier = match self.store.media_since_compaction(thread_id) {
+            Ok(earlier) => earlier,
+            Err(error) => {
+                eprintln!("hoshi: failed to read the media of thread {thread_id}: {error}");
+                return Vec::new();
+            }
+        };
+        let earlier = earlier
+            .into_iter()
+            .filter(|attachment| !current.iter().any(|sent| sent.attachment == *attachment))
+            .collect();
+        self.turn_attachments(earlier)
     }
 
     /// Asks the provider for a title in the background, retrying a first title twice.
@@ -3892,6 +3939,7 @@ fn start_turn(
         return;
     };
     let attachments = state.turn_attachments(attachments);
+    let earlier_media = state.earlier_media(thread_id, &attachments);
     let depth = state.depth(thread_id);
     let mcp = state
         .mcp
@@ -3916,6 +3964,7 @@ fn start_turn(
         cwd: cwd.to_owned(),
         prompt,
         attachments,
+        earlier_media,
         resume_session_id: thread.session_id.clone(),
         resume_session_at: thread.resume_at.clone(),
         model: thread.model.clone(),

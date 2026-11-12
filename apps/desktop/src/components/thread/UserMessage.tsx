@@ -8,6 +8,7 @@ import { CopyButton } from '@hoshi/ui/components/copy-button'
 import { Markdown } from '@/components/markdown/Markdown'
 import type { MessageAttachment } from '@/bindings/MessageAttachment'
 import { ImageDialog } from '@/components/markdown/ImageMention'
+import { FileMention } from '@/components/markdown/FileMention'
 import { ArrowTurnForwardIcon, Copy01Icon } from '@hugeicons/core-free-icons'
 import {
   type ReactNode,
@@ -18,6 +19,19 @@ import {
 } from 'react'
 
 type Image = Extract<MessageAttachment, { type: 'image' }>
+type AttachedFile = Extract<MessageAttachment, { type: 'file' }>
+
+/** The files whose `[File #n]` the text doesn't show, which show above it instead. */
+function filesOutsideText(text: string, attachments: MessageAttachment[]) {
+  const shown = new Set(
+    Array.from(text.matchAll(/\[File #(\d+)\]/g), (match) => Number(match[1]))
+  )
+  return attachments
+    .filter(
+      (attachment): attachment is AttachedFile => attachment.type === 'file'
+    )
+    .filter((_, index) => !shown.has(index + 1))
+}
 
 type UserMessageProps = {
   text: string
@@ -40,6 +54,7 @@ export function UserMessage({
   const images = attachments.filter(
     (attachment): attachment is Image => attachment.type === 'image'
   )
+  const files = filesOutsideText(text, attachments)
   const time = createdAt ? formatClockTime(createdAt, getLocale()) : ''
 
   return (
@@ -59,6 +74,27 @@ export function UserMessage({
           {images.map((image) => (
             <li key={image.id}>
               <MessageImage image={image} />
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {files.length > 0 ? (
+        <ul className='flex max-w-[85%] flex-wrap justify-end gap-1.5 text-sm'>
+          {files.map((file) => (
+            <li key={file.id}>
+              <FileMention
+                node={{
+                  type: 'element',
+                  tagName: 'span',
+                  properties: {
+                    dataId: file.id,
+                    dataName: file.name,
+                    dataMimeType: file.mimeType,
+                    dataSize: file.size
+                  },
+                  children: []
+                }}
+              />
             </li>
           ))}
         </ul>

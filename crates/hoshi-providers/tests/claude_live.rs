@@ -19,6 +19,7 @@ fn a_real_turn_streams_a_reply_and_resumes_its_session() {
             cwd: cwd.clone(),
             prompt: prompt.into(),
             attachments: Vec::new(),
+            earlier_media: Vec::new(),
             resume_session_id: resume,
             resume_session_at: None,
             model: None,
@@ -81,6 +82,7 @@ fn a_message_sent_as_the_turn_starts_doesnt_take_the_place_of_its_prompt() {
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         prompt: "The first word is ALPHA. Wait for the second word.".into(),
         attachments: Vec::new(),
+        earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
         model: None,
@@ -180,7 +182,9 @@ fn a_real_turn_sees_an_attached_image() {
                 size: 0,
             },
             path: Some(path),
+            extracted_text: None,
         }],
+        earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
         model: None,
@@ -210,6 +214,132 @@ fn a_real_turn_sees_an_attached_image() {
     });
     assert!(
         reply.is_some_and(|text| text.contains("red")),
+        "{outputs:#?}"
+    );
+}
+
+/// A one-page PDF that shows `text`, with a cross-reference table PDF readers accept.
+fn pdf_showing(text: &str) -> Vec<u8> {
+    let stream = format!("BT /F1 24 Tf 72 700 Td ({text}) Tj ET");
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>".to_owned(),
+        format!("<< /Length {} >>
+stream
+{stream}
+endstream", stream.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+    ];
+    let mut pdf = String::from(
+        "%PDF-1.4
+",
+    );
+    let mut offsets = Vec::new();
+    for (index, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!(
+            "{} 0 obj
+{object}
+endobj
+",
+            index + 1
+        ));
+    }
+    let xref = pdf.len();
+    pdf.push_str(&format!(
+        "xref
+0 {}
+0000000000 65535 f 
+",
+        objects.len() + 1
+    ));
+    for offset in offsets {
+        pdf.push_str(&format!(
+            "{offset:010} 00000 n 
+"
+        ));
+    }
+    pdf.push_str(&format!(
+        "trailer
+<< /Size {} /Root 1 0 R >>
+startxref
+{xref}
+%%EOF
+",
+        objects.len() + 1
+    ));
+    pdf.into_bytes()
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_real_turn_reads_an_attached_pdf_and_a_file_by_its_path() {
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let dir = std::env::temp_dir().join("hoshi-live-files");
+    std::fs::create_dir_all(&dir).unwrap();
+    let pdf = dir.join("memo.pdf");
+    std::fs::write(&pdf, pdf_showing("The first code word is PELICAN.")).unwrap();
+    let notes = dir.join("notes.txt");
+    std::fs::write(
+        &notes,
+        "The second code word is HERON.
+",
+    )
+    .unwrap();
+    let file =
+        |name: &str, mime_type: &str, path: std::path::PathBuf| hoshi_providers::TurnAttachment {
+            attachment: hoshi_core::MessageAttachment::File {
+                id: name.into(),
+                name: name.into(),
+                mime_type: mime_type.into(),
+                size: 0,
+            },
+            path: Some(path),
+            extracted_text: None,
+        };
+    let (sender, receiver) = mpsc::channel();
+    let request = TurnRequest {
+        cwd: dir.to_string_lossy().into_owned(),
+        prompt: "[File #1] and [File #2] each hold one code word; read both files. Reply with just the two code words."
+            .into(),
+        attachments: vec![
+            file("memo.pdf", "application/pdf", pdf),
+            file("notes.txt", "text/plain", notes),
+        ],
+        earlier_media: Vec::new(),
+        resume_session_id: None,
+        resume_session_at: None,
+        model: None,
+        effort: Some(hoshi_core::Effort::Low),
+        fast_mode: false,
+        ultracode: false,
+        access_mode: hoshi_core::AccessMode::AcceptEdits,
+        plan_mode: false,
+        mcp: None,
+        instructions: None,
+        subagent_effort: SubagentEffort::Thread,
+        environment: Vec::new(),
+    };
+    let _turn = adapter
+        .start_turn(
+            request,
+            Box::new(move |output| {
+                let _ = sender.send(output);
+            }),
+        )
+        .unwrap();
+    let outputs: Vec<_> = receiver.iter().collect();
+
+    let reply: String = outputs
+        .iter()
+        .filter_map(|output| match output {
+            ProviderOutput::AssistantMessage { text, .. } => Some(text.to_lowercase()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        reply.contains("pelican") && reply.contains("heron"),
         "{outputs:#?}"
     );
 }
@@ -245,6 +375,7 @@ fn run_answering(
         cwd: cwd.to_string_lossy().into_owned(),
         prompt: prompt.into(),
         attachments: Vec::new(),
+        earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
         model: None,
@@ -476,6 +607,7 @@ fn a_stopped_subagent_ends_and_the_turn_goes_on() {
         cwd: cwd.to_string_lossy().into_owned(),
         prompt: "Use the Agent tool to launch one general-purpose subagent in the foreground whose only job is to run this exact shell command in the foreground: `1..40 | % { Start-Sleep 1; \"tick $_\" }` (or `for i in $(seq 40); do sleep 1; echo tick $i; done`) and then report done. When it returns, reply with one word.".into(),
         attachments: Vec::new(),
+        earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
         model: None,
@@ -590,6 +722,7 @@ fn run_acting(
         cwd: cwd.to_string_lossy().into_owned(),
         prompt: "Run this exact shell command in the foreground: `1..12 | % { Start-Sleep 1; \"tick $_\" }` (or `for i in $(seq 12); do sleep 1; echo tick $i; done`). Then reply with the last line it printed.".into(),
         attachments: Vec::new(),
+        earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
         model: None,
@@ -698,6 +831,7 @@ fn a_message_is_answered_at_once_while_a_subagent_keeps_working() {
         cwd: cwd.to_string_lossy().into_owned(),
         prompt: "Use the Agent tool to launch one general-purpose subagent IN THE FOREGROUND whose job is to run `1..12 | % { Start-Sleep 1; \"tick $_\" }` (or `for i in $(seq 12); do sleep 1; echo tick $i; done`) and report the last line. Then tell me the last line.".into(),
         attachments: Vec::new(),
+        earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
         model: None,
@@ -817,6 +951,7 @@ fn watched_request(cwd: &std::path::Path, prompt: &str, session: Option<String>)
         cwd: cwd.to_string_lossy().into_owned(),
         prompt: prompt.into(),
         attachments: Vec::new(),
+        earlier_media: Vec::new(),
         resume_session_id: session,
         resume_session_at: None,
         model: None,

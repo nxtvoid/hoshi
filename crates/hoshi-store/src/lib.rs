@@ -5,9 +5,9 @@
 //! thread projection must match `ReadModel::apply`; a test checks that.
 
 use hoshi_core::{
-    ContextUsage, Effort, Event, OpenToolCall, Project, PullRequestDetail, PullRequestWatch,
-    Snapshot, TaskPreview, Thread, ThreadContextUsage, ThreadItem, ThreadPullRequest, ThreadStatus,
-    TurnOutcome, UsageLimits, task_preview,
+    ContextUsage, Effort, Event, MessageAttachment, OpenToolCall, Project, PullRequestDetail,
+    PullRequestWatch, Snapshot, TaskPreview, Thread, ThreadContextUsage, ThreadItem,
+    ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits, task_preview,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, types::Type};
 use std::path::Path;
@@ -278,6 +278,17 @@ const ANSWERED_TASKS: &str = "
     SELECT json_extract(content_json, '$.taskResult') FROM thread_items
     WHERE json_extract(content_json, '$.kind') = 'userMessage'
       AND json_extract(content_json, '$.taskResult') IS NOT NULL";
+
+const MEDIA_SINCE_COMPACTION: &str = "
+    SELECT json_extract(content_json, '$.attachments')
+    FROM thread_items INDEXED BY thread_items_thread_kind
+    WHERE thread_id = ?1 AND json_extract(content_json, '$.kind') = 'userMessage'
+      AND ordinal > coalesce((
+          SELECT max(ordinal) FROM thread_items INDEXED BY thread_items_thread_kind
+          WHERE thread_id = ?1 AND json_extract(content_json, '$.kind') = 'compaction'
+            AND json_extract(content_json, '$.status') = 'done'), 0)
+      AND json_array_length(content_json, '$.attachments') > 0
+    ORDER BY ordinal";
 
 const THREAD_ITEMS: &str = "
     SELECT id, thread_id, created_at, content_json
@@ -689,6 +700,31 @@ impl Store {
             .prepare(ANSWERED_TASKS)?
             .query_map([], |row| row.get(0))?
             .collect::<Result<_, _>>()?)
+    }
+
+    /// The images and files the thread's messages carried since its conversation last
+    /// compacted, oldest first.
+    pub fn media_since_compaction(
+        &self,
+        thread_id: &str,
+    ) -> Result<Vec<MessageAttachment>, StoreError> {
+        let lists = self
+            .conn
+            .prepare_cached(MEDIA_SINCE_COMPACTION)?
+            .query_map([thread_id], |row| {
+                json_document_column::<Vec<MessageAttachment>>(row, 0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(lists
+            .into_iter()
+            .flatten()
+            .filter(|attachment| {
+                matches!(
+                    attachment,
+                    MessageAttachment::Image { .. } | MessageAttachment::File { .. }
+                )
+            })
+            .collect())
     }
 
     /// A thread's transcript, oldest first.
@@ -1185,9 +1221,9 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
 mod tests {
     use super::*;
     use hoshi_core::{
-        AccessMode, BankedResets, ChecksState, Command, ForgeKind, ItemContent, Mergeability,
-        ProviderOutput, PullRequest, PullRequestState, ReadModel, ToolDetail, UsageWindow,
-        UsageWindowKind, decide, record_output,
+        AccessMode, BankedResets, ChecksState, Command, CompactionStatus, ForgeKind, ItemContent,
+        Mergeability, ProviderOutput, PullRequest, PullRequestState, ReadModel, ToolDetail,
+        UsageWindow, UsageWindowKind, decide, record_output,
     };
 
     const NOW: &str = "2026-11-07T12:00:00.000Z";
@@ -2054,6 +2090,7 @@ mod tests {
             (LAST_ANSWER, "INDEX thread_items_thread_kind"),
             (LAST_PLAN, "INDEX thread_items_thread_kind"),
             (LAST_DECISION, "INDEX thread_items_thread_kind"),
+            (MEDIA_SINCE_COMPACTION, "INDEX thread_items_thread_kind"),
             (PAGE_ITEMS, "INDEX thread_items_thread_ordinal"),
             (THREAD_ITEMS, "INDEX thread_items_thread_ordinal"),
             (LATEST_MESSAGES, "COVERING INDEX thread_items_thread_kind"),
@@ -2109,6 +2146,70 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
+    }
+
+    fn message_with(thread_id: &str, id: &str, attachments: Vec<MessageAttachment>) -> Event {
+        item(
+            thread_id,
+            id,
+            ItemContent::UserMessage {
+                text: String::new(),
+                attachments,
+                steer: false,
+                task_result: None,
+                pull_request_update: None,
+                rewind: None,
+            },
+        )
+    }
+
+    fn compaction(thread_id: &str, id: &str, status: CompactionStatus) -> Event {
+        item(
+            thread_id,
+            id,
+            ItemContent::Compaction {
+                status,
+                before_tokens: None,
+                after_tokens: None,
+                error: None,
+            },
+        )
+    }
+
+    #[test]
+    fn media_counts_from_the_last_finished_compaction() {
+        let mut store = Store::open_in_memory().unwrap();
+        let file = |id: &str| MessageAttachment::File {
+            id: id.into(),
+            name: format!("{id}.pdf"),
+            mime_type: "application/pdf".into(),
+            size: 1,
+        };
+        store
+            .append(
+                &[
+                    message_with("t", "m1", vec![file("old")]),
+                    compaction("t", "c1", CompactionStatus::Done),
+                    message_with(
+                        "t",
+                        "m2",
+                        vec![
+                            file("kept"),
+                            MessageAttachment::Skill { name: "pdf".into() },
+                        ],
+                    ),
+                    compaction("t", "c2", CompactionStatus::Failed),
+                    message_with("t", "m3", vec![file("last")]),
+                    message_with("other", "m1", vec![file("elsewhere")]),
+                ],
+                NOW,
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.media_since_compaction("t").unwrap(),
+            [file("kept"), file("last")]
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { cn, formatFileSize } from '@hoshi/utils'
-import { imageFiles } from '@/lib/images'
 import { CHAT_LANE } from '@/lib/chat-lane'
+import { isMac } from '@/components/brand/EditorIcon'
 import { m } from '@/paraglide/messages'
 import { getLocale } from '@/paraglide/runtime'
 import { useAppStore } from '@/state/app-store'
@@ -20,10 +20,11 @@ import {
   PlanningTasksNote,
   RequestPanel
 } from './RequestPanel'
-import { ComposerImages } from './ComposerImages'
+import { ComposerAttachments } from './ComposerAttachments'
 import { ImageDialog } from '@/components/markdown/ImageMention'
 import { Button } from '@hoshi/ui/components/button'
-import { useComposerImages } from './use-composer-images'
+import { openAttachment } from '@/components/markdown/open-local-file'
+import { toastManager } from '@hoshi/ui/components/toast'
 import type { CommandError } from '@/bindings/CommandError'
 import { useModelPickerStore } from '@/state/model-picker-store'
 import { usePromptHistoryStore } from '@/state/prompt-history-store'
@@ -36,17 +37,27 @@ import {
 import { ComposerSuggestions, suggestionOptionId } from './ComposerSuggestions'
 import { usePendingRequest, useRequestActions } from './use-request-actions'
 import {
-  imageChipKeys,
+  attachmentChipKeys,
   joinDocuments,
-  numberImageChips,
-  keepImageChips,
+  numberAttachmentChips,
+  keepAttachmentChips,
   withoutImageSources
 } from '@/lib/composer-markdown'
 import {
-  type PastedImages,
-  pastedImages,
-  readPastedImages
-} from '@/lib/pasted-images'
+  type PastedFiles,
+  pastedFiles,
+  readPastedFiles
+} from '@/lib/pasted-files'
+import {
+  type AttachmentProblem,
+  attachmentProblem,
+  formatAttachmentLimit,
+  pastedTextFileName
+} from '@/lib/attachment-files'
+import {
+  type ComposerAttachment,
+  useComposerAttachments
+} from './use-composer-attachments'
 import {
   ArrowUp02Icon,
   Attachment01Icon,
@@ -81,8 +92,6 @@ type ComposerProps = {
   /** The thread's working directory, to show paths relative to it. */
   cwd?: string | null
 }
-
-const IMAGE_TYPES = 'image/png,image/jpeg,image/gif,image/webp,image/*'
 
 /** As tall as one line of the docked editor, so its buttons center on it. */
 const DOCKED_BUTTON = 'flex h-8 shrink-0 items-center'
@@ -140,16 +149,23 @@ export function Composer({
   const editorRef = useRef<ComposerEditorHandle>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const listId = useId()
-  const images = useComposerImages(draftKey)
+  const files = useComposerAttachments(draftKey)
   /** The draft image shown large, by its key. */
   const [viewing, setViewing] = useState<string | null>(null)
-  const viewed = images.images.find((image) => image.key === viewing)
+  const viewed = files.attachments.find(
+    (attachment) => attachment.key === viewing && attachment.kind === 'image'
+  )
   const [initialContent] = useState(
     () =>
       initialDraft &&
-      keepImageChips(
+      keepAttachmentChips(
         initialDraft,
-        new Map(images.images.map((image) => [image.key, image.previewUrl]))
+        new Map(
+          files.attachments.map((attachment) => [
+            attachment.key,
+            attachment.previewUrl
+          ])
+        )
       )
   )
   const history = usePromptHistoryStore((state) => state.entries)
@@ -160,44 +176,55 @@ export function Composer({
   const [, updateAccess] = useAccess()
   const threadId = useAppStore((state) => state.selectedThreadId)
   const fill = useComposerFillStore((state) => state.fill)
-  const restoreImages = images.restore
+  const restoreAttachments = files.restore
 
   useEffect(() => {
     if (!fill || fill.threadId !== threadId) return
     editorRef.current?.setText(fill.text)
-    restoreImages(fill.attachments, useImageStore.getState().urls)
+    restoreAttachments(fill.attachments, useImageStore.getState().urls)
     useComposerFillStore.getState().done()
-  }, [fill, threadId, restoreImages])
+  }, [fill, threadId, restoreAttachments])
   useEffect(() => {
     editorRef.current?.setImageSources(
       new Map(
-        images.images.flatMap((image) =>
-          image.previewUrl ? [[image.key, image.previewUrl]] : []
+        files.attachments.flatMap((attachment) =>
+          attachment.kind === 'image' && attachment.previewUrl
+            ? [[attachment.key, attachment.previewUrl]]
+            : []
         )
       )
     )
-  }, [images.images])
+  }, [files.attachments])
+
   const request = usePendingRequest()
   const requestActions = useRequestActions(request)
   const compaction = useCompactionDue()
   const { text } = snapshot
-  const chipKeys = imageChipKeys(text)
-  /** The images the message goes with: one whose chip was taken out of the text is left out. */
-  const attached = images.images.filter(
-    (image) => !image.chipped || chipKeys.includes(image.key)
+  const chipKeys = attachmentChipKeys(text)
+  /** What the message goes with: an attachment whose chip was taken out of the text is left out. */
+  const attached = files.attachments.filter(
+    (attachment) => !attachment.chipped || chipKeys.includes(attachment.key)
   )
-  const savingImages = attached.some((image) => !image.saved && !image.failed)
+  /** The files with a chip in the text show only there, unless they failed. */
+  const shown = attached.filter(
+    (attachment) =>
+      attachment.kind === 'image' || !attachment.chipped || attachment.failed
+  )
+  const saving = attached.some(
+    (attachment) => !attachment.saved && !attachment.failed
+  )
   /** A secret is typed in its own card, so it never reaches the chat. */
   const answering =
     request !== null &&
     request.content.kind !== 'secretRequest' &&
     text.trim() !== ''
   const written =
-    text.trim() !== '' || attached.some((image) => image.saved !== null)
+    text.trim() !== '' ||
+    attached.some((attachment) => attachment.saved !== null)
   /** A message sent while the agent works joins its turn. */
   const canSend = request
     ? answering && !sending
-    : written && !savingImages && !sending
+    : written && !saving && !sending
   const hero = variant === 'hero'
   const stacked = hero || tall
 
@@ -261,31 +288,82 @@ export function Composer({
     if (next.empty) setTall(false)
   }
 
-  /** Adds images to the draft and, when the prompt has text, chips for them at the caret. */
-  const attach = (files: File[]) => {
-    const added = images.add(files)
+  /**
+   * Adds the files that fit to the draft, with chips for them at the caret: a file's always,
+   * an image's when the prompt has text. Says why any stayed out. Returns those added.
+   */
+  const attach = (added: File[]): ComposerAttachment[] => {
+    const problems: AttachmentProblem[] = []
+    const accepted: File[] = []
+    for (const file of added) {
+      const found = attachmentProblem(
+        file,
+        files.attachments.length + accepted.length
+      )
+      if (found) problems.push(found)
+      else accepted.push(file)
+    }
+    for (const message of new Set(problems.map(problemMessage))) {
+      toastManager.add({
+        type: 'error',
+        title: message,
+        data: { scope: threadId }
+      })
+    }
+    if (accepted.length === 0) return []
+    const attachments = files.add(accepted)
     const locale = getLocale()
-    const inText = editorRef.current?.insertImages(
-      added.map((image) => ({
-        key: image.key,
-        name: image.name,
-        detail: formatFileSize(image.size, locale),
-        previewUrl: image.previewUrl
+    const chipped = editorRef.current?.insertAttachments(
+      attachments.map((attachment) => ({
+        key: attachment.key,
+        kind: attachment.kind === 'image' ? 'image' : 'attachedFile',
+        name: attachment.name,
+        detail: formatFileSize(attachment.size, locale),
+        previewUrl: attachment.previewUrl
       }))
     )
-    if (inText) images.markChipped(added.map((image) => image.key))
+    if (chipped?.length) files.markChipped(chipped)
+    return attachments
   }
 
-  /** A path that turns out to be no image file is pasted as the text it was. */
-  const addImages = async (pasted: PastedImages) => {
-    const files = await readPastedImages(pasted)
-    if (files) attach(files)
+  /** A path that turns out to be no file is pasted as the text it was. */
+  const addPasted = async (pasted: PastedFiles) => {
+    const read = await readPastedFiles(pasted)
+    if (read) attach(read)
     else if (pasted.kind === 'paths') editorRef.current?.paste(pasted.text)
   }
 
-  const removeImage = (key: string) => {
-    images.remove(key)
-    editorRef.current?.removeImage(key)
+  /** A large paste joins the draft as a text file, unless a request waits for an answer. */
+  const attachPastedText = (pasted: string) => {
+    if (request) return false
+    const name = pastedTextFileName(
+      files.attachments.map((attachment) => attachment.name)
+    )
+    const [added] = attach([
+      new File([pasted], name, { type: 'text/plain;charset=utf-8' })
+    ])
+    if (added) {
+      toastManager.add({
+        type: 'info',
+        title: m.composer_pasted_text_attached({ name }),
+        description: m.composer_pasted_text_keep_inline({
+          size: formatFileSize(added.size, getLocale()),
+          shortcut: isMac() ? '⌘⇧V' : 'Ctrl+Shift+V'
+        }),
+        data: { hideCopyButton: true }
+      })
+    }
+    return true
+  }
+
+  const removeAttachment = (key: string) => {
+    files.remove(key)
+    editorRef.current?.removeAttachment(key)
+  }
+
+  const openDraftAttachment = (attachment: ComposerAttachment) => {
+    if (attachment.kind === 'image') setViewing(attachment.key)
+    else if (attachment.saved) openAttachment(attachment.saved)
   }
 
   const runAction = (action: ComposerAction) => {
@@ -355,10 +433,10 @@ export function Composer({
     setSending(true)
     const answered =
       request.content.kind === 'questions'
-        ? requestActions.advance(numberImageChips(text, new Map()))
+        ? requestActions.advance(numberAttachmentChips(text, new Map()))
         : await requestActions.decide(
             'decline',
-            numberImageChips(text, new Map())
+            numberAttachmentChips(text, new Map())
           )
     setSending(false)
     if (!answered) return
@@ -381,27 +459,24 @@ export function Composer({
       return
     }
     if (!canSend) return
-    // Images go in the order their chips show them, then the rest, so `[Image #n]` names
-    // the image sent nth.
-    const saved = attached.filter((image) => image.saved !== null)
+    // Attachments go in the order their chips show them, then the rest, so `[Image #n]`
+    // names the image sent nth and `[File #n]` the file sent nth.
+    const saved = attached.filter((attachment) => attachment.saved !== null)
     const inText = chipKeys.flatMap(
-      (key) => saved.find((image) => image.key === key) ?? []
+      (key) => saved.find((attachment) => attachment.key === key) ?? []
     )
     const ordered = [
       ...inText,
-      ...saved.filter((image) => !inText.includes(image))
+      ...saved.filter((attachment) => !inText.includes(attachment))
     ]
-    const prompt = numberImageChips(
-      text,
-      new Map(ordered.map((image, index) => [image.key, index + 1]))
-    )
+    const prompt = numberAttachmentChips(text, attachmentLabels(ordered))
     const attachments = [
-      ...ordered.flatMap((image) => image.saved ?? []),
+      ...ordered.flatMap((attachment) => attachment.saved ?? []),
       ...editor.mentions()
     ]
     const compactFirst = compaction?.compact === true && !isCompactCommand(text)
     const doc = editor.document()
-    const taken = images.take()
+    const taken = files.take()
     setSending(true)
     setRecalled(undefined)
     saveDraft(draftKey, null)
@@ -410,13 +485,13 @@ export function Composer({
     setSending(false)
     if (sent) {
       remember(prompt)
-      images.release(taken.filter((image) => ordered.includes(image)))
-      images.discard(taken.filter((image) => !ordered.includes(image)))
+      files.release(taken.filter((attachment) => ordered.includes(attachment)))
+      files.discard(taken.filter((attachment) => !ordered.includes(attachment)))
       return
     }
     const restored = joinDocuments(doc, editorRef.current?.document() ?? null)
     saveDraft(draftKey, restored && withoutImageSources(restored))
-    images.putBack(taken)
+    files.putBack(taken)
     if (restored) editorRef.current?.setDocument(restored)
   }
 
@@ -502,7 +577,7 @@ export function Composer({
             type='button'
             size='icon-sm'
             variant='ghost'
-            aria-label={m.composer_attach_images()}
+            aria-label={m.composer_attach_files()}
             className='text-muted-foreground shrink-0 rounded-full'
             onClick={() => fileInputRef.current?.click()}
           />
@@ -510,7 +585,7 @@ export function Composer({
       >
         <HugeiconsIcon icon={Attachment01Icon} strokeWidth={2} />
       </TooltipTrigger>
-      <TooltipContent>{m.composer_attach_images()}</TooltipContent>
+      <TooltipContent>{m.composer_attach_files()}</TooltipContent>
     </Tooltip>
   )
 
@@ -591,17 +666,17 @@ export function Composer({
           onDrop={(event) => {
             event.preventDefault()
             setDragging(false)
-            const dropped = pastedImages(event.dataTransfer, {
+            const dropped = pastedFiles(event.dataTransfer, {
               orClipboard: false
             })
-            if (dropped) void addImages(dropped)
+            if (dropped) void addPasted(dropped)
           }}
         >
-          {attached.length > 0 ? (
-            <ComposerImages
-              images={attached}
-              onOpen={setViewing}
-              onRemove={removeImage}
+          {shown.length > 0 ? (
+            <ComposerAttachments
+              attachments={shown}
+              onOpen={openDraftAttachment}
+              onRemove={removeAttachment}
             />
           ) : null}
           <div
@@ -627,8 +702,14 @@ export function Composer({
                 }
                 onBlur={flushDrafts}
                 onKeyDown={onKeyDown}
-                onImages={(pasted) => void addImages(pasted)}
-                onOpenImage={setViewing}
+                onFiles={(pasted) => void addPasted(pasted)}
+                onLargeText={attachPastedText}
+                onOpenAttachment={(key) => {
+                  const attachment = files.attachments.find(
+                    (candidate) => candidate.key === key
+                  )
+                  if (attachment) openDraftAttachment(attachment)
+                }}
               />
             </div>
             {stacked ? (
@@ -643,11 +724,10 @@ export function Composer({
           <input
             ref={fileInputRef}
             type='file'
-            accept={IMAGE_TYPES}
             multiple
             hidden
             onChange={(event) => {
-              attach(imageFiles(event.currentTarget))
+              attach(Array.from(event.currentTarget.files ?? []))
               event.currentTarget.value = ''
             }}
           />
@@ -664,6 +744,35 @@ export function Composer({
       />
     </div>
   )
+}
+
+/** `Image #n` and `File #n` for each attachment, numbered among its kind in `ordered`. */
+function attachmentLabels(ordered: ComposerAttachment[]) {
+  const counts = { image: 0, file: 0 }
+  return new Map(
+    ordered.map((attachment) => {
+      const number = ++counts[attachment.kind]
+      const label =
+        attachment.kind === 'image' ? `Image #${number}` : `File #${number}`
+      return [attachment.key, label]
+    })
+  )
+}
+
+function problemMessage(problem: AttachmentProblem) {
+  switch (problem.kind) {
+    case 'tooMany':
+      return m.composer_attachments_too_many({ max: problem.max })
+    case 'unsupportedImage':
+      return m.composer_attachment_unsupported_image({ name: problem.name })
+    case 'empty':
+      return m.composer_attachment_empty({ name: problem.name })
+    case 'tooLarge':
+      return m.composer_attachment_too_large({
+        name: problem.name,
+        max: formatAttachmentLimit(problem.max)
+      })
+  }
 }
 
 function ComposerFooter() {

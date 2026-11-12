@@ -2,11 +2,11 @@ import { expect, test } from 'bun:test'
 import type { JSONContent } from '@tiptap/core'
 import {
   fromText,
-  imageChipKeys,
+  attachmentChipKeys,
   joinDocuments,
-  numberImageChips,
+  numberAttachmentChips,
   toMarkdown,
-  keepImageChips
+  keepAttachmentChips
 } from '../../src/lib/composer-markdown'
 
 const text = (value: string, ...marks: string[]): JSONContent => ({
@@ -141,26 +141,29 @@ test('image chips are numbered as their images are sent', () => {
           { type: 'text', text: ' and ' },
           { type: 'mention', attrs: { kind: 'image', value: B } },
           { type: 'text', text: ' ' },
-          { type: 'mention', attrs: { kind: 'image', value: 'c0ffee' } }
+          { type: 'mention', attrs: { kind: 'image', value: 'c0ffee' } },
+          { type: 'text', text: ' in ' },
+          { type: 'mention', attrs: { kind: 'attachedFile', value: 'f00d' } }
         ]
       }
     ]
   }
   const text = toMarkdown(doc)
 
-  expect(imageChipKeys(text)).toEqual([B, A, 'c0ffee'])
+  expect(attachmentChipKeys(text)).toEqual([B, A, 'c0ffee', 'f00d'])
   expect(
-    numberImageChips(
+    numberAttachmentChips(
       text,
       new Map([
-        [B, 1],
-        [A, 2]
+        [B, 'Image #1'],
+        [A, 'Image #2'],
+        ['f00d', 'File #1']
       ])
     )
-  ).toBe('compare [Image #1] with [Image #2] and [Image #1]')
+  ).toBe('compare [Image #1] with [Image #2] and [Image #1] in [File #1]')
 })
 
-test('a saved draft keeps the chips of the images it still has', () => {
+test('a saved draft keeps the chips of the images and files it still has', () => {
   const draft: JSONContent = {
     type: 'doc',
     content: [
@@ -169,15 +172,24 @@ test('a saved draft keeps the chips of the images it still has', () => {
         content: [
           { type: 'text', text: 'see ' },
           { type: 'mention', attrs: { kind: 'image', value: A } },
-          { type: 'mention', attrs: { kind: 'file', value: 'src/a.ts' } }
+          { type: 'mention', attrs: { kind: 'file', value: 'src/a.ts' } },
+          { type: 'mention', attrs: { kind: 'attachedFile', value: B } }
         ]
       }
     ]
   }
 
-  expect(toMarkdown(keepImageChips(draft, new Map()))).toBe('see @src/a.ts')
-  const kept = keepImageChips(draft, new Map([[A, 'data:image/png;base64,x']]))
-  expect(toMarkdown(kept)).toBe(`see [image:${A}]@src/a.ts`)
+  expect(toMarkdown(keepAttachmentChips(draft, new Map()))).toBe(
+    'see @src/a.ts'
+  )
+  const kept = keepAttachmentChips(
+    draft,
+    new Map([
+      [A, 'data:image/png;base64,x'],
+      [B, '']
+    ])
+  )
+  expect(toMarkdown(kept)).toBe(`see [image:${A}]@src/a.ts[file:${B}]`)
   expect(kept.content?.[0]?.content?.[1]?.attrs?.src).toBe(
     'data:image/png;base64,x'
   )
