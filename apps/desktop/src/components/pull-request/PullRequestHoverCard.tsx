@@ -6,15 +6,22 @@ import { formatRelativeTime } from '@hoshi/utils'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { PullRequest } from '@/bindings/PullRequest'
 import type { ChecksState } from '@/bindings/ChecksState'
+import { isOthersPullRequest } from '@/state/thread-sections'
 import { pullRequestProblem } from '@/lib/pull-request-problem'
+import { type PullRequestTurn, pullRequestTurn } from '@/lib/pull-request-turn'
 import {
   PULL_REQUEST_PROBLEM,
   PULL_REQUEST_STATE,
   PullRequestIcon
 } from './PullRequestIcon'
-import { Comment01Icon } from '@hugeicons/core-free-icons'
 import { usePullRequestStore } from '@/state/pull-request-store'
+import { useForgeAccountsStore } from '@/state/forge-accounts-store'
 import { useLinkedPullRequestStore } from '@/state/linked-pull-request-store'
+import {
+  CancelCircleIcon,
+  Comment01Icon,
+  TaskDone01Icon
+} from '@hugeicons/core-free-icons'
 import {
   HoverCard,
   HoverCardContent,
@@ -132,6 +139,13 @@ function PullRequestSummary({ pullRequest }: { pullRequest: PullRequest }) {
     ? PULL_REQUEST_PROBLEM[problem].label
     : PULL_REQUEST_STATE[pullRequest.state].label
   const checks = pullRequest.checks ? CHECKS[pullRequest.checks] : null
+  const login = useForgeAccountsStore(
+    (state) =>
+      state.accounts?.find((account) => account.forge === pullRequest.forge)
+        ?.login ?? undefined
+  )
+  const own = !isOthersPullRequest(pullRequest, { [pullRequest.forge]: login })
+  const turn = own ? pullRequestTurn(pullRequest) : null
   return (
     <div className='flex flex-col gap-1.5'>
       <div className='text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs'>
@@ -177,7 +191,7 @@ function PullRequestSummary({ pullRequest }: { pullRequest: PullRequest }) {
             {checks.label()}
           </span>
         ) : null}
-        {pullRequest.unresolvedComments > 0 ? (
+        {!own && pullRequest.unresolvedComments > 0 ? (
           <span className='flex items-center gap-1'>
             <HugeiconsIcon
               icon={Comment01Icon}
@@ -190,6 +204,84 @@ function PullRequestSummary({ pullRequest }: { pullRequest: PullRequest }) {
           </span>
         ) : null}
       </div>
+      {turn ? <TurnSummary turn={turn} /> : null}
     </div>
+  )
+}
+
+const relative = (iso: string) =>
+  formatRelativeTime(iso, new Date(), getLocale())
+
+/** Whose move the pull request waits on, and why. */
+function TurnSummary({ turn }: { turn: PullRequestTurn }) {
+  const yours = turn.kind === 'author'
+  return (
+    <div className='border-border mt-0.5 flex flex-col gap-1 border-t pt-2 text-xs'>
+      <span className='flex items-center gap-1.5 font-medium'>
+        <span
+          className={cn(
+            'size-1.5 shrink-0 rounded-full',
+            yours ? 'bg-warning' : 'bg-muted-foreground'
+          )}
+        />
+        {yours
+          ? m.pr_turn_yours()
+          : m.pr_turn_waiting_on({ names: turn.waitingOn.join(', ') })}
+      </span>
+      {turn.kind === 'reviewers' ? (
+        <TurnReason icon={Comment01Icon}>
+          {m.pr_turn_replied({ time: relative(turn.repliedAt) })}
+        </TurnReason>
+      ) : (
+        <>
+          {turn.ask?.ask === 'changesRequested' ? (
+            <TurnReason icon={CancelCircleIcon} iconClassName='text-warning'>
+              {m.pr_turn_changes_requested({
+                name: turn.ask.by,
+                time: relative(turn.ask.at)
+              })}
+            </TurnReason>
+          ) : turn.ask ? (
+            <TurnReason icon={Comment01Icon}>
+              {m.pr_turn_commented({
+                name: turn.ask.by,
+                time: relative(turn.ask.at)
+              })}
+            </TurnReason>
+          ) : null}
+          {turn.threads > 0 ? (
+            <TurnReason icon={Comment01Icon}>
+              {m.pr_turn_threads({ count: turn.threads })}
+            </TurnReason>
+          ) : null}
+        </>
+      )}
+      {turn.tasks > 0 ? (
+        <TurnReason icon={TaskDone01Icon}>
+          {m.pr_turn_tasks({ count: turn.tasks })}
+        </TurnReason>
+      ) : null}
+    </div>
+  )
+}
+
+function TurnReason({
+  icon,
+  iconClassName,
+  children
+}: {
+  icon: typeof Comment01Icon
+  iconClassName?: string
+  children: string
+}) {
+  return (
+    <span className='text-muted-foreground flex min-w-0 items-center gap-1.5 pl-3'>
+      <HugeiconsIcon
+        icon={icon}
+        strokeWidth={2}
+        className={cn('size-3 shrink-0', iconClassName)}
+      />
+      <span className='truncate'>{children}</span>
+    </span>
   )
 }

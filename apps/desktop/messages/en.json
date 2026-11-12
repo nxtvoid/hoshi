@@ -374,6 +374,31 @@
   "checks_failing": "Checks failing",
   "checks_pending": "Checks running",
   "unresolved_comments": "{count} unresolved",
+  "pr_turn_yours": "Your turn",
+  "pr_turn_waiting_on": "Waiting on {names}",
+  "pr_turn_changes_requested": "{name} requested changes · {time}",
+  "pr_turn_commented": "{name} commented · {time}",
+  "pr_turn_replied": "You replied {time}",
+  "pr_turn_threads": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} unresolved thread",
+        "countPlural=*": "{count} unresolved threads"
+      }
+    }
+  ],
+  "pr_turn_tasks": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} open task",
+        "countPlural=*": "{count} open tasks"
+      }
+    }
+  ],
   "open_pull_request": "Open pull request #{number}",
   "open_pull_request_with_problem": "Open pull request #{number}: {problem}",
   "settings_source_control": "Source control",

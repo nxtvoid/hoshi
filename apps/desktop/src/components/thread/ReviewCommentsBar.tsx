@@ -28,7 +28,12 @@ export function ReviewCommentsBar({ threadId }: { threadId: string }) {
   }, [count, threadId, load])
 
   if (!pullRequest || count === 0 || working) return null
-  const unresolved = detail?.reviewThreads.filter((thread) => !thread.resolved)
+  const author = pullRequest.author?.toLowerCase()
+  const unresolved = detail?.reviewThreads.filter(
+    (thread) =>
+      !thread.resolved &&
+      thread.comments.at(-1)?.author?.toLowerCase() !== author
+  )
 
   return (
     <div

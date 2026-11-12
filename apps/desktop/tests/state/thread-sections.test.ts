@@ -57,7 +57,9 @@ const pullRequest = (changes: Partial<PullRequest> = {}): PullRequest => ({
   state: 'open',
   checks: 'passing',
   unresolvedComments: 0,
+  openTasks: 0,
   changesRequested: false,
+  turn: null,
   conflicts: false,
   additions: 1,
   deletions: 1,
@@ -133,6 +135,32 @@ describe('sectionOf', () => {
     expect(sectionOf(thread('t'), commented, NOW)).toBe('attention')
     expect(sectionOf(thread('t'), conflicting, NOW)).toBe('attention')
     expect(sectionOf(thread('t'), changes, NOW)).toBe('attention')
+  })
+
+  test('requested changes wait on the reviewer once the author answers', () => {
+    const asked = pullRequest({
+      changesRequested: true,
+      turn: {
+        kind: 'author',
+        by: 'luis',
+        ask: 'changesRequested',
+        at: '2026-11-07T10:00:00Z'
+      }
+    })
+    const answered = pullRequest({
+      changesRequested: true,
+      turn: {
+        kind: 'reviewers',
+        waitingOn: ['luis'],
+        repliedAt: '2026-11-07T11:00:00Z'
+      }
+    })
+
+    expect(sectionOf(thread('t'), asked, NOW)).toBe('attention')
+    expect(sectionOf(thread('t'), answered, NOW)).toBe('review')
+    expect(
+      sectionOf(thread('t'), { ...answered, unresolvedComments: 1 }, NOW)
+    ).toBe('attention')
   })
 
   test('a merged or closed pull request is done', () => {

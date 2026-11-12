@@ -2,6 +2,7 @@
 import type { ChecksState } from "./ChecksState";
 import type { ForgeKind } from "./ForgeKind";
 import type { PullRequestState } from "./PullRequestState";
+import type { ReviewTurn } from "./ReviewTurn";
 
 /**
  * A pull request as every forge reports it.
@@ -19,11 +20,24 @@ headSha: string | null, baseBranch: string, state: PullRequestState,
 /**
  * `None` when the pull request has no checks.
  */
-checks: ChecksState | null, unresolvedComments: number, 
+checks: ChecksState | null, 
+/**
+ * Open review threads whose last word isn't the author's.
+ */
+unresolvedComments: number, 
+/**
+ * Tasks still to do, which some repositories add to every pull request; only Bitbucket
+ * has them.
+ */
+openTasks: number, 
 /**
  * A reviewer asked for changes and hasn't approved since.
  */
 changesRequested: boolean, 
+/**
+ * Whose move it waits on; `None` while nobody else has spoken, or it wasn't read.
+ */
+turn: ReviewTurn | null, 
 /**
  * It conflicts with its base branch; `false` while the forge hasn't worked that out.
  */

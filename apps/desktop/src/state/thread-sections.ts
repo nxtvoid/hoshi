@@ -1,6 +1,7 @@
 import type { Thread } from '@/bindings/Thread'
 import type { ForgeKind } from '@/bindings/ForgeKind'
 import type { PullRequest } from '@/bindings/PullRequest'
+import { pullRequestTurn } from '@/lib/pull-request-turn'
 
 export type SectionId =
   | 'pinned'
@@ -65,8 +66,8 @@ export function inactiveAfterMs(days: number | undefined): number {
 }
 
 /**
- * An open pull request with failing checks, conflicts, requested changes or unresolved review
- * threads waits on the user.
+ * An open pull request with failing checks or conflicts waits on the user, as does one
+ * whose turn is theirs.
  */
 export function pullRequestNeedsAttention(pullRequest: PullRequest): boolean {
   const open = pullRequest.state === 'open' || pullRequest.state === 'draft'
@@ -74,8 +75,7 @@ export function pullRequestNeedsAttention(pullRequest: PullRequest): boolean {
     open &&
     (pullRequest.checks === 'failing' ||
       pullRequest.conflicts ||
-      pullRequest.changesRequested ||
-      pullRequest.unresolvedComments > 0)
+      pullRequestTurn(pullRequest)?.kind === 'author')
   )
 }
 

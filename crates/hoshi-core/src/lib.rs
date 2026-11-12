@@ -46,8 +46,9 @@ pub use provider_update::{ProviderUpdate, ProviderUpdateFailure, ProviderVersion
 pub use pull_request::{
     ChecksState, ForgeAccount, ForgeKind, MergeMethod, Mergeability, PullRequest,
     PullRequestAction, PullRequestCheck, PullRequestDetail, PullRequestLabel, PullRequestState,
-    PullRequestSupport, PullRequestUpdate, PullRequestWatch, ReviewComment, ReviewState,
-    ReviewThread, Reviewer, ThreadPullRequest, ThreadPullRequestDetail, TimelineItem,
+    PullRequestSupport, PullRequestUpdate, PullRequestWatch, ReviewAction, ReviewApproval,
+    ReviewAsk, ReviewComment, ReviewState, ReviewThread, ReviewTurn, Reviewer, ThreadPullRequest,
+    ThreadPullRequestDetail, TimelineItem,
 };
 pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
 pub use server::{LocalServer, ServerOrigin, ThreadServers};
