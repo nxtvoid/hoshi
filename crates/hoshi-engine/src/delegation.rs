@@ -67,8 +67,9 @@ const FILES: &str = "- The user sees your replies, not what your tools read. To 
 const PULL_REQUESTS: &str = "- Asked to babysit a pull request, or your work waits on its checks or reviews: watch_pull_request, then end your turn.\n\
 - Asked to move to an existing worktree: EnterWorktree with its path, never cd.";
 
-const BROWSER_AND_BACKGROUND: &str = "- Web previews when asked for browser work, or to see or reproduce something in a live app: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.\n\
-- A visual the user asks for (chart, diagram, mockup, visualizer): an HTML file's path, or inline HTML, to html_preview, then html_render. A screenshot on disk or a text description doesn't show it; never start a server for it. An image to post or send elsewhere: a .png file and its path, never html_render.\n\
+const BROWSER: &str = "- Web previews when asked for browser work, or to see or reproduce something in a live app: preview_open, preview_snapshot, preview_act. Never to verify your own edit unasked. No other browser.";
+
+const VISUALS_AND_BACKGROUND: &str = "- A visual the user asks for (chart, diagram, mockup, visualizer): an HTML file's path, or inline HTML, to html_preview, then html_render. A screenshot on disk or a text description doesn't show it; never start a server for it. An image to post or send elsewhere: a .png file and its path, never html_render.\n\
 - Background Bash or Monitor commands don't hold your turn. To wait for one (tests, a build, a sleep, which only runs in the background): await_background_tasks with its id, then end your turn. Never for dev servers.";
 
 /// Added after the rest of [`instructions`] for agents of threads on Bitbucket.
@@ -76,8 +77,14 @@ pub(crate) const BITBUCKET_INSTRUCTIONS: &str = "- On Bitbucket, open pull reque
 
 /// Added to the system prompt of agents that have hoshi's tools, of a thread `depth`
 /// delegations deep.
-/// `in_project` is false for a chat, which has no repository to open pull requests on.
-pub(crate) fn instructions(depth: usize, in_project: bool, bitbucket: bool) -> String {
+/// `in_project` is false for a chat, which has no repository to open pull requests on;
+/// `browser` is false while the user keeps agents off the browser.
+pub(crate) fn instructions(
+    depth: usize,
+    in_project: bool,
+    bitbucket: bool,
+    browser: bool,
+) -> String {
     let mut parts = vec![
         format!(
             "hoshi, the app running you, has tools on its MCP server{}. Ordinary coding needs none.",
@@ -89,7 +96,10 @@ pub(crate) fn instructions(depth: usize, in_project: bool, bitbucket: bool) -> S
     if depth == 0 && in_project {
         parts.push(PULL_REQUESTS.to_owned());
     }
-    parts.push(BROWSER_AND_BACKGROUND.to_owned());
+    if browser {
+        parts.push(BROWSER.to_owned());
+    }
+    parts.push(VISUALS_AND_BACKGROUND.to_owned());
     if bitbucket {
         parts.push(BITBUCKET_INSTRUCTIONS.to_owned());
     }
@@ -228,6 +238,7 @@ impl State {
                     thread.parent_thread_id.is_none() && thread.project_id.is_some()
                 })
             }
+            tool if tool.starts_with("preview_") => self.browser.agent_access,
             _ => true,
         }
     }
@@ -745,10 +756,13 @@ mod tests {
 
     #[test]
     fn the_instructions_name_only_the_tools_a_thread_has() {
-        assert!(instructions(0, true, false).contains("watch_pull_request"));
-        assert!(!instructions(0, false, false).contains("watch_pull_request"));
-        assert!(!instructions(1, true, false).contains("watch_pull_request"));
-        assert!(instructions(1, true, false).ends_with(TASK_INSTRUCTIONS));
+        assert!(instructions(0, true, false, true).contains("watch_pull_request"));
+        assert!(!instructions(0, false, false, true).contains("watch_pull_request"));
+        assert!(!instructions(1, true, false, true).contains("watch_pull_request"));
+        assert!(instructions(1, true, false, true).ends_with(TASK_INSTRUCTIONS));
+        assert!(instructions(0, true, false, true).contains("preview_open"));
+        assert!(!instructions(0, true, false, false).contains("preview_"));
+        assert!(instructions(0, true, false, false).contains("html_render"));
     }
 
     #[test]

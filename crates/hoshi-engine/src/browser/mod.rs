@@ -69,6 +69,7 @@ impl Browser {
             refs: HashMap::new(),
             console,
             size,
+            zoom: 1.0,
         };
         for domain in ["Page.enable", "Runtime.enable", "DOM.enable"] {
             page.call(domain, json!({}))?;
@@ -226,6 +227,8 @@ pub struct Page {
     refs: HashMap<String, i64>,
     console: Arc<Mutex<VecDeque<String>>>,
     size: (u32, u32),
+    /// Page zoom: the page lays out at `size / zoom` CSS pixels and paints at `size`.
+    zoom: f64,
 }
 
 impl Page {
@@ -454,12 +457,24 @@ impl Page {
     }
 
     pub fn resize(&mut self, size: (u32, u32)) -> Result<(), String> {
+        let layout = |side: u32| (f64::from(side) / self.zoom).round().max(1.0);
         self.call(
             "Emulation.setDeviceMetricsOverride",
-            json!({ "width": size.0, "height": size.1, "deviceScaleFactor": 1, "mobile": false }),
+            json!({
+                "width": layout(size.0),
+                "height": layout(size.1),
+                "deviceScaleFactor": self.zoom,
+                "mobile": false,
+            }),
         )?;
         self.size = size;
         Ok(())
+    }
+
+    /// Zooms the page by `zoom` (1 is 100%), keeping its size.
+    pub fn set_zoom(&mut self, zoom: f64) -> Result<(), String> {
+        self.zoom = zoom.clamp(0.25, 5.0);
+        self.resize(self.size)
     }
 
     /// `dark`, `light`, or `None` for the system's.
@@ -767,5 +782,30 @@ mod tests {
         page.close();
         drop(browser);
         let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    #[test]
+    fn a_zoomed_page_lays_out_narrower_at_the_same_size() {
+        let Some(executable) = find_browser() else {
+            eprintln!("no Chromium-based browser here; skipping");
+            return;
+        };
+        let profile = std::env::temp_dir().join(format!("hoshi-zoom-{}", std::process::id()));
+        let browser = Browser::start(&executable, &profile).unwrap();
+        let mut page = browser.open_page((1000, 600), Arc::new(|_| {})).unwrap();
+
+        page.set_zoom(1.25).unwrap();
+        page.set_color_scheme(Some("dark")).unwrap();
+        let laid_out = page.evaluate("window.innerWidth").unwrap();
+        let dark = page
+            .evaluate("matchMedia('(prefers-color-scheme: dark)').matches")
+            .unwrap();
+        page.close();
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&profile);
+
+        assert_eq!(laid_out, json!(800));
+        assert_eq!(dark, json!(true));
+        assert_eq!(page.size(), (1000, 600));
     }
 }

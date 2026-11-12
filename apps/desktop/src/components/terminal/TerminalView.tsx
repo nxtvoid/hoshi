@@ -16,6 +16,8 @@ import type { TerminalEvent } from '@/bindings/TerminalEvent'
 import type { TerminalAttach } from '@/bindings/TerminalAttach'
 import { GitForkIcon } from '@hugeicons/core-free-icons'
 import { registerEditTerminal } from '@/components/window/edit-terminals'
+import { cellAt, findLinks, wrappedLine } from '@/lib/terminal-links'
+import { openWebLink } from '@/components/markdown/open-web-link'
 
 /** Keys the app handles even while a terminal has the keyboard. */
 function isAppShortcut(event: KeyboardEvent) {
@@ -117,6 +119,24 @@ export function TerminalView({
     }
     terminalRef.current = terminal
     const unregisterEdit = registerEditTerminal(container, terminal)
+    const links = terminal.registerLinkProvider({
+      provideLinks: (lineNumber, provide) => {
+        const buffer = terminal.buffer.active
+        const line = wrappedLine(lineNumber, (index) => buffer.getLine(index))
+        if (!line) return provide(undefined)
+        provide(
+          findLinks(line.text).map((link) => ({
+            text: link.url,
+            range: {
+              start: cellAt(line.segments, link.start),
+              end: cellAt(line.segments, link.end - 1)
+            },
+            activate: (event: MouseEvent, url: string) =>
+              void openWebLink(url, event.ctrlKey || event.metaKey)
+          }))
+        )
+      }
+    })
     const fitVisible = () => {
       if (container.clientWidth > 0 && container.clientHeight > 0) fit.fit()
     }
@@ -211,6 +231,7 @@ export function TerminalView({
       input.dispose()
       resize.dispose()
       unregisterEdit()
+      links.dispose()
       terminal.dispose()
       terminalRef.current = null
       void invoke('detach_terminal', { terminalId })

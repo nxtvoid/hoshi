@@ -89,7 +89,7 @@ export function RightPanelView({ threadId }: { threadId: string }) {
             strokeWidth={2}
           />
         </IconButton>
-        <IconButton label={m.close_panel()} onClick={close}>
+        <IconButton label={m.close_panel()} onClick={() => close(threadId)}>
           <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} />
         </IconButton>
       </div>

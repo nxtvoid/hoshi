@@ -3,6 +3,7 @@ import type { ComponentType } from 'react'
 import { SettingsNav } from './SettingsNav'
 import { AboutSection } from './AboutSection'
 import { GeneralSection } from './GeneralSection'
+import { BrowserSection } from './BrowserSection'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { useNavigate } from '@tanstack/react-router'
 import { ProvidersSection } from './ProvidersSection'
@@ -17,6 +18,7 @@ const CONTENT: Record<SettingsSection, ComponentType> = {
   general: GeneralSection,
   appearance: AppearanceSection,
   providers: ProvidersSection,
+  browser: BrowserSection,
   forges: SourceControlSection,
   about: AboutSection
 }

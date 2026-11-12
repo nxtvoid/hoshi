@@ -43,7 +43,7 @@ use chrono::{SecondsFormat, Utc};
 use hoshi_core::ProviderAccountStatus;
 use hoshi_core::{BankedResetFailure, BankedResetSpend, HeldMessage, ThreadHeldMessage};
 use hoshi_core::{
-    BrowserFrame, BrowserInput, BrowserPage, GitActionProgress, ProviderUpdate,
+    BrowserFrame, BrowserInput, BrowserPage, BrowserSettings, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, TranscriptPage,
 };
 use hoshi_core::{
@@ -202,6 +202,7 @@ struct State {
     linked_pull_requests: HashMap<(RepositoryRef, u32), (Instant, PullRequest)>,
     context_usages: HashMap<String, ContextUsage>,
     thread_titles: ThreadTitleSettings,
+    browser: BrowserSettings,
     subagent_effort: SubagentEffort,
     /// Threads whose generated title missed the subject; named again after their turn.
     titles_to_refine: HashSet<String>,
@@ -503,6 +504,7 @@ impl Engine {
             pending_wakes: HashMap::new(),
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
+            browser: BrowserSettings::default(),
             subagent_effort: SubagentEffort::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -1304,6 +1306,13 @@ impl Engine {
 
     pub fn set_thread_titles(&self, settings: ThreadTitleSettings) {
         lock(&self.state).thread_titles = settings;
+    }
+
+    /// Who uses the browser and how its pages open. Agents running now keep the tools they
+    /// were given until their session starts again; they are refused once access is off.
+    pub fn set_browser(&self, settings: BrowserSettings) {
+        lock(&self.state).browser = settings.clone();
+        self.browsing().configure(settings);
     }
 
     /// How agents choose the model and effort of their subagents, from their next turn on.
@@ -3895,9 +3904,14 @@ fn start_turn(
             })
         });
     let bitbucket = state.opens_pull_requests(thread_id);
-    let instructions = mcp
-        .as_ref()
-        .map(|_| delegation::instructions(depth, thread.project_id.is_some(), bitbucket));
+    let instructions = mcp.as_ref().map(|_| {
+        delegation::instructions(
+            depth,
+            thread.project_id.is_some(),
+            bitbucket,
+            state.browser.agent_access,
+        )
+    });
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
@@ -4723,7 +4737,7 @@ mod tests {
             resume_at: None,
             model: Some("haiku".into()),
             attachments: Vec::new(),
-            instructions: Some(delegation::instructions(0, true, false)),
+            instructions: Some(delegation::instructions(0, true, false, true)),
             subagent_effort: SubagentEffort::AgentDecides,
         };
         assert_eq!(

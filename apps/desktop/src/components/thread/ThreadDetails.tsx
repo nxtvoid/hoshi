@@ -208,6 +208,7 @@ export function ThreadDetailsCard({ threadId }: { threadId: string }) {
   return (
     <aside
       aria-label={m.thread_details()}
+      data-mini-browser-obstacle='details'
       style={{
         width: DETAILS_CARD_WIDTH,
         top: DETAILS_CARD_GAP,

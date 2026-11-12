@@ -1,6 +1,6 @@
 import { HugeiconsIcon } from '@hugeicons/react'
-import { openUrl } from '@tauri-apps/plugin-opener'
 import { localPath } from '@/lib/local-paths'
+import { openWebLink } from './open-web-link'
 import { openLocalFile } from './open-local-file'
 import { Children, memo, type ReactNode, useState } from 'react'
 import { GithubIcon, Globe02Icon } from '@hugeicons/core-free-icons'
@@ -44,7 +44,7 @@ export function MarkdownLink({
       onClick={(event) => {
         if (href?.startsWith('#')) return
         event.preventDefault()
-        if (href) void openUrl(href)
+        if (href) void openWebLink(href, event.ctrlKey || event.metaKey)
       }}
     >
       {host ? <WithIcon host={host}>{children}</WithIcon> : children}

@@ -29,6 +29,7 @@ import { useServerStore } from './server-store'
 import { usePullRequestStore } from './pull-request-store'
 import { draftKey, useDraftStore } from './draft-store'
 import { usePanelStore } from './panel-store'
+import { useMiniBrowserStore } from './mini-browser-store'
 import { useCleanupStore } from './cleanup-store'
 import { useDetailsStore } from './details-store'
 import { useTerminalStore } from './terminal-store'
@@ -467,6 +468,7 @@ function forgetThreads(threadIds: string[], drafts: string[]) {
   useTerminalStore.getState().forget(threadIds)
   useDetailsStore.getState().forget(threadIds)
   useCleanupStore.getState().forget(threadIds)
+  useMiniBrowserStore.getState().forget(threadIds)
 }
 
 function receivePullRequest({ threadId, pullRequest }: ThreadPullRequest) {

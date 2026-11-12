@@ -1,5 +1,6 @@
 import { m } from '@/paraglide/messages'
 import {
+  Globe02Icon,
   GitBranchIcon,
   InformationCircleIcon,
   PaintBoardIcon,
@@ -11,6 +12,7 @@ export const SETTINGS_SECTIONS = [
   'general',
   'appearance',
   'providers',
+  'browser',
   'forges',
   'about'
 ] as const
@@ -28,6 +30,7 @@ export const SECTION_META: Record<
   general: { label: m.settings_general, icon: Settings02Icon },
   appearance: { label: m.settings_appearance, icon: PaintBoardIcon },
   providers: { label: m.settings_providers, icon: PlugSocketIcon },
+  browser: { label: m.settings_browser, icon: Globe02Icon },
   forges: { label: m.settings_source_control, icon: GitBranchIcon },
   about: { label: m.settings_about, icon: InformationCircleIcon }
 }
@@ -38,7 +41,10 @@ export const NAV_GROUPS: {
   sections: SettingsSection[]
 }[] = [
   { heading: null, sections: ['general', 'appearance'] },
-  { heading: m.settings_group_agents, sections: ['providers', 'forges'] },
+  {
+    heading: m.settings_group_agents,
+    sections: ['providers', 'browser', 'forges']
+  },
   { heading: null, sections: ['about'] }
 ]
 
@@ -53,6 +59,13 @@ export const SEARCH_ITEMS: { title: () => string; section: SettingsSection }[] =
     { title: m.claude_code, section: 'providers' },
     { title: m.binary_path, section: 'providers' },
     { title: m.plan_mode_setting, section: 'providers' },
+    { title: m.browser_agent_access, section: 'browser' },
+    { title: m.browser_open_links_in, section: 'browser' },
+    { title: m.float_agent_pages_setting, section: 'browser' },
+    { title: m.browser_search_engine, section: 'browser' },
+    { title: m.browser_page_size, section: 'browser' },
+    { title: m.browser_zoom, section: 'browser' },
+    { title: m.browser_color_scheme, section: 'browser' },
     { title: m.github, section: 'forges' },
     { title: m.app_version_label, section: 'about' }
   ]

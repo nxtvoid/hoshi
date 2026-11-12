@@ -70,6 +70,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
     let settings = crate::settings::load(&crate::settings::settings_path(app.handle())?);
     engine.set_adapter(adapter_for(&settings));
     engine.set_thread_titles(settings.thread_titles.clone());
+    engine.set_browser(settings.browser.clone());
     engine.set_subagent_effort(settings.providers.claude_code.subagent_effort);
     engine.set_forges(hoshi_engine::default_forges());
     app.manage(engine);

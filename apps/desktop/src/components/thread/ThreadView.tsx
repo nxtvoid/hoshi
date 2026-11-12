@@ -29,9 +29,11 @@ import { HeldMessageBar } from './HeldMessageBar'
 import { WorktreeSetupBar } from './WorktreeSetupBar'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { LogoMark } from '@/components/brand/Logo'
-import { usePanelStore } from '@/state/panel-store'
+import { usePanelOpen, usePanelStore } from '@/state/panel-store'
 import { useTerminalStore } from '@/state/terminal-store'
 import { RightPanel } from '@/components/panel/RightPanel'
+import { MiniBrowser } from '@/components/browser/MiniBrowser'
+import { useMiniBrowserStore } from '@/state/mini-browser-store'
 import { useSubagentStore } from '@/state/subagent-store'
 import { useTranscriptStore } from '@/state/transcript-store'
 import { IconButton } from '@hoshi/ui/components/icon-button'
@@ -60,7 +62,7 @@ export function ThreadView() {
       state.projects.find((project) => project.id === thread?.projectId)
         ?.workspaceRoot
   )
-  const panelOpen = usePanelStore((state) => state.open)
+  const panelOpen = usePanelOpen(thread?.id)
   /** The thread whose panel stays mounted once opened, closed or not. */
   const [panelKeptFor, setPanelKeptFor] = useState<string | null>(null)
   const togglePanel = usePanelStore((state) => state.toggle)
@@ -79,6 +81,9 @@ export function ThreadView() {
   const chatWidth = useElementWidth(chatRef)
   const detailsInline = chatWidth >= DETAILS_INLINE_MIN_WIDTH
   const showDetailsCard = Boolean(thread && detailsOpen && detailsInline)
+  const playerRoom = useMiniBrowserStore((state) =>
+    state.room && state.room.threadId === thread?.id ? state.room : null
+  )
   const ready = useAppStore((state) => state.ready)
   const loading = useTranscriptStore((state) => state.loading)
   const empty = useTranscriptStore((state) => state.items.length === 0)
@@ -94,8 +99,9 @@ export function ThreadView() {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey && event.altKey && event.code === 'KeyB') {
+        if (!threadId) return
         event.preventDefault()
-        togglePanel()
+        togglePanel(threadId)
       } else if (
         threadId &&
         event.ctrlKey &&
@@ -174,7 +180,7 @@ export function ThreadView() {
             <IconButton
               label={m.toggle_panel()}
               active={panelOpen}
-              onClick={togglePanel}
+              onClick={() => togglePanel(thread.id)}
             >
               <HugeiconsIcon icon={SidebarRightIcon} strokeWidth={2} />
             </IconButton>
@@ -188,12 +194,17 @@ export function ThreadView() {
           ref={chatRef}
           hidden={Boolean(thread && panelOpen && panelMaximized)}
           style={
-            showDetailsCard
+            playerRoom
               ? ({
-                  '--details-room': `${DETAILS_CARD_ROOM}px`,
-                  '--details-gutter': `${DETAILS_CARD_CLEARANCE}px`
+                  '--details-room': `${playerRoom.right}px`,
+                  '--details-gutter': `${playerRoom.left}px`
                 } as React.CSSProperties)
-              : undefined
+              : showDetailsCard
+                ? ({
+                    '--details-room': `${DETAILS_CARD_ROOM}px`,
+                    '--details-gutter': `${DETAILS_CARD_CLEARANCE}px`
+                  } as React.CSSProperties)
+                : undefined
           }
           className='relative flex min-w-0 flex-1 flex-col'
         >
@@ -249,7 +260,10 @@ export function ThreadView() {
                   working={working}
                   cwd={thread?.worktreePath ?? workspaceRoot ?? null}
                 />
-                <div className='relative px-4 pb-3'>
+                <div
+                  data-mini-browser-obstacle='composer'
+                  className='relative px-4 pb-3'
+                >
                   <div
                     aria-hidden
                     className='pointer-events-none absolute inset-x-4 bottom-full'
@@ -282,6 +296,13 @@ export function ThreadView() {
               ) : null}
             </>
           )}
+          {thread ? (
+            <MiniBrowser
+              threadId={thread.id}
+              chat={chatRef}
+              obstaclesKey={`${showDetailsCard}:${draft}:${inSubagent}`}
+            />
+          ) : null}
           {thread ? <TerminalDrawer threadId={thread.id} /> : null}
         </div>
         {thread && (panelOpen || panelKeptFor === thread.id) ? (

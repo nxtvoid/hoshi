@@ -1,6 +1,7 @@
 import { create } from 'zustand'
-import { useAppStore } from './app-store'
 import { usePanelStore } from './panel-store'
+import { useSettingsStore } from './settings-store'
+import { useMiniBrowserStore } from './mini-browser-store'
 import type { BrowserPage } from '@/bindings/BrowserPage'
 import type { BrowserFrame } from '@/bindings/BrowserFrame'
 
@@ -29,6 +30,7 @@ export const useBrowserStore = create<BrowserState>()((set, get) => ({
     set((state) => ({ frames: { ...state.frames, [frame.threadId]: frame } })),
   receivePage: (page) => {
     if (!page.open) {
+      useMiniBrowserStore.getState().close(page.threadId)
       set((state) => ({
         frames: without(state.frames, page.threadId),
         pages: without(state.pages, page.threadId)
@@ -41,11 +43,21 @@ export const useBrowserStore = create<BrowserState>()((set, get) => ({
     set((state) => ({
       pages: { ...state.pages, [page.threadId]: { ...page, agentAt, fitted } }
     }))
-    if (
-      page.opened &&
-      page.threadId === useAppStore.getState().selectedThreadId
-    ) {
-      usePanelStore.getState().openSurface(page.threadId, 'browser')
-    }
+    if (!page.opened || panelShowsBrowser(page.threadId)) return
+    if (floatsAgentPages()) useMiniBrowserStore.getState().open(page.threadId)
+    else usePanelStore.getState().placeSurface(page.threadId, 'browser')
   }
 }))
+
+function floatsAgentPages() {
+  return useSettingsStore.getState().settings?.browser.floatAgentPages ?? true
+}
+
+function panelShowsBrowser(threadId: string) {
+  const panel = usePanelStore.getState()
+  const surfaces = panel.threads[threadId]
+  const active = surfaces?.surfaces.find(
+    (surface) => surface.id === surfaces.activeId
+  )
+  return Boolean(panel.openThreads[threadId]) && active?.kind === 'browser'
+}
