@@ -152,7 +152,8 @@ struct Extras {
     summary: Summary,
     checks_read_at: Instant,
     comments_read_at: Instant,
-    review_read_at: Instant,
+    /// `None` until both reads succeed, so a failed one is tried again.
+    review_read_at: Option<Instant>,
 }
 
 type PullRequestKey = (String, String, u32);
@@ -452,13 +453,13 @@ impl Bitbucket {
             summary.unresolved_comments = model::unresolved_threads(&comments);
             comments_read_at = now;
         }
-        let mut review_read_at = cached.as_ref().map_or(now, |extras| extras.review_read_at);
+        let mut review_read_at = cached.as_ref().and_then(|extras| extras.review_read_at);
         if !open {
             summary.changes_requested = false;
             summary.conflicts = false;
         } else if !same_update
             || !same_head
-            || now.duration_since(review_read_at) >= REVIEW_FRESH_FOR
+            || review_read_at.is_none_or(|at| now.duration_since(at) >= REVIEW_FRESH_FOR)
         {
             let path = pull_request_path(repository, raw.id);
             let full = best_effort(self.get::<RawPullRequest>(&path))?;
@@ -469,7 +470,7 @@ impl Bitbucket {
             }
             summary.conflicts = conflicts_after_read(summary.conflicts, conflicts);
             if read_both {
-                review_read_at = now;
+                review_read_at = Some(now);
             }
         }
         lock(&self.extras).insert(
