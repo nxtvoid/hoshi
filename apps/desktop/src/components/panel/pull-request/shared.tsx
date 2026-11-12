@@ -38,7 +38,7 @@ export const REVIEW_STATE: Record<
   },
   changesRequested: {
     icon: CancelCircleIcon,
-    color: 'text-status-error',
+    color: 'text-warning',
     label: m.review_changes_requested
   },
   commented: {
