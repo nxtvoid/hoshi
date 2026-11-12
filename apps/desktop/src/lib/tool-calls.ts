@@ -556,6 +556,34 @@ export function reasoningPreview(text: string, streaming: boolean) {
   return (streaming ? lines.at(-1) : lines[0]) ?? ''
 }
 
+/** More than a first sentence ever needs, so a long thought isn't scanned whole. */
+const THOUGHT_SOURCE_CHARS = 4000
+
+/**
+ * What a thought is about, as a running group shows it above its action: its bold heading
+ * when it opens with one, else its first sentence, without markdown marks.
+ */
+export function thoughtLine(thought: string) {
+  const markdown = thought.slice(0, THOUGHT_SOURCE_CHARS)
+  const heading = /^\s*\*\*([^*\r\n]+)\*\*[ \t]*\r?(?:\n|$)/.exec(markdown)?.[1]
+  const text = (heading ?? markdown)
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^[ \t]*(?:#{1,6}|[-*+]|\d+\.)[ \t]+/gm, '')
+    .replace(/`+|\*\*|~~/g, '')
+    .replace(/(^|[^\w*])[*_]([^*_\n]+)[*_](?![\w*])/g, '$1$2')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (heading !== undefined) return text
+  const end = /[.?!]["'”’)]?(?=\s)/.exec(text)
+  return end ? text.slice(0, end.index + end[0].length) : text
+}
+
+/** The work row a running turn is adding to: its last row, when that is work. */
+export function liveWorkId(rows: TranscriptRow[]) {
+  const last = rows.at(-1)
+  return last?.kind === 'work' ? last.id : undefined
+}
+
 function parseInput(input: string): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(input)

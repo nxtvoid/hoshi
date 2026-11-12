@@ -82,16 +82,19 @@ import {
   staysInView,
   isSubagentCall,
   isToolCall,
+  liveWorkId,
   reasoningPreview,
   summarizeToolCalls,
   toolAction,
   toolName,
   toolTarget,
+  thoughtLine,
   withStreaming,
   streamingShape,
   fromStreamingShape,
   type ToolAction,
   type ToolCallItem,
+  type ToolCallContent,
   type FoldEnding,
   type TaskOutcome,
   type ToolSummaryPart,
@@ -208,6 +211,7 @@ export const Transcript = memo(function Transcript({
       approvals={approvals}
       cwd={cwd}
       liveTasks={liveTasks}
+      liveWork={working ? liveWorkId(rows) : undefined}
       loadOlder={hasOlder ? loadOlder : undefined}
       firstId={items[0]?.id}
       status={
@@ -231,6 +235,7 @@ export function TranscriptFrame({
   approvals,
   cwd,
   liveTasks,
+  liveWork,
   loadOlder,
   firstId,
   lead,
@@ -241,6 +246,8 @@ export function TranscriptFrame({
   approvals: Map<string, ApprovalContent>
   cwd: string | null
   liveTasks?: string
+  /** The work row a running turn is adding to. */
+  liveWork?: string
   /** A running turn's status, shown where its work folds once it ends. */
   status?: StatusSlot
   /** Loads what came before the first row, while there is more, as the reader nears it. */
@@ -295,6 +302,7 @@ export function TranscriptFrame({
                 from={from}
                 cwd={cwd}
                 liveTasks={liveTasks}
+                liveWork={liveWork}
                 status={status}
               />
             </ApprovalsContext.Provider>
@@ -478,6 +486,8 @@ type RowsProps = {
   cwd: string | null
   /** The task list of the running turn, which shows what is being worked on. */
   liveTasks: string | undefined
+  /** The work row a running turn is adding to. */
+  liveWork?: string
 }
 
 /** A row's place for a running turn's status: after `after`, or first when `null`. */
@@ -505,6 +515,7 @@ function Rows({
   from = 0,
   cwd,
   liveTasks,
+  liveWork,
   status
 }: RowsProps & { from?: number; status?: StatusSlot }) {
   const shown: React.ReactNode[] = []
@@ -551,6 +562,7 @@ function Rows({
         cwd={cwd}
         liveTasks={liveTasks}
         live={index >= liveFrom}
+        working={row.kind === 'work' && row.id === liveWork}
       />
     )
     if (status && row === status.after) showStatus()
@@ -591,8 +603,14 @@ const Row = memo(function Row({
   row,
   cwd,
   liveTasks,
-  live
-}: Omit<RowsProps, 'rows'> & { row: TranscriptRow; live: boolean }) {
+  live,
+  working = false
+}: Omit<RowsProps, 'rows' | 'liveWork'> & {
+  row: TranscriptRow
+  live: boolean
+  /** The work a running turn is adding to. */
+  working?: boolean
+}) {
   switch (row.kind) {
     case 'item':
       return (
@@ -616,7 +634,7 @@ const Row = memo(function Row({
     case 'work':
       return (
         <RowItem messageId={row.id} className={cn(!live && ROW)}>
-          <WorkGroup entries={row.entries} cwd={cwd} />
+          <WorkGroup entries={row.entries} cwd={cwd} live={working} />
         </RowItem>
       )
     default:
@@ -799,11 +817,6 @@ const Item = memo(function Item({
   }
 })
 
-/** The last line of reasoning still streaming, as a work group's line shows it. */
-function LivePreview({ item, text }: { item: TranscriptItem; text: string }) {
-  return reasoningPreview(useLiveText(item, text), true)
-}
-
 /** An answer, or a task's note, with its text as it streams in. */
 function AssistantMessage({
   item,
@@ -839,62 +852,21 @@ const ACTION_ICONS: Record<ToolAction, typeof CommandLineIcon> = {
   other: Wrench01Icon
 }
 
-type WorkGroupProps = { entries: WorkItem[]; cwd: string | null }
+type WorkGroupProps = { entries: WorkItem[]; cwd: string | null; live: boolean }
 
 /**
- * A run of tool calls and reasoning, folded into one line that names what they did.
- * What is still running shows on that same line, so the row never changes height.
+ * A run of tool calls and reasoning. While its turn adds to it, it shows the latest thought
+ * above what runs now; once done, one line that names what the run did.
  */
-const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
+const WorkGroup = memo(function WorkGroup({
+  entries,
+  cwd,
+  live
+}: WorkGroupProps) {
   const [open, setOpen] = useState(false)
   const [first] = entries
-  if (entries.length === 1 && first)
+  if (!live && entries.length === 1 && first)
     return <WorkEntry entry={first} cwd={cwd} />
-
-  const calls = entries.filter(isToolCall)
-  const active = activeEntry(entries)
-  const last = calls.at(-1)?.content
-  const failed = !active && last?.isError === true && !last.interrupted
-  const actions = new Set(calls.map((call) => toolAction(call.content.name)))
-  const [onlyAction] = actions
-  const icon = active
-    ? active.content.kind === 'toolCall'
-      ? ACTION_ICONS[toolAction(active.content.name)]
-      : AiBrain01Icon
-    : calls.length === 0
-      ? AiBrain01Icon
-      : ACTION_ICONS[actions.size === 1 && onlyAction ? onlyAction : 'other']
-  const summary = (
-    <>
-      <HugeiconsIcon
-        icon={failed ? Cancel01Icon : icon}
-        strokeWidth={2}
-        aria-label={
-          active ? m.tool_running() : failed ? m.tool_failed() : undefined
-        }
-        className={cn('size-4 shrink-0', failed && 'text-destructive')}
-      />
-      <span className='shrink-0'>
-        {calls.length > 0
-          ? summaryText(summarizeToolCalls(calls))
-          : m.reasoning_thought()}
-      </span>
-      {active ? (
-        <span
-          className={cn(
-            'min-w-0 truncate opacity-70',
-            active.content.kind === 'toolCall' && 'font-mono text-xs'
-          )}
-        >
-          {active.content.kind === 'toolCall' ? (
-            toolTarget(active.content.name, active.content.input, cwd)
-          ) : (
-            <LivePreview item={active} text={active.content.text} />
-          )}
-        </span>
-      ) : null}
-    </>
-  )
 
   return (
     <div>
@@ -902,21 +874,13 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
         type='button'
         aria-expanded={open}
         onClick={() => setOpen(!open)}
-        className='group/tools text-muted-foreground hover:text-foreground focus-visible:ring-ring flex min-h-6 w-full min-w-0 items-center gap-2 rounded-md text-left text-sm outline-none focus-visible:ring-2'
+        className='group/tools text-muted-foreground hover:text-foreground focus-visible:ring-ring flex w-full min-w-0 flex-col rounded-md text-left text-sm outline-none focus-visible:ring-2'
       >
-        {active ? (
-          <Shimmer className='items-center gap-2'>{summary}</Shimmer>
+        {live ? (
+          <LiveWork entries={entries} cwd={cwd} open={open} />
         ) : (
-          summary
+          <WorkSummary entries={entries} open={open} />
         )}
-        <HugeiconsIcon
-          icon={ArrowRight01Icon}
-          strokeWidth={2}
-          className={cn(
-            'size-3.5 shrink-0 opacity-0 transition-transform group-hover/tools:opacity-100',
-            open && 'rotate-90 opacity-100'
-          )}
-        />
       </button>
       {open ? (
         <ol className='border-border/60 ms-2 mt-1 flex flex-col border-s ps-2.5'>
@@ -934,8 +898,181 @@ const WorkGroup = memo(function WorkGroup({ entries, cwd }: WorkGroupProps) {
 function sameWorkGroup(previous: WorkGroupProps, next: WorkGroupProps) {
   return (
     previous.cwd === next.cwd &&
+    previous.live === next.live &&
     previous.entries.length === next.entries.length &&
     previous.entries.every((entry, index) => entry === next.entries[index])
+  )
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <HugeiconsIcon
+      icon={ArrowRight01Icon}
+      strokeWidth={2}
+      className={cn(
+        'size-3.5 shrink-0 opacity-0 transition-transform group-hover/tools:opacity-100',
+        open && 'rotate-90 opacity-100'
+      )}
+    />
+  )
+}
+
+function WorkSummary({
+  entries,
+  open
+}: {
+  entries: WorkItem[]
+  open: boolean
+}) {
+  const calls = entries.filter(isToolCall)
+  const active = activeEntry(entries)
+  const last = calls.at(-1)?.content
+  const failed = !active && last?.isError === true && !last.interrupted
+  const actions = new Set(calls.map((call) => toolAction(call.content.name)))
+  const [onlyAction] = actions
+  const icon =
+    calls.length === 0
+      ? AiBrain01Icon
+      : ACTION_ICONS[actions.size === 1 && onlyAction ? onlyAction : 'other']
+  const summary = (
+    <>
+      <HugeiconsIcon
+        icon={failed ? Cancel01Icon : icon}
+        strokeWidth={2}
+        aria-label={
+          active ? m.tool_running() : failed ? m.tool_failed() : undefined
+        }
+        className={cn('size-4 shrink-0', failed && 'text-destructive')}
+      />
+      <span className='min-w-0 truncate'>
+        {calls.length > 0
+          ? summaryText(summarizeToolCalls(calls))
+          : m.reasoning_thought()}
+      </span>
+    </>
+  )
+  return (
+    <span className='flex min-h-6 w-full min-w-0 items-center gap-2'>
+      {active ? (
+        <Shimmer className='items-center gap-2'>{summary}</Shimmer>
+      ) : (
+        summary
+      )}
+      <Chevron open={open} />
+    </span>
+  )
+}
+
+const LIVE_VERBS: Record<Exclude<ToolAction, 'other'>, () => string> = {
+  command: m.tool_live_command,
+  edit: m.tool_live_edit,
+  read: m.tool_live_read,
+  search: m.tool_live_search,
+  web: m.tool_live_web
+}
+
+const DONE_VERBS: Record<Exclude<ToolAction, 'other'>, () => string> = {
+  command: m.tool_done_command,
+  edit: m.tool_done_edit,
+  read: m.tool_done_read,
+  search: m.tool_done_search,
+  web: m.tool_done_web
+}
+
+/** The work a running turn is adding to: its latest thought, then what runs now. */
+function LiveWork({
+  entries,
+  cwd,
+  open
+}: {
+  entries: WorkItem[]
+  cwd: string | null
+  open: boolean
+}) {
+  const latest = activeEntry(entries) ?? entries.at(-1)
+  if (!latest) return null
+  const thought = open
+    ? undefined
+    : entries.filter((entry) => entry.content.kind === 'reasoning').at(-1)
+  const { content } = latest
+  const failed =
+    content.kind === 'toolCall' && content.isError && !content.interrupted
+  const action = (
+    <>
+      <HugeiconsIcon
+        icon={
+          failed
+            ? Cancel01Icon
+            : content.kind === 'toolCall'
+              ? ACTION_ICONS[toolAction(content.name)]
+              : AiBrain01Icon
+        }
+        strokeWidth={2}
+        aria-label={failed ? m.tool_failed() : undefined}
+        className={cn('size-4 shrink-0', failed && 'text-destructive')}
+      />
+      {content.kind === 'toolCall' ? (
+        <LiveCall content={content} cwd={cwd} />
+      ) : (
+        <span className='min-w-0 truncate'>
+          {latest.streaming ? m.reasoning_thinking() : m.reasoning_thought()}
+        </span>
+      )}
+    </>
+  )
+  return (
+    <>
+      {thought?.content.kind === 'reasoning' ? (
+        <LiveThought item={thought} text={thought.content.text} />
+      ) : null}
+      <span className='flex min-h-6 w-full min-w-0 items-center gap-2'>
+        {failed ? (
+          action
+        ) : (
+          <Shimmer className='items-center gap-2'>{action}</Shimmer>
+        )}
+        <Chevron open={open} />
+      </span>
+    </>
+  )
+}
+
+function LiveCall({
+  content,
+  cwd
+}: {
+  content: ToolCallContent
+  cwd: string | null
+}) {
+  const action = toolAction(content.name)
+  const running = content.output === null && !content.interrupted
+  const target = toolTarget(content.name, content.input, cwd)
+  return (
+    <>
+      <span className='shrink-0'>
+        {action === 'other'
+          ? toolName(content.name).label
+          : (running ? LIVE_VERBS : DONE_VERBS)[action]()}
+      </span>
+      {target ? (
+        <span className='min-w-0 truncate font-mono text-xs'>{target}</span>
+      ) : null}
+    </>
+  )
+}
+
+function LiveThought({ item, text }: { item: TranscriptItem; text: string }) {
+  const line = thoughtLine(useLiveText(item, text))
+  if (!line) return null
+  return (
+    <span className='flex w-full min-w-0 gap-2 py-0.5 leading-5'>
+      <HugeiconsIcon
+        icon={AiBrain01Icon}
+        strokeWidth={2}
+        className='mt-0.5 size-4 shrink-0'
+      />
+      <span className='line-clamp-4 min-w-0'>{line}</span>
+    </span>
   )
 }
 

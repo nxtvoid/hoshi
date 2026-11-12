@@ -21,6 +21,7 @@ import { ClaudeIcon } from '@/components/brand/ProviderIcon'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
 import {
   isSubagentCall,
+  liveWorkId,
   subagentInput,
   subagentTranscriptId,
   type ToolCallItem
@@ -153,6 +154,7 @@ function SubagentTranscript({
       rows={rows}
       approvals={approvals}
       cwd={cwd}
+      liveWork={running ? liveWorkId(rows) : undefined}
       lead={
         <>
           <div className='text-muted-foreground flex items-center gap-3 text-xs'>

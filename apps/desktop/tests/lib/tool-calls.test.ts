@@ -4,6 +4,7 @@ import {
   activeEntry,
   foldTurns,
   groupTranscript,
+  liveWorkId,
   readingChanges,
   reasoningPreview,
   relativePath,
@@ -11,6 +12,7 @@ import {
   statusAnchor,
   summarizeToolCalls,
   subagentTranscriptId,
+  thoughtLine,
   toolName,
   toolTarget,
   withStreaming,
@@ -161,6 +163,39 @@ describe('reasoningPreview', () => {
 
     expect(reasoningPreview(value, true)).toBe('Then fix the build.')
     expect(reasoningPreview(value, false)).toBe('Checking the tests.')
+  })
+})
+
+describe('thoughtLine', () => {
+  test('is the bold heading a thought opens with', () => {
+    expect(thoughtLine('**Planning the split**\n\nFirst read the row.')).toBe(
+      'Planning the split'
+    )
+  })
+
+  test('is the first sentence, without markdown marks', () => {
+    expect(
+      thoughtLine(
+        'Found it in `Transcript.tsx`, see [the row](x.ts).\nThen *split* it.'
+      )
+    ).toBe('Found it in Transcript.tsx, see the row.')
+  })
+
+  test('keeps a sentence still arriving whole', () => {
+    expect(thoughtLine('I need to find where the line\nis rendered')).toBe(
+      'I need to find where the line is rendered'
+    )
+  })
+})
+
+describe('liveWorkId', () => {
+  test('is the last row only when it is work', () => {
+    const rows = groupTranscript([text('a'), tool('1', 'Read')])
+
+    expect(liveWorkId(rows)).toBe('1')
+    expect(liveWorkId(groupTranscript([tool('1', 'Read'), text('a')]))).toBe(
+      undefined
+    )
   })
 })
 

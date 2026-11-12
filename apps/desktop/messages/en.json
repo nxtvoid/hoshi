@@ -708,6 +708,16 @@
   "tool_running": "Running",
   "reasoning_thinking": "Thinking",
   "reasoning_thought": "Thought",
+  "tool_live_command": "Running",
+  "tool_live_edit": "Editing",
+  "tool_live_read": "Reading",
+  "tool_live_search": "Searching",
+  "tool_live_web": "Browsing",
+  "tool_done_command": "Ran",
+  "tool_done_edit": "Edited",
+  "tool_done_read": "Read",
+  "tool_done_search": "Searched",
+  "tool_done_web": "Browsed",
   "tool_failed": "Failed",
   "tool_summary_command": [
     {
