@@ -104,6 +104,23 @@ function keepInDraft(draftKey: string, attachment: ComposerAttachment) {
   ])
 }
 
+/** Saves running at once: each holds its whole file in memory until the engine has it. */
+const SAVES_AT_ONCE = 2
+let saving = 0
+const waitingSaves: (() => void)[] = []
+
+async function inTurn<T>(save: () => Promise<T>): Promise<T> {
+  if (saving < SAVES_AT_ONCE) saving++
+  else await new Promise<void>((resolve) => waitingSaves.push(resolve))
+  try {
+    return await save()
+  } finally {
+    const next = waitingSaves.shift()
+    if (next) next()
+    else saving--
+  }
+}
+
 /** Saves an image as a provider takes it, keeping its preview for the transcript. */
 async function saveImage(file: File, name: string): Promise<SavedAttachment> {
   const prepared = await prepareImage(withAttachmentType(file))
@@ -171,9 +188,9 @@ export function useComposerAttachments(draftKey: string) {
         chipped: false
       }
       setAttachments((current) => [...current, attachment])
-      const saving =
+      inTurn(() =>
         kind === 'image' ? saveImage(file, name) : saveFile(file, name)
-      saving
+      )
         .then((saved) => {
           const current = attachmentsRef.current.find(
             (candidate) => candidate.key === key
