@@ -14,6 +14,7 @@ import { AddProjectPalette } from './AddProjectPalette'
 import { PullRequestPalette } from './PullRequestPalette'
 import { ClaudeIcon } from '@/components/brand/ProviderIcon'
 import { ProjectIcon } from '@/components/sidebar/ProjectIcon'
+import { pullRequestProblem } from '@/lib/pull-request-problem'
 import { Dialog, DialogContent, DialogTitle } from '@hoshi/ui/components/dialog'
 import { PullRequestIcon } from '@/components/pull-request/PullRequestIcon'
 import { PALETTE_ICON, type PaletteGroup, PaletteFrame } from './PaletteFrame'
@@ -281,7 +282,11 @@ function ThreadEntry({
         ) : null}
         {pullRequest ? (
           <span className='flex shrink-0 items-center gap-1'>
-            <PullRequestIcon state={pullRequest.state} className='size-3' />
+            <PullRequestIcon
+              state={pullRequest.state}
+              problem={pullRequestProblem(pullRequest)}
+              className='size-3'
+            />
             <span className='tabular-nums'>#{pullRequest.number}</span>
           </span>
         ) : null}

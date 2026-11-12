@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { Markdown } from '../../src/components/markdown/Markdown'
+import { knownMentions } from '../../src/lib/prompt-segments'
 
 const render = (text: string, source?: 'agent' | 'forge') =>
   renderToStaticMarkup(<Markdown text={text} source={source} />)
@@ -74,5 +75,27 @@ describe('Markdown', () => {
     expect(render('![shot](https://example.com/shot.png)')).toContain(
       'src="https://example.com/shot.png"'
     )
+  })
+
+  test('a file a message sent shows as a chip that opens it', () => {
+    const report = {
+      type: 'file' as const,
+      id: 'f1',
+      name: 'Q3 report.pdf',
+      mimeType: 'application/pdf',
+      size: 2048
+    }
+    const html = renderToStaticMarkup(
+      <Markdown
+        text='summarize [File #1], not [File #2]'
+        source='forge'
+        mentions={knownMentions([report])}
+      />
+    )
+
+    expect(html.match(/<button/g)?.length).toBe(1)
+    expect(html).toContain('aria-label="Open Q3 report.pdf"')
+    expect(html).toContain('[File #2]')
+    expect(html).not.toContain('[File #1]')
   })
 })

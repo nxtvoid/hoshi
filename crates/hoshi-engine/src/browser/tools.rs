@@ -2,8 +2,12 @@
 //! browser, started on first use.
 
 use super::{Browser, DEFAULT_SIZE, Observer, Page, PageEvent, find_browser};
+use crate::throttle::Throttle;
 use crate::{Notification, Notify};
-use hoshi_core::{BrowserFrame, BrowserInput, BrowserPage, BrowserPoint};
+use hoshi_core::{
+    BrowserFrame, BrowserInput, BrowserPage, BrowserPoint, BrowserSettings, PageColorScheme,
+    PageSize, SearchEngine,
+};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -34,13 +38,20 @@ pub(crate) struct Browsing {
     /// Since when the browser has no page; it stays a while, keeping the sessions of the
     /// sites signed in to.
     idle_since: Option<Instant>,
+    /// The panel's size when a page last filled it, for new pages that open filling it.
+    last_fit: Option<(u32, u32)>,
+    settings: BrowserSettings,
 }
 
+/// The least time between two frames of a page sent to the UI: about 20 a second.
+const FRAME_EVERY: Duration = Duration::from_millis(50);
 /// How long a browser without pages is kept before it goes.
 const IDLE_BROWSER: Duration = Duration::from_secs(10 * 60);
 const NO_PAGE: &str = "this thread has no page open: call preview_open first";
 const CLOSED_BY_USER: &str =
     "the user closed this thread's page: call preview_open if you still need it";
+const NO_AGENT_ACCESS: &str =
+    "the user turned off the browser for agents in hoshi's settings, so it can't be used";
 
 fn text<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
     arguments[key]
@@ -58,6 +69,73 @@ fn size(arguments: &Value, fallback: (u32, u32)) -> (u32, u32) {
     (side("width", fallback.0), side("height", fallback.1))
 }
 
+/// Whether the address bar's `input` is somewhere to go rather than words to search for.
+fn is_address(input: &str) -> bool {
+    is_local_path(input)
+        || !input.contains(char::is_whitespace)
+            && (input.contains("://")
+                || input.contains('.')
+                || input.contains(':')
+                || input.starts_with('/')
+                || input.starts_with("localhost"))
+}
+
+fn is_local_path(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let windows_path = bytes.len() > 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    windows_path
+        || input.starts_with("file://")
+        || (input.starts_with('/') && !input.starts_with("//"))
+}
+
+/// `text` as a URL query value.
+fn encode_query(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                char::from(byte).to_string()
+            }
+            b' ' => "+".to_owned(),
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+/// A custom search URL hoshi can use: http(s), with `%s` for the terms.
+fn usable_search_url(template: &str) -> bool {
+    (template.starts_with("https://") || template.starts_with("http://")) && template.contains("%s")
+}
+
+/// The search for `terms` with the engine the user chose; DuckDuckGo while a custom one
+/// isn't usable.
+fn search_url(terms: &str, settings: &BrowserSettings) -> String {
+    let template = match settings.search_engine {
+        SearchEngine::Custom if usable_search_url(&settings.custom_search_url) => {
+            settings.custom_search_url.as_str()
+        }
+        SearchEngine::DuckDuckGo | SearchEngine::Custom => "https://duckduckgo.com/?q=%s",
+        SearchEngine::Google => "https://www.google.com/search?q=%s",
+        SearchEngine::Bing => "https://www.bing.com/search?q=%s",
+        SearchEngine::Brave => "https://search.brave.com/search?q=%s",
+        SearchEngine::Kagi => "https://kagi.com/search?q=%s",
+        SearchEngine::Ecosia => "https://www.ecosia.org/search?q=%s",
+    };
+    template.replacen("%s", &encode_query(terms), 1)
+}
+
+/// What the address bar opens for `input`: the address, or a search for the words.
+fn address_or_search(input: &str, settings: &BrowserSettings) -> String {
+    let input = input.trim();
+    if is_address(input) {
+        address(input)
+    } else {
+        search_url(input, settings)
+    }
+}
+
 /// A bare host like `localhost:5173` gets `http://`, an absolute file path `file://`; other
 /// addresses stay as written.
 fn address(url: &str) -> String {
@@ -70,9 +148,11 @@ fn address(url: &str) -> String {
         && bytes[1] == b':'
         && matches!(bytes[2], b'\\' | b'/');
     if windows_path {
-        format!("file:///{}", url.replace('\\', "/"))
+        format!("file:///{}", url.replace('\\', "/").replace(' ', "%20"))
     } else if url.starts_with('/') && !url.starts_with("//") {
-        format!("file://{url}")
+        format!("file://{}", url.replace(' ', "%20"))
+    } else if url.starts_with("file://") {
+        url.replace(' ', "%20")
     } else if url.contains("://") || url.starts_with("about:") || url.starts_with("data:") {
         url.to_owned()
     } else if local {
@@ -93,12 +173,37 @@ impl Browsing {
             fits: HashMap::new(),
             closed_by_user: HashSet::new(),
             idle_since: None,
+            last_fit: None,
+            settings: BrowserSettings::default(),
         }
     }
 
-    /// The size a new page of the thread opens at: the panel's while it fills it.
+    /// How new pages open, and whether agents may use the browser.
+    pub(crate) fn configure(&mut self, settings: BrowserSettings) {
+        self.settings = settings;
+    }
+
+    /// The size a new page of the thread opens at: the panel's while it fills it, else the
+    /// one the user picked in the settings.
     fn opening_size(&self, thread_id: &str) -> (u32, u32) {
-        self.fits.get(thread_id).copied().unwrap_or(DEFAULT_SIZE)
+        if let Some(fit) = self.fits.get(thread_id) {
+            return *fit;
+        }
+        match self.settings.page_size {
+            PageSize::Fill => self.last_fit.unwrap_or(DEFAULT_SIZE),
+            PageSize::Desktop => DEFAULT_SIZE,
+            PageSize::Tablet => (768, 1024),
+            PageSize::Phone => (390, 844),
+        }
+    }
+
+    /// A page that just opened at its default size fills the panel when the settings say so.
+    fn fill_when_default(&mut self, thread_id: &str) {
+        if self.settings.page_size == PageSize::Fill
+            && let Some(page) = self.pages.get(thread_id)
+        {
+            self.fits.entry(thread_id.to_owned()).or_insert(page.size());
+        }
     }
 
     /// The panel is `size` and the page fills it.
@@ -109,6 +214,7 @@ impl Browsing {
         );
         self.guarded(|this| {
             this.fits.insert(thread_id.to_owned(), wanted);
+            this.last_fit = Some(wanted);
             if this.pages.contains_key(thread_id) {
                 this.resize_page(thread_id, wanted)?;
             }
@@ -166,18 +272,31 @@ impl Browsing {
     /// What the page shows and where it went reach the UI as notifications.
     fn observer(&self, thread_id: &str) -> Observer {
         let (notify, thread_id) = (self.notify.clone(), thread_id.to_owned());
+        let frames = {
+            let notify = notify.clone();
+            Throttle::new(
+                FRAME_EVERY,
+                |shown, frame| *shown = frame,
+                move |frame| {
+                    notify(Notification::BrowserFrame(frame));
+                },
+            )
+        };
         Arc::new(move |event| {
             let notification = match event {
                 PageEvent::Frame {
-                    data,
+                    jpeg,
                     width,
                     height,
-                } => Notification::BrowserFrame(BrowserFrame {
-                    thread_id: thread_id.clone(),
-                    data,
-                    width,
-                    height,
-                }),
+                } => {
+                    frames.offer(BrowserFrame {
+                        thread_id: thread_id.clone(),
+                        jpeg,
+                        width,
+                        height,
+                    });
+                    return;
+                }
                 PageEvent::Changed { url, title, errors } => {
                     Notification::BrowserPage(BrowserPage {
                         thread_id: thread_id.clone(),
@@ -202,7 +321,16 @@ impl Browsing {
             return Ok(false);
         }
         let observer = self.observer(thread_id);
-        let page = self.browser()?.open_page(wanted, observer)?;
+        let (zoom, scheme) = (self.settings.zoom, self.settings.color_scheme);
+        let mut page = self.browser()?.open_page(wanted, observer)?;
+        if zoom != 100 {
+            page.set_zoom(f64::from(zoom) / 100.0)?;
+        }
+        match scheme {
+            PageColorScheme::System => {}
+            PageColorScheme::Light => page.set_color_scheme(Some("light"))?,
+            PageColorScheme::Dark => page.set_color_scheme(Some("dark"))?,
+        }
         if self.viewing.contains(thread_id) {
             page.start_screencast(page.size())?;
         }
@@ -261,9 +389,11 @@ impl Browsing {
     /// had none.
     pub(crate) fn user_open(&mut self, thread_id: &str, url: &str) -> Result<(), String> {
         self.guarded(|this| {
-            this.ensure_page(thread_id, this.opening_size(thread_id))?;
-            this.page(thread_id)?
-                .navigate(&address(url), LOAD_TIMEOUT)?;
+            if this.ensure_page(thread_id, this.opening_size(thread_id))? {
+                this.fill_when_default(thread_id);
+            }
+            let target = address_or_search(url, &this.settings);
+            this.page(thread_id)?.navigate(&target, LOAD_TIMEOUT)?;
             this.announce(thread_id, false, None, false);
             Ok(())
         })
@@ -376,6 +506,9 @@ impl Browsing {
         tool: &str,
         arguments: &Value,
     ) -> Result<Value, String> {
+        if !self.settings.agent_access {
+            return Err(NO_AGENT_ACCESS.into());
+        }
         self.drop_dead_browser();
         let point = self.agent_point(caller, tool, arguments);
         let result = self.dispatch(caller, tool, arguments);
@@ -423,6 +556,9 @@ impl Browsing {
             self.fits.remove(caller);
         }
         let opened = self.ensure_page(caller, size(arguments, self.opening_size(caller)))?;
+        if opened && !sized {
+            self.fill_when_default(caller);
+        }
         if sized {
             let wanted = size(arguments, self.page(caller)?.size());
             self.resize_page(caller, wanted)?;
@@ -697,7 +833,7 @@ mod tests {
 
         assert_eq!(opened["opened"], true);
         assert_eq!((frame.thread_id.as_str(), frame.width), ("t", 1280));
-        assert!(!frame.data.is_empty());
+        assert!(frame.jpeg.starts_with(&[0xff, 0xd8]));
         assert_eq!(label["value"], "Clicked");
         let pages: Vec<BrowserPage> = received
             .try_iter()
@@ -755,5 +891,71 @@ mod tests {
         assert_eq!(address("about:blank"), "about:blank");
         assert_eq!(address("/tmp/a.html"), "file:///tmp/a.html");
         assert_eq!(address("C:\\work\\a.html"), "file:///C:/work/a.html");
+        assert_eq!(
+            address("/tmp/My Report.html"),
+            "file:///tmp/My%20Report.html"
+        );
+    }
+
+    #[test]
+    fn local_paths_with_spaces_are_not_searched_for() {
+        let settings = BrowserSettings::default();
+        assert_eq!(
+            address_or_search("/tmp/My Report.html", &settings),
+            "file:///tmp/My%20Report.html"
+        );
+        assert_eq!(
+            address_or_search("C:\\Program Files\\report.html", &settings),
+            "file:///C:/Program%20Files/report.html"
+        );
+        assert_eq!(
+            address_or_search("file:///tmp/My Report.html", &settings),
+            "file:///tmp/My%20Report.html"
+        );
+    }
+
+    #[test]
+    fn words_in_the_address_bar_are_searched_for() {
+        let mut settings = BrowserSettings::default();
+        assert_eq!(
+            address_or_search("rust borrow checker", &settings),
+            "https://duckduckgo.com/?q=rust+borrow+checker"
+        );
+        assert_eq!(
+            address_or_search("localhost:5173", &settings),
+            "http://localhost:5173"
+        );
+        assert_eq!(
+            address_or_search("example.com/a", &settings),
+            "https://example.com/a"
+        );
+        settings.search_engine = SearchEngine::Google;
+        assert_eq!(
+            address_or_search("c++ & rust", &settings),
+            "https://www.google.com/search?q=c%2B%2B+%26+rust"
+        );
+        settings.search_engine = SearchEngine::Custom;
+        settings.custom_search_url = "https://search.example/?q=%s&lang=es".into();
+        assert_eq!(
+            address_or_search("ñandú", &settings),
+            "https://search.example/?q=%C3%B1and%C3%BA&lang=es"
+        );
+        settings.custom_search_url = "not a url".into();
+        assert_eq!(
+            address_or_search("hoshi", &settings),
+            "https://duckduckgo.com/?q=hoshi"
+        );
+    }
+
+    #[test]
+    fn agents_are_refused_the_browser_once_the_user_turns_it_off() {
+        let mut browsing = Browsing::new(std::env::temp_dir(), Arc::new(|_| {}));
+        browsing.configure(BrowserSettings {
+            agent_access: false,
+            ..BrowserSettings::default()
+        });
+        let refused = browsing.call("t", "preview_status", &json!({}));
+        assert_eq!(refused, Err(NO_AGENT_ACCESS.to_owned()));
+        assert!(browsing.browser.is_none());
     }
 }

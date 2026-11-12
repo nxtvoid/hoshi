@@ -52,8 +52,9 @@ pub use pull_request::{
 pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
 pub use server::{LocalServer, ServerOrigin, ThreadServers};
 pub use settings::{
-    AppSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
-    SubagentEffort, ThreadTitleSettings,
+    AppSettings, BrowserSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, LinkTarget,
+    PageColorScheme, PageSize, ProviderSettings, SearchEngine, StartupView, SubagentEffort,
+    ThreadTitleSettings,
 };
 pub use source_control::{
     GitAction, GitActionPhase, GitActionProgress, GitActionPullRequest, GitActionRequest,

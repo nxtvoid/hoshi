@@ -13,6 +13,24 @@ use std::time::Duration;
 
 const POLL_EVERY: Duration = Duration::from_millis(400);
 const REQUEST_PREFIX: &str = "hoshi-output:";
+/// How much of a running command's output is sent each time it grows: its latest lines.
+const LIVE_TAIL_BYTES: usize = 32 * 1024;
+
+/// The output's last `LIVE_TAIL_BYTES`, from the start of a line when it was cut.
+fn tail(output: &str) -> &str {
+    if output.len() <= LIVE_TAIL_BYTES {
+        return output;
+    }
+    let mut start = output.len() - LIVE_TAIL_BYTES;
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    let cut = &output[start..];
+    match cut.find('\n') {
+        Some(line_end) if !cut[line_end + 1..].is_empty() => &cut[line_end + 1..],
+        _ => cut,
+    }
+}
 
 #[derive(Debug)]
 struct Running {
@@ -105,7 +123,7 @@ impl LiveOutput {
         running.seen = Some(total);
         Some(ProviderOutput::ToolOutput {
             item_id: running.tool_use_id.clone(),
-            output: strip_ansi(output["output"].as_str().unwrap_or_default()),
+            output: strip_ansi(tail(output["output"].as_str().unwrap_or_default())),
         })
     }
 
@@ -156,6 +174,34 @@ mod tests {
 
         live.ended(&json!({ "task_id": "b1" }));
         assert_eq!(live.answer(&answer(14, "tick 1\r\ntick 2\r\n")), None);
+    }
+
+    #[test]
+    fn one_long_final_line_keeps_its_bounded_suffix() {
+        let output = format!("{}\n", "x".repeat(LIVE_TAIL_BYTES * 2));
+
+        let sent = tail(&output);
+
+        assert_eq!(sent.len(), LIVE_TAIL_BYTES);
+        assert!(sent.ends_with('\n'));
+    }
+
+    #[test]
+    fn a_long_output_is_sent_as_its_latest_whole_lines() {
+        let live = LiveOutput::default();
+        live.started(&json!({ "task_id": "b1", "tool_use_id": "toolu_1",
+            "task_type": "local_bash", "is_backgrounded": false }));
+        let line = format!("{}\n", "é".repeat(99));
+        let output = line.repeat(1000);
+
+        let Some(ProviderOutput::ToolOutput { output: sent, .. }) =
+            live.answer(&answer(output.len() as u64, &output))
+        else {
+            panic!("no output");
+        };
+        assert!(sent.len() <= LIVE_TAIL_BYTES);
+        assert!(sent.len() > LIVE_TAIL_BYTES - line.len());
+        assert!(sent.starts_with('é') && output.ends_with(&sent));
     }
 
     #[test]

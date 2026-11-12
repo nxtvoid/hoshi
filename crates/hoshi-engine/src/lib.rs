@@ -8,6 +8,7 @@ mod browser;
 mod checkpoint;
 mod delegation;
 mod diff;
+mod document_text;
 mod editors;
 mod folders;
 mod git;
@@ -28,8 +29,10 @@ mod secrets;
 mod servers;
 mod setup_files;
 mod source_control;
+mod stream_batch;
 mod terminal;
 mod thread_tools;
+mod throttle;
 mod titles;
 mod watch;
 mod worktree;
@@ -43,7 +46,7 @@ use chrono::{SecondsFormat, Utc};
 use hoshi_core::ProviderAccountStatus;
 use hoshi_core::{BankedResetFailure, BankedResetSpend, HeldMessage, ThreadHeldMessage};
 use hoshi_core::{
-    BrowserFrame, BrowserInput, BrowserPage, GitActionProgress, ProviderUpdate,
+    BrowserFrame, BrowserInput, BrowserPage, BrowserSettings, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, TranscriptPage,
 };
 use hoshi_core::{
@@ -86,7 +89,8 @@ use worktree_setup::{SetupLaunch, WorktreeSetups};
 
 pub enum Notification {
     Event(EventEnvelope),
-    Stream(StreamDelta),
+    /// Text still streaming, batched.
+    Stream(Vec<StreamDelta>),
     /// Read from a forge; cached, not part of the event log.
     PullRequest(ThreadPullRequest),
     /// A fresh read of a pull request's detail, after the panel showed the cached one.
@@ -202,6 +206,7 @@ struct State {
     linked_pull_requests: HashMap<(RepositoryRef, u32), (Instant, PullRequest)>,
     context_usages: HashMap<String, ContextUsage>,
     thread_titles: ThreadTitleSettings,
+    browser: BrowserSettings,
     subagent_effort: SubagentEffort,
     /// Threads whose generated title missed the subject; named again after their turn.
     titles_to_refine: HashSet<String>,
@@ -244,6 +249,8 @@ struct State {
     pending_wakes: HashMap<String, Vec<Wake>>,
     /// The account each forge is read with, whose own comments never wake its agent.
     viewers: HashMap<ForgeKind, String>,
+    /// The thread whose transcript the UI shows, the only one whose text streams to it.
+    streamed: Option<String>,
 }
 
 /// A message waiting for the thread's running turn to end.
@@ -441,6 +448,7 @@ impl Engine {
     /// Turns that were running when the app last closed are recorded as
     /// interrupted, and every thread's branch is read again. Files go under `data_dir`.
     pub fn from_store(store: Store, data_dir: &Path, notify: Notify) -> Result<Self, StoreError> {
+        let notify = stream_batch::batch_streams(notify);
         let snapshot = store.snapshot()?;
         let known = snapshot.pull_requests.iter().filter_map(|update| {
             let pull_request = update.pull_request.clone()?;
@@ -501,8 +509,10 @@ impl Engine {
             watches,
             watch_reads: HashMap::new(),
             pending_wakes: HashMap::new(),
+            streamed: None,
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
+            browser: BrowserSettings::default(),
             subagent_effort: SubagentEffort::default(),
             titles_to_refine: HashSet::new(),
         };
@@ -1206,16 +1216,28 @@ impl Engine {
         adapter.repository(&repository).map_err(forge_error)
     }
 
-    /// Who each forge is signed in as. Asks the forges, so it can take a moment.
+    /// Who each forge is signed in as now, reading the credentials again in case the account
+    /// changed. Asks the forges, so it can take a moment.
     pub fn forge_accounts(&self) -> Vec<ForgeAccount> {
         let forges: Vec<_> = lock(&self.state).forges.values().cloned().collect();
-        forges
+        let accounts: Vec<ForgeAccount> = forges
             .into_iter()
-            .map(|forge| ForgeAccount {
-                forge: forge.kind(),
-                login: forge.viewer().ok(),
+            .map(|forge| {
+                forge.forget_credentials();
+                ForgeAccount {
+                    forge: forge.kind(),
+                    login: forge.viewer().ok(),
+                }
             })
-            .collect()
+            .collect();
+        let mut state = lock(&self.state);
+        for account in &accounts {
+            match &account.login {
+                Some(login) => state.viewers.insert(account.forge, login.clone()),
+                None => state.viewers.remove(&account.forge),
+            };
+        }
+        accounts
     }
 
     /// The project's icon as a data URL, found among its files. Reads the disk.
@@ -1292,6 +1314,13 @@ impl Engine {
 
     pub fn set_thread_titles(&self, settings: ThreadTitleSettings) {
         lock(&self.state).thread_titles = settings;
+    }
+
+    /// Who uses the browser and how its pages open. Agents running now keep the tools they
+    /// were given until their session starts again; they are refused once access is off.
+    pub fn set_browser(&self, settings: BrowserSettings) {
+        lock(&self.state).browser = settings.clone();
+        self.browsing().configure(settings);
     }
 
     /// How agents choose the model and effort of their subagents, from their next turn on.
@@ -1701,6 +1730,11 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The UI shows this thread's transcript, `None` for none: only its text streams to it.
+    pub fn stream_thread(&self, thread_id: Option<String>) {
+        lock(&self.state).streamed = thread_id;
+    }
+
     /// The panel shows the thread's browser page, which then streams to it, or stopped.
     pub fn browser_view(&self, thread_id: &str, viewing: bool) -> Result<(), CommandError> {
         self.browsing()
@@ -1857,9 +1891,28 @@ impl Engine {
             .map_err(|detail| CommandError::Internal { detail })
     }
 
-    /// An image the user removed before sending it.
-    pub fn discard_image(&self, image: &MessageAttachment) {
-        lock(&self.state).attachments.remove(image);
+    /// Saves a file the user is about to send, and the text of a document beside it.
+    pub fn save_file(
+        &self,
+        name: &str,
+        mime_type: &str,
+        bytes: &[u8],
+    ) -> Result<MessageAttachment, CommandError> {
+        let attachments = lock(&self.state).attachments.clone();
+        attachments
+            .save_file(name, mime_type, bytes)
+            .map_err(|detail| CommandError::Internal { detail })
+    }
+
+    /// An image or file the user removed before sending it.
+    pub fn discard_attachment(&self, attachment: &MessageAttachment) {
+        lock(&self.state).attachments.remove(attachment);
+    }
+
+    /// Where a saved image or file is, to open it; `None` when it is gone.
+    pub fn attachment_path(&self, attachment: &MessageAttachment) -> Option<String> {
+        let path = lock(&self.state).attachments.path_of(attachment)?;
+        path.is_file().then(|| path.to_string_lossy().into_owned())
     }
 
     /// An image on this machine an agent's answer shows by its absolute path, as a data URL;
@@ -2325,7 +2378,7 @@ impl State {
     }
 
     /// Worktrees (with their repository) that a deletion leaves without a thread.
-    /// The images in the transcripts of the threads `command` deletes.
+    /// The images and files in the transcripts of the threads `command` deletes.
     fn images_freed_by(&self, command: &Command) -> Vec<MessageAttachment> {
         self.threads_deleted_by(command)
             .into_iter()
@@ -2334,7 +2387,12 @@ impl State {
                 ItemContent::UserMessage { attachments, .. } => attachments,
                 _ => Vec::new(),
             })
-            .filter(|attachment| matches!(attachment, MessageAttachment::Image { .. }))
+            .filter(|attachment| {
+                matches!(
+                    attachment,
+                    MessageAttachment::Image { .. } | MessageAttachment::File { .. }
+                )
+            })
             .collect()
     }
 
@@ -2392,17 +2450,18 @@ impl State {
             }
             other => return self.record(thread_id, turn_id, other),
         };
+        let shown = self.streamed.as_deref() == Some(thread_id);
         let active = self
             .model
             .thread(thread_id)
             .is_some_and(|thread| thread.active_turn_id.as_deref() == Some(turn_id));
-        if active {
-            (self.notify)(Notification::Stream(StreamDelta {
+        if shown && active {
+            (self.notify)(Notification::Stream(vec![StreamDelta {
                 thread_id: thread_id.to_owned(),
                 item_id,
                 kind,
                 delta,
-            }));
+            }]));
         }
     }
 
@@ -2893,7 +2952,7 @@ impl State {
                         let request = TitleRequest {
                             context: text.clone(),
                             previous_title: None,
-                            images: titles::image_names(attachments),
+                            images: titles::attachment_names(attachments),
                             model: None,
                             instructions: String::new(),
                         };
@@ -3130,16 +3189,38 @@ impl State {
     fn turn_attachments(&self, attachments: Vec<MessageAttachment>) -> Vec<TurnAttachment> {
         attachments
             .into_iter()
-            .map(|attachment| TurnAttachment {
-                path: match &attachment {
-                    MessageAttachment::Image { id, mime_type, .. } => {
-                        self.attachments.path(id, mime_type)
+            .map(|attachment| {
+                let path = self.attachments.path_of(&attachment);
+                let extracted_text = match &attachment {
+                    MessageAttachment::File { .. } => {
+                        path.as_deref().and_then(document_text::sidecar)
                     }
                     _ => None,
-                },
-                attachment,
+                };
+                TurnAttachment {
+                    path,
+                    extracted_text,
+                    attachment,
+                }
             })
             .collect()
+    }
+
+    /// The images and files the thread's earlier messages carried since its conversation
+    /// last compacted, leaving out those of the message about to go, `current`.
+    fn earlier_media(&self, thread_id: &str, current: &[TurnAttachment]) -> Vec<TurnAttachment> {
+        let earlier = match self.store.media_since_compaction(thread_id) {
+            Ok(earlier) => earlier,
+            Err(error) => {
+                eprintln!("hoshi: failed to read the media of thread {thread_id}: {error}");
+                return Vec::new();
+            }
+        };
+        let earlier = earlier
+            .into_iter()
+            .filter(|attachment| !current.iter().any(|sent| sent.attachment == *attachment))
+            .collect();
+        self.turn_attachments(earlier)
     }
 
     /// Asks the provider for a title in the background, retrying a first title twice.
@@ -3871,6 +3952,7 @@ fn start_turn(
         return;
     };
     let attachments = state.turn_attachments(attachments);
+    let earlier_media = state.earlier_media(thread_id, &attachments);
     let depth = state.depth(thread_id);
     let mcp = state
         .mcp
@@ -3883,13 +3965,19 @@ fn start_turn(
             })
         });
     let bitbucket = state.opens_pull_requests(thread_id);
-    let instructions = mcp
-        .as_ref()
-        .map(|_| delegation::instructions(depth, thread.project_id.is_some(), bitbucket));
+    let instructions = mcp.as_ref().map(|_| {
+        delegation::instructions(
+            depth,
+            thread.project_id.is_some(),
+            bitbucket,
+            state.browser.agent_access,
+        )
+    });
     let request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
         attachments,
+        earlier_media,
         resume_session_id: thread.session_id.clone(),
         resume_session_at: thread.resume_at.clone(),
         model: thread.model.clone(),
@@ -4711,7 +4799,7 @@ mod tests {
             resume_at: None,
             model: Some("haiku".into()),
             attachments: Vec::new(),
-            instructions: Some(delegation::instructions(0, true, false)),
+            instructions: Some(delegation::instructions(0, true, false, true)),
             subagent_effort: SubagentEffort::AgentDecides,
         };
         assert_eq!(
@@ -6278,6 +6366,8 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            changes_requested: false,
+            conflicts: false,
             additions: 0,
             deletions: 0,
             updated_at: "2026-11-07T12:00:00Z".into(),
@@ -6369,6 +6459,8 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            changes_requested: false,
+            conflicts: false,
             additions: 0,
             deletions: 0,
             updated_at: "2026-11-07T12:00:00Z".into(),
@@ -6467,6 +6559,8 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            changes_requested: false,
+            conflicts: false,
             additions: 0,
             deletions: 0,
             updated_at: "2026-11-07T12:00:00Z".into(),
@@ -6734,6 +6828,8 @@ Blue"
                 state: hoshi_core::PullRequestState::Open,
                 checks: None,
                 unresolved_comments: 0,
+                changes_requested: false,
+                conflicts: false,
                 additions: 0,
                 deletions: 0,
                 updated_at: "2026-11-09T12:00:00Z".into(),
@@ -7005,6 +7101,8 @@ Blue"
             state,
             checks: None,
             unresolved_comments: 0,
+            changes_requested: false,
+            conflicts: false,
             additions: 0,
             deletions: 0,
             updated_at: "2026-11-07T12:00:00Z".into(),
@@ -7730,6 +7828,8 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            changes_requested: false,
+            conflicts: false,
             additions: 0,
             deletions: 0,
             updated_at: "2026-11-07T12:00:00Z".into(),

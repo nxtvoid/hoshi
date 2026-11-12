@@ -6,7 +6,7 @@ import { useAppStore } from '@/state/app-store'
 import { AgentLine, AgentStatus } from './AgentLine'
 import { useModelsStore } from '@/state/models-store'
 import { useSubagentStore } from '@/state/subagent-store'
-import { useTranscriptStore } from '@/state/transcript-store'
+import { useTranscriptView } from './transcript-scope'
 import {
   reasoningPreview,
   subagentInput,
@@ -31,8 +31,8 @@ export function SubagentRow({
   const running = state === 'running'
   const { description, kind } = subagentInput(input)
   const catalog = useModelsStore((state) => state.catalog)
-  const progress = useTranscriptStore((state) =>
-    running ? state.toolOutput[item.id] : undefined
+  const progress = useTranscriptView((view) =>
+    running ? view.toolOutput[item.id] : undefined
   )
   const stopSubagent = useAppStore((state) => state.stopSubagent)
   const view = useSubagentStore((state) => state.view)

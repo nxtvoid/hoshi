@@ -4,9 +4,12 @@ import { selectQuietThreads } from '@/state/quiet-threads'
 import type { Thread } from '@/bindings/Thread'
 import { useUnseenStore } from '@/state/unseen-store'
 import { useSidebarStore } from '@/state/sidebar-store'
+import type { ForgeAccount } from '@/bindings/ForgeAccount'
 import type { PullRequest } from '@/bindings/PullRequest'
 import { useSettingsStore } from '@/state/settings-store'
+import { useForgeAccountsStore } from '@/state/forge-accounts-store'
 import {
+  type ForgeLogins,
   inactiveAfterMs,
   inboxCount,
   inboxSections,
@@ -22,6 +25,19 @@ type SidebarInputs = {
   query: SidebarQuery
   unseen: Record<string, true>
   held: string | null
+}
+
+function loginsOf(accounts: ForgeAccount[] | null): ForgeLogins {
+  const logins: ForgeLogins = {}
+  for (const account of accounts ?? []) {
+    if (account.login) logins[account.forge] = account.login
+  }
+  return logins
+}
+
+function useLogins() {
+  const accounts = useForgeAccountsStore((state) => state.accounts)
+  return useMemo(() => loginsOf(accounts), [accounts])
 }
 
 function sectionsOf({
@@ -43,12 +59,13 @@ function sectionsOf({
 function inboxOf(
   threads: Thread[],
   pullRequests: Record<string, PullRequest>,
-  unseen: Record<string, true>
+  unseen: Record<string, true>,
+  logins: ForgeLogins
 ) {
   const sorted = withDelegatedWork(threads).sort((a, b) =>
     newestFirst(a.updatedAt, b.updatedAt)
   )
-  return inboxSections(sorted, pullRequests, Date.now(), unseen)
+  return inboxSections(sorted, pullRequests, Date.now(), unseen, logins)
 }
 
 /** The sections the sidebar lists right now, for its view, search, filter and sort. */
@@ -65,6 +82,7 @@ export function useSidebarSections() {
   const inactiveDays = useSettingsStore(
     (state) => state.settings?.general.inactiveAfterDays
   )
+  const logins = useLogins()
 
   return useMemo(
     () =>
@@ -77,7 +95,8 @@ export function useSidebarSections() {
           search,
           filter,
           sort,
-          inactiveAfterMs: inactiveAfterMs(inactiveDays)
+          inactiveAfterMs: inactiveAfterMs(inactiveDays),
+          logins
         },
         unseen,
         held
@@ -91,6 +110,7 @@ export function useSidebarSections() {
       filter,
       sort,
       inactiveDays,
+      logins,
       unseen,
       held
     ]
@@ -114,7 +134,8 @@ export function currentSidebarSections() {
       search,
       filter,
       sort: threadSort,
-      inactiveAfterMs: inactiveAfterMs(inactiveDays)
+      inactiveAfterMs: inactiveAfterMs(inactiveDays),
+      logins: loginsOf(useForgeAccountsStore.getState().accounts)
     },
     unseen,
     held
@@ -126,10 +147,11 @@ function useInboxSections() {
   const threads = useAppStore(selectQuietThreads)
   const pullRequests = useAppStore((state) => state.pullRequests)
   const unseen = useUnseenStore((state) => state.unseen)
+  const logins = useLogins()
 
   return useMemo(
-    () => inboxOf(threads, pullRequests, unseen),
-    [threads, pullRequests, unseen]
+    () => inboxOf(threads, pullRequests, unseen, logins),
+    [threads, pullRequests, unseen, logins]
   )
 }
 
@@ -137,8 +159,9 @@ function useInboxSections() {
 export function currentAttentionThreads(): Thread[] {
   const { threads, pullRequests } = useAppStore.getState()
   const { unseen } = useUnseenStore.getState()
+  const logins = loginsOf(useForgeAccountsStore.getState().accounts)
   return (
-    inboxOf(threads, pullRequests, unseen).find(
+    inboxOf(threads, pullRequests, unseen, logins).find(
       (section) => section.id === 'attention'
     )?.threads ?? []
   )

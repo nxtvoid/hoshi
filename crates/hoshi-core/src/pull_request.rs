@@ -58,6 +58,12 @@ pub struct PullRequest {
     /// `None` when the pull request has no checks.
     pub checks: Option<ChecksState>,
     pub unresolved_comments: u32,
+    /// A reviewer asked for changes and hasn't approved since.
+    #[serde(default)]
+    pub changes_requested: bool,
+    /// It conflicts with its base branch; `false` while the forge hasn't worked that out.
+    #[serde(default)]
+    pub conflicts: bool,
     pub additions: u32,
     pub deletions: u32,
     /// RFC 3339.

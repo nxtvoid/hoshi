@@ -18,6 +18,7 @@ const API_URL: &str = "https://api.github.com";
 macro_rules! pull_request_fields {
     () => {
         "number title url isDraft state additions deletions updatedAt headRefName headRefOid baseRefName
+        reviewDecision mergeable
         author { login }
         commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
         reviewThreads(first: 100) { nodes { isResolved } }"
@@ -219,6 +220,10 @@ fn rejection_message(text: &str, status: u16) -> String {
 impl Forge for GitHub {
     fn kind(&self) -> ForgeKind {
         ForgeKind::Github
+    }
+
+    fn forget_credentials(&self) {
+        self.forget_token();
     }
 
     fn viewer(&self) -> Result<String, ForgeError> {
@@ -556,6 +561,10 @@ struct PullRequestNode {
     #[serde(default)]
     head_ref_oid: Option<String>,
     base_ref_name: String,
+    #[serde(default)]
+    review_decision: Option<String>,
+    #[serde(default)]
+    mergeable: Option<String>,
     author: Option<Author>,
     commits: Nodes<CommitNode>,
     review_threads: Nodes<ReviewThread>,
@@ -648,6 +657,8 @@ fn pull_request_of(node: PullRequestNode) -> PullRequest {
         state,
         checks,
         unresolved_comments,
+        changes_requested: node.review_decision.as_deref() == Some("CHANGES_REQUESTED"),
+        conflicts: node.mergeable.as_deref() == Some("CONFLICTING"),
         additions: node.additions,
         deletions: node.deletions,
         updated_at: node.updated_at,
@@ -757,5 +768,19 @@ mod tests {
             "errors":[{"type":"NOT_FOUND","message":"Could not resolve to a Repository"}]}"#;
 
         assert_eq!(parse(text, "x"), Err(ForgeError::NotFound));
+    }
+
+    #[test]
+    fn reads_requested_changes_and_conflicts() {
+        let blocked = OPEN_PR.replacen(
+            "\"isDraft\"",
+            "\"reviewDecision\": \"CHANGES_REQUESTED\", \"mergeable\": \"CONFLICTING\", \"isDraft\"",
+            1,
+        );
+        let blocked = parse(&response(&blocked), "fix/sidebar").unwrap().unwrap();
+        let plain = parse(&response(OPEN_PR), "fix/sidebar").unwrap().unwrap();
+
+        assert!(blocked.changes_requested && blocked.conflicts);
+        assert!(!plain.changes_requested && !plain.conflicts);
     }
 }

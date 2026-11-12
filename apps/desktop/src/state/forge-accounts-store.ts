@@ -10,16 +10,51 @@ type ForgeAccountsState = {
   load: () => Promise<void>
 }
 
-export const useForgeAccountsStore = create<ForgeAccountsState>()((set) => ({
-  accounts: null,
-  load: async () => {
-    try {
-      set({ accounts: await invoke<ForgeAccount[]>('get_forge_accounts') })
-    } catch (error) {
-      console.error('hoshi: forge accounts failed', error)
+const sameAccounts = (a: ForgeAccount[] | null, b: ForgeAccount[]) =>
+  a !== null &&
+  a.length === b.length &&
+  a.every((account) =>
+    b.some(
+      (other) => other.forge === account.forge && other.login === account.login
+    )
+  )
+
+/** The window coming back reads the accounts again, at most this often: they may have changed outside hoshi. */
+const RECHECK_AFTER_MS = 30_000
+
+/** Reads started so far; only the latest one's answer is kept. */
+let loads = 0
+
+export const useForgeAccountsStore = create<ForgeAccountsState>()(
+  (set, get) => ({
+    accounts: null,
+    load: async () => {
+      const request = ++loads
+      try {
+        const accounts = await invoke<ForgeAccount[]>('get_forge_accounts')
+        if (request !== loads) return
+        if (!sameAccounts(get().accounts, accounts)) set({ accounts })
+      } catch (error) {
+        console.error('hoshi: forge accounts failed', error)
+      }
     }
+  })
+)
+
+/** Reads the accounts now, and again when the window comes back after a while. */
+export function watchForgeAccounts() {
+  let checkedAt = 0
+  const load = () => {
+    checkedAt = Date.now()
+    void useForgeAccountsStore.getState().load()
   }
-}))
+  const onFocus = () => {
+    if (Date.now() - checkedAt >= RECHECK_AFTER_MS) load()
+  }
+  load()
+  window.addEventListener('focus', onFocus)
+  return () => window.removeEventListener('focus', onFocus)
+}
 
 /** `undefined` while unknown, `null` when signed out. */
 export const forgeLogin = (

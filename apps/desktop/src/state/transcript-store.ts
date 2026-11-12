@@ -14,6 +14,10 @@ type TranscriptState = {
   threadId: string | null
   /** Its transcript is on its way; `items` may still be the previous thread's meanwhile. */
   loading: boolean
+  /** The thread `items` belong to: the previous one while the next one's are on their way. */
+  shownId: string | null
+  /** The threads shown lately, the latest first, whose views may stay mounted. */
+  recent: string[]
   /** The latest turns are loaded first; older ones as the reader scrolls up. */
   items: ThreadItem[]
   hasOlder: boolean
@@ -57,10 +61,23 @@ function takeDeltas(live: LiveText): LiveText {
 const page = (threadId: string, before: string | null) =>
   invoke<TranscriptPage>('get_thread_items', { threadId, before })
 
+let streamed: Promise<unknown> = Promise.resolve()
+
+/** Asks the engine to stream this thread's text, and no other's, after the previous ask. */
+function streamThread(threadId: string | null) {
+  streamed = streamed
+    .then(() => invoke('stream_thread', { threadId }))
+    .catch((error: unknown) =>
+      console.error('hoshi: failed to follow the thread', error)
+    )
+}
+
 type Kept = { items: ThreadItem[]; hasOlder: boolean }
 
 /** How many transcripts besides the one shown stay in memory, to open again at once. */
 const KEPT_TRANSCRIPTS = 8
+/** How many transcripts stay mounted, the shown one included; each is one kept in memory. */
+export const MOUNTED_TRANSCRIPTS = 4
 /** How long the previous thread stays on screen while the next one's transcript loads. */
 const BLANK_AFTER_MS = 400
 
@@ -90,11 +107,33 @@ function applyToKept(event: Event, shown: string | null) {
   }
 }
 
+/** A transcript kept in memory, as a view that still holds it reads it. */
+export function keptTranscript(threadId: string): Kept | undefined {
+  return kept.get(threadId)
+}
+
+/** `threadId` became the one shown, at the head of those shown lately. */
+function shownNow(recent: string[], threadId: string | null) {
+  if (threadId === null) return { shownId: null }
+  return {
+    shownId: threadId,
+    recent:
+      recent[0] === threadId
+        ? recent
+        : [threadId, ...recent.filter((id) => id !== threadId)].slice(
+            0,
+            MOUNTED_TRANSCRIPTS
+          )
+  }
+}
+
 let blankTimer: ReturnType<typeof setTimeout> | undefined
 
 export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
   threadId: null,
   loading: false,
+  shownId: null,
+  recent: [],
   items: [],
   hasOlder: false,
   loadingOlder: false,
@@ -112,11 +151,13 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
     flush.cancel()
     deltas.clear()
     clearTimeout(blankTimer)
+    if (threadId !== previous.threadId) streamThread(threadId)
     const known = threadId ? kept.get(threadId) : undefined
     if (!threadId || known) {
       set({
         threadId,
         loading: false,
+        ...shownNow(previous.recent, threadId),
         items: known?.items ?? [],
         hasOlder: known?.hasOlder ?? false,
         loadingOlder: false,
@@ -134,7 +175,11 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
     })
     blankTimer = setTimeout(() => {
       if (get().threadId === threadId && get().loading) {
-        set({ items: [], hasOlder: false })
+        set({
+          items: [],
+          hasOlder: false,
+          ...shownNow(get().recent, threadId)
+        })
       }
     }, BLANK_AFTER_MS)
     try {
@@ -146,12 +191,22 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
       )
       pending = []
       clearTimeout(blankTimer)
-      set({ items, hasOlder: loaded.hasOlder, loading: false })
+      set({
+        items,
+        hasOlder: loaded.hasOlder,
+        loading: false,
+        ...shownNow(get().recent, threadId)
+      })
     } catch (error) {
       console.error('hoshi: failed to load the transcript', error)
       if (get().threadId === threadId) {
         clearTimeout(blankTimer)
-        set({ items: [], hasOlder: false, loading: false })
+        set({
+          items: [],
+          hasOlder: false,
+          loading: false,
+          ...shownNow(get().recent, threadId)
+        })
       }
     }
   },
@@ -181,6 +236,8 @@ export const useTranscriptStore = create<TranscriptState>()((set, get) => ({
     const state = get()
     const { threadId, loading, items } = state
     applyToKept(event, threadId)
+    if (event.type === 'threadDeleted' && state.recent.includes(event.threadId))
+      set({ recent: state.recent.filter((id) => id !== event.threadId) })
     if (!threadId) return
     if (loading) {
       pending.push(event)

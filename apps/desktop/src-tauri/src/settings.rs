@@ -20,6 +20,7 @@ pub fn update_settings(app: AppHandle, settings: AppSettings) -> Result<AppSetti
         engine.set_adapter(crate::orchestration::adapter_for(&settings));
     }
     engine.set_thread_titles(settings.thread_titles.clone());
+    engine.set_browser(settings.browser.clone());
     engine.set_subagent_effort(settings.providers.claude_code.subagent_effort);
     Ok(settings)
 }
@@ -68,8 +69,9 @@ pub fn save(path: &Path, settings: &AppSettings) -> io::Result<()> {
 mod tests {
     use super::*;
     use hoshi_core::{
-        ClaudeCodeSettings, FavoriteModel, GeneralSettings, ProviderSettings, StartupView,
-        SubagentEffort, ThreadTitleSettings,
+        BrowserSettings, ClaudeCodeSettings, FavoriteModel, GeneralSettings, LinkTarget,
+        PageColorScheme, PageSize, ProviderSettings, SearchEngine, StartupView, SubagentEffort,
+        ThreadTitleSettings,
     };
 
     fn settings_file(name: &str) -> PathBuf {
@@ -156,6 +158,16 @@ mod tests {
                 inactive_after_days: 7,
                 notifications: false,
                 projects_folder: Some("D:\\code".into()),
+            },
+            browser: BrowserSettings {
+                agent_access: false,
+                float_agent_pages: false,
+                open_links_in: LinkTarget::Hoshi,
+                search_engine: SearchEngine::Custom,
+                custom_search_url: "https://search.example/?q=%s".into(),
+                page_size: PageSize::Phone,
+                zoom: 125,
+                color_scheme: PageColorScheme::Dark,
             },
             onboarding_completed_at: Some("2026-11-09T08:00:00.000Z".into()),
         };

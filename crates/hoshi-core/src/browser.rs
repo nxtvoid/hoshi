@@ -1,16 +1,29 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// What a thread's browser page painted, a JPEG in base64, while the panel shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
+/// What a thread's browser page painted, a JPEG, while the panel shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserFrame {
     pub thread_id: String,
-    pub data: String,
+    pub jpeg: Vec<u8>,
     /// The page's size in CSS pixels, which clicks on the frame map back to.
     pub width: u32,
     pub height: u32,
+}
+
+impl BrowserFrame {
+    /// The frame as raw bytes for the UI, numbers little-endian: the thread id's length as
+    /// a `u16` and its UTF-8, the width and the height as `u32`, then the JPEG.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let id = self.thread_id.as_bytes();
+        let mut bytes = Vec::with_capacity(2 + id.len() + 8 + self.jpeg.len());
+        bytes.extend_from_slice(&(id.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(id);
+        bytes.extend_from_slice(&self.width.to_le_bytes());
+        bytes.extend_from_slice(&self.height.to_le_bytes());
+        bytes.extend_from_slice(&self.jpeg);
+        bytes
+    }
 }
 
 /// A point of the page, in CSS pixels.
@@ -71,4 +84,30 @@ pub enum BrowserInput {
     Text {
         text: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_is_its_thread_its_size_and_its_jpeg() {
+        let frame = BrowserFrame {
+            thread_id: "té".into(),
+            jpeg: vec![0xff, 0xd8, 0xff],
+            width: 1280,
+            height: 800,
+        };
+        assert_eq!(
+            frame.to_bytes(),
+            [
+                &[3, 0][..],
+                "té".as_bytes(),
+                &1280u32.to_le_bytes(),
+                &800u32.to_le_bytes(),
+                &[0xff, 0xd8, 0xff],
+            ]
+            .concat()
+        );
+    }
 }

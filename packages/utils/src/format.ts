@@ -20,19 +20,26 @@ export function relativeTimeParts(
   return { value: 0, unit: 'second' }
 }
 
-const formatters = new Map<string, Intl.RelativeTimeFormat>()
+const formatters = new Map<string, unknown>()
+
+/** The formatter made for `key`, made once: building an `Intl` formatter is slow. */
+function formatter<T>(key: string, make: () => T): T {
+  let made = formatters.get(key) as T | undefined
+  if (made === undefined) {
+    made = make()
+    formatters.set(key, made)
+  }
+  return made
+}
 
 export function formatRelativeTime(iso: string, now: Date, locale: string) {
-  let formatter = formatters.get(locale)
-  if (!formatter) {
-    formatter = new Intl.RelativeTimeFormat(locale, {
-      numeric: 'auto',
-      style: 'narrow'
-    })
-    formatters.set(locale, formatter)
-  }
+  const relative = formatter(
+    `relative:${locale}`,
+    () =>
+      new Intl.RelativeTimeFormat(locale, { numeric: 'auto', style: 'narrow' })
+  )
   const { value, unit } = relativeTimeParts(new Date(iso), now)
-  return formatter.format(value, unit)
+  return relative.format(value, unit)
 }
 
 const DURATION_UNITS = [
@@ -49,13 +56,16 @@ export function formatDuration(milliseconds: number, locale: string) {
     const value = Math.floor(rest / size)
     rest -= value * size
     if (value === 0 && !(unit === 'second' && parts.length === 0)) continue
-    parts.push(
-      new Intl.NumberFormat(locale, {
-        style: 'unit',
-        unit,
-        unitDisplay: 'narrow'
-      }).format(value)
+    const format = formatter(
+      `duration:${locale}:${unit}`,
+      () =>
+        new Intl.NumberFormat(locale, {
+          style: 'unit',
+          unit,
+          unitDisplay: 'narrow'
+        })
     )
+    parts.push(format.format(value))
   }
   return parts.slice(0, 2).join(' ')
 }
@@ -80,7 +90,6 @@ export function formatFileSize(bytes: number, locale: string) {
   }).format(bytes / size)
 }
 
-/** The time of day of `iso`, as "22:10" or "10:10 PM" in `locale`. */
 /** A running time as a clock reads it: "0:07", "12:30", "1:02:05". */
 export function formatElapsed(milliseconds: number) {
   const total = Math.max(0, Math.floor(milliseconds / 1000))
@@ -92,6 +101,7 @@ export function formatElapsed(milliseconds: number) {
     : `${minutes}:${seconds}`
 }
 
+/** The time of day of `iso`, as "22:10" or "10:10 PM" in `locale`. */
 export function formatClockTime(
   iso: string,
   locale: string,
@@ -99,9 +109,14 @@ export function formatClockTime(
 ) {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
-  return new Intl.DateTimeFormat(locale, {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone
-  }).format(date)
+  const clock = formatter(
+    `clock:${locale}:${timeZone ?? ''}`,
+    () =>
+      new Intl.DateTimeFormat(locale, {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone
+      })
+  )
+  return clock.format(date)
 }

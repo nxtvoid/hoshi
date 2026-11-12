@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-core"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-desktop"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "arboard",
  "fontdb",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-engine"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1892,15 +1892,17 @@ dependencies = [
  "netstat2",
  "notify",
  "portable-pty",
+ "roxmltree",
  "serde_json",
  "sysinfo",
  "tiny_http",
  "tungstenite",
+ "zip",
 ]
 
 [[package]]
 name = "hoshi-forge"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.23.1",
  "hoshi-core",
@@ -1912,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-providers"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1925,7 +1927,7 @@ dependencies = [
 
 [[package]]
 name = "hoshi-store"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "hoshi-core",
  "rusqlite",
@@ -7019,6 +7021,7 @@ dependencies = [
  "typed-path",
  "windows-sys 0.61.2",
  "zeroize",
+ "zopfli",
 ]
 
 [[package]]
@@ -7032,6 +7035,18 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+
+[[package]]
+name = "zopfli"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaf7fc5d30c28483d93805c4a5e12b05bbb52407fa67c5f8bd552374cd01fb11"
+dependencies = [
+ "bumpalo",
+ "crc32fast",
+ "log",
+ "simd-adler32",
+]
 
 [[package]]
 name = "zune-core"

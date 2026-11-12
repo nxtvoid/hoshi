@@ -1,15 +1,15 @@
 use hoshi_core::{
-    AppSettings, BankedResetSpend, BrowserInput, ChangesSummary, Command, CommandError, DiffFile,
-    DiffScope, Editor, FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest,
-    GitActionResult, GitStatus, HeldMessage, LocalServer, MessageAttachment, ProviderAccountStatus,
-    ProviderModels, ProviderVersion, PullRequest, PullRequestAction, PullRequestDetail,
-    PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach, TerminalEvent,
-    ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
+    AppSettings, BankedResetSpend, BrowserFrame, BrowserInput, ChangesSummary, Command,
+    CommandError, DiffFile, DiffScope, Editor, FileDiff, FolderListing, ForgeAccount, ForgeKind,
+    GitActionRequest, GitActionResult, GitStatus, HeldMessage, LocalServer, MessageAttachment,
+    ProviderAccountStatus, ProviderModels, ProviderVersion, PullRequest, PullRequestAction,
+    PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach,
+    TerminalEvent, ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
-use std::sync::Arc;
-use tauri::ipc::Channel;
+use std::sync::{Arc, Mutex};
+use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
 use tauri::{App, AppHandle, Emitter, Manager, State};
 
 /// Every committed event reaches the UI here, in sequence order.
@@ -31,16 +31,35 @@ const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 const PROVIDER_VERSION_CHANNEL: &str = "hoshi://provider-version";
 /// The step a running commit, push or pull request action reached.
 const GIT_ACTION_CHANNEL: &str = "hoshi://git-action";
-/// What a thread's browser page painted, while the panel shows it.
-const BROWSER_FRAME_CHANNEL: &str = "hoshi://browser-frame";
 /// Where a thread's browser page is, and what the agent just did on it.
 const BROWSER_PAGE_CHANNEL: &str = "hoshi://browser-page";
 const WORKTREE_SETUP_CHANNEL: &str = "hoshi://worktree-setup";
 /// The servers of a thread a view watches, when they change.
 const SERVERS_CHANNEL: &str = "hoshi://servers";
 
+/// Where the browser pages the panel shows send their frames, as raw bytes: the UI gives it
+/// once it starts. Events would carry them as base64 inside a script the webview evaluates.
+#[derive(Clone, Default)]
+pub struct BrowserFrames(Arc<Mutex<Option<Channel>>>);
+
+impl BrowserFrames {
+    fn send(&self, frame: &BrowserFrame) -> tauri::Result<()> {
+        let channel = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match channel {
+            Some(channel) => channel.send(InvokeResponseBody::Raw(frame.to_bytes())),
+            None => Ok(()),
+        }
+    }
+}
+
 pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
+    let frames = BrowserFrames::default();
+    app.manage(frames.clone());
     let notify: Notify = Arc::new(move |notification| {
         let result = match notification {
             Notification::Event(envelope) => handle.emit(EVENT_CHANNEL, envelope),
@@ -56,7 +75,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
                 handle.emit(PROVIDER_VERSION_CHANNEL, version)
             }
             Notification::GitActionProgress(progress) => handle.emit(GIT_ACTION_CHANNEL, progress),
-            Notification::BrowserFrame(frame) => handle.emit(BROWSER_FRAME_CHANNEL, frame),
+            Notification::BrowserFrame(frame) => frames.send(&frame),
             Notification::BrowserPage(page) => handle.emit(BROWSER_PAGE_CHANNEL, page),
             Notification::HeldMessage(held) => handle.emit(HELD_MESSAGE_CHANNEL, held),
             Notification::WorktreeSetup(run) => handle.emit(WORKTREE_SETUP_CHANNEL, run),
@@ -70,6 +89,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
     let settings = crate::settings::load(&crate::settings::settings_path(app.handle())?);
     engine.set_adapter(adapter_for(&settings));
     engine.set_thread_titles(settings.thread_titles.clone());
+    engine.set_browser(settings.browser.clone());
     engine.set_subagent_effort(settings.providers.claude_code.subagent_effort);
     engine.set_forges(hoshi_engine::default_forges());
     app.manage(engine);
@@ -97,6 +117,12 @@ pub fn get_thread_items(
     before: Option<String>,
 ) -> Result<TranscriptPage, CommandError> {
     engine.transcript(&thread_id, before.as_deref())
+}
+
+/// The UI shows this thread's transcript now; text streams only for it.
+#[tauri::command(async)]
+pub fn stream_thread(engine: State<'_, Engine>, thread_id: Option<String>) {
+    engine.stream_thread(thread_id);
 }
 
 /// One transcript item with what `get_thread_items` leaves out, such as a diff.
@@ -207,10 +233,71 @@ pub fn save_image(
     engine.save_image(&name, &mime_type, &data)
 }
 
-/// An image removed from the composer before it was sent.
+/// Saves a file the user is about to send. Its bytes are the request's body; its name and
+/// type come percent-encoded in the `x-name` and `x-mime-type` headers.
 #[tauri::command(async)]
-pub fn discard_image(engine: State<'_, Engine>, image: MessageAttachment) {
-    engine.discard_image(&image);
+pub fn save_file(
+    engine: State<'_, Engine>,
+    request: Request<'_>,
+) -> Result<MessageAttachment, CommandError> {
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err(CommandError::Internal {
+            detail: "the file's bytes are missing".into(),
+        });
+    };
+    let header = |name: &str| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(percent_decoded)
+            .unwrap_or_default()
+    };
+    let mime_type = header("x-mime-type");
+    let mime_type = if mime_type.is_empty() {
+        "application/octet-stream".to_owned()
+    } else {
+        mime_type
+    };
+    engine.save_file(&header("x-name"), &mime_type, bytes)
+}
+
+fn percent_decoded(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escaped = (bytes[index] == b'%')
+            .then(|| text.get(index + 1..index + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                out.push(byte);
+                index += 3;
+            }
+            None => {
+                out.push(bytes[index]);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// An image or file removed from the composer before it was sent.
+#[tauri::command(async)]
+pub fn discard_attachment(engine: State<'_, Engine>, attachment: MessageAttachment) {
+    engine.discard_attachment(&attachment);
+}
+
+/// Where a sent image or file is saved, to open it; `None` when it is gone.
+#[tauri::command(async)]
+pub fn get_attachment_path(
+    engine: State<'_, Engine>,
+    attachment: MessageAttachment,
+) -> Option<String> {
+    engine.attachment_path(&attachment)
 }
 
 /// A sent image as a data URL, read when the transcript shows it.
@@ -553,6 +640,15 @@ pub fn take_held_message(
     discard: bool,
 ) -> Option<HeldMessage> {
     engine.take_held_message(&thread_id, discard)
+}
+
+/// Frames of the browser pages the panel shows arrive on `channel` from now on.
+#[tauri::command]
+pub fn browser_frames(frames: State<'_, BrowserFrames>, channel: Channel) {
+    *frames
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(channel);
 }
 
 #[tauri::command(async)]

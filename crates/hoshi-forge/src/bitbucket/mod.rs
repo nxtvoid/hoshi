@@ -38,6 +38,8 @@ const PENDING_CHECKS_FRESH_FOR: Duration = Duration::from_secs(30);
 const CHECKS_FRESH_FOR: Duration = Duration::from_secs(2 * 60);
 /// Comments bump `updated_on`; this only covers a missed bump.
 const COMMENTS_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
+/// Votes may not bump `updated_on`, and a moving base branch never does.
+const REVIEW_FRESH_FOR: Duration = Duration::from_secs(5 * 60);
 /// Diffs past this size come without patches, like GitHub's.
 const MAX_DIFF_BYTES: u64 = 8 * 1024 * 1024;
 const ALL_STATES: &str = "state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED";
@@ -150,6 +152,8 @@ struct Extras {
     summary: Summary,
     checks_read_at: Instant,
     comments_read_at: Instant,
+    /// `None` until both reads succeed, so a failed one is tried again.
+    review_read_at: Option<Instant>,
 }
 
 type PullRequestKey = (String, String, u32);
@@ -449,6 +453,26 @@ impl Bitbucket {
             summary.unresolved_comments = model::unresolved_threads(&comments);
             comments_read_at = now;
         }
+        let mut review_read_at = cached.as_ref().and_then(|extras| extras.review_read_at);
+        if !open {
+            summary.changes_requested = false;
+            summary.conflicts = false;
+        } else if !same_update
+            || !same_head
+            || review_read_at.is_none_or(|at| now.duration_since(at) >= REVIEW_FRESH_FOR)
+        {
+            let path = pull_request_path(repository, raw.id);
+            let full = best_effort(self.get::<RawPullRequest>(&path))?;
+            let conflicts = best_effort(self.get::<Page<Value>>(&format!("{path}/conflicts")))?;
+            let read_both = full.is_some() && conflicts.is_some();
+            if let Some(full) = full {
+                summary.changes_requested = model::changes_requested(&full);
+            }
+            summary.conflicts = conflicts_after_read(summary.conflicts, conflicts);
+            if read_both {
+                review_read_at = Some(now);
+            }
+        }
         lock(&self.extras).insert(
             key,
             Extras {
@@ -457,6 +481,7 @@ impl Bitbucket {
                 summary,
                 checks_read_at,
                 comments_read_at,
+                review_read_at,
             },
         );
         Ok(model::pull_request(raw, summary))
@@ -876,9 +901,24 @@ fn mergeability(conflicts: Option<Page<Value>>) -> Mergeability {
     }
 }
 
+/// Whether the pull request conflicts after a read; an unreadable list keeps `previous`.
+fn conflicts_after_read(previous: bool, conflicts: Option<Page<Value>>) -> bool {
+    match mergeability(conflicts) {
+        Mergeability::Conflicting => true,
+        Mergeability::Mergeable => false,
+        Mergeability::Unknown => previous,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_conflicts_read_keeps_the_cached_answer() {
+        assert!(conflicts_after_read(true, None));
+        assert!(!conflicts_after_read(false, None));
+    }
 
     #[test]
     fn credentials_round_trip_and_refuse_unsafe_values() {

@@ -10,7 +10,8 @@
     "./lib/*": "./src/lib/*.ts"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test ./tests"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",

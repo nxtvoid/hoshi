@@ -24,6 +24,9 @@ export function HeldMessageBar({ threadId }: { threadId: string }) {
   const images = held.attachments.filter(
     (attachment) => attachment.type === 'image'
   ).length
+  const files = held.attachments.filter(
+    (attachment) => attachment.type === 'file'
+  ).length
 
   const takeBack = async (discard: boolean) => {
     const taken = await invoke<HeldMessage | null>('take_held_message', {
@@ -60,6 +63,11 @@ export function HeldMessageBar({ threadId }: { threadId: string }) {
         {images > 0 ? (
           <p className='text-muted-foreground text-xs'>
             {m.held_message_images({ count: images })}
+          </p>
+        ) : null}
+        {files > 0 ? (
+          <p className='text-muted-foreground text-xs'>
+            {m.held_message_files({ count: files })}
           </p>
         ) : null}
       </div>

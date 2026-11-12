@@ -1,8 +1,13 @@
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef } from 'react'
 import type { Ref } from 'react'
 import { cn } from '@hoshi/utils'
-import { type PastedImages, pastedImages } from '@/lib/pasted-images'
+import { type PastedFiles, pastedFiles } from '@/lib/pasted-files'
+import {
+  attachesPastedText,
+  isPasteAsTextShortcut
+} from '@/lib/attachment-files'
 import { CHIP_CLASSES } from '@/lib/chips'
+import { isMac } from '@/components/brand/EditorIcon'
 import { fileIcon } from '@/lib/file-icons'
 import StarterKit from '@tiptap/starter-kit'
 import { Placeholder } from '@tiptap/extensions'
@@ -68,22 +73,24 @@ export type ComposerEditorHandle = {
   /** Pastes `text` at the caret as if the user had. */
   paste: (text: string) => void
   /**
-   * Shows images just added as chips at the caret, when the prompt has text to place them
-   * in. Says whether it did.
+   * Shows images and files just added as chips at the caret: files always, images only
+   * when the prompt has text to place them in. Returns the keys of those it placed.
    */
-  insertImages: (images: ImageChip[]) => boolean
-  /** Takes away the chips of an image removed from the draft. */
-  removeImage: (key: string) => void
+  insertAttachments: (chips: AttachmentChip[]) => string[]
+  /** Takes away the chips of an image or file removed from the draft. */
+  removeAttachment: (key: string) => void
   /** Shows these previews in the chips of the images they belong to. */
   setImageSources: (sources: ReadonlyMap<string, string>) => void
 }
 
-/** An image of the draft, as its chip in the text shows it. */
-export type ImageChip = {
+/** An image or file of the draft, as its chip in the text shows it. */
+export type AttachmentChip = {
   key: string
+  kind: 'image' | 'attachedFile'
   name: string
   /** Its size, as shown after the name. */
   detail: string
+  /** An image's preview; empty for a file. */
   previewUrl: string
 }
 
@@ -103,10 +110,15 @@ type ComposerEditorProps = {
   onBlur?: () => void
   /** `true` when the composer handled the key. */
   onKeyDown: (event: KeyboardEvent, context: KeyContext) => boolean
-  /** Images pasted; the editor leaves them to the composer. */
-  onImages: (pasted: PastedImages) => void
-  /** An image chip was clicked, to show its image large. */
-  onOpenImage?: (key: string) => void
+  /** Files pasted; the editor leaves them to the composer. */
+  onFiles: (pasted: PastedFiles) => void
+  /**
+   * Text pasted large enough to attach as a file; `true` when the composer took it.
+   * Ctrl+Shift+V pastes it as text all the same.
+   */
+  onLargeText: (text: string) => boolean
+  /** An image or file chip was clicked, to show its image large or open its file. */
+  onOpenAttachment?: (key: string) => void
 }
 
 const leafText = (node: ProseMirrorNode) =>
@@ -199,6 +211,36 @@ const Mention = Node.create({
         ]
       ]
     }
+    if (kind === 'attachedFile') {
+      const name = String(node.attrs.label ?? 'file')
+      const icon = fileIcon(name)
+      return [
+        'span',
+        {
+          'data-mention': kind,
+          'data-value': value,
+          class: cn(
+            'cursor-pointer rounded-sm px-0.5',
+            CHIP_CLASSES.attachedFile
+          )
+        },
+        [
+          `${SVG} svg`,
+          {
+            'aria-hidden': 'true',
+            viewBox: '0 0 16 16',
+            class: cn('me-1 inline-block size-3.5 align-[-2px]', icon.color)
+          },
+          [`${SVG} use`, { href: `#${icon.name}` }]
+        ],
+        name,
+        [
+          'span',
+          { class: 'text-muted-foreground ms-1 text-[0.85em]' },
+          String(node.attrs.detail ?? '')
+        ]
+      ]
+    }
     const label =
       kind === 'file'
         ? `@${value.split('/').pop() || value}`
@@ -227,7 +269,9 @@ const Mention = Node.create({
     ]
   },
   renderText({ node }) {
-    if (node.attrs.kind === 'image') return `[${node.attrs.label ?? 'image'}]`
+    if (node.attrs.kind === 'image' || node.attrs.kind === 'attachedFile') {
+      return `[${node.attrs.label ?? node.attrs.kind}]`
+    }
     return mentionSource(node.attrs.kind, String(node.attrs.value))
   }
 })
@@ -301,8 +345,9 @@ export function ComposerEditor({
   onDocument,
   onBlur,
   onKeyDown,
-  onImages,
-  onOpenImage
+  onFiles,
+  onLargeText,
+  onOpenAttachment
 }: ComposerEditorProps) {
   // The editor's configuration reads the latest handlers through refs, which React
   // Compiler can't tell apart from reading them while rendering.
@@ -312,9 +357,12 @@ export function ComposerEditor({
     onDocument,
     onBlur,
     onKeyDown,
-    onImages,
-    onOpenImage
+    onFiles,
+    onLargeText,
+    onOpenAttachment
   })
+  /** The next paste keeps its text as text, however large: Ctrl+Shift+V was pressed. */
+  const pasteAsText = useRef(false)
   const shownPlaceholder = useRef(placeholder)
   useLayoutEffect(() => {
     handlers.current = {
@@ -322,8 +370,9 @@ export function ComposerEditor({
       onDocument,
       onBlur,
       onKeyDown,
-      onImages,
-      onOpenImage
+      onFiles,
+      onLargeText,
+      onOpenAttachment
     }
     shownPlaceholder.current = placeholder
   })
@@ -391,28 +440,43 @@ export function ComposerEditor({
         'aria-expanded': 'false',
         class: cn(CONTENT_CLASSES, contentClassName)
       },
-      handleKeyDown: (view, event) =>
-        openFencedBlock(view, event) ||
-        handlers.current.onKeyDown(event, keyContext(view)),
+      handleKeyDown: (view, event) => {
+        pasteAsText.current = isPasteAsTextShortcut(event, isMac())
+        return (
+          openFencedBlock(view, event) ||
+          handlers.current.onKeyDown(event, keyContext(view))
+        )
+      },
       // Never left to WebKit, which pastes an image as an attachment element of its own.
       handlePaste: (_view, event) => {
+        const asText = pasteAsText.current
+        pasteAsText.current = false
         const data = event.clipboardData
-        const pasted = data ? pastedImages(data, { orClipboard: true }) : null
-        if (!pasted) return false
-        handlers.current.onImages(pasted)
-        return true
+        const pasted = data ? pastedFiles(data, { orClipboard: true }) : null
+        if (pasted) {
+          handlers.current.onFiles(pasted)
+          return true
+        }
+        const text = data?.getData('text/plain') ?? ''
+        return !asText && attachesPastedText(text)
+          ? handlers.current.onLargeText(text)
+          : false
       },
       handleClickOn: (_view, _position, node) => {
-        if (node.type.name !== 'mention' || node.attrs.kind !== 'image') {
+        const kind = node.attrs.kind
+        if (
+          node.type.name !== 'mention' ||
+          (kind !== 'image' && kind !== 'attachedFile')
+        ) {
           return false
         }
-        handlers.current.onOpenImage?.(String(node.attrs.value))
+        handlers.current.onOpenAttachment?.(String(node.attrs.value))
         return true
       },
-      // The form around the editor takes dropped images; the editor only stays out of it.
+      // The form around the editor takes dropped files; the editor only stays out of it.
       handleDrop: (_view, event) =>
         event.dataTransfer !== null &&
-        pastedImages(event.dataTransfer, { orClipboard: false }) !== null
+        pastedFiles(event.dataTransfer, { orClipboard: false }) !== null
     },
     onCreate: ({ editor }) => {
       if (!editor.isEmpty) emit(editor)
@@ -444,35 +508,41 @@ export function ComposerEditor({
       paste: (text) => {
         editor?.view.pasteText(text)
       },
-      insertImages: (images) => {
-        if (!editor || editor.isEmpty || images.length === 0) return false
-        return editor
+      insertAttachments: (chips) => {
+        if (!editor) return []
+        const placed = editor.isEmpty
+          ? chips.filter((chip) => chip.kind === 'attachedFile')
+          : chips
+        if (placed.length === 0) return []
+        const inserted = editor
           .chain()
           .focus()
           .insertContent(
-            images.flatMap((image) => [
+            placed.flatMap((chip) => [
               {
                 type: 'mention',
                 attrs: {
-                  kind: 'image',
-                  value: image.key,
-                  label: image.name,
-                  detail: image.detail,
-                  src: image.previewUrl
+                  kind: chip.kind,
+                  value: chip.key,
+                  label: chip.name,
+                  detail: chip.detail,
+                  src: chip.previewUrl || null
                 }
               },
               { type: 'text', text: ' ' }
             ])
           )
           .run()
+        return inserted ? placed.map((chip) => chip.key) : []
       },
-      removeImage: (key) => {
+      removeAttachment: (key) => {
         if (!editor) return
         const chips: number[] = []
         editor.state.doc.descendants((node, position) => {
           const chip =
             node.type.name === 'mention' &&
-            node.attrs.kind === 'image' &&
+            (node.attrs.kind === 'image' ||
+              node.attrs.kind === 'attachedFile') &&
             node.attrs.value === key
           if (chip) chips.push(position)
         })

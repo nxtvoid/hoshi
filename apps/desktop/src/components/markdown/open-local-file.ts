@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { Editor } from '@/bindings/Editor'
+import type { MessageAttachment } from '@/bindings/MessageAttachment'
 import { opensInEditor } from '@/lib/local-paths'
 import { useEditorStore } from '@/state/editor-store'
 import { useDetailsStore } from '@/state/details-store'
@@ -22,4 +23,13 @@ export function openLocalFile(path: string) {
   invoke('open_local_file', { path, editor }).catch((error) =>
     console.error('hoshi: failed to open a file', error)
   )
+}
+
+/** Opens an image or file a message was sent with, where hoshi saved it. */
+export function openAttachment(attachment: MessageAttachment) {
+  invoke<string | null>('get_attachment_path', { attachment })
+    .then((path) => {
+      if (path) openLocalFile(path)
+    })
+    .catch((error) => console.error('hoshi: failed to open a file', error))
 }

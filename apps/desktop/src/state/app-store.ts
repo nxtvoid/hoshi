@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { m } from '@/paraglide/messages'
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { Thread } from '@/bindings/Thread'
 import type { Command } from '@/bindings/Command'
@@ -29,6 +29,7 @@ import { useServerStore } from './server-store'
 import { usePullRequestStore } from './pull-request-store'
 import { draftKey, useDraftStore } from './draft-store'
 import { usePanelStore } from './panel-store'
+import { useMiniBrowserStore } from './mini-browser-store'
 import { useCleanupStore } from './cleanup-store'
 import { useDetailsStore } from './details-store'
 import { useTerminalStore } from './terminal-store'
@@ -36,13 +37,14 @@ import { useRequestStore } from './request-store'
 import { useUsageStore } from './usage-store'
 import { useProviderUpdateStore } from './provider-update-store'
 import { watchAppUpdates } from './app-update-store'
+import { watchForgeAccounts } from './forge-accounts-store'
 import { useGitActionStore } from './git-action-store'
 import { useWorktreeSetupStore } from './worktree-setup-store'
 import type { WorktreeSetupRun } from '@/bindings/WorktreeSetupRun'
 import { COMPACT_COMMAND } from '@/lib/compaction'
 import { useBrowserStore } from './browser-store'
 import type { BrowserPage } from '@/bindings/BrowserPage'
-import type { BrowserFrame } from '@/bindings/BrowserFrame'
+import { readBrowserFrame } from '@/lib/browser-frame'
 import type { GitActionProgress } from '@/bindings/GitActionProgress'
 import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
@@ -458,6 +460,16 @@ function receive({ sequence, event }: EventEnvelope) {
   }
 }
 
+/** Gives the engine the channel browser frames come back on, as raw bytes. */
+function watchBrowserFrames() {
+  const frames = new Channel<ArrayBuffer>((buffer) =>
+    useBrowserStore.getState().receiveFrame(readBrowserFrame(buffer))
+  )
+  invoke('browser_frames', { channel: frames }).catch((error: unknown) =>
+    console.error('hoshi: failed to receive browser frames', error)
+  )
+}
+
 /** Drops what the app kept on this machine for threads that are gone. */
 function forgetThreads(threadIds: string[], drafts: string[]) {
   useDraftStore.getState().forget(drafts)
@@ -466,6 +478,7 @@ function forgetThreads(threadIds: string[], drafts: string[]) {
   useTerminalStore.getState().forget(threadIds)
   useDetailsStore.getState().forget(threadIds)
   useCleanupStore.getState().forget(threadIds)
+  useMiniBrowserStore.getState().forget(threadIds)
 }
 
 function receivePullRequest({ threadId, pullRequest }: ThreadPullRequest) {
@@ -519,9 +532,6 @@ async function startSync() {
     listen<ProviderVersion | null>('hoshi://provider-version', (message) =>
       useProviderUpdateStore.getState().receive(message.payload)
     ),
-    listen<BrowserFrame>('hoshi://browser-frame', (message) =>
-      useBrowserStore.getState().receiveFrame(message.payload)
-    ),
     listen<BrowserPage>('hoshi://browser-page', (message) =>
       useBrowserStore.getState().receivePage(message.payload)
     ),
@@ -534,11 +544,14 @@ async function startSync() {
     listen<ThreadServers>('hoshi://servers', (message) =>
       useServerStore.getState().receive(message.payload)
     ),
-    listen<StreamDelta>('hoshi://stream', (message) =>
-      useTranscriptStore.getState().applyDelta(message.payload)
-    )
+    listen<StreamDelta[]>('hoshi://stream', (message) => {
+      const { applyDelta } = useTranscriptStore.getState()
+      for (const delta of message.payload) applyDelta(delta)
+    })
   ])
+  watchBrowserFrames()
   const stopAppUpdates = watchAppUpdates()
+  const stopForgeAccounts = watchForgeAccounts()
   // Read after the sequenced listeners exist, or events in between would be lost.
   const unlistenSequenced = await sequenced
   const snapshotLoad = invoke<Snapshot>('get_snapshot')
@@ -548,6 +561,7 @@ async function startSync() {
   import.meta.hot?.dispose(() => {
     for (const unlisten of [...unlistenSequenced, ...unlistenLive]) unlisten()
     stopAppUpdates()
+    stopForgeAccounts()
   })
   const [snapshot, settings] = await Promise.all([snapshotLoad, settingsLoad])
   const start = startupSelection(

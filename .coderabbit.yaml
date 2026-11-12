@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+reviews:
+  high_level_summary: false
+  review_status: false
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+  path_filters:
+    - "!apps/desktop/src/bindings/**"
+    - "!apps/desktop/src/routeTree.gen.ts"
+    - "!**/*.lock"
+    - "!agent-context-budget.json"
+  path_instructions:
+    - path: "**/*"
+      instructions: "Hold changed code to the rules in AGENTS.md."
+    - path: "{apps,packages}/**/tests/**"
+      instructions: "Hold changed tests to the Tests rules in AGENTS.md. Request tests only as those rules allow."
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - AGENTS.md

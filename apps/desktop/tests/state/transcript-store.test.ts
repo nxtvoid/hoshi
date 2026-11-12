@@ -100,6 +100,7 @@ describe('transcript deltas', () => {
 describe('switching threads', () => {
   const pages: Record<string, ThreadItem[]> = {}
   const asked: string[] = []
+  const streamed: (string | null)[] = []
   let slow = false
   const item = (threadId: string, id: string): ThreadItem => ({
     ...message(id, id),
@@ -108,11 +109,16 @@ describe('switching threads', () => {
 
   beforeEach(() => {
     asked.length = 0
+    streamed.length = 0
     slow = false
     const scope = globalThis as { window?: Record<string, unknown> }
     scope.window ??= {}
     scope.window.__TAURI_INTERNALS__ = {
-      invoke: async (_command: string, args: { threadId: string }) => {
+      invoke: async (command: string, args: { threadId: string }) => {
+        if (command === 'stream_thread') {
+          streamed.push(args.threadId)
+          return null
+        }
         asked.push(args.threadId)
         if (slow) await wait(600)
         return { items: pages[args.threadId] ?? [], hasOlder: false }
@@ -133,6 +139,15 @@ describe('switching threads', () => {
     expect(asked).toEqual(['k1', 'k2'])
   })
 
+  test('only the thread shown streams, asked once per switch', async () => {
+    pages.s1 = [item('s1', 'g1')]
+    await store().load('s1')
+    await store().load('s1')
+    await store().load(null)
+
+    expect(streamed).toEqual(['s1', null])
+  })
+
   test("the previous thread stays until the next one's transcript is in", async () => {
     pages.k3 = [item('k3', 'c1')]
     pages.k4 = [item('k4', 'd1')]
@@ -143,6 +158,30 @@ describe('switching threads', () => {
     expect(store().items.map((kept) => kept.id)).toEqual(['c1'])
     await loading
     expect(store().items.map((kept) => kept.id)).toEqual(['d1'])
+  })
+
+  test('the items stay credited to the thread they belong to while the next one loads', async () => {
+    pages.m1 = [item('m1', 'h1')]
+    pages.m2 = [item('m2', 'i1')]
+    await store().load('m1')
+    const loading = store().load('m2')
+
+    expect(store().shownId).toBe('m1')
+    await loading
+    expect(store().shownId).toBe('m2')
+    expect(store().recent.slice(0, 2)).toEqual(['m2', 'm1'])
+  })
+
+  test('the threads shown lately are a short list, latest first, without deleted ones', async () => {
+    for (const id of ['r1', 'r2', 'r3', 'r4', 'r5']) {
+      pages[id] = [item(id, `${id}-a`)]
+      await store().load(id)
+    }
+    await store().load('r3')
+    expect(store().recent).toEqual(['r3', 'r5', 'r4', 'r2'])
+
+    store().applyEvent({ type: 'threadDeleted', threadId: 'r4' })
+    expect(store().recent).toEqual(['r3', 'r5', 'r2'])
   })
 
   test('a slow transcript blanks the previous one after a moment', async () => {

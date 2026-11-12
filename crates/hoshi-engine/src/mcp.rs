@@ -15,15 +15,17 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// Answers a tool call made by the agent of a thread: its result, or why it failed.
 pub(crate) type ToolHandler = dyn Fn(&str, &str, &Value) -> Result<Value, String> + Send + Sync;
 /// Whether the agent of a thread is offered a tool, by its name. Only
-/// [`CONDITIONAL_TOOLS`] are asked about.
+/// [`conditional`] tools are asked about.
 pub(crate) type ToolFilter = dyn Fn(&str, &str) -> bool + Send + Sync;
 
-/// Tools only some threads' agents see.
-const CONDITIONAL_TOOLS: [&str; 3] = [
-    "create_pull_request",
-    "watch_pull_request",
-    "unwatch_pull_request",
-];
+/// Tools only some threads' agents see: the pull request ones, and the browser's, which
+/// the user can turn off.
+fn conditional(tool: &str) -> bool {
+    matches!(
+        tool,
+        "create_pull_request" | "watch_pull_request" | "unwatch_pull_request"
+    ) || tool.starts_with("preview_")
+}
 
 pub(crate) struct McpServer {
     pub url: String,
@@ -189,7 +191,7 @@ fn tools_for(caller: &str, offered: &ToolFilter) -> Vec<Value> {
         .into_iter()
         .filter(|tool| {
             let name = tool["name"].as_str().unwrap_or_default();
-            !CONDITIONAL_TOOLS.contains(&name) || offered(caller, name)
+            !conditional(name) || offered(caller, name)
         })
         .collect()
 }
@@ -535,7 +537,7 @@ mod tests {
             .into_iter()
             .flat_map(|in_project| {
                 (0..=crate::delegation::MAX_DEPTH).map(move |depth| {
-                    crate::delegation::instructions(depth, in_project, true).len()
+                    crate::delegation::instructions(depth, in_project, true, true).len()
                 })
             })
             .max()
@@ -580,12 +582,13 @@ mod tests {
         assert!(!on_github.iter().any(|name| name == "create_pull_request"));
         assert_eq!(on_github.len() + 1, names(&everything).len());
         let nothing_conditional = names(&|_, _| false);
-        assert_eq!(nothing_conditional.len() + 3, names(&everything).len());
+        assert_eq!(nothing_conditional.len() + 13, names(&everything).len());
         assert!(
             !nothing_conditional
                 .iter()
-                .any(|name| name.contains("watch"))
+                .any(|name| name.contains("watch") || name.starts_with("preview_"))
         );
+        assert!(nothing_conditional.iter().any(|name| name == "html_render"));
         let names = names(&everything);
         assert_eq!(
             names,

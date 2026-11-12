@@ -1,18 +1,33 @@
 //! What the webview can't read from the clipboard itself: text for the edit menu's Paste,
-//! an image on the system clipboard, as an email client copies it, and image files a file
-//! manager copied, which reach a Linux webview as paths only.
+//! an image on the system clipboard, as an email client copies it, and files a file
+//! manager copied, which reach some webviews as paths only.
 
 use std::path::Path;
 use tauri::ipc::Response;
 
-/// Larger files are no image anyone means to send.
+/// The most a message carries in one file.
 const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 
-/// The bytes of the image file at `path`, as the paste of a copied file gives it.
+/// The bytes of a file a file manager copied or dropped, which the page got as a path.
 #[tauri::command(async)]
-pub fn read_image_file(path: String) -> Result<Response, String> {
-    image_file(Path::new(&path)).map(Response::new)
+pub fn read_pasted_file(path: String) -> Result<Response, String> {
+    any_file(Path::new(&path)).map(Response::new)
+}
+
+/// The files a file manager copied to the system clipboard, by path.
+#[tauri::command(async)]
+pub fn read_clipboard_files() -> Vec<String> {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.get().file_list())
+        .map(|files| {
+            files
+                .into_iter()
+                .filter(|path| path.is_file())
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The image on the system clipboard as PNG, or the first image file copied there.
@@ -51,9 +66,13 @@ fn image_file(path: &Path) -> Result<Vec<u8>, String> {
     if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
         return Err("not an image file".into());
     }
+    any_file(path)
+}
+
+fn any_file(path: &Path) -> Result<Vec<u8>, String> {
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
     if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
-        return Err("not an image file".into());
+        return Err("not a file to attach".into());
     }
     std::fs::read(path).map_err(|error| error.to_string())
 }

@@ -17,12 +17,15 @@ export function draftKey(
 }
 
 export type SavedImage = Extract<MessageAttachment, { type: 'image' }>
+export type SavedFile = Extract<MessageAttachment, { type: 'file' }>
+/** An image or file the engine saved for a message. */
+export type SavedAttachment = SavedImage | SavedFile
 
-/** An image the draft carries, already saved by the engine. */
-export type DraftImage = {
+/** An image or file the draft carries, already saved by the engine. */
+export type DraftAttachment = {
   /** The key its chip in the text names. */
   key: string
-  image: SavedImage
+  attachment: SavedAttachment
   /** Shown as a chip in the text, which it goes with. */
   chipped: boolean
 }
@@ -30,22 +33,46 @@ export type DraftImage = {
 type DraftState = {
   /** Unsent composer text, as the editor's document, by draft key. */
   drafts: Record<string, JSONContent>
-  /** Unsent images, by draft key. */
-  images: Record<string, DraftImage[]>
+  /** Unsent images and files, by draft key. */
+  attachments: Record<string, DraftAttachment[]>
   /** `null` forgets the draft's text. */
   save: (key: string, doc: JSONContent | null) => void
-  /** An empty list forgets the draft's images. */
-  saveImages: (key: string, images: DraftImage[]) => void
-  /** Drops these drafts whole, with the files of their images. */
+  /** An empty list forgets the draft's images and files. */
+  saveAttachments: (key: string, attachments: DraftAttachment[]) => void
+  /** Drops these drafts whole, with their images and files. */
   forget: (keys: string[]) => void
 }
 
-/** Whether the draft holds anything to send: text, images or both. */
+/** Whether the draft holds anything to send: text, attachments or both. */
 export function hasDraft(
-  state: Pick<DraftState, 'drafts' | 'images'>,
+  state: Pick<DraftState, 'drafts' | 'attachments'>,
   key: string
 ) {
-  return key in state.drafts || (state.images[key]?.length ?? 0) > 0
+  return key in state.drafts || (state.attachments[key]?.length ?? 0) > 0
+}
+
+type PersistedDraft = Pick<DraftState, 'drafts' | 'attachments'>
+
+/** Drafts saved before files could be attached kept only images, under `images`. */
+function migrated(persisted: unknown, version: number): PersistedDraft {
+  const state = (persisted ?? {}) as Partial<PersistedDraft> & {
+    images?: Record<
+      string,
+      { key: string; image: SavedImage; chipped: boolean }[]
+    >
+  }
+  if (version >= 1) {
+    return { drafts: state.drafts ?? {}, attachments: state.attachments ?? {} }
+  }
+  const attachments: Record<string, DraftAttachment[]> = {}
+  for (const [key, images] of Object.entries(state.images ?? {})) {
+    attachments[key] = images.map(({ key, image, chipped }) => ({
+      key,
+      attachment: image,
+      chipped
+    }))
+  }
+  return { drafts: state.drafts ?? {}, attachments }
 }
 
 const storage = debouncedStorage<DraftState>(300)
@@ -58,7 +85,7 @@ export const useDraftStore = create<DraftState>()(
   persist(
     (set, get) => ({
       drafts: {},
-      images: {},
+      attachments: {},
       save: (key, doc) =>
         set((state) => {
           if (doc === null) {
@@ -68,30 +95,36 @@ export const useDraftStore = create<DraftState>()(
           }
           return { drafts: { ...state.drafts, [key]: doc } }
         }),
-      saveImages: (key, images) =>
+      saveAttachments: (key, attachments) =>
         set((state) => {
-          if (images.length > 0) {
-            return { images: { ...state.images, [key]: images } }
+          if (attachments.length > 0) {
+            return { attachments: { ...state.attachments, [key]: attachments } }
           }
-          if (!(key in state.images)) return state
-          const { [key]: _, ...rest } = state.images
-          return { images: rest }
+          if (!(key in state.attachments)) return state
+          const { [key]: _, ...rest } = state.attachments
+          return { attachments: rest }
         }),
       forget: (keys) => {
         for (const key of keys) {
-          for (const { image } of get().images[key] ?? []) {
-            void invoke('discard_image', { image }).catch(() => {})
+          for (const { attachment } of get().attachments[key] ?? []) {
+            void invoke('discard_attachment', { attachment }).catch(() => {})
           }
         }
         set((state) => {
           const drafts = withoutKeys(state.drafts, keys)
-          const images = withoutKeys(state.images, keys)
-          return drafts === state.drafts && images === state.images
+          const attachments = withoutKeys(state.attachments, keys)
+          return drafts === state.drafts && attachments === state.attachments
             ? state
-            : { drafts, images }
+            : { drafts, attachments }
         })
       }
     }),
-    { name: 'hoshi-drafts', storage }
+    {
+      name: 'hoshi-drafts',
+      storage,
+      version: 1,
+      migrate: (persisted, version) =>
+        migrated(persisted, version) as unknown as DraftState
+    }
   )
 )

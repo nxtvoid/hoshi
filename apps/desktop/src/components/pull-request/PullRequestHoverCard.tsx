@@ -6,7 +6,12 @@ import { formatRelativeTime } from '@hoshi/utils'
 import { HugeiconsIcon } from '@hugeicons/react'
 import type { PullRequest } from '@/bindings/PullRequest'
 import type { ChecksState } from '@/bindings/ChecksState'
-import { PULL_REQUEST_STATE, PullRequestIcon } from './PullRequestIcon'
+import { pullRequestProblem } from '@/lib/pull-request-problem'
+import {
+  PULL_REQUEST_PROBLEM,
+  PULL_REQUEST_STATE,
+  PullRequestIcon
+} from './PullRequestIcon'
 import { Comment01Icon } from '@hugeicons/core-free-icons'
 import { usePullRequestStore } from '@/state/pull-request-store'
 import { useLinkedPullRequestStore } from '@/state/linked-pull-request-store'
@@ -122,7 +127,10 @@ export function PullRequestLinkCard({
 
 function PullRequestSummary({ pullRequest }: { pullRequest: PullRequest }) {
   const repository = repositoryOf(pullRequest.url)
-  const state = PULL_REQUEST_STATE[pullRequest.state]
+  const problem = pullRequestProblem(pullRequest)
+  const label = problem
+    ? PULL_REQUEST_PROBLEM[problem].label
+    : PULL_REQUEST_STATE[pullRequest.state].label
   const checks = pullRequest.checks ? CHECKS[pullRequest.checks] : null
   return (
     <div className='flex flex-col gap-1.5'>
@@ -131,8 +139,12 @@ function PullRequestSummary({ pullRequest }: { pullRequest: PullRequest }) {
         <span className='shrink-0 tabular-nums'>#{pullRequest.number}</span>
         <span aria-hidden='true'>·</span>
         <span className='flex shrink-0 items-center gap-1'>
-          <PullRequestIcon state={pullRequest.state} className='size-3' />
-          {state.label()}
+          <PullRequestIcon
+            state={pullRequest.state}
+            problem={problem}
+            className='size-3'
+          />
+          {label()}
         </span>
       </div>
       <p className='text-sm leading-snug font-medium text-pretty'>
