@@ -1,5 +1,6 @@
 import { cn, offsets } from '@hoshi/utils'
-import { type ComponentProps, memo, useMemo } from 'react'
+import { textCache } from '@/lib/text-cache'
+import { type ComponentProps, memo, type ReactElement, useMemo } from 'react'
 import { useThemeStore } from '@/state/theme-store'
 import { CodeBlock } from './CodeBlock'
 import { MarkdownLink } from './MarkdownLink'
@@ -216,8 +217,9 @@ export const Markdown = memo(function Markdown({
           <MarkdownBlock
             key={starts[index]}
             text={block}
-            remarkPlugins={REMARK_PLUGINS[source]}
+            source={source}
             rehypePlugins={rehypePlugins}
+            cached={!mentions && (!streaming || index < blocks.length - 1)}
           />
         )
       })}
@@ -225,25 +227,35 @@ export const Markdown = memo(function Markdown({
   )
 })
 
+/** Characters of markdown whose rendering is kept, so a transcript shown again skips parsing. */
+const PARSED_CHARS = 1_000_000
+
+const parsed = textCache<ReactElement>(PARSED_CHARS)
+
 const MarkdownBlock = memo(function MarkdownBlock({
   text,
-  remarkPlugins,
-  rehypePlugins
+  source,
+  rehypePlugins,
+  cached
 }: {
   text: string
-  remarkPlugins: PluggableList
+  source: MarkdownSource
   rehypePlugins: PluggableList
+  /** Its rendering may be kept and reused: no mentions to show, and not still growing. */
+  cached: boolean
 }) {
-  return (
-    <ReactMarkdown
-      remarkPlugins={remarkPlugins}
-      rehypePlugins={rehypePlugins}
-      components={COMPONENTS}
-      urlTransform={urlTransform}
-    >
-      {text}
-    </ReactMarkdown>
-  )
+  const key = `${source}:${text}`
+  const known = cached ? parsed.get(key) : undefined
+  if (known) return known
+  const element = ReactMarkdown({
+    children: text,
+    remarkPlugins: REMARK_PLUGINS[source],
+    rehypePlugins,
+    components: COMPONENTS,
+    urlTransform
+  })
+  if (cached) parsed.set(key, element)
+  return element
 })
 
 function PlainPre(props: ComponentProps<'pre'>) {

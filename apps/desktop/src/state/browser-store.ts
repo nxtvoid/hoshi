@@ -3,18 +3,21 @@ import { usePanelStore } from './panel-store'
 import { useSettingsStore } from './settings-store'
 import { useMiniBrowserStore } from './mini-browser-store'
 import type { BrowserPage } from '@/bindings/BrowserPage'
-import type { BrowserFrame } from '@/bindings/BrowserFrame'
+import type { RawBrowserFrame } from '@/lib/browser-frame'
 
 export type ShownPage = BrowserPage & {
   /** When the agent last acted on it, from `Date.now()`. */
   agentAt: number | null
 }
 
+/** A frame on screen: its JPEG behind an object URL, and the page's size in CSS pixels. */
+export type ShownFrame = { url: string; width: number; height: number }
+
 type BrowserState = {
   /** The latest frame of each thread's page, while the panel shows it. */
-  frames: Record<string, BrowserFrame>
+  frames: Record<string, ShownFrame>
   pages: Record<string, ShownPage>
-  receiveFrame: (frame: BrowserFrame) => void
+  receiveFrame: (frame: RawBrowserFrame) => void
   receivePage: (page: BrowserPage) => void
 }
 
@@ -23,14 +26,28 @@ const without = <T>(record: Record<string, T>, key: string) => {
   return rest
 }
 
+/** How long a replaced frame's URL stays valid, so an image still showing it can finish. */
+const REVOKE_AFTER_MS = 1000
+
+function release(frame: ShownFrame | undefined) {
+  if (frame) setTimeout(() => URL.revokeObjectURL(frame.url), REVOKE_AFTER_MS)
+}
+
 export const useBrowserStore = create<BrowserState>()((set, get) => ({
   frames: {},
   pages: {},
-  receiveFrame: (frame) =>
-    set((state) => ({ frames: { ...state.frames, [frame.threadId]: frame } })),
+  receiveFrame: ({ threadId, width, height, jpeg }) => {
+    const before = get().frames[threadId]
+    const url = URL.createObjectURL(new Blob([jpeg], { type: 'image/jpeg' }))
+    set((state) => ({
+      frames: { ...state.frames, [threadId]: { url, width, height } }
+    }))
+    release(before)
+  },
   receivePage: (page) => {
     if (!page.open) {
       useMiniBrowserStore.getState().close(page.threadId)
+      release(get().frames[page.threadId])
       set((state) => ({
         frames: without(state.frames, page.threadId),
         pages: without(state.pages, page.threadId)

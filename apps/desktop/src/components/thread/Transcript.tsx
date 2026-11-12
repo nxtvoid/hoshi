@@ -26,6 +26,7 @@ import { useStableRows } from './use-stable-rows'
 import { useNow } from './use-now'
 import { DiffView } from '@/components/panel/DiffView'
 import { TranscriptMinimap } from './TranscriptMinimap'
+import { useTranscriptView } from './transcript-scope'
 import { itemById, useTranscriptStore } from '@/state/transcript-store'
 import { useAppStore } from '@/state/app-store'
 import { useStoppingStore } from '@/state/stopping-store'
@@ -40,6 +41,7 @@ import {
   memo,
   type ReactNode,
   type RefObject,
+  startTransition,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -114,8 +116,8 @@ const ENTRY_SUMMARY =
 
 /** A streaming item's text as it arrives; `text`, the item's own, once it is stored. */
 function useLiveText(item: TranscriptItem, text: string) {
-  return useTranscriptStore((state) =>
-    item.streaming ? (state.streaming[item.id]?.text ?? text) : text
+  return useTranscriptView((view) =>
+    item.streaming ? (view.streaming[item.id]?.text ?? text) : text
   )
 }
 
@@ -128,8 +130,8 @@ const SETTLE_MS = 1000
  * show in one step, not in two a moment apart.
  */
 function useShownWorking(working: boolean) {
-  const reading = useTranscriptStore(
-    (state) => readingChanges(state.items) === true
+  const reading = useTranscriptView(
+    (view) => readingChanges(view.items) === true
   )
   const [settling, setSettling] = useState(false)
   const wasWorking = useRef(working)
@@ -161,10 +163,10 @@ export const Transcript = memo(function Transcript({
   cwd: string | null
 }) {
   const working = useShownWorking(running)
-  const items = useTranscriptStore((state) => state.items)
-  const shape = useTranscriptStore((state) => streamingShape(state.streaming))
+  const items = useTranscriptView((view) => view.items)
+  const shape = useTranscriptView((view) => streamingShape(view.streaming))
   const streaming = useMemo(() => fromStreamingShape(shape), [shape])
-  const threadId = useTranscriptStore((state) => state.threadId)
+  const threadId = useTranscriptView((view) => view.threadId)
   const pendingTasks = useRequestStore((state) => state.pendingTasks)
   const busy = useBusyThreads()
   const activeTasks = useAppStore((state) =>
@@ -197,7 +199,7 @@ export const Transcript = memo(function Transcript({
         : undefined,
     [items, working]
   )
-  const hasOlder = useTranscriptStore((state) => state.hasOlder)
+  const hasOlder = useTranscriptView((view) => view.shown && view.hasOlder)
   const loadOlder = useTranscriptStore((state) => state.loadOlder)
 
   return (
@@ -253,20 +255,22 @@ export function TranscriptFrame({
   const listRef = useRef<HTMLDivElement>(null)
   const olderRef = useRef<HTMLDivElement>(null)
   usePinnedEnd(scrollRef, listRef)
+  const from = useMountedFrom(rows.length)
+  const older = from === 0 ? loadOlder : undefined
 
   useEffect(() => {
     const element = scrollRef.current
     const sentinel = olderRef.current
-    if (!element || !sentinel || !loadOlder) return
+    if (!element || !sentinel || !older) return
     const observer = new IntersectionObserver(
       ([entry]) => {
-        if (entry?.isIntersecting) void loadOlder()
+        if (entry?.isIntersecting) void older()
       },
       { root: element, rootMargin: '800px 0px 0px 0px' }
     )
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [loadOlder, firstId])
+  }, [older, firstId])
 
   return (
     <MessageScrollerProvider autoScroll>
@@ -279,7 +283,7 @@ export function TranscriptFrame({
             if (toggle) keepInPlace(event.currentTarget, toggle)
           }}
         >
-          {loadOlder ? <div ref={olderRef} aria-hidden /> : null}
+          {older ? <div ref={olderRef} aria-hidden /> : null}
           <MessageScrollerContent
             ref={listRef}
             className={cn(CHAT_LANE, 'gap-4 px-4 pt-6 pb-12')}
@@ -288,6 +292,7 @@ export function TranscriptFrame({
             <ApprovalsContext.Provider value={approvals}>
               <Rows
                 rows={rows}
+                from={from}
                 cwd={cwd}
                 liveTasks={liveTasks}
                 status={status}
@@ -315,28 +320,52 @@ export function TranscriptFrame({
   )
 }
 
+/** How many of its latest rows a transcript mounts at first. */
+const FIRST_ROWS = 16
+
+/**
+ * Where the mounted rows start: a transcript first mounts only its latest rows, the ones in
+ * view at its end, and the rest in a transition right after, so it shows without waiting for
+ * all of them.
+ */
+function useMountedFrom(count: number) {
+  const [whole, setWhole] = useState(count <= FIRST_ROWS)
+  useEffect(() => {
+    if (!whole) startTransition(() => setWhole(true))
+  }, [whole])
+  return whole ? 0 : Math.max(0, count - FIRST_ROWS)
+}
+
 /** How near the end, in pixels, still counts as at it. */
 const END_SLACK_PX = 2
 
 /**
  * Keeps the end in view as the rows grow, in the frame they grow: the scroller follows only
  * a frame after the growth painted, so new text would show below the end, then snap up.
- * Lets go once the reader scrolls away, or a row opening asks to stay in place.
+ * Lets go once the reader scrolls away, or a row opening asks to stay in place. A transcript
+ * hidden and shown again comes back where the reader left it.
  */
 function usePinnedEnd(
   scrollRef: RefObject<HTMLDivElement | null>,
   listRef: RefObject<HTMLDivElement | null>
 ) {
+  const readAt = useRef<number | null>(null)
   useLayoutEffect(() => {
     const viewport = scrollRef.current
     const list = listRef.current
     if (!viewport || !list) return
-    let following = true
+    let following = readAt.current === null
+    if (readAt.current !== null) {
+      viewport.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+      viewport.scrollTop = readAt.current
+    }
     const atEnd = () =>
       viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <=
       END_SLACK_PX
     const onScroll = () => {
+      if (viewport.clientHeight === 0) return
       following = atEnd()
+      readAt.current = following ? null : viewport.scrollTop
     }
     const onWheel = (event: WheelEvent) => {
       if (!event.isTrusted || event.deltaY < 0) following = false
@@ -473,15 +502,17 @@ function isAgent(row: TranscriptRow) {
 
 function Rows({
   rows,
+  from = 0,
   cwd,
   liveTasks,
   status
-}: RowsProps & { status?: StatusSlot }) {
+}: RowsProps & { from?: number; status?: StatusSlot }) {
   const shown: React.ReactNode[] = []
   const showStatus = () => {
     if (status) shown.push(<StatusRow key='turn-status' node={status.node} />)
   }
-  if (status?.after === null) showStatus()
+  const statusAt = status?.after ? rows.indexOf(status.after) : -1
+  if (status?.after === null || (statusAt >= 0 && statusAt < from)) showStatus()
   const liveFrom = rows.length - LIVE_ROWS
   let agents: TranscriptRow[] = []
   let agentsAt = 0
@@ -506,6 +537,7 @@ function Rows({
     agents = []
   }
   rows.forEach((row, index) => {
+    if (index < from) return
     if (isAgent(row)) {
       if (agents.length === 0) agentsAt = index
       agents.push(row)
@@ -972,9 +1004,16 @@ const SUMMARY_MESSAGES: Record<
   others: m.tool_summary_others
 }
 
+const listFormats = new Map<string, Intl.ListFormat>()
+
 function summaryText(parts: ToolSummaryPart[]) {
   const locale = getLocale()
-  const sentence = new Intl.ListFormat(locale, { type: 'conjunction' }).format(
+  let list = listFormats.get(locale)
+  if (!list) {
+    list = new Intl.ListFormat(locale, { type: 'conjunction' })
+    listFormats.set(locale, list)
+  }
+  const sentence = list.format(
     parts.map(({ action, count }) => SUMMARY_MESSAGES[action]({ count }))
   )
   return sentence.charAt(0).toLocaleUpperCase(locale) + sentence.slice(1)
@@ -992,8 +1031,8 @@ function ToolCallRow({
   const whole = useWholeToolCall(item, open)
   const diff = whole.detail?.kind === 'fileChange' ? whole.detail.diff : null
   const running = output === null && !interrupted
-  const live = useTranscriptStore((state) =>
-    running && open ? state.toolOutput[item.id] : undefined
+  const live = useTranscriptView((view) =>
+    running && open ? view.toolOutput[item.id] : undefined
   )
   const target = toolTarget(name, input, cwd)
   const shown = toolName(name)
@@ -1124,8 +1163,8 @@ function TurnStatus() {
   const stoppingSince = useStoppingStore((state) =>
     threadId ? state.since[threadId] : undefined
   )
-  const startedAt = useTranscriptStore((state) => {
-    const asked = turnId ? itemById(state.items, turnId) : undefined
+  const startedAt = useTranscriptView((view) => {
+    const asked = turnId ? itemById(view.items, turnId) : undefined
     return asked ? Date.parse(asked.createdAt) : undefined
   })
   const now = useNow()

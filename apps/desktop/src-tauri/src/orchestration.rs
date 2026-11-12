@@ -1,15 +1,15 @@
 use hoshi_core::{
-    AppSettings, BankedResetSpend, BrowserInput, ChangesSummary, Command, CommandError, DiffFile,
-    DiffScope, Editor, FileDiff, FolderListing, ForgeAccount, ForgeKind, GitActionRequest,
-    GitActionResult, GitStatus, HeldMessage, LocalServer, MessageAttachment, ProviderAccountStatus,
-    ProviderModels, ProviderVersion, PullRequest, PullRequestAction, PullRequestDetail,
-    PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach, TerminalEvent,
-    ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
+    AppSettings, BankedResetSpend, BrowserFrame, BrowserInput, ChangesSummary, Command,
+    CommandError, DiffFile, DiffScope, Editor, FileDiff, FolderListing, ForgeAccount, ForgeKind,
+    GitActionRequest, GitActionResult, GitStatus, HeldMessage, LocalServer, MessageAttachment,
+    ProviderAccountStatus, ProviderModels, ProviderVersion, PullRequest, PullRequestAction,
+    PullRequestDetail, PullRequestLabel, RemoteRepository, SlashCommand, Snapshot, TerminalAttach,
+    TerminalEvent, ThreadItem, TranscriptPage, UsageLimits, WorkspaceEntry,
 };
 use hoshi_engine::{Engine, Notification, Notify};
 use hoshi_providers::{ClaudeCodeAdapter, ProviderAdapter};
-use std::sync::Arc;
-use tauri::ipc::{Channel, InvokeBody, Request};
+use std::sync::{Arc, Mutex};
+use tauri::ipc::{Channel, InvokeBody, InvokeResponseBody, Request};
 use tauri::{App, AppHandle, Emitter, Manager, State};
 
 /// Every committed event reaches the UI here, in sequence order.
@@ -31,16 +31,35 @@ const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 const PROVIDER_VERSION_CHANNEL: &str = "hoshi://provider-version";
 /// The step a running commit, push or pull request action reached.
 const GIT_ACTION_CHANNEL: &str = "hoshi://git-action";
-/// What a thread's browser page painted, while the panel shows it.
-const BROWSER_FRAME_CHANNEL: &str = "hoshi://browser-frame";
 /// Where a thread's browser page is, and what the agent just did on it.
 const BROWSER_PAGE_CHANNEL: &str = "hoshi://browser-page";
 const WORKTREE_SETUP_CHANNEL: &str = "hoshi://worktree-setup";
 /// The servers of a thread a view watches, when they change.
 const SERVERS_CHANNEL: &str = "hoshi://servers";
 
+/// Where the browser pages the panel shows send their frames, as raw bytes: the UI gives it
+/// once it starts. Events would carry them as base64 inside a script the webview evaluates.
+#[derive(Clone, Default)]
+pub struct BrowserFrames(Arc<Mutex<Option<Channel>>>);
+
+impl BrowserFrames {
+    fn send(&self, frame: &BrowserFrame) -> tauri::Result<()> {
+        let channel = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match channel {
+            Some(channel) => channel.send(InvokeResponseBody::Raw(frame.to_bytes())),
+            None => Ok(()),
+        }
+    }
+}
+
 pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
+    let frames = BrowserFrames::default();
+    app.manage(frames.clone());
     let notify: Notify = Arc::new(move |notification| {
         let result = match notification {
             Notification::Event(envelope) => handle.emit(EVENT_CHANNEL, envelope),
@@ -56,7 +75,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
                 handle.emit(PROVIDER_VERSION_CHANNEL, version)
             }
             Notification::GitActionProgress(progress) => handle.emit(GIT_ACTION_CHANNEL, progress),
-            Notification::BrowserFrame(frame) => handle.emit(BROWSER_FRAME_CHANNEL, frame),
+            Notification::BrowserFrame(frame) => frames.send(&frame),
             Notification::BrowserPage(page) => handle.emit(BROWSER_PAGE_CHANNEL, page),
             Notification::HeldMessage(held) => handle.emit(HELD_MESSAGE_CHANNEL, held),
             Notification::WorktreeSetup(run) => handle.emit(WORKTREE_SETUP_CHANNEL, run),
@@ -98,6 +117,12 @@ pub fn get_thread_items(
     before: Option<String>,
 ) -> Result<TranscriptPage, CommandError> {
     engine.transcript(&thread_id, before.as_deref())
+}
+
+/// The UI shows this thread's transcript now; text streams only for it.
+#[tauri::command(async)]
+pub fn stream_thread(engine: State<'_, Engine>, thread_id: Option<String>) {
+    engine.stream_thread(thread_id);
 }
 
 /// One transcript item with what `get_thread_items` leaves out, such as a diff.
@@ -615,6 +640,15 @@ pub fn take_held_message(
     discard: bool,
 ) -> Option<HeldMessage> {
     engine.take_held_message(&thread_id, discard)
+}
+
+/// Frames of the browser pages the panel shows arrive on `channel` from now on.
+#[tauri::command]
+pub fn browser_frames(frames: State<'_, BrowserFrames>, channel: Channel) {
+    *frames
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(channel);
 }
 
 #[tauri::command(async)]

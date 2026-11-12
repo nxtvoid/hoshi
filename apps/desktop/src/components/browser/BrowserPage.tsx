@@ -183,7 +183,7 @@ export function BrowserPage({
     >
       <img
         ref={image}
-        src={`data:image/jpeg;base64,${frame.data}`}
+        src={frame.url}
         alt={page.title || page.url}
         draggable={false}
         className='block h-auto w-full select-none'

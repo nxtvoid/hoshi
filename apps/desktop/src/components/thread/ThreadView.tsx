@@ -1,5 +1,5 @@
 import type * as React from 'react'
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Activity, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { cn } from '@hoshi/utils'
 import { useShallow } from 'zustand/react/shallow'
 import { Composer } from './Composer'
@@ -14,6 +14,7 @@ import {
 } from './ThreadDetails'
 import { m } from '@/paraglide/messages'
 import { Transcript } from './Transcript'
+import { TranscriptScope } from './transcript-scope'
 import { DelegatedBanner } from './DelegationRows'
 import { SubagentTitle, SubagentView } from './SubagentView'
 import { ThreadGitChip } from './ThreadGitChip'
@@ -256,10 +257,7 @@ export function ThreadView() {
                     <DelegatedBanner parentThreadId={thread.parentThreadId} />
                   </div>
                 ) : null}
-                <Transcript
-                  working={working}
-                  cwd={thread?.worktreePath ?? workspaceRoot ?? null}
-                />
+                <MountedTranscripts />
                 <div
                   data-mini-browser-obstacle='composer'
                   className='relative px-4 pb-3'
@@ -338,6 +336,46 @@ function selectedThreadFields(state: {
         worktreePath: thread.worktreePath
       }
     : undefined
+}
+
+/**
+ * The transcripts shown lately, kept mounted and hidden but for the one shown, so going
+ * back to a thread only shows its transcript again instead of building it anew.
+ */
+function MountedTranscripts() {
+  const shownId = useTranscriptStore((state) => state.shownId)
+  const recent = useTranscriptStore((state) => state.recent)
+  if (shownId === null) return null
+  return recent.map((threadId) => (
+    <Activity key={threadId} mode={threadId === shownId ? 'visible' : 'hidden'}>
+      <TranscriptScope value={threadId}>
+        <ThreadTranscript threadId={threadId} />
+      </TranscriptScope>
+    </Activity>
+  ))
+}
+
+function ThreadTranscript({ threadId }: { threadId: string }) {
+  const thread = useAppStore(
+    useShallow((state) => {
+      const found = state.threads.find((candidate) => candidate.id === threadId)
+      return {
+        status: found?.status,
+        worktreePath: found?.worktreePath,
+        workspaceRoot: state.projects.find(
+          (project) => project.id === found?.projectId
+        )?.workspaceRoot
+      }
+    })
+  )
+  return (
+    <Transcript
+      working={
+        thread.status === 'working' || thread.status === 'waitingForInput'
+      }
+      cwd={thread.worktreePath ?? thread.workspaceRoot ?? null}
+    />
+  )
 }
 
 /** The element's width; a hidden element keeps the last width it had. */

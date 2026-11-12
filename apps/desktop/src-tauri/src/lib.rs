@@ -82,6 +82,8 @@ pub fn run() {
             orchestration::compact_then_send,
             orchestration::send_held_message_now,
             orchestration::take_held_message,
+            orchestration::stream_thread,
+            orchestration::browser_frames,
             orchestration::browser_view,
             orchestration::browser_open,
             orchestration::browser_go,

@@ -2,6 +2,7 @@
 //! browser, started on first use.
 
 use super::{Browser, DEFAULT_SIZE, Observer, Page, PageEvent, find_browser};
+use crate::throttle::Throttle;
 use crate::{Notification, Notify};
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, BrowserPoint, BrowserSettings, PageColorScheme,
@@ -42,6 +43,8 @@ pub(crate) struct Browsing {
     settings: BrowserSettings,
 }
 
+/// The least time between two frames of a page sent to the UI: about 20 a second.
+const FRAME_EVERY: Duration = Duration::from_millis(50);
 /// How long a browser without pages is kept before it goes.
 const IDLE_BROWSER: Duration = Duration::from_secs(10 * 60);
 const NO_PAGE: &str = "this thread has no page open: call preview_open first";
@@ -255,18 +258,31 @@ impl Browsing {
     /// What the page shows and where it went reach the UI as notifications.
     fn observer(&self, thread_id: &str) -> Observer {
         let (notify, thread_id) = (self.notify.clone(), thread_id.to_owned());
+        let frames = {
+            let notify = notify.clone();
+            Throttle::new(
+                FRAME_EVERY,
+                |shown, frame| *shown = frame,
+                move |frame| {
+                    notify(Notification::BrowserFrame(frame));
+                },
+            )
+        };
         Arc::new(move |event| {
             let notification = match event {
                 PageEvent::Frame {
-                    data,
+                    jpeg,
                     width,
                     height,
-                } => Notification::BrowserFrame(BrowserFrame {
-                    thread_id: thread_id.clone(),
-                    data,
-                    width,
-                    height,
-                }),
+                } => {
+                    frames.offer(BrowserFrame {
+                        thread_id: thread_id.clone(),
+                        jpeg,
+                        width,
+                        height,
+                    });
+                    return;
+                }
                 PageEvent::Changed { url, title, errors } => {
                     Notification::BrowserPage(BrowserPage {
                         thread_id: thread_id.clone(),
@@ -803,7 +819,7 @@ mod tests {
 
         assert_eq!(opened["opened"], true);
         assert_eq!((frame.thread_id.as_str(), frame.width), ("t", 1280));
-        assert!(!frame.data.is_empty());
+        assert!(frame.jpeg.starts_with(&[0xff, 0xd8]));
         assert_eq!(label["value"], "Clicked");
         let pages: Vec<BrowserPage> = received
             .try_iter()

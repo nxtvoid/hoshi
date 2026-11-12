@@ -8,6 +8,8 @@ pub(crate) mod tools;
 
 pub use launch::find_browser;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use cdp::Connection;
 use launch::BrowserProcess;
 use serde_json::{Value, json};
@@ -99,9 +101,9 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// What a page shows or became, for whoever displays it.
 pub enum PageEvent {
-    /// A JPEG of the page as it paints, base64, while it is screencast.
+    /// A JPEG of the page as it paints, while it is screencast.
     Frame {
-        data: String,
+        jpeg: Vec<u8>,
         width: u32,
         height: u32,
     },
@@ -149,8 +151,12 @@ fn listen(
                         Some(&session),
                     );
                     let metadata = &event.params["metadata"];
+                    let data = event.params["data"].as_str().unwrap_or_default();
+                    let Ok(jpeg) = STANDARD.decode(data) else {
+                        continue;
+                    };
                     observer(PageEvent::Frame {
-                        data: event.params["data"].as_str().unwrap_or_default().to_owned(),
+                        jpeg,
                         width: metadata["deviceWidth"].as_f64().unwrap_or_default() as u32,
                         height: metadata["deviceHeight"].as_f64().unwrap_or_default() as u32,
                     });

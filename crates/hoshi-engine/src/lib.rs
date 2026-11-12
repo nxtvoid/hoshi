@@ -29,8 +29,10 @@ mod secrets;
 mod servers;
 mod setup_files;
 mod source_control;
+mod stream_batch;
 mod terminal;
 mod thread_tools;
+mod throttle;
 mod titles;
 mod watch;
 mod worktree;
@@ -87,7 +89,8 @@ use worktree_setup::{SetupLaunch, WorktreeSetups};
 
 pub enum Notification {
     Event(EventEnvelope),
-    Stream(StreamDelta),
+    /// Text still streaming, batched.
+    Stream(Vec<StreamDelta>),
     /// Read from a forge; cached, not part of the event log.
     PullRequest(ThreadPullRequest),
     /// A fresh read of a pull request's detail, after the panel showed the cached one.
@@ -246,6 +249,8 @@ struct State {
     pending_wakes: HashMap<String, Vec<Wake>>,
     /// The account each forge is read with, whose own comments never wake its agent.
     viewers: HashMap<ForgeKind, String>,
+    /// The thread whose transcript the UI shows, the only one whose text streams to it.
+    streamed: Option<String>,
 }
 
 /// A message waiting for the thread's running turn to end.
@@ -443,6 +448,7 @@ impl Engine {
     /// Turns that were running when the app last closed are recorded as
     /// interrupted, and every thread's branch is read again. Files go under `data_dir`.
     pub fn from_store(store: Store, data_dir: &Path, notify: Notify) -> Result<Self, StoreError> {
+        let notify = stream_batch::batch_streams(notify);
         let snapshot = store.snapshot()?;
         let known = snapshot.pull_requests.iter().filter_map(|update| {
             let pull_request = update.pull_request.clone()?;
@@ -503,6 +509,7 @@ impl Engine {
             watches,
             watch_reads: HashMap::new(),
             pending_wakes: HashMap::new(),
+            streamed: None,
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             browser: BrowserSettings::default(),
@@ -1723,6 +1730,11 @@ impl Engine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The UI shows this thread's transcript, `None` for none: only its text streams to it.
+    pub fn stream_thread(&self, thread_id: Option<String>) {
+        lock(&self.state).streamed = thread_id;
+    }
+
     /// The panel shows the thread's browser page, which then streams to it, or stopped.
     pub fn browser_view(&self, thread_id: &str, viewing: bool) -> Result<(), CommandError> {
         self.browsing()
@@ -2438,17 +2450,18 @@ impl State {
             }
             other => return self.record(thread_id, turn_id, other),
         };
+        let shown = self.streamed.as_deref() == Some(thread_id);
         let active = self
             .model
             .thread(thread_id)
             .is_some_and(|thread| thread.active_turn_id.as_deref() == Some(turn_id));
-        if active {
-            (self.notify)(Notification::Stream(StreamDelta {
+        if shown && active {
+            (self.notify)(Notification::Stream(vec![StreamDelta {
                 thread_id: thread_id.to_owned(),
                 item_id,
                 kind,
                 delta,
-            }));
+            }]));
         }
     }
 

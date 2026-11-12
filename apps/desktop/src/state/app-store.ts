@@ -1,6 +1,6 @@
 import { create } from 'zustand'
 import { m } from '@/paraglide/messages'
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import type { Thread } from '@/bindings/Thread'
 import type { Command } from '@/bindings/Command'
@@ -44,7 +44,7 @@ import type { WorktreeSetupRun } from '@/bindings/WorktreeSetupRun'
 import { COMPACT_COMMAND } from '@/lib/compaction'
 import { useBrowserStore } from './browser-store'
 import type { BrowserPage } from '@/bindings/BrowserPage'
-import type { BrowserFrame } from '@/bindings/BrowserFrame'
+import { readBrowserFrame } from '@/lib/browser-frame'
 import type { GitActionProgress } from '@/bindings/GitActionProgress'
 import type { StreamDelta } from '@/bindings/StreamDelta'
 import type { ProviderVersion } from '@/bindings/ProviderVersion'
@@ -460,6 +460,16 @@ function receive({ sequence, event }: EventEnvelope) {
   }
 }
 
+/** Gives the engine the channel browser frames come back on, as raw bytes. */
+function watchBrowserFrames() {
+  const frames = new Channel<ArrayBuffer>((buffer) =>
+    useBrowserStore.getState().receiveFrame(readBrowserFrame(buffer))
+  )
+  invoke('browser_frames', { channel: frames }).catch((error: unknown) =>
+    console.error('hoshi: failed to receive browser frames', error)
+  )
+}
+
 /** Drops what the app kept on this machine for threads that are gone. */
 function forgetThreads(threadIds: string[], drafts: string[]) {
   useDraftStore.getState().forget(drafts)
@@ -522,9 +532,6 @@ async function startSync() {
     listen<ProviderVersion | null>('hoshi://provider-version', (message) =>
       useProviderUpdateStore.getState().receive(message.payload)
     ),
-    listen<BrowserFrame>('hoshi://browser-frame', (message) =>
-      useBrowserStore.getState().receiveFrame(message.payload)
-    ),
     listen<BrowserPage>('hoshi://browser-page', (message) =>
       useBrowserStore.getState().receivePage(message.payload)
     ),
@@ -537,10 +544,12 @@ async function startSync() {
     listen<ThreadServers>('hoshi://servers', (message) =>
       useServerStore.getState().receive(message.payload)
     ),
-    listen<StreamDelta>('hoshi://stream', (message) =>
-      useTranscriptStore.getState().applyDelta(message.payload)
-    )
+    listen<StreamDelta[]>('hoshi://stream', (message) => {
+      const { applyDelta } = useTranscriptStore.getState()
+      for (const delta of message.payload) applyDelta(delta)
+    })
   ])
+  watchBrowserFrames()
   const stopAppUpdates = watchAppUpdates()
   const stopForgeAccounts = watchForgeAccounts()
   // Read after the sequenced listeners exist, or events in between would be lost.

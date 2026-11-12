@@ -1,7 +1,8 @@
 import { cn } from '@hoshi/utils'
 import { m } from '@/paraglide/messages'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { itemById, useTranscriptStore } from '@/state/transcript-store'
+import { itemById } from '@/state/transcript-store'
+import { useTranscriptView } from './transcript-scope'
 import {
   Alert02Icon,
   BotIcon,
@@ -28,8 +29,8 @@ export function BackgroundTaskRow({
   failed: boolean
   cwd: string | null
 }) {
-  const found = useTranscriptStore((state) =>
-    toolCallId ? itemById(state.items, toolCallId) : undefined
+  const found = useTranscriptView((view) =>
+    toolCallId ? itemById(view.items, toolCallId) : undefined
   )
   const call = found?.content.kind === 'toolCall' ? found : undefined
   const subagent = call ? isSubagentCall(call) : false
