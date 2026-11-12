@@ -25,6 +25,8 @@ const CONTEXT_USAGE_CHANNEL: &str = "hoshi://context-usage";
 /// The commands a thread's running turn waits for in the background.
 const BACKGROUND_TASKS_CHANNEL: &str = "hoshi://background-tasks";
 const HELD_MESSAGE_CHANNEL: &str = "hoshi://held-message";
+/// The branch a project's root folder is on, when it changes.
+const PROJECT_BRANCH_CHANNEL: &str = "hoshi://project-branch";
 /// The provider plan's limits, as a running turn reported them.
 const USAGE_LIMITS_CHANNEL: &str = "hoshi://usage-limits";
 /// The provider's CLI against its latest release, and how its update goes.
@@ -80,6 +82,7 @@ pub fn init(app: &App, data_dir: &std::path::Path) -> Result<(), Box<dyn std::er
             Notification::HeldMessage(held) => handle.emit(HELD_MESSAGE_CHANNEL, held),
             Notification::WorktreeSetup(run) => handle.emit(WORKTREE_SETUP_CHANNEL, run),
             Notification::Servers(update) => handle.emit(SERVERS_CHANNEL, update),
+            Notification::ProjectBranch(update) => handle.emit(PROJECT_BRANCH_CHANNEL, update),
         };
         if let Err(error) = result {
             eprintln!("hoshi: failed to emit to the UI: {error}");

@@ -521,6 +521,7 @@ impl Store {
             background_tasks: Vec::new(),
             task_previews,
             held_messages: Vec::new(),
+            project_branches: Vec::new(),
         })
     }
 

@@ -6,6 +6,7 @@ import type { Thread } from '@/bindings/Thread'
 import type { Command } from '@/bindings/Command'
 import type { Project } from '@/bindings/Project'
 import type { Snapshot } from '@/bindings/Snapshot'
+import type { ProjectBranch } from '@/bindings/ProjectBranch'
 import type { ThreadHeldMessage } from '@/bindings/ThreadHeldMessage'
 import type { PullRequest } from '@/bindings/PullRequest'
 import type { ThreadWorkspace } from '@/bindings/ThreadWorkspace'
@@ -25,6 +26,7 @@ import { useSubagentStore } from './subagent-store'
 import { useStoppingStore } from './stopping-store'
 import { useBackgroundTaskStore } from './background-task-store'
 import { useHeldMessageStore } from './held-message-store'
+import { useProjectBranchStore } from './project-branch-store'
 import { useServerStore } from './server-store'
 import { usePullRequestStore } from './pull-request-store'
 import { draftKey, useDraftStore } from './draft-store'
@@ -523,6 +525,9 @@ async function startSync() {
     listen<ThreadHeldMessage>('hoshi://held-message', (message) =>
       useHeldMessageStore.getState().receive(message.payload)
     ),
+    listen<ProjectBranch>('hoshi://project-branch', (message) =>
+      useProjectBranchStore.getState().receive(message.payload)
+    ),
     listen<ThreadPullRequestDetail>('hoshi://pull-request-detail', (message) =>
       usePullRequestStore.getState().receive(message.payload)
     ),
@@ -580,6 +585,7 @@ async function startSync() {
     )
   useBackgroundTaskStore.getState().seed(snapshot.backgroundTasks)
   useHeldMessageStore.getState().seed(snapshot.heldMessages)
+  useProjectBranchStore.getState().seed(snapshot.projectBranches)
   useAppStore.setState({
     ready: true,
     sequence: snapshot.sequence,

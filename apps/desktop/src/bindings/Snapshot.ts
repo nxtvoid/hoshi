@@ -2,6 +2,7 @@
 import type { HeldMessage } from "./HeldMessage";
 import type { OpenToolCall } from "./OpenToolCall";
 import type { Project } from "./Project";
+import type { ProjectBranch } from "./ProjectBranch";
 import type { TaskPreview } from "./TaskPreview";
 import type { Thread } from "./Thread";
 import type { ThreadBackgroundTasks } from "./ThreadBackgroundTasks";
@@ -44,4 +45,8 @@ taskPreviews: Array<TaskPreview>,
 /**
  * The messages that wait for their thread to be compacted.
  */
-heldMessages: Array<HeldMessage>, };
+heldMessages: Array<HeldMessage>, 
+/**
+ * The branch each project's root folder is on, as last read.
+ */
+projectBranches: Array<ProjectBranch>, };

@@ -441,6 +441,17 @@ pub struct Snapshot {
     pub task_previews: Vec<TaskPreview>,
     /// The messages that wait for their thread to be compacted.
     pub held_messages: Vec<HeldMessage>,
+    /// The branch each project's root folder is on, as last read.
+    pub project_branches: Vec<ProjectBranch>,
+}
+
+/// The branch a project's root folder is on; `None` off any branch or outside git.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProjectBranch {
+    pub project_id: String,
+    pub branch: Option<String>,
 }
 
 /// A message the user sent that waits for its thread's conversation to be compacted.

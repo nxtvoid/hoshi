@@ -7,7 +7,9 @@ import { useAppStore } from '@/state/app-store'
 import { usePanelStore } from '@/state/panel-store'
 import { useUnseenStore } from '@/state/unseen-store'
 import { mergedCleanup } from '@/state/merged-cleanup'
+import { branchMismatch } from '@/lib/branch-mismatch'
 import { pullRequestProblem } from '@/lib/pull-request-problem'
+import { useProjectBranchStore } from '@/state/project-branch-store'
 import { runCleanupWithDialog } from '@/components/thread/use-workspace-cleanup'
 import { HugeiconsIcon } from '@hugeicons/react'
 import { cn, formatRelativeTime } from '@hoshi/utils'
@@ -17,6 +19,7 @@ import { PullRequestIcon } from '@/components/pull-request/PullRequestIcon'
 import { PullRequestHoverCard } from '@/components/pull-request/PullRequestHoverCard'
 import { pullRequestPillHover, ThreadCardTrigger } from './ThreadCard'
 import {
+  AlertCircleIcon,
   Comment01Icon,
   GitBranchIcon,
   GitForkIcon
@@ -95,6 +98,10 @@ export const ThreadRow = memo(function ThreadRow({
   const status =
     thread.status !== 'idle' ? STATUS[thread.status] : unseen ? COMPLETED : null
   const canCleanUp = mergedCleanup(thread, pullRequest)
+  const rootBranch = useProjectBranchStore((state) =>
+    thread.projectId === null ? undefined : state.byProject[thread.projectId]
+  )
+  const mismatch = branchMismatch(thread, rootBranch)
   const canRelease =
     Boolean(thread.worktreePath) &&
     !thread.worktreeReleased &&
@@ -239,6 +246,16 @@ export const ThreadRow = memo(function ThreadRow({
                 }
               />
             ) : null}
+          </span>
+        ) : null}
+        {mismatch ? (
+          <span className='text-warning flex min-w-0 items-center gap-1.5 text-xs'>
+            <HugeiconsIcon
+              icon={AlertCircleIcon}
+              strokeWidth={2}
+              className='size-3 shrink-0'
+            />
+            <span className='truncate'>{m.root_on_other_branch()}</span>
           </span>
         ) : null}
       </ThreadCardTrigger>

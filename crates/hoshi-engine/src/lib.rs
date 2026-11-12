@@ -116,6 +116,8 @@ pub enum Notification {
     WorktreeSetup(hoshi_core::WorktreeSetupRun),
     /// The servers of a thread a view watches, when they change.
     Servers(hoshi_core::ThreadServers),
+    /// The branch a project's root folder is on, when it changes.
+    ProjectBranch(hoshi_core::ProjectBranch),
 }
 
 pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
@@ -197,6 +199,8 @@ struct State {
     forges: HashMap<ForgeKind, Arc<dyn Forge>>,
     /// The forge repository of each project whose `origin` a forge serves.
     repositories: HashMap<String, RepositoryRef>,
+    /// The branch each project's root folder is on, as last read.
+    root_branches: HashMap<String, Option<String>>,
     pull_requests: PullRequestSync,
     /// The files of the pull request last read for each thread, with their patches, so the
     /// UI can ask for one patch at a time.
@@ -487,6 +491,7 @@ impl Engine {
             sync_wake: None,
             forges: HashMap::new(),
             repositories: HashMap::new(),
+            root_branches: HashMap::new(),
             pull_requests,
             pull_request_cache: PullRequestCache::default(),
             linked_pull_requests: HashMap::new(),
@@ -534,6 +539,7 @@ impl Engine {
         let thread_ids = state
             .model
             .threads()
+            .filter(|thread| follows_its_folder(thread))
             .map(|thread| thread.id.clone())
             .collect();
         let shared = Arc::new_cyclic(|this| {
@@ -989,7 +995,16 @@ impl Engine {
             git::switch(&cwd, branch).map_err(|detail| CommandError::GitFailed { detail });
         lock(&self.state).end_op(op, None)?;
         switched?;
-        read_branches(&Arc::downgrade(&self.state), &[thread_id.to_owned()]);
+        let state = Arc::downgrade(&self.state);
+        read_branches(&state, &[thread_id.to_owned()]);
+        let project_id = lock(&self.state)
+            .model
+            .thread(thread_id)
+            .filter(|thread| thread.worktree_path.is_none())
+            .and_then(|thread| thread.project_id.clone());
+        if let Some(project_id) = project_id {
+            read_root_branches(&state, &[project_id]);
+        }
         Ok(())
     }
 
@@ -1532,6 +1547,14 @@ impl Engine {
                 .after_compaction
                 .iter()
                 .map(|(thread_id, message)| held_message(thread_id, message))
+                .collect(),
+            project_branches: state
+                .root_branches
+                .iter()
+                .map(|(project_id, branch)| hoshi_core::ProjectBranch {
+                    project_id: project_id.clone(),
+                    branch: branch.clone(),
+                })
                 .collect(),
         }
     }
@@ -2980,6 +3003,7 @@ impl State {
                         watcher.unwatch(project_id);
                     }
                     self.repositories.remove(project_id);
+                    self.root_branches.remove(project_id);
                 }
                 Event::ThreadDeleted { thread_id } => self.forget_thread(thread_id),
                 _ => {}
@@ -3555,13 +3579,20 @@ fn in_any(project_ids: &[String], thread: &hoshi_core::Thread) -> bool {
         .is_some_and(|project_id| project_ids.contains(project_id))
 }
 
-/// Reads the branch of every thread in the given projects. A running turn that
-/// created a worktree moves to it now, not only when the turn ends.
+/// Whether a branch change in the thread's folder is the thread's own: its worktree, or
+/// the project root while one of its turns runs there. Idle threads in the root keep the
+/// branch they worked on.
+fn follows_its_folder(thread: &hoshi_core::Thread) -> bool {
+    thread.worktree_path.is_some() || thread.active_turn_id.is_some()
+}
+
+/// Reads the branch of the threads in the given projects that follow their folder. A
+/// running turn that created a worktree moves to it now, not only when the turn ends.
 fn refresh_projects(state: &Weak<Mutex<State>>, project_ids: &[String]) {
     let Some(shared) = state.upgrade() else {
         return;
     };
-    let (thread_ids, checks) = {
+    let (thread_ids, following, checks) = {
         let state = lock(&shared);
         let in_projects = |thread_id: &str| {
             state
@@ -3573,6 +3604,12 @@ fn refresh_projects(state: &Weak<Mutex<State>>, project_ids: &[String]) {
             .model
             .threads()
             .filter(|thread| in_any(project_ids, thread))
+            .map(|thread| thread.id.clone())
+            .collect();
+        let following: Vec<String> = state
+            .model
+            .threads()
+            .filter(|thread| in_any(project_ids, thread) && follows_its_folder(thread))
             .map(|thread| thread.id.clone())
             .collect();
         let checks: Vec<(String, WorktreeCheck)> = state
@@ -3587,15 +3624,44 @@ fn refresh_projects(state: &Weak<Mutex<State>>, project_ids: &[String]) {
                 ))
             })
             .collect();
-        (thread_ids, checks)
+        (thread_ids, following, checks)
     };
     for (thread_id, check) in &checks {
         attach_created_worktree(state, thread_id, check);
     }
-    read_branches(state, &thread_ids);
+    read_root_branches(state, project_ids);
+    read_branches(state, &following);
     let mut state = lock(&shared);
     for thread_id in &thread_ids {
         state.pull_requests.check_soon(thread_id);
+    }
+}
+
+/// Reads the branch of each project's root folder off the lock, and tells the UI of changes.
+fn read_root_branches(state: &Weak<Mutex<State>>, project_ids: &[String]) {
+    for project_id in project_ids {
+        let Some(shared) = state.upgrade() else {
+            return;
+        };
+        let root = lock(&shared)
+            .model
+            .project(project_id)
+            .map(|project| project.workspace_root.clone());
+        let Some(root) = root else { continue };
+        let branch = git::current_branch(&root);
+        let mut state = lock(&shared);
+        if state.model.project(project_id).is_none()
+            || state.root_branches.get(project_id) == Some(&branch)
+        {
+            continue;
+        }
+        state
+            .root_branches
+            .insert(project_id.clone(), branch.clone());
+        (state.notify)(Notification::ProjectBranch(hoshi_core::ProjectBranch {
+            project_id: project_id.clone(),
+            branch,
+        }));
     }
 }
 
@@ -3605,6 +3671,8 @@ fn watch_projects(state: Weak<Mutex<State>>, projects: Vec<(String, String)>) {
         return;
     }
     thread::spawn(move || {
+        let project_ids: Vec<String> = projects.iter().map(|(id, _)| id.clone()).collect();
+        read_root_branches(&state, &project_ids);
         for (project_id, root) in projects {
             let Some(git_dir) = git::common_dir(&root) else {
                 continue;
@@ -8014,6 +8082,39 @@ Blue"
         });
 
         assert_eq!(branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn an_idle_local_thread_keeps_its_branch_when_the_root_switches() {
+        let repo = git::tests::temp_repository("engine-root-switch");
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("root-switch", repo, store, Vec::new());
+        harness.wait_for(|event| match event {
+            Event::ThreadBranchSet { thread_id, .. } if thread_id == "t" => Some(()),
+            _ => None,
+        });
+        harness
+            .create_thread("w1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        let worktree = harness.thread("w1234567-rest").worktree_path.unwrap();
+
+        source_control::create_branch(&harness.root, "fix").unwrap();
+        source_control::create_branch(&worktree, "other").unwrap();
+        refresh_projects(&Arc::downgrade(&harness.engine.state), &["p".into()]);
+
+        assert_eq!(harness.thread("t").branch.as_deref(), Some("main"));
+        assert_eq!(
+            harness.thread("w1234567-rest").branch.as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            harness.engine.snapshot().project_branches,
+            vec![hoshi_core::ProjectBranch {
+                project_id: "p".into(),
+                branch: Some("fix".into()),
+            }]
+        );
+        let _ = git::remove_worktree(&harness.root, &worktree);
     }
 
     #[test]
