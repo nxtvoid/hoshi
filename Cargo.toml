@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["apps/desktop/src-tauri", "crates/*"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.0.9"
@@ -52,3 +53,8 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# gpui-base 0.9.1 with one change: textareas take text decorations (`set_decorations`), for the
+# composer's inline marks. See vendor/README.md.
+[patch.crates-io]
+gpui-base = { path = "vendor/gpui-base" }
