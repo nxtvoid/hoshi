@@ -55,10 +55,5 @@ jobs:
       - name: Format and lint
         run: bun run check
 
-      - name: Debug the browser test
-        env:
-          HOSHI_BROWSER_LOG: "1"
-        run: cargo test -p hoshi-engine --lib -- --nocapture 2>&1 | grep -E "DEBUG|^test browser|panicked|test result"
-
       - name: Test
         run: bun run test

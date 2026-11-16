@@ -169,7 +169,9 @@ fn run(
         loop {
             match queued.try_recv() {
                 Ok(text) => {
-                    if socket.send(Message::text(text)).is_err() {
+                    if let Err(error) = socket.send(Message::text(text))
+                        && !transient(&error)
+                    {
                         break 'serve;
                     }
                 }
@@ -179,23 +181,25 @@ fn run(
         }
         match socket.read() {
             Ok(Message::Text(text)) => dispatch(text.as_str(), pending, listeners),
-            Ok(Message::Close(frame)) => {
-                if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
-                    eprintln!("DEBUG cdp: close frame {frame:?}");
-                }
-                break;
-            }
+            Ok(Message::Close(_)) => break,
             Ok(_) => {}
-            Err(tungstenite::Error::Io(error))
-                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(error) => {
-                if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
-                    eprintln!("DEBUG cdp: read error {error:?}");
-                }
-                break;
-            }
+            Err(error) if transient(&error) => {}
+            Err(_) => break,
         }
     }
+}
+
+/// The read timeout ran out, or a signal cut the call short, as a child process ending does
+/// on Linux: the socket is still open, and a frame half sent or read stays buffered.
+fn transient(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+            )
+    )
 }
 
 fn dispatch(
@@ -232,9 +236,20 @@ fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::Connection;
+    use super::{Connection, transient};
     use serde_json::json;
+    use std::io::{Error, ErrorKind};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_signal_or_a_timeout_keeps_the_socket_open() {
+        let io = |kind: ErrorKind| tungstenite::Error::Io(Error::from(kind));
+        assert!(transient(&io(ErrorKind::Interrupted)));
+        assert!(transient(&io(ErrorKind::WouldBlock)));
+        assert!(transient(&io(ErrorKind::TimedOut)));
+        assert!(!transient(&io(ErrorKind::ConnectionReset)));
+        assert!(!transient(&tungstenite::Error::ConnectionClosed));
+    }
 
     #[test]
     fn a_call_the_browser_never_answers_gives_up_in_time() {

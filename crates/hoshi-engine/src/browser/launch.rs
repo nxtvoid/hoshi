@@ -66,14 +66,6 @@ pub struct BrowserProcess {
 
 impl Drop for BrowserProcess {
     fn drop(&mut self) {
-        if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
-            eprintln!(
-                "DEBUG drop browser pid {} url {} thread {:?}",
-                self.child.id(),
-                self.url,
-                std::thread::current().name()
-            );
-        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         if let Some(profile) = &self.spare_profile {
@@ -152,9 +144,6 @@ fn start(executable: &Path, profile: &Path) -> Result<BrowserProcess, StartError
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
-        eprintln!("DEBUG launch: {executable:?}");
-    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -167,14 +156,6 @@ fn start(executable: &Path, profile: &Path) -> Result<BrowserProcess, StartError
     let deadline = Instant::now() + START_TIMEOUT;
     while Instant::now() < deadline {
         if let Some(url) = read_port_file(&port_file) {
-            if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
-                eprintln!(
-                    "DEBUG started browser pid {} url {url} profile {} thread {:?}",
-                    child.id(),
-                    profile.display(),
-                    std::thread::current().name()
-                );
-            }
             return Ok(BrowserProcess {
                 child,
                 url,
