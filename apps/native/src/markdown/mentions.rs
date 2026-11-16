@@ -235,10 +235,13 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
         .iter()
         .enumerate()
         .map(|(index, (offset, segment))| {
-            (
-                offset + segment.range.start..offset + segment.range.end,
-                format!(r#"<{TAG} i="{index}"/>"#),
-            )
+            let range = offset + segment.range.start..offset + segment.range.end;
+            let lead = if alone_on_its_line(text, &range) {
+                NOT_A_BLOCK
+            } else {
+                ""
+            };
+            (range, format!(r#"{lead}<{TAG} i="{index}"/>"#))
         })
         .chain(
             found
@@ -253,6 +256,21 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
         out.replace_range(range, &replacement);
     }
     (out, mentions)
+}
+
+/// Leads a tag that would otherwise stand alone on its line, which markdown reads as a block
+/// of HTML rather than a mention within the text. It draws nothing.
+const NOT_A_BLOCK: &str = "\u{200B}";
+
+/// Whether only whitespace and list or quote markers share `range`'s line.
+fn alone_on_its_line(text: &str, range: &std::ops::Range<usize>) -> bool {
+    let start = text[..range.start].rfind('\n').map_or(0, |at| at + 1);
+    let end = text[range.end..]
+        .find('\n')
+        .map_or(text.len(), |at| range.end + at);
+    let marker =
+        |char: char| char.is_whitespace() || char.is_ascii_digit() || "->*+.)".contains(char);
+    text[range.end..end].trim().is_empty() && text[start..range.start].chars().all(marker)
 }
 
 #[derive(Clone, Debug)]
@@ -475,6 +493,41 @@ mod tests {
     fn line_breaks_stay_as_written() {
         let (text, _) = tag("one\ntwo\n\n```\na\nb\n```", &known());
         assert_eq!(text, "one\\\ntwo\n\n```\na\nb\n```");
+    }
+
+    fn has_block_html(node: &markdown::mdast::Node, in_paragraph: bool) -> bool {
+        use markdown::mdast::Node;
+        match node {
+            Node::Html(_) => !in_paragraph,
+            Node::Paragraph(_) | Node::Heading(_) => node
+                .children()
+                .into_iter()
+                .flatten()
+                .any(|child| has_block_html(child, true)),
+            _ => node
+                .children()
+                .into_iter()
+                .flatten()
+                .any(|child| has_block_html(child, in_paragraph)),
+        }
+    }
+
+    #[test]
+    fn a_mention_alone_on_its_line_stays_within_the_text() {
+        for message in [
+            "one\n\n[Image #1]\n\ntwo",
+            "[Image #1]",
+            "  [Image #1]  \nthen",
+            "- [Image #1]\n- @src/a.rs",
+            "> [Image #1]",
+        ] {
+            let (text, mentions) = tag(message, &known());
+            assert!(!mentions.is_empty(), "{message:?}");
+            let tree = markdown::to_mdast(&text, &markdown::ParseOptions::gfm()).unwrap();
+            assert!(!has_block_html(&tree, false), "{text:?}");
+        }
+        let (text, _) = tag("see [Image #1]", &known());
+        assert_eq!(text, "see <hoshi-mention i=\"0\"/>");
     }
 
     #[test]
