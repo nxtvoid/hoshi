@@ -1,0 +1,493 @@
+//! A sent message's mentions as chips, as the composer showed them: `@file`, the `/command` it
+//! starts with, and the `#123`, `$name`, `[Image #n]` and `[File #n]` its attachments stand
+//! for. Each one becomes an inline tag before the text view parses the markdown, so it is a
+//! node of its own that a chip draws whole.
+
+use super::{images, open_local};
+use gpui_kit::component::text::{InlineElement, InlineRenderContext, MarkdownNode};
+use gpui_kit::component::text::{MarkdownParseContext, MarkdownPlugin, markdown_ast};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use hoshi_core::MessageAttachment;
+use hoshi_ui::assets::file_icon;
+use hoshi_ui::prelude::{ActiveTheme as _, PressSelectsNothing as _, code_language_icon};
+use markdown::mdast::Node;
+use std::sync::Arc;
+
+const TAG: &str = "hoshi-mention";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MentionKind {
+    File,
+    Command,
+    PullRequest,
+    Skill,
+    Image,
+    AttachedFile,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Segment {
+    pub kind: MentionKind,
+    pub range: std::ops::Range<usize>,
+    /// The image or file an `[Image #n]` or `[File #n]` stands for.
+    pub attachment: Option<MessageAttachment>,
+}
+
+/// What a message's attachments let its text mention.
+#[derive(Clone, Default)]
+pub struct Known {
+    pull_requests: Vec<u32>,
+    skills: Vec<String>,
+    images: Vec<MessageAttachment>,
+    files: Vec<MessageAttachment>,
+}
+
+impl Known {
+    pub fn of(attachments: &[MessageAttachment]) -> Self {
+        let mut known = Self::default();
+        for attachment in attachments {
+            match attachment {
+                MessageAttachment::PullRequest { number, .. } => known.pull_requests.push(*number),
+                MessageAttachment::Skill { name } => known.skills.push(name.clone()),
+                MessageAttachment::Image { .. } => known.images.push(attachment.clone()),
+                MessageAttachment::File { .. } => known.files.push(attachment.clone()),
+            }
+        }
+        known
+    }
+}
+
+fn starts_word(text: &str, at: usize) -> bool {
+    text[..at]
+        .chars()
+        .next_back()
+        .is_none_or(char::is_whitespace)
+}
+
+fn ends_word(text: &str, at: usize, also: &str) -> bool {
+    text[at..]
+        .chars()
+        .next()
+        .is_none_or(|next| next.is_whitespace() || also.contains(next))
+}
+
+/// The `@path` at `at`: a quoted one, or a run of non-space without its trailing punctuation.
+fn file_mention(text: &str, at: usize) -> Option<usize> {
+    let rest = &text[at + 1..];
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let close = quoted.find(['"', '\n'])?;
+        return (quoted[close..].starts_with('"') && close > 0).then_some(at + 1 + 1 + close + 1);
+    }
+    let run = rest
+        .find(|char: char| char.is_whitespace() || char == '"')
+        .unwrap_or(rest.len());
+    let kept = rest[..run].trim_end_matches(['.', ',', ';', ':', '!', '?', ')']);
+    (!kept.is_empty()).then_some(at + 1 + kept.len())
+}
+
+fn numbered(text: &str, at: usize, prefix: &str) -> Option<(usize, usize)> {
+    let rest = text[at..].strip_prefix(prefix)?;
+    let digits = rest.find(|char: char| !char.is_ascii_digit())?;
+    if digits == 0 || !rest[digits..].starts_with(']') {
+        return None;
+    }
+    let number = rest[..digits].parse().ok()?;
+    Some((number, at + prefix.len() + digits + 1))
+}
+
+/// The chips of `text`, in order; `leading` when `text` starts the message, where a `/command`
+/// may stand.
+pub fn segments(text: &str, known: &Known, leading: bool) -> Vec<Segment> {
+    let mut chips: Vec<Segment> = Vec::new();
+    let chip = |kind, range, attachment| Segment {
+        kind,
+        range,
+        attachment,
+    };
+    if leading {
+        let start = text.len() - text.trim_start().len();
+        if text[start..].starts_with('/') {
+            let end = text[start + 1..]
+                .find(|char: char| !(char.is_alphanumeric() || "_:-".contains(char)))
+                .map_or(text.len(), |length| start + 1 + length);
+            if end > start + 1 && ends_word(text, end, "") {
+                chips.push(chip(MentionKind::Command, start..end, None));
+            }
+        }
+    }
+    for (at, char) in text.char_indices() {
+        match char {
+            '@' if starts_word(text, at) => {
+                if let Some(end) = file_mention(text, at) {
+                    chips.push(chip(MentionKind::File, at..end, None));
+                }
+            }
+            '#' if starts_word(text, at) => {
+                let digits = text[at + 1..]
+                    .find(|char: char| !char.is_ascii_digit())
+                    .unwrap_or(text.len() - at - 1);
+                let end = at + 1 + digits;
+                let known_pr = text[at + 1..end]
+                    .parse()
+                    .is_ok_and(|number: u32| known.pull_requests.contains(&number));
+                if digits > 0 && known_pr && ends_word(text, end, ".,;:!?)") {
+                    chips.push(chip(MentionKind::PullRequest, at..end, None));
+                }
+            }
+            '$' if starts_word(text, at) => {
+                let name_end = text[at + 1..]
+                    .find(|char: char| !(char.is_alphanumeric() || "_:-".contains(char)))
+                    .map_or(text.len(), |length| at + 1 + length);
+                let name = &text[at + 1..name_end];
+                let valid = name
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first.is_ascii_alphabetic());
+                if valid
+                    && known.skills.iter().any(|skill| skill == name)
+                    && ends_word(text, name_end, "")
+                {
+                    chips.push(chip(MentionKind::Skill, at..name_end, None));
+                }
+            }
+            '[' => {
+                if let Some((number, end)) = numbered(text, at, "[Image #") {
+                    if let Some(image) = known.images.get(number.wrapping_sub(1)) {
+                        chips.push(chip(MentionKind::Image, at..end, Some(image.clone())));
+                    }
+                } else if let Some((number, end)) = numbered(text, at, "[File #")
+                    && let Some(file) = known.files.get(number.wrapping_sub(1))
+                {
+                    chips.push(chip(MentionKind::AttachedFile, at..end, Some(file.clone())));
+                }
+            }
+            _ => {}
+        }
+    }
+    chips.sort_by_key(|chip| chip.range.start);
+    let mut kept: Vec<Segment> = Vec::new();
+    for chip in chips {
+        if kept
+            .last()
+            .is_none_or(|last| chip.range.start >= last.range.end)
+        {
+            kept.push(chip);
+        }
+    }
+    kept
+}
+
+/// What a message's text nodes hold that the view draws differently: mentions, and line
+/// breaks, which a message keeps as written.
+#[derive(Default)]
+struct Found {
+    mentions: Vec<(usize, Segment)>,
+    breaks: Vec<usize>,
+}
+
+fn collect(node: &Node, source: &str, first: usize, found: &mut Found, known: &Known) {
+    match node {
+        Node::Code(_) | Node::InlineCode(_) | Node::Link(_) | Node::Html(_) => {}
+        Node::Text(text) => {
+            let Some(position) = &text.position else {
+                return;
+            };
+            let (start, end) = (position.start.offset, position.end.offset);
+            if source.get(start..end) != Some(text.value.as_str()) {
+                return;
+            }
+            for segment in segments(&text.value, known, start == first) {
+                found.mentions.push((start, segment));
+            }
+            found
+                .breaks
+                .extend(text.value.match_indices('\n').map(|(at, _)| start + at));
+        }
+        _ => {
+            for child in node.children().into_iter().flatten() {
+                collect(child, source, first, found, known);
+            }
+        }
+    }
+}
+
+/// The markdown with each mention as a tag and each line break kept, and the mentions in the
+/// order the tags count them.
+pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
+    let Ok(tree) = markdown::to_mdast(text, &markdown::ParseOptions::gfm()) else {
+        return (text.to_owned(), Vec::new());
+    };
+    let first = text.len() - text.trim_start().len();
+    let mut found = Found::default();
+    collect(&tree, text, first, &mut found, known);
+    let mentions: Vec<Mention> = found
+        .mentions
+        .iter()
+        .map(|(offset, segment)| Mention {
+            kind: segment.kind,
+            text: text[offset + segment.range.start..offset + segment.range.end].into(),
+            attachment: segment.attachment.clone(),
+        })
+        .collect();
+    let mut edits: Vec<(std::ops::Range<usize>, String)> = found
+        .mentions
+        .iter()
+        .enumerate()
+        .map(|(index, (offset, segment))| {
+            (
+                offset + segment.range.start..offset + segment.range.end,
+                format!(r#"<{TAG} i="{index}"/>"#),
+            )
+        })
+        .chain(
+            found
+                .breaks
+                .iter()
+                .map(|at| (*at..*at + 1, "\\\n".to_owned())),
+        )
+        .collect();
+    edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+    let mut out = text.to_owned();
+    for (range, replacement) in edits {
+        out.replace_range(range, &replacement);
+    }
+    (out, mentions)
+}
+
+#[derive(Clone, Debug)]
+pub struct Mention {
+    pub kind: MentionKind,
+    /// As written in the message.
+    pub text: SharedString,
+    pub attachment: Option<MessageAttachment>,
+}
+
+/// Turns a message's mention tags into chips.
+pub struct Mentions(pub Arc<Vec<Mention>>);
+
+impl MarkdownPlugin for Mentions {
+    fn name(&self) -> &str {
+        TAG
+    }
+
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        _: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown_ast::Node::Html(html) = node else {
+            return None;
+        };
+        let index: usize = html
+            .value
+            .strip_prefix(&format!(r#"<{TAG} i=""#))?
+            .split('"')
+            .next()?
+            .parse()
+            .ok()?;
+        let mention = self.0.get(index)?.clone();
+        Some(MarkdownNode::new(TAG, mention.clone()).text(mention.text))
+    }
+
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        context: &InlineRenderContext,
+        _: &mut Window,
+        cx: &mut App,
+    ) -> Option<InlineElement> {
+        let mention = node.data::<Mention>()?;
+        let line_height = context.line_height();
+        let font_size = context.font_size();
+        let chip = chip(
+            mention,
+            node.source_range().map_or(0, |range| range.start),
+            font_size,
+            cx,
+        );
+        Some(
+            InlineElement::new(chip.h(line_height))
+                .with_baseline(line_height / 2. + font_size * 0.35),
+        )
+    }
+}
+
+fn size_label(attachment: &MessageAttachment) -> Option<SharedString> {
+    let size = match attachment {
+        MessageAttachment::Image { size, .. } | MessageAttachment::File { size, .. } => *size,
+        _ => return None,
+    };
+    (size > 0).then(|| crate::composer::format_size(size).into())
+}
+
+fn attachment_name(attachment: &MessageAttachment) -> SharedString {
+    match attachment {
+        MessageAttachment::Image { name, .. } | MessageAttachment::File { name, .. } => {
+            name.clone().into()
+        }
+        _ => SharedString::default(),
+    }
+}
+
+/// A mention drawn as the composer draws it: tinted, and an attachment with its preview or
+/// icon, name and size.
+pub fn chip(mention: &Mention, at: usize, font_size: Pixels, cx: &App) -> Stateful<Div> {
+    let colors = cx.hoshi().clone();
+    let tint = match mention.kind {
+        MentionKind::PullRequest => colors.pr_open,
+        MentionKind::Skill => colors.provider_claude,
+        _ => colors.link,
+    };
+    let base = div()
+        .id(("mention", at))
+        .flex()
+        .items_center()
+        .px(px(2.))
+        .rounded_sm()
+        .bg(tint.opacity(0.12))
+        .text_color(tint)
+        .text_size(font_size)
+        .whitespace_nowrap();
+    let Some(attachment) = mention.attachment.clone() else {
+        return base.child(mention.text.clone());
+    };
+    let name = attachment_name(&attachment);
+    let size = size_label(&attachment);
+    let icon_size = font_size;
+    let lead = match &attachment {
+        MessageAttachment::Image { id, mime_type, .. } => {
+            images::image(id, mime_type, cx).map(|image| {
+                img(ImageSource::Image(image))
+                    .size(icon_size)
+                    .rounded(px(3.))
+                    .object_fit(ObjectFit::Cover)
+                    .into_any_element()
+            })
+        }
+        _ => {
+            let (icon, color) =
+                code_language_icon(name.rsplit_once('.').map_or("", |(_, extension)| extension));
+            Some(
+                svg()
+                    .path(file_icon(icon))
+                    .size(icon_size)
+                    .flex_none()
+                    .text_color(color(&colors))
+                    .into_any_element(),
+            )
+        }
+    };
+    let muted = colors.muted_foreground;
+    base.gap_1()
+        .cursor_pointer()
+        .children(lead)
+        .child(name.clone())
+        .when_some(size, |chip, size| {
+            chip.child(
+                div()
+                    .text_size(font_size * 0.85)
+                    .text_color(muted)
+                    .child(size),
+            )
+        })
+        .press_selects_nothing()
+        .on_click(move |_, window, cx| open_attachment(&attachment, window, cx))
+}
+
+/// An image opens large over the window; a file where the system or the editor opens it.
+pub fn open_attachment(attachment: &MessageAttachment, window: &mut Window, cx: &mut App) {
+    match attachment {
+        MessageAttachment::Image {
+            id,
+            mime_type,
+            name,
+            ..
+        } => images::show(id.clone(), mime_type.clone(), name.clone(), window, cx),
+        MessageAttachment::File { .. } => {
+            let Some(links) = cx.try_global::<super::Links>() else {
+                return;
+            };
+            if let Some(path) = links.engine.attachment_path(attachment) {
+                open_local(path, cx);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Known, MentionKind, segments, tag};
+    use hoshi_core::{MessageAttachment, PullRequestState};
+
+    fn known() -> Known {
+        Known::of(&[
+            MessageAttachment::PullRequest {
+                number: 12,
+                title: String::new(),
+                url: String::new(),
+                head_branch: String::new(),
+                base_branch: String::new(),
+                state: PullRequestState::Open,
+            },
+            MessageAttachment::Skill {
+                name: "review".into(),
+            },
+            MessageAttachment::Image {
+                id: "a1".into(),
+                name: "shot.png".into(),
+                mime_type: "image/png".into(),
+                size: 2048,
+            },
+        ])
+    }
+
+    #[test]
+    fn mentions_the_attachments_stand_for_become_chips() {
+        fn kinds(text: &str, leading: bool) -> Vec<(MentionKind, &str)> {
+            segments(text, &known(), leading)
+                .into_iter()
+                .map(|segment| (segment.kind, &text[segment.range]))
+                .collect()
+        }
+        assert_eq!(
+            kinds(
+                "/review read @src/main.rs, see #12 and #13 with $review [Image #1] [Image #2]",
+                true
+            ),
+            [
+                (MentionKind::Command, "/review"),
+                (MentionKind::File, "@src/main.rs"),
+                (MentionKind::PullRequest, "#12"),
+                (MentionKind::Skill, "$review"),
+                (MentionKind::Image, "[Image #1]"),
+            ]
+        );
+        assert_eq!(kinds("a/b and email@x.com", true), []);
+        assert_eq!(
+            kinds(r#"open @"My Docs/a.md" now"#, false),
+            [(MentionKind::File, r#"@"My Docs/a.md""#)]
+        );
+    }
+
+    #[test]
+    fn line_breaks_stay_as_written() {
+        let (text, _) = tag("one\ntwo\n\n```\na\nb\n```", &known());
+        assert_eq!(text, "one\\\ntwo\n\n```\na\nb\n```");
+    }
+
+    #[test]
+    fn mentions_in_code_stay_text() {
+        let (text, mentions) = tag(
+            "see `@src/a.rs` and @src/b.rs\n\n```\n@src/c.rs\n```",
+            &known(),
+        );
+        assert_eq!(
+            text,
+            "see `@src/a.rs` and <hoshi-mention i=\"0\"/>\n\n```\n@src/c.rs\n```"
+        );
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].text.as_ref(), "@src/b.rs");
+    }
+}

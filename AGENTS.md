@@ -67,6 +67,7 @@ import App from './App'
 
 ## Localization
 
+- The native app (`apps/native`) keeps its own text in `apps/native/messages/en.json`; its `build.rs` turns each key into an `m::<key>()` function.
 - The UI is in English; more locales come later. Every user-visible string goes through Paraglide: add it to `apps/desktop/messages/en.json` and render `m.<key>()` from `@/paraglide/messages`. Never hard-code UI text in a component.
 - Keys are `snake_case` and describe the meaning, not the screen (`no_project_selected`, not `sidebar_text_1`).
 - Rust never writes UI text of its own (labels, errors, statuses). It sends codes and data; the UI picks the message. Agent output passes through untranslated.
