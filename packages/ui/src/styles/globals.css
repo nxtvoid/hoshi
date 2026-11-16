@@ -54,6 +54,8 @@
   --status-error: oklch(0.6 0.21 25);
   --status-done: oklch(0.6 0.15 155);
   --provider-claude: oklch(0.64 0.14 40);
+  --provider-copilot: oklch(0.3 0.01 265);
+  --provider-codex: oklch(0.25 0 0);
   --forge-bitbucket: oklch(0.63 0.19 259);
   --forge-bitbucket-deep: oklch(0.46 0.19 260);
   --favorite: oklch(0.78 0.15 80);
@@ -160,6 +162,8 @@ html[data-terminal-font="system"] {
   --color-status-error: var(--status-error);
   --color-status-done: var(--status-done);
   --color-provider-claude: var(--provider-claude);
+  --color-provider-copilot: var(--provider-copilot);
+  --color-provider-codex: var(--provider-codex);
   --color-favorite: var(--favorite);
   --color-link: var(--link);
   --color-send: var(--send);
@@ -316,6 +320,8 @@ html[data-terminal-font="system"] {
   --status-error: oklch(0.7 0.18 22);
   --status-done: oklch(0.76 0.15 155);
   --provider-claude: oklch(0.72 0.13 42);
+  --provider-copilot: oklch(0.9 0.01 265);
+  --provider-codex: oklch(0.94 0 0);
   --forge-bitbucket: oklch(0.63 0.19 259);
   --forge-bitbucket-deep: oklch(0.46 0.19 260);
   --favorite: oklch(0.83 0.15 85);

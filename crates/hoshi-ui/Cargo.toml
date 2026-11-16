@@ -1,0 +1,17 @@
+[package]
+name = "hoshi-ui"
+description = "Reusable native components and the theme, like @hoshi/ui: they know nothing about the app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+futures = "0.3"
+gpui-kit = "0.9.1"
+
+[dev-dependencies]
+gpui-kit = { version = "0.9.1", features = ["test-support"] }
+
+[lints]
+workspace = true
