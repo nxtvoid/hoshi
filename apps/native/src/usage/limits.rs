@@ -1,8 +1,9 @@
 use crate::m;
 use chrono::{DateTime, TimeZone, Utc};
 use hoshi_core::{
-    BankedResetFailure, BankedResetSpend, BankedResets, ProviderAccountStatus, ProviderPlan,
-    UsageLimits, UsageWindow, UsageWindowKind,
+    BankedGrant, BankedResetFailure, BankedResetSpend, BankedResets, ExtraUsage,
+    ProviderAccountStatus, ProviderPlan, ResetKind, SpendUnit, UsageLimits, UsageWindow,
+    UsageWindowKind,
 };
 
 const MINUTE: i64 = 60_000;
@@ -167,6 +168,74 @@ pub fn format_expiry(span: Span) -> String {
     }
 }
 
+/// How long until `grant` expires; `None` when it never does or already did.
+pub fn grant_expiry(grant: &BankedGrant, now: DateTime<Utc>) -> Option<Span> {
+    millis_until(grant.expires_at.as_deref(), now)
+        .filter(|millis| *millis > 0)
+        .map(Span::of)
+}
+
+/// The share of the extra usage cap still unspent; `None` without a cap or what was spent.
+pub fn extra_left_percent(extra: &ExtraUsage) -> Option<u8> {
+    let (limit, used) = (extra.limit?, extra.used?);
+    if limit == 0 {
+        return Some(0);
+    }
+    Some(100 - (used.min(limit).saturating_mul(100) / limit) as u8)
+}
+
+/// An amount of `unit`, grouped by thousands, with its fraction only when it has one.
+pub fn amount(value: u64, unit: &SpendUnit) -> String {
+    let exponent = match unit {
+        SpendUnit::Money { exponent, .. } | SpendUnit::Credits { exponent } => *exponent,
+    };
+    let scale = 10u64.saturating_pow(u32::from(exponent));
+    let (whole, fraction) = (value / scale, value % scale);
+    let digits = whole.to_string();
+    let mut text = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            text.push(',');
+        }
+        text.push(digit);
+    }
+    if fraction > 0 {
+        text.push_str(&format!(
+            ".{fraction:0width$}",
+            width = usize::from(exponent)
+        ));
+    }
+    match unit {
+        SpendUnit::Credits { .. } => text,
+        SpendUnit::Money { currency, .. } => match currency.as_deref().unwrap_or("USD") {
+            "USD" => format!("${text}"),
+            "EUR" => format!("€{text}"),
+            "GBP" => format!("£{text}"),
+            "JPY" => format!("¥{text}"),
+            code => format!("{code} {text}"),
+        },
+    }
+}
+
+pub fn reset_kind_label(kind: ResetKind) -> String {
+    match kind {
+        ResetKind::Session => m::usage_reset_kind_session(),
+        ResetKind::Weekly => m::usage_reset_kind_weekly(),
+        ResetKind::Fable => m::usage_reset_kind_fable(),
+        ResetKind::Full => m::usage_reset_kind_full(),
+    }
+}
+
+/// What spending a reset of `kind` refills.
+pub fn reset_kind_description(kind: ResetKind) -> String {
+    match kind {
+        ResetKind::Session => m::usage_reset_kind_session_description(),
+        ResetKind::Weekly => m::usage_reset_kind_weekly_description(),
+        ResetKind::Fable => m::usage_reset_kind_fable_description(),
+        ResetKind::Full => m::usage_reset_kind_full_description(),
+    }
+}
+
 pub fn window_label(window: &UsageWindow) -> String {
     match (window.kind, &window.model) {
         (UsageWindowKind::Session, _) => m::usage_session(),
@@ -248,15 +317,56 @@ pub fn masked_email(email: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResetDay, SectionState, Span, banked_resets_for, even_pace_left, format_expiry,
-        format_span, masked_email, remaining_percent, reset_moment, restored_percent,
-        section_state, session_spent, spendable_resets, time_left_percent, time_to_expiry,
-        time_to_reset, window_label,
+        ResetDay, SectionState, Span, amount, banked_resets_for, even_pace_left,
+        extra_left_percent, format_expiry, format_span, masked_email, remaining_percent,
+        reset_moment, restored_percent, section_state, session_spent, spendable_resets,
+        time_left_percent, time_to_expiry, time_to_reset, window_label,
     };
     use chrono::{DateTime, FixedOffset, TimeZone, Utc};
     use hoshi_core::{
-        BankedResets, ProviderAccountStatus, UsageLimits, UsageWindow, UsageWindowKind,
+        BankedResets, ExtraUsage, ProviderAccountStatus, SpendUnit, UsageLimits, UsageWindow,
+        UsageWindowKind,
     };
+
+    #[test]
+    fn amounts_show_their_fraction_only_when_they_have_one() {
+        let money = |currency: Option<&str>, exponent| SpendUnit::Money {
+            currency: currency.map(str::to_owned),
+            exponent,
+        };
+        assert_eq!(amount(3_800, &money(Some("USD"), 2)), "$38");
+        assert_eq!(amount(1_234_567, &money(None, 2)), "$12,345.67");
+        assert_eq!(amount(5, &money(Some("EUR"), 2)), "€0.05");
+        assert_eq!(amount(1_500, &money(Some("JPY"), 0)), "¥1,500");
+        assert_eq!(amount(10_000, &money(Some("CAD"), 2)), "CAD 100");
+        assert_eq!(
+            amount(51_250, &SpendUnit::Credits { exponent: 2 }),
+            "512.50"
+        );
+    }
+
+    #[test]
+    fn extra_usage_is_left_as_a_share_of_its_cap() {
+        let extra = |used, limit| ExtraUsage {
+            unit: SpendUnit::Credits { exponent: 2 },
+            used,
+            limit,
+            balance: None,
+            unlimited: false,
+            resets_at: None,
+        };
+        assert_eq!(
+            extra_left_percent(&extra(Some(3_800), Some(10_000))),
+            Some(62)
+        );
+        assert_eq!(
+            extra_left_percent(&extra(Some(12_000), Some(10_000))),
+            Some(0)
+        );
+        assert_eq!(extra_left_percent(&extra(Some(0), Some(0))), Some(0));
+        assert_eq!(extra_left_percent(&extra(Some(500), None)), None);
+        assert_eq!(extra_left_percent(&extra(None, Some(500))), None);
+    }
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap()
@@ -277,6 +387,7 @@ mod tests {
             count,
             next_grant_id: grant.map(str::to_owned),
             expires_at: vec!["2026-11-13T11:00:00Z".into(), "2026-11-15T14:30:00Z".into()],
+            grants: Vec::new(),
         }
     }
 
@@ -319,6 +430,7 @@ mod tests {
                 }],
                 banked_resets: None,
                 account: None,
+                extra_usage: None,
             };
             session_spent(Some(&limits))
         };
@@ -335,6 +447,7 @@ mod tests {
             windows: Vec::new(),
             banked_resets: Some(banked(2, Some("grant"))),
             account: None,
+            extra_usage: None,
         };
         let session = window(UsageWindowKind::Session, None, None);
         assert!(banked_resets_for(&session, Some(&limits)).is_some());

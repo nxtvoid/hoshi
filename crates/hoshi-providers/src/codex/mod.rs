@@ -2140,6 +2140,7 @@ mod tests {
             .windows,
             banked_resets: None,
             account: None,
+            extra_usage: None,
         };
         let detail = || "upstream said no".to_owned();
 

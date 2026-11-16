@@ -94,7 +94,7 @@ pub use thread::{
     TurnOutcome, TurnPoint, TurnRetry, TurnStatus,
 };
 pub use usage::{
-    BankedResetFailure, BankedResetSpend, BankedResets, ContextUsage, ThreadContextUsage,
-    UsageLimits, UsageWindow, UsageWindowKind,
+    BankedGrant, BankedResetFailure, BankedResetSpend, BankedResets, ContextUsage, ExtraUsage,
+    ResetKind, SpendUnit, ThreadContextUsage, UsageLimits, UsageWindow, UsageWindowKind,
 };
 pub use workspace::{ChangesSummary, Editor};

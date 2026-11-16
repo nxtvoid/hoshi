@@ -11,11 +11,15 @@ use crate::state::Workspace;
 use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::Icon;
 use gpui_kit::*;
-use hoshi_core::{BankedResetSpend, BankedResets, DEFAULT_PROVIDER, UsageLimits, UsageWindow};
+use hoshi_core::{
+    BankedGrant, BankedResetSpend, BankedResets, DEFAULT_PROVIDER, ExtraUsage, SpendUnit,
+    UsageLimits, UsageWindow,
+};
 use hoshi_ui::prelude::*;
 use limits::{
-    LOW_PERCENT, SectionState, banked_resets_for, even_pace_left, format_expiry, format_span,
-    masked_email, plan_label, remaining_percent, reset_moment, reset_when, restored_percent,
+    LOW_PERCENT, SectionState, amount, banked_resets_for, even_pace_left, extra_left_percent,
+    format_expiry, format_span, grant_expiry, masked_email, plan_label, remaining_percent,
+    reset_kind_description, reset_kind_label, reset_moment, reset_when, restored_percent,
     section_state, spend_message, spendable_resets, time_left_percent, time_to_expiry,
     time_to_reset, window_label,
 };
@@ -38,6 +42,8 @@ struct ProviderUsage {
     /// The last time it was asked, it couldn't say.
     failed: bool,
     spending: bool,
+    /// The grant being spent, when the user picked one.
+    spending_grant: Option<String>,
     result: Option<BankedResetSpend>,
     email_revealed: bool,
 }
@@ -82,6 +88,125 @@ pub fn spend_reset_button(id: &str, provider: &'static str, cx: &App) -> Option<
             .child(button)
             .into_any_element(),
     )
+}
+
+/// The plan's extra usage as one more row of the limits: what is left of its cap, of the
+/// credits bought ahead, or what was spent when there is neither.
+fn extra_row(
+    provider: &'static KnownProvider,
+    extra: &ExtraUsage,
+    below_windows: bool,
+    colors: &Colors,
+) -> impl IntoElement {
+    let id = provider.id;
+    let unit = &extra.unit;
+    let left = extra_left_percent(extra);
+    let (shown, note, detail) = match (extra.limit, extra.used, extra.balance) {
+        (Some(limit), Some(used), _) => (
+            amount(limit.saturating_sub(used), unit),
+            Some(m::usage_left()),
+            m::usage_extra_of(amount(used, unit), amount(limit, unit)),
+        ),
+        (_, _, Some(balance)) => (
+            amount(balance, unit),
+            Some(m::usage_left()),
+            m::usage_credits_balance(),
+        ),
+        _ if extra.unlimited => (m::usage_extra_unlimited(), None, String::new()),
+        (_, used, _) => (
+            amount(used.unwrap_or(0), unit),
+            Some(m::usage_extra_spent()),
+            m::usage_extra_no_cap(),
+        ),
+    };
+    let label = match unit {
+        SpendUnit::Money { .. } => m::usage_extra(),
+        SpendUnit::Credits { .. } => m::usage_credits(),
+    };
+    let fill = match left {
+        Some(left) if left <= LOW_PERCENT => colors.status_error.opacity(0.6),
+        _ => (provider.tint)(colors).opacity(0.45),
+    };
+    div()
+        .debug_selector(move || format!("usage-extra-{id}"))
+        .flex()
+        .items_center()
+        .gap_4()
+        .px_4()
+        .py_3()
+        .when(below_windows, |this| {
+            this.border_t_1().border_color(colors.border)
+        })
+        .child(
+            div()
+                .w(px(144.))
+                .flex_none()
+                .truncate()
+                .text_sm()
+                .child(label),
+        )
+        .child(
+            div()
+                .relative()
+                .h_5()
+                .flex_1()
+                .min_w_0()
+                .when_some(left, |this, left| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .rounded_full()
+                            .bg(colors.muted),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .top(px(6.))
+                            .bottom(px(6.))
+                            .w(relative(f32::from(left) / 100.))
+                            .rounded_full()
+                            .bg(fill),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .w_20()
+                .flex_none()
+                .flex()
+                .items_baseline()
+                .justify_end()
+                .gap_1()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(shown),
+                )
+                .when_some(note, |this, note| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(colors.muted_foreground)
+                            .child(note),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .w(px(112.))
+                .flex_none()
+                .truncate()
+                .text_right()
+                .text_xs()
+                .text_color(colors.muted_foreground)
+                .child(detail),
+        )
 }
 
 fn confirm_reset(
@@ -252,9 +377,11 @@ impl UsageView {
             .is_some_and(|usage| usage.checking || usage.spending)
     }
 
+    /// Asks before spending a banked reset of `grant`, or the next one when `None`.
     fn confirm_spend(
         &mut self,
         provider: &'static str,
+        grant: Option<BankedGrant>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -264,22 +391,25 @@ impl UsageView {
         if self.busy(provider) || self.confirming.is_some() {
             return;
         }
+        let description = match &grant {
+            Some(grant) => m::usage_use_grant_description(reset_kind_description(grant.kind)),
+            None => m::usage_use_reset_description(banked.count.saturating_sub(1)),
+        };
         self.confirming = Some(provider);
         let ask = DialogLayer::confirm(
             ConfirmRequest::new(m::usage_use_reset_title(), m::usage_use_reset())
-                .description(m::usage_use_reset_description(
-                    banked.count.saturating_sub(1),
-                ))
+                .description(description)
                 .cancel_label(m::cancel()),
             window,
             cx,
         );
+        let grant_id = grant.map(|grant| grant.id);
         cx.spawn(async move |this, cx| {
             let go = ask.await;
             this.update(cx, |this, cx| {
                 this.confirming = None;
                 if go {
-                    this.spend(provider, cx);
+                    this.spend(provider, grant_id, cx);
                 }
                 cx.notify();
             })
@@ -289,21 +419,25 @@ impl UsageView {
         cx.notify();
     }
 
-    fn spend(&mut self, provider: &'static str, cx: &mut Context<Self>) {
+    fn spend(&mut self, provider: &'static str, grant_id: Option<String>, cx: &mut Context<Self>) {
         let usage = self.usage.entry(provider).or_default();
         if usage.spending {
             return;
         }
         usage.spending = true;
+        usage.spending_grant = grant_id.clone();
         usage.result = None;
         let engine = self.workspace.read(cx).engine.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
-                .background_spawn(async move { engine.spend_banked_reset_of(provider) })
+                .background_spawn(async move {
+                    engine.spend_banked_grant(provider, grant_id.as_deref())
+                })
                 .await;
             this.update(cx, |this, cx| {
                 let usage = this.usage.entry(provider).or_default();
                 usage.spending = false;
+                usage.spending_grant = None;
                 usage.result = Some(result);
                 cx.notify();
             })
@@ -619,6 +753,14 @@ impl UsageView {
                 let banked = banked_resets_for(window, Some(limits)).cloned();
                 self.row(provider, index, window, banked, colors, cx)
             }))
+            .when_some(limits.extra_usage.as_ref(), |this, extra| {
+                this.child(extra_row(
+                    provider,
+                    extra,
+                    !limits.windows.is_empty(),
+                    colors,
+                ))
+            })
     }
 
     fn row(
@@ -847,40 +989,112 @@ impl UsageView {
         banked: &BankedResets,
         colors: &Colors,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let text = match time_to_expiry(banked, self.now) {
-            Some(expiry) => m::usage_banked_resets_expiring(banked.count, format_expiry(expiry)),
-            None => m::usage_banked_resets(banked.count),
-        };
-        let spending = self.usage.get(provider).is_some_and(|usage| usage.spending);
-        div()
+    ) -> AnyElement {
+        let usage = self.usage.get(provider);
+        let spending = usage.is_some_and(|usage| usage.spending);
+        let spending_grant = usage.and_then(|usage| usage.spending_grant.clone());
+        let disabled = self.busy(provider) || self.confirming.is_some();
+        let use_button =
+            |id: String, label: String, grant: Option<BankedGrant>, cx: &mut Context<Self>| {
+                Button::new(SharedString::from(id))
+                    .label(label)
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Xs)
+                    .disabled(disabled)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.confirm_spend(provider, grant.clone(), window, cx)
+                    }))
+            };
+        let footer = div()
             .flex()
             .items_center()
             .gap_2()
             .px_3()
-            .py_2()
             .border_t_1()
-            .border_color(colors.border)
+            .border_color(colors.border);
+        if banked.grants.is_empty() {
+            let text = match time_to_expiry(banked, self.now) {
+                Some(expiry) => {
+                    m::usage_banked_resets_expiring(banked.count, format_expiry(expiry))
+                }
+                None => m::usage_banked_resets(banked.count),
+            };
+            let label = if spending {
+                m::usage_using_reset()
+            } else {
+                m::usage_use_reset()
+            };
+            return footer
+                .py_2()
+                .text_xs()
+                .text_color(colors.muted_foreground)
+                .child(Icon::new(IconName::Ticket).size_3p5().flex_none())
+                .child(div().flex_1().min_w_0().truncate().child(text))
+                .child(div().flex_none().child(use_button(
+                    format!("usage-use-reset-{provider}"),
+                    label,
+                    None,
+                    cx,
+                )))
+                .into_any_element();
+        }
+        let mut grants = Vec::with_capacity(banked.grants.len());
+        for (index, grant) in banked.grants.iter().enumerate() {
+            let detail = match grant_expiry(grant, self.now) {
+                Some(expiry) => m::usage_grant_left_expiring(grant.resets, format_expiry(expiry)),
+                None => m::usage_grant_left(grant.resets),
+            };
+            let label = if spending_grant.as_deref() == Some(grant.id.as_str()) {
+                m::usage_using_reset()
+            } else {
+                m::usage_use_grant()
+            };
+            grants.push(
+                div()
+                    .debug_selector(move || format!("usage-grant-{provider}-{index}"))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(colors.border)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_color(colors.foreground)
+                                    .child(reset_kind_label(grant.kind)),
+                            )
+                            .child(div().truncate().child(detail)),
+                    )
+                    .child(div().flex_none().child(use_button(
+                        format!("usage-use-grant-{provider}-{index}"),
+                        label,
+                        Some(grant.clone()),
+                        cx,
+                    ))),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
             .text_xs()
             .text_color(colors.muted_foreground)
-            .child(Icon::new(IconName::Ticket).size_3p5())
-            .child(text)
             .child(
-                div().ml_auto().child(
-                    Button::new(SharedString::from(format!("usage-use-reset-{provider}")))
-                        .label(if spending {
-                            m::usage_using_reset()
-                        } else {
-                            m::usage_use_reset()
-                        })
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Xs)
-                        .disabled(self.busy(provider) || self.confirming.is_some())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.confirm_spend(provider, window, cx)
-                        })),
-                ),
+                footer
+                    .pt_2()
+                    .pb_1p5()
+                    .child(Icon::new(IconName::Ticket).size_3p5().flex_none())
+                    .child(m::usage_banked_resets(banked.count)),
             )
+            .children(grants)
+            .into_any_element()
     }
 
     /// A provider whose limits only its own page shows.

@@ -3,8 +3,8 @@
 use super::PROVIDER;
 use super::items::effort;
 use hoshi_core::{
-    BankedResets, ModelInfo, ProviderAccount, ProviderModels, ProviderPlan, UsageLimits,
-    UsageWindow, UsageWindowKind,
+    BankedGrant, BankedResets, ExtraUsage, ModelInfo, ProviderAccount, ProviderModels,
+    ProviderPlan, ResetKind, SpendUnit, UsageLimits, UsageWindow, UsageWindowKind,
 };
 use serde_json::Value;
 
@@ -100,7 +100,51 @@ pub(crate) fn usage_limits(response: &Value) -> UsageLimits {
         windows: windows(snapshot),
         banked_resets: banked_resets(&response["rateLimitResetCredits"]),
         account: None,
+        extra_usage: extra_usage(snapshot),
     }
+}
+
+/// The workspace's monthly credit limit for this member, and the credits bought ahead.
+/// `None` when the plan has neither.
+fn extra_usage(snapshot: &Value) -> Option<ExtraUsage> {
+    let individual = &snapshot["individualLimit"];
+    let used = credits(&individual["used"]);
+    let limit = credits(&individual["limit"]).filter(|_| used.is_some());
+    let bought = &snapshot["credits"];
+    let balance = credits(&bought["balance"]).filter(|_| bought["hasCredits"] == true);
+    let unlimited = bought["unlimited"] == true;
+    if limit.is_none() && balance.is_none() && !unlimited {
+        return None;
+    }
+    Some(ExtraUsage {
+        unit: SpendUnit::Credits { exponent: 2 },
+        used: used.filter(|_| limit.is_some()),
+        limit,
+        balance,
+        unlimited,
+        resets_at: individual["resetsAt"]
+            .as_i64()
+            .filter(|_| limit.is_some())
+            .and_then(rfc3339),
+    })
+}
+
+/// A credit amount written as a decimal, such as `"12.5"`, in hundredths.
+fn credits(amount: &Value) -> Option<u64> {
+    let text = amount.as_str()?.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    let cents: u64 = format!("{:0<2}", &fraction[..fraction.len().min(2)])
+        .parse()
+        .ok()?;
+    whole
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(100)?
+        .checked_add(cents)
 }
 
 /// The windows a mid-turn `account/rateLimits/updated` reports; `None` when it reports none
@@ -114,6 +158,7 @@ pub(crate) fn usage_update(params: &Value) -> Option<UsageLimits> {
         windows,
         banked_resets: None,
         account: None,
+        extra_usage: extra_usage(&params["rateLimits"]),
     })
 }
 
@@ -201,7 +246,42 @@ fn banked_resets(summary: &Value) -> Option<BankedResets> {
             .iter()
             .find_map(|credit| credit["id"].as_str().map(str::to_owned)),
         expires_at: expiries.into_iter().filter_map(rfc3339).collect(),
+        grants: by_kind(&available),
     })
+}
+
+/// One entry per kind of reset the available credits refill, spending the one that expires
+/// first; none when a credit doesn't say what it refills.
+fn by_kind(available: &[&Value]) -> Vec<BankedGrant> {
+    let kinds: Option<Vec<(ResetKind, &str, Option<i64>)>> = available
+        .iter()
+        .map(|credit| {
+            let kind = match credit["resetType"].as_str()? {
+                "session" => ResetKind::Session,
+                "weekly" => ResetKind::Weekly,
+                "full" => ResetKind::Full,
+                _ => return None,
+            };
+            Some((kind, credit["id"].as_str()?, credit["expiresAt"].as_i64()))
+        })
+        .collect();
+    let Some(kinds) = kinds else {
+        return Vec::new();
+    };
+    [ResetKind::Session, ResetKind::Weekly, ResetKind::Full]
+        .into_iter()
+        .filter_map(|kind| {
+            let mut credits: Vec<_> = kinds.iter().filter(|credit| credit.0 == kind).collect();
+            credits.sort_by_key(|(_, _, expires)| (expires.is_none(), *expires));
+            let (_, id, expires) = credits.first()?;
+            Some(BankedGrant {
+                id: (*id).to_owned(),
+                kind,
+                resets: credits.len() as u32,
+                expires_at: expires.and_then(rfc3339),
+            })
+        })
+        .collect()
 }
 
 fn rfc3339(seconds: i64) -> Option<String> {
@@ -302,6 +382,7 @@ mod tests {
                 count: 0,
                 next_grant_id: None,
                 expires_at: Vec::new(),
+                grants: Vec::new(),
             })
         );
         assert_eq!(paid.windows[0].kind, UsageWindowKind::Session);
@@ -313,6 +394,64 @@ mod tests {
         assert_eq!(banked.count, 2);
         assert_eq!(banked.next_grant_id.as_deref(), Some("credit_b"));
         assert_eq!(banked.expires_at.len(), 1);
+        assert_eq!(
+            banked.grants,
+            [BankedGrant {
+                id: "credit_b".into(),
+                kind: ResetKind::Session,
+                resets: 1,
+                expires_at: Some("2026-11-25T09:46:40Z".into()),
+            }]
+        );
+        assert_eq!(free.extra_usage, None);
+    }
+
+    #[test]
+    fn a_workspace_credit_limit_and_bought_credits_are_its_extra_usage() {
+        let limits = |snapshot: Value| usage_limits(&json!({ "rateLimits": snapshot })).extra_usage;
+        let credits = |balance: Option<u64>, unlimited| ExtraUsage {
+            unit: SpendUnit::Credits { exponent: 2 },
+            used: None,
+            limit: None,
+            balance,
+            unlimited,
+            resets_at: None,
+        };
+
+        assert_eq!(
+            limits(json!({
+                "limitId": "codex",
+                "individualLimit": {
+                    "limit": "2000",
+                    "used": "512.5",
+                    "remainingPercent": 74,
+                    "resetsAt": 1_795_561_547,
+                },
+                "credits": { "hasCredits": true, "unlimited": false, "balance": "40.25" },
+            })),
+            Some(ExtraUsage {
+                used: Some(51_250),
+                limit: Some(200_000),
+                resets_at: Some("2026-11-24T23:05:47Z".into()),
+                ..credits(Some(4_025), false)
+            })
+        );
+        assert_eq!(
+            limits(
+                json!({ "credits": { "hasCredits": true, "unlimited": true, "balance": null } })
+            ),
+            Some(credits(None, true))
+        );
+        assert_eq!(
+            limits(
+                json!({ "credits": { "hasCredits": false, "unlimited": false, "balance": "5" } })
+            ),
+            None
+        );
+        assert_eq!(
+            limits(json!({ "individualLimit": { "limit": "lots", "used": "1" } })),
+            None
+        );
     }
 
     #[test]

@@ -1964,6 +1964,12 @@ impl Engine {
     /// Spends provider `provider`'s next banked reset, then reads its limits again. Reaches
     /// the network.
     pub fn spend_banked_reset_of(&self, provider: &str) -> BankedResetSpend {
+        self.spend_banked_grant(provider, None)
+    }
+
+    /// Spends a banked reset of `provider`'s grant `grant_id`, one its limits list, or its
+    /// next one when `None`; then reads its limits again. Reaches the network.
+    pub fn spend_banked_grant(&self, provider: &str, grant_id: Option<&str>) -> BankedResetSpend {
         let mut pending = self
             .reset_spend
             .lock()
@@ -1975,7 +1981,14 @@ impl Engine {
                 .get(provider)
                 .and_then(|limits| limits.banked_resets.as_ref())
                 .filter(|banked| banked.count > 0)
-                .and_then(|banked| banked.next_grant_id.clone());
+                .and_then(|banked| match grant_id {
+                    Some(id) => banked
+                        .grants
+                        .iter()
+                        .any(|grant| grant.id == id && grant.resets > 0)
+                        .then(|| id.to_owned()),
+                    None => banked.next_grant_id.clone(),
+                });
             (state.adapter_for(provider), grant)
         };
         let (Some(adapter), Some(grant)) = (adapter, grant) else {
@@ -5630,6 +5643,7 @@ mod tests {
                 }],
                 banked_resets: None,
                 account: None,
+                extra_usage: None,
             })
         }
 
@@ -5661,11 +5675,20 @@ mod tests {
             Some(UsageLimits {
                 windows: Vec::new(),
                 banked_resets: Some(hoshi_core::BankedResets {
-                    count: 1,
+                    count: 2,
                     next_grant_id: Some("grant_a".into()),
                     expires_at: Vec::new(),
+                    grants: ["grant_a", "grant_b"]
+                        .map(|id| hoshi_core::BankedGrant {
+                            id: id.into(),
+                            kind: hoshi_core::ResetKind::Session,
+                            resets: 1,
+                            expires_at: None,
+                        })
+                        .into(),
                 }),
                 account: None,
+                extra_usage: None,
             })
         }
 
@@ -6045,6 +6068,30 @@ mod tests {
         assert!(spends.iter().all(|(grant, _)| grant == "grant_a"));
         assert_eq!(spends[0].1, spends[1].1);
         assert_ne!(spends[1].1, spends[2].1);
+    }
+
+    #[test]
+    fn a_spend_draws_from_the_grant_the_user_picked_when_it_is_listed() {
+        let data_dir = scratch_dir("banked-grant");
+        let engine = Engine::open(&data_dir, Arc::new(|_| {})).unwrap();
+        let adapter = Arc::new(ResetAdapter {
+            answers: Mutex::new(vec![BankedResetSpend::Reset]),
+            spends: Mutex::default(),
+        });
+        engine.set_adapter(Some(adapter.clone()));
+        engine.usage_limits(true).unwrap();
+
+        assert_eq!(
+            engine.spend_banked_grant(DEFAULT_PROVIDER, Some("unknown")),
+            BankedResetSpend::NoneLeft
+        );
+        assert_eq!(
+            engine.spend_banked_grant(DEFAULT_PROVIDER, Some("grant_b")),
+            BankedResetSpend::Reset
+        );
+        let spends = adapter.spends.lock().unwrap();
+        assert_eq!(spends.len(), 1);
+        assert_eq!(spends[0].0, "grant_b");
     }
 
     #[test]
@@ -6504,6 +6551,7 @@ mod tests {
                 windows,
                 banked_resets: None,
                 account: None,
+                extra_usage: None,
             })
         };
         let mut script = completed_turn();

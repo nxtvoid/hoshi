@@ -53,6 +53,9 @@ pub struct UsageLimits {
     /// `None` when the provider's login couldn't be read.
     #[serde(default)]
     pub account: Option<ProviderAccount>,
+    /// `None` when the plan has no extra usage turned on, or the provider doesn't say.
+    #[serde(default)]
+    pub extra_usage: Option<ExtraUsage>,
 }
 
 impl UsageLimits {
@@ -64,6 +67,9 @@ impl UsageLimits {
         }
         if update.account.is_some() {
             self.account = update.account;
+        }
+        if update.extra_usage.is_some() {
+            self.extra_usage = update.extra_usage;
         }
         for window in update.windows {
             match self
@@ -109,6 +115,71 @@ pub struct BankedResets {
     /// When each spendable grant expires, RFC 3339, soonest first. Grants that never
     /// expire are left out.
     pub expires_at: Vec<String>,
+    /// The kinds of reset that can be spent now, one entry each, when resets differ in what
+    /// they refill; empty when they don't.
+    #[serde(default)]
+    pub grants: Vec<BankedGrant>,
+}
+
+/// What a banked reset refills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResetKind {
+    /// The session limit.
+    Session,
+    /// The weekly limit.
+    Weekly,
+    /// One model's allowance, giving back what it used of the weekly limit.
+    Fable,
+    /// The session and weekly limits.
+    Full,
+}
+
+/// The banked resets of one kind; spending draws from grant `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BankedGrant {
+    pub id: String,
+    pub kind: ResetKind,
+    /// How many resets of this kind are left.
+    pub resets: u32,
+    /// When grant `id` expires, RFC 3339; `None` when it never does.
+    pub expires_at: Option<String>,
+}
+
+/// Usage paid past the plan's limits, for the current period: what was spent, its cap, or
+/// what is left of credits bought ahead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraUsage {
+    pub unit: SpendUnit,
+    /// Spent this period; `None` when the provider tells only a balance.
+    pub used: Option<u64>,
+    /// The cap for the period; `None` when there is none.
+    pub limit: Option<u64>,
+    /// Credits bought ahead that are left; `None` when there are none to tell.
+    pub balance: Option<u64>,
+    /// The provider lets usage go on without a cap or a balance.
+    pub unlimited: bool,
+    /// When the period's spend starts over, RFC 3339.
+    pub resets_at: Option<String>,
+}
+
+/// What the amounts of [`ExtraUsage`] count, each an integer in `10^-exponent` of its unit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SpendUnit {
+    /// `currency` is ISO 4217; `None` when the provider doesn't say.
+    Money {
+        currency: Option<String>,
+        exponent: u8,
+    },
+    /// The provider's own credits.
+    Credits { exponent: u8 },
 }
 
 /// What spending a banked reset did.
@@ -179,6 +250,7 @@ mod tests {
             count: 1,
             next_grant_id: Some("grant_a".into()),
             expires_at: Vec::new(),
+            grants: Vec::new(),
         };
         let mut limits = UsageLimits {
             windows: vec![
@@ -191,12 +263,14 @@ mod tests {
                 email: Some("nxtvoid@example.com".into()),
                 plan: Some(crate::ProviderPlan::Max),
             }),
+            extra_usage: None,
         };
 
         limits.merge(UsageLimits {
             windows: vec![window(UsageWindowKind::Session, None, 35)],
             banked_resets: None,
             account: None,
+            extra_usage: None,
         });
 
         assert_eq!(limits.windows[0].used_percent, 35);

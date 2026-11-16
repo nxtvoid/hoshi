@@ -2037,8 +2037,10 @@ mod tests {
                 count: 1,
                 next_grant_id: Some("grant_a".into()),
                 expires_at: vec!["2026-12-01T00:00:00Z".into()],
+                grants: Vec::new(),
             }),
             account: None,
+            extra_usage: None,
         }
     }
 
