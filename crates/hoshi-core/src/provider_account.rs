@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// Whether the enabled provider's CLI can run turns.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ProviderAccountStatus {
     Ready,
     NotInstalled,
@@ -14,18 +12,16 @@ pub enum ProviderAccountStatus {
 }
 
 /// Who is signed in to the provider, as its local login files say.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ProviderAccount {
     pub email: Option<String>,
     /// `None` when the plan is unknown or can't be read.
     pub plan: Option<ProviderPlan>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ProviderPlan {
     Pro,
     /// A Max plan whose tier isn't known.
@@ -37,9 +33,8 @@ pub enum ProviderPlan {
 }
 
 /// Who Codex is signed in as, as its `auth.json` says.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct CodexAccount {
     /// `false` when it runs on an API key instead of a ChatGPT account.
     pub chatgpt: bool,
@@ -48,9 +43,8 @@ pub struct CodexAccount {
     pub plan: Option<ChatGptPlan>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ChatGptPlan {
     Free,
     Go,
@@ -63,13 +57,12 @@ pub enum ChatGptPlan {
 }
 
 /// A sign-in hoshi runs for a provider, through the provider's CLI.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ProviderSignIn {
     #[default]
     Idle,
@@ -85,13 +78,12 @@ pub enum ProviderSignIn {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ProviderSignInFailure {
     NotInstalled,
     SpawnFailed,

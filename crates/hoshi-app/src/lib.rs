@@ -1,4 +1,5 @@
 pub mod app_release;
+pub mod app_update;
 pub mod fonts;
 pub mod home;
 pub mod settings;

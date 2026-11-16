@@ -2,11 +2,9 @@ use crate::{
     ApprovalDecision, DiffFile, MessageAttachment, PullRequestUpdate, Question, RequestStatus,
 };
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Thread {
     pub id: String,
     /// `None` for a chat, which belongs to no project and runs in a folder of its own.
@@ -96,9 +94,8 @@ pub struct Thread {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ThreadStatus {
     Idle,
     Working,
@@ -106,9 +103,8 @@ pub enum ThreadStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
 pub enum Effort {
     Low,
     Medium,
@@ -130,9 +126,8 @@ impl Effort {
 }
 
 /// What the agent may do without asking.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum AccessMode {
     /// Asks before anything the agent's settings don't allow, file edits included.
     Ask,
@@ -148,13 +143,12 @@ pub enum AccessMode {
 
 /// Where a new thread works. The engine turns `NewWorktree` and `BranchWorktree` into
 /// `Worktree` after creating it, so a thread never exists without its worktree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ThreadWorkspace {
     Local,
     NewWorktree,
@@ -170,9 +164,8 @@ pub enum ThreadWorkspace {
 }
 
 /// Part of a thread's transcript, latest turns first loaded, older ones on request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct TranscriptPage {
     /// Oldest first, each as `ItemContent::summary` leaves it.
     pub items: Vec<ThreadItem>,
@@ -181,9 +174,8 @@ pub struct TranscriptPage {
 }
 
 /// A tool call still waiting for its output.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct OpenToolCall {
     /// The thread's transcript, or one of its subagents'.
     pub thread_id: String,
@@ -191,9 +183,8 @@ pub struct OpenToolCall {
 }
 
 /// A command the agent left running in the background, which its turn waits for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct BackgroundTask {
     pub task_id: String,
     /// The call that started it, when one did.
@@ -205,9 +196,8 @@ pub struct BackgroundTask {
 }
 
 /// The commands a thread's running turn waits for; empty once none is left.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadBackgroundTasks {
     pub thread_id: String,
     pub tasks: Vec<BackgroundTask>,
@@ -216,9 +206,8 @@ pub struct ThreadBackgroundTasks {
 }
 
 /// One entry in a thread's transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadItem {
     pub id: String,
     pub thread_id: String,
@@ -226,9 +215,8 @@ pub struct ThreadItem {
     pub content: ItemContent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum CompactionStatus {
     Running,
     Done,
@@ -236,13 +224,12 @@ pub enum CompactionStatus {
 }
 
 /// The point of the conversation a user message started from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum Rewind {
     /// The first message: going back starts a new session.
     Start,
@@ -255,9 +242,8 @@ pub enum Rewind {
 }
 
 /// A provider and model a thread runs on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ModelChoice {
     pub provider: String,
     /// `None` uses the provider's default.
@@ -280,9 +266,8 @@ impl ModelChoice {
 }
 
 /// The session a thread keeps with a provider it no longer runs on.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ProviderSession {
     pub provider: String,
     pub session_id: String,
@@ -293,9 +278,8 @@ pub struct ProviderSession {
 }
 
 /// How a turn of a thread ended, as its transcript tells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum TurnStatus {
     Running,
     Completed,
@@ -315,9 +299,8 @@ impl TurnStatus {
 }
 
 /// A turn a fork or a merge-back starts from, read by the engine from the transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct TurnPoint {
     /// The message that started it.
     pub turn_id: String,
@@ -335,13 +318,12 @@ pub struct TurnPoint {
 }
 
 /// Where a fork or a merge-back starts from, as the user asks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ForkPoint {
     /// The latest turn that completed.
     LatestStable,
@@ -350,9 +332,8 @@ pub enum ForkPoint {
 }
 
 /// Where a fork came from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ForkOrigin {
     pub thread_id: String,
     /// The source's turn it goes on from: it inherits the source's items through
@@ -361,9 +342,8 @@ pub struct ForkOrigin {
 }
 
 /// How a context handoff covers what the agent did not see.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum HandoffStrategy {
     /// The whole conversation, to an agent that saw none of it.
     FullThreadSummary,
@@ -385,13 +365,12 @@ impl HandoffStrategy {
 }
 
 /// Context a thread's next turn hands its agent first.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum PendingHandoff {
     /// The thread moved from `from` to `to`: the items from `since` (the whole thread when
     /// `None`) up to message `before` are what `to` never saw.
@@ -413,13 +392,12 @@ pub enum PendingHandoff {
 }
 
 /// Where a context handoff's material came from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum HandoffSource {
     ProviderSwitch {
         from: ModelChoice,
@@ -435,9 +413,8 @@ pub enum HandoffSource {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum HandoffDelivery {
     /// Prepared; the provider has yet to take it.
     Pending,
@@ -451,9 +428,8 @@ pub enum HandoffDelivery {
 }
 
 /// Why hoshi went on with a thread by itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum Resumption {
     /// A restart cut the turn short; the agent goes on where it left off.
     Restart,
@@ -463,13 +439,12 @@ pub enum Resumption {
     UsageLimitReset,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ItemContent {
     UserMessage {
         text: String,
@@ -678,9 +653,8 @@ impl ItemContent {
 
 /// The provider failed to reach the model and tries again; holds until the run's next output
 /// or its end.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct TurnRetry {
     pub attempt: u32,
     pub max_attempts: Option<u32>,
@@ -693,9 +667,8 @@ pub struct TurnRetry {
 }
 
 /// One step of the agent's task list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Task {
     pub subject: String,
     /// How the agent words it while working on it, such as "Writing a.txt".
@@ -703,9 +676,8 @@ pub struct Task {
     pub status: TaskStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum TaskStatus {
     Pending,
     InProgress,
@@ -713,13 +685,12 @@ pub enum TaskStatus {
 }
 
 /// What a tool call did, as the provider reported it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ToolDetail {
     FileChange {
         path: String,
@@ -757,13 +728,12 @@ impl ToolDetail {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum TurnOutcome {
     Completed,
     Interrupted,
@@ -771,13 +741,12 @@ pub enum TurnOutcome {
 }
 
 /// Why a turn failed. Codes for the UI; `detail` is for logs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "code",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum TurnFailure {
     ProviderDisabled,
     SpawnFailed {

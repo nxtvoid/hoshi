@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use ts_rs::TS;
 
 /// How a search for theme extensions on Open VSX is ordered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ThemeExtensionSort {
     DownloadCount,
     Rating,
@@ -14,9 +12,8 @@ pub enum ThemeExtensionSort {
 }
 
 /// An open-source color theme extension on Open VSX that can be installed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThemeExtension {
     /// `publisher.name`.
     pub id: String,
@@ -36,9 +33,8 @@ pub struct ThemeExtension {
 }
 
 /// One color theme an extension contributes: its VS Code workbench colors, includes resolved.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ExtensionTheme {
     pub label: String,
     /// `light`, `dark`, `hc-black` or `hc-light`, when the extension says.

@@ -13,7 +13,7 @@
     </p>
   </description>
   <launchable type="desktop-id">dev.hoshi.app.desktop</launchable>
-  <icon type="stock">dev.hoshi.app</icon>
+  <icon type="stock">hoshi</icon>
   <url type="homepage">https://github.com/nxtvoid/hoshi</url>
   <developer id="dev.hoshi">
     <name>nxtvoid</name>

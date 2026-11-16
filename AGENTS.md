@@ -2,34 +2,31 @@
 
 ## Layout
 
-- `apps/desktop/src` - React + Tailwind v4 UI. Renders state; holds no business logic.
-  - `components` - App-specific components (sidebar, thread, settings, window). They may use the stores and bindings.
-  - `routes` - TanStack Router file-based routes. The plugin generates `src/routeTree.gen.ts` (committed, never edit by hand); selection state stays in Zustand, the URL only picks the main view.
-  - `state` - Zustand stores. Select one field per `useAppStore` call so a component only rerenders when that field changes.
-- `apps/desktop/src-tauri` - Thin Tauri shell: forwards commands to the engine and events to the UI.
-- `apps/desktop/src/bindings` - TypeScript generated from `hoshi-core` by ts-rs. Never edit by hand.
-- `apps/desktop/messages` - UI text per locale, compiled by Paraglide JS into `src/paraglide` (git-ignored).
-- `packages/ui` (`@hoshi/ui`) - Reusable components and the theme (`src/styles/globals.css`). shadcn components on Base UI (style `base-nova`), imported as `@hoshi/ui/components/<name>`. Icons are Hugeicons: `<HugeiconsIcon icon={Search01Icon} strokeWidth={2} />` with icons from `@hugeicons/core-free-icons`. Add more with `bunx shadcn@latest add <name>` from `packages/ui`. Components here know nothing about the app: no stores, no bindings, no Paraglide; text comes in through props.
-- `packages/utils` (`@hoshi/utils`) - Pure helpers with no React (`cn`, formatting).
-- `packages/ts-config` (`@hoshi/ts-config`) - Shared `tsconfig` bases (`base.json`, `react.json`).
+- `apps/native` - The app, drawn natively with GPUI (`gpui-kit`). Renders state; holds no business logic. Its binary is `hoshi`; its installers are configured under `[package.metadata.packager]` in its `Cargo.toml`.
+  - `messages/en.json` - UI text, turned by `build.rs` into one `m::<key>()` function per message.
+  - `icons`, `linux` - App icons (release and `dev`) and the Linux desktop entry and metainfo the `.deb` installs.
+- `crates/hoshi-ui` - Reusable native components and the theme (`assets/globals.css`, read by `theme.rs`). Components here know nothing about the app: no engine, no `hoshi-core` types, no stores; text and state come in from the caller.
+- `crates/hoshi-app` - The home folder, settings and engine start.
 - `crates/hoshi-core` - Domain model and orchestrator. Pure: commands in, events out. No I/O.
   Its types are the contract with the UI.
 - `crates/hoshi-engine` - Runtime that wires core, store and providers: persists events, runs effects.
 - `crates/hoshi-store` - SQLite persistence for events and projections, in `state.sqlite` under hoshi's home. Each append writes events and projection rows in one transaction.
-- `crates/hoshi-providers` - One adapter per agent CLI behind a common trait. Claude Code first, Codex next.
+- `crates/hoshi-providers` - One adapter per agent CLI behind a common trait: Claude Code, Codex and Copilot.
+- `crates/hoshi-forge` - Forge adapters (GitHub, Bitbucket Cloud) for the pull requests of threads' branches.
+- `vendor/gpui-base` - `gpui-base` with one patch; see `vendor/README.md`.
+- `scripts` - Release helpers run with Bun (`bump.ts`, `release-notes.ts`).
 
 ## Data
 
-Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-dev` for debug builds (`bun run dev`) so they never touch the installed app's data. `HOSHI_HOME` overrides both. It holds `settings.json`, `state.sqlite`, `worktrees/`, `chats/`, `attachments/`, `agent-processes/` (the agent processes each run started, so the next start ends what a crashed run left), `caches/` (what the provider CLIs last listed, shown at start before they answer) and `webview/` (the webview's storage). Never write to Tauri's per-identifier folders (`app_data_dir` and the like); `apps/desktop/src-tauri/src/home.rs` moves what older versions left there on first start, except worktrees, whose paths git registered.
+Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-dev` for debug builds (`bun run dev`) so they never touch the installed app's data. `HOSHI_HOME` overrides both. It holds `settings.json`, `state.sqlite`, `worktrees/`, `chats/`, `attachments/`, `agent-processes/` (the agent processes each run started, so the next start ends what a crashed run left) and `caches/` (what the provider CLIs last listed, shown at start before they answer).
 
 ## Commands
 
-- `bun i` installs. `bun run dev` starts the app. `bun run build` bundles it.
+- `bun i` installs the JS tools: Biome, and the Tauri CLI the release workflow signs installers with. `bun run dev` starts the app. `bun run build` builds it in release.
 - `bun run check` runs Biome, rustfmt and clippy. `bun run fix` applies formatting.
-- `bun run typecheck` checks every app and package. `bun run test` runs the Rust tests and the unit tests of every app and package.
-- Shared JS dependency versions live in the root `package.json` `catalog`; packages reference them as `"catalog:"`, and each other as `"workspace:*"`.
-- `bun run bindings` regenerates the TypeScript bindings. Run it after changing a `#[ts(export)]` type.
-- `bun run --cwd apps/desktop check:i18n` checks the translations.
+- `bun run test` runs the Rust tests and the scripts' tests.
+- `bun run bump <version>` sets the version in `Cargo.toml`; a `v<version>` tag builds the installers (`.github/workflows/release.yml`).
+- Installers locally: `cargo install cargo-packager --locked`, then `cargo packager --release -p hoshi-native -f nsis` (Windows) or `-f deb` (Linux).
 
 ### Not decided yet — ask before establishing a pattern
 
@@ -46,44 +43,30 @@ The repo is indexed by [CodeGraph](https://github.com/colbymchenry/codegraph). O
 - A thread runs in its own working directory. A thread on a worktree spawns its agent
   with that worktree as `cwd`, never the project root.
 - Performance matters: long sessions and many parallel sessions must stay smooth.
-  Virtualize long lists and do not ship whole transcripts across the IPC bridge.
-- Types that cross to the UI derive `Serialize` and `TS` with `#[ts(export)]` and use camelCase:
+  Virtualize long lists and load transcripts a page at a time, never whole.
+- Types that are persisted or written to JSON use camelCase:
   `rename_all = "camelCase"` on structs; on enums also `rename_all_fields = "camelCase"`.
 
 ## Code conventions
 
 - **Identifiers in English:** types, functions, variables, enum values, file names.
-- **No narrating comments:** do not write comments that explain why the code does something or restate a rule. Keep a short comment only for genuinely non-obvious intent. Applies to Rust and TypeScript.
-- **TypeScript** follows `biome.json` (single quotes, no semicolons). **Rust** follows rustfmt and clippy; `bun run check` fails on any clippy warning.
-- **Import order (TypeScript):** side-effect imports and namespace imports (`import * as React`) first, then named imports from shortest to longest line, then multiline imports, then default imports:
-
-```ts
-import '@hoshi/ui/globals.css'
-import { cn } from '@hoshi/utils'
-import { Button } from '@hoshi/ui/components/button'
-import { Tooltip, TooltipPopup } from '@hoshi/ui/components/tooltip'
-import App from './App'
-```
+- **No narrating comments:** do not write comments that explain why the code does something or restate a rule. Keep a short comment only for genuinely non-obvious intent.
+- **Rust** follows rustfmt and clippy; `bun run check` fails on any clippy warning. **TypeScript** (the scripts) follows `biome.json` (single quotes, no semicolons).
 
 ## Localization
 
-- The native app (`apps/native`) keeps its own text in `apps/native/messages/en.json`; its `build.rs` turns each key into an `m::<key>()` function.
-- The UI is in English; more locales come later. Every user-visible string goes through Paraglide: add it to `apps/desktop/messages/en.json` and render `m.<key>()` from `@/paraglide/messages`. Never hard-code UI text in a component.
+- The UI is in English; more locales come later. Every user-visible string goes through `apps/native/messages/en.json`: add the key there and render `m::<key>()`. Never hard-code UI text in a component.
 - Keys are `snake_case` and describe the meaning, not the screen (`no_project_selected`, not `sidebar_text_1`).
-- Rust never writes UI text of its own (labels, errors, statuses). It sends codes and data; the UI picks the message. Agent output passes through untranslated.
-- Before localization work, read `apps/desktop/project.inlang/README.md` (git-ignored, so search tools may skip it). Never edit `src/paraglide/`.
-- The locale is resolved from `localStorage`, then the OS language, then English (`project.inlang/paraglide.config.ts`).
+- Rust outside the app never writes UI text of its own (labels, errors, statuses). It sends codes and data; the app picks the message. Agent output passes through untranslated.
 
 ## Styling
 
-- **Themes:** light, dark and system are supported, and more themes will come. Every color is a CSS variable in `packages/ui/src/styles/globals.css`, defined for `:root` (light) and `.dark`, and exposed to Tailwind in `@theme inline`. Components use those tokens (`bg-sidebar`, `text-muted-foreground`, `bg-status-error`), never raw palette colors (`bg-red-400`, `text-white`) or literal values. A new color is a new token in both themes.
-- Use `cn` for conditional or merged classes. Never build class strings with template literals.
-- Biome sorts Tailwind classes (`useTailwindSortedClasses`), including those inside `cn()` and `cva()`. Run `bun run fix` and let it order them.
+- **Themes:** light, dark and system are supported, plus imported themes. Every color is a token in `crates/hoshi-ui/assets/globals.css`, defined for `:root` (light) and `.dark`, and read into `hoshi_ui::theme::Colors`. Components use those tokens (`colors.sidebar`, `colors.muted_foreground`), never literal colors. A new color is a new token in both themes.
 
 ## Tests
 
-- **Rust:** unit tests for a module go in a `#[cfg(test)] mod tests` at the bottom of that file. Tests that use a crate only through its public API go in that crate's `tests/` folder.
-- **TypeScript:** pure logic has unit tests in the `tests/` folder of its app or package, mirroring `src` (`packages/utils/tests/format.test.ts` tests `packages/utils/src/format.ts`), never inside `src`. They import from `bun:test`.
+- **Rust:** unit tests for a module go in a `#[cfg(test)] mod tests` at the bottom of that file. Tests that use a crate only through its public API go in that crate's `tests/` folder. UI behavior is tested headless with `#[gpui_kit::test]`.
+- **TypeScript:** the scripts' tests live in `scripts/tests` and import from `bun:test`.
 - Test behavior that can break (orchestrator decisions, provider protocol parsing, persistence). Skip tests for what types already guarantee.
 - **What agents read:** `agent-context-budget.json` holds the exact size of the instructions and MCP tool descriptions hoshi gives agents; a change to them, up or down, updates it. Before and after such a change, run the cases it touches in `crates/hoshi-engine/tests/tool_use_evals.rs` (real Claude Code, spends tokens: `cargo test -p hoshi-engine --test tool_use_evals -- --ignored`). A new case reproduces a real mistake and fails on the text before the fix.
 

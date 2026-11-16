@@ -158,7 +158,7 @@ impl Onboarding {
                         && let Err(error) =
                             hoshi_app::apply_settings(&engine, &path, &previous, &next)
                     {
-                        eprintln!("hoshi-native: could not save settings: {error}");
+                        eprintln!("hoshi: could not save settings: {error}");
                     }
                     (engine.check_providers(), engine.provider_models())
                 })

@@ -7,7 +7,7 @@ use gpui_kit::{
     Render, Styled as _, TestAppContext, VisualTestContext, Window, WindowBounds, WindowOptions,
     div, px, size,
 };
-use hoshi_core::{AppRelease, ProviderUpdate, ProviderVersion};
+use hoshi_core::{AppInstaller, AppRelease, ProviderUpdate, ProviderVersion};
 use std::sync::Arc;
 
 struct Host(Entity<UpdatesButton>);
@@ -147,6 +147,7 @@ fn an_app_release_opens_its_page_and_notes(cx: &mut TestAppContext) {
         published_at: "2026-11-01T00:00:00Z".into(),
         body: "- Native app\n- Faster sidebar".into(),
         url: "https://github.com/nxtvoid/hoshi/releases/tag/v9.0.0".into(),
+        installer: None,
     };
     h.button.update(&mut h.cx, |button, cx| {
         let key = release_notes_key(INSTALLED, &release.version);
@@ -163,4 +164,76 @@ fn an_app_release_opens_its_page_and_notes(cx: &mut TestAppContext) {
     assert!(h.cx.debug_bounds("updates-app").is_some());
     assert!(h.cx.debug_bounds("updates-release-notes").is_some());
     assert!(h.cx.debug_bounds("updates-provider").is_none());
+}
+
+fn installable(version: &str) -> AppRelease {
+    let name = format!("hoshi_{version}_x64-setup.exe");
+    AppRelease {
+        version: version.into(),
+        published_at: "2026-11-01T00:00:00Z".into(),
+        body: String::new(),
+        url: format!("https://github.com/nxtvoid/hoshi/releases/tag/v{version}"),
+        installer: Some(AppInstaller {
+            url: format!("https://github.com/nxtvoid/hoshi/releases/download/v{version}/{name}"),
+            signature_url: format!(
+                "https://github.com/nxtvoid/hoshi/releases/download/v{version}/{name}.sig"
+            ),
+            name,
+            size: 1,
+        }),
+    }
+}
+
+fn show(h: &mut Harness, app: AppUpdate) {
+    h.button.update(&mut h.cx, |button, cx| {
+        button.app = app;
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+}
+
+#[gpui_kit::test]
+fn an_installable_release_downloads_then_restarts(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "updates-install");
+    let release = installable("9.0.0");
+    show(
+        &mut h,
+        AppUpdate::Available {
+            release: release.clone(),
+        },
+    );
+    click(&mut h, "updates-details");
+    assert!(h.cx.debug_bounds("updates-app-install").is_some());
+    assert!(h.cx.debug_bounds("updates-app-release-page").is_none());
+
+    show(
+        &mut h,
+        AppUpdate::Downloading {
+            release: release.clone(),
+            percent: Some(40),
+        },
+    );
+    assert!(h.cx.debug_bounds("updates-app-downloading").is_some());
+
+    show(
+        &mut h,
+        AppUpdate::Ready {
+            release: release.clone(),
+            installer: "hoshi_9.0.0_x64-setup.exe".into(),
+        },
+    );
+    assert!(h.cx.debug_bounds("updates-app-ready").is_some());
+
+    show(&mut h, AppUpdate::Failed { release });
+    assert!(h.cx.debug_bounds("updates-app-failed").is_some());
+}
+
+#[gpui_kit::test]
+fn a_release_without_an_installer_points_at_its_page(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "updates-page");
+    let mut release = installable("9.0.0");
+    release.installer = None;
+    show(&mut h, AppUpdate::Available { release });
+    click(&mut h, "updates-details");
+    assert!(h.cx.debug_bounds("updates-app-release-page").is_some());
 }

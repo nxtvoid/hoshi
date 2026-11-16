@@ -299,7 +299,7 @@ impl SettingsView {
                     })
                     .await;
                 if let Err(error) = &saved {
-                    eprintln!("hoshi-native: could not save settings: {error}");
+                    eprintln!("hoshi: could not save settings: {error}");
                 }
                 this.update(cx, |this, cx| {
                     this.save_failed = saved.is_err();

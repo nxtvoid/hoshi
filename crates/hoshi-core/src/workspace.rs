@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// Where hoshi can open a thread's folder: a code editor, or the system's file manager.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum Editor {
     Vscode,
     Cursor,
@@ -63,9 +61,8 @@ impl Editor {
 }
 
 /// What a thread's working tree changed and has not committed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ChangesSummary {
     pub files: u32,
     pub additions: u32,

@@ -1,19 +1,16 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// A code host that serves pull requests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ForgeKind {
     Github,
     /// Bitbucket Cloud (bitbucket.org).
     Bitbucket,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum PullRequestState {
     Open,
     Draft,
@@ -28,9 +25,8 @@ impl PullRequestState {
 }
 
 /// The combined result of a pull request's CI checks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ChecksState {
     Passing,
     Failing,
@@ -38,9 +34,8 @@ pub enum ChecksState {
 }
 
 /// A pull request as every forge reports it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct PullRequest {
     pub forge: ForgeKind,
     pub number: u32,
@@ -80,13 +75,12 @@ pub struct PullRequest {
 
 /// Whose move a pull request waits on, told by who spoke last. Commits never pass the
 /// turn: a merge from the base branch or a partial fix answers nobody.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ReviewTurn {
     /// Someone asked something of the author after the author last answered.
     Author {
@@ -104,9 +98,8 @@ pub enum ReviewTurn {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ReviewAsk {
     Comment,
     ChangesRequested,
@@ -231,9 +224,8 @@ fn timestamp_millis(text: &str) -> Option<i64> {
 }
 
 /// What an update on a watched pull request told the agent, for the UI to name.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct PullRequestUpdate {
     pub number: u32,
     /// Checks that failed since the last update.
@@ -268,18 +260,16 @@ pub struct PullRequestWatch {
 }
 
 /// One CI check of a pull request's latest commit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct PullRequestCheck {
     pub name: String,
     pub state: ChecksState,
     pub url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ReviewComment {
     pub author: Option<String>,
     pub body: String,
@@ -289,9 +279,8 @@ pub struct ReviewComment {
 }
 
 /// A conversation on a line of the diff.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ReviewThread {
     /// The forge's own id, to reply to or resolve the thread.
     pub id: String,
@@ -302,9 +291,8 @@ pub struct ReviewThread {
     pub comments: Vec<ReviewComment>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ReviewState {
     /// Asked to review, no review yet.
     Requested,
@@ -314,18 +302,16 @@ pub enum ReviewState {
     Dismissed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Reviewer {
     /// A user's login or a team's name.
     pub name: String,
     pub state: ReviewState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct PullRequestLabel {
     pub name: String,
     /// Hex without `#`, as the forge stores it.
@@ -333,13 +319,12 @@ pub struct PullRequestLabel {
 }
 
 /// What happened on a pull request, oldest first.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum TimelineItem {
     Comment {
         author: Option<String>,
@@ -363,9 +348,8 @@ pub enum TimelineItem {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum MergeMethod {
     Merge,
     Squash,
@@ -373,9 +357,8 @@ pub enum MergeMethod {
 }
 
 /// Whether the forge would merge the pull request as it stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum Mergeability {
     Mergeable,
     Conflicting,
@@ -384,13 +367,12 @@ pub enum Mergeability {
 }
 
 /// A change the user asks the forge to make to a pull request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum PullRequestAction {
     Merge {
         method: MergeMethod,
@@ -432,9 +414,8 @@ pub enum PullRequestAction {
 }
 
 /// What the side panel shows of a pull request, read on demand and not cached.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct PullRequestDetail {
     /// What the forge lets hoshi change; older cached details predate it and are GitHub's.
     #[serde(default = "PullRequestSupport::all")]
@@ -460,9 +441,8 @@ pub struct PullRequestDetail {
 
 /// The account a forge is signed in with; `None` when it is not signed in.
 /// Parts of a pull request some forges have and others don't.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct PullRequestSupport {
     pub labels: bool,
     /// Moving it in and out of draft.
@@ -481,27 +461,24 @@ impl PullRequestSupport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ForgeAccount {
     pub forge: ForgeKind,
     pub login: Option<String>,
 }
 
 /// A fresh read of a thread's pull request detail; `None` when the read failed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadPullRequestDetail {
     pub thread_id: String,
     pub detail: Option<PullRequestDetail>,
 }
 
 /// The pull request of a thread's branch; `None` when the branch has none.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadPullRequest {
     pub thread_id: String,
     pub pull_request: Option<PullRequest>,

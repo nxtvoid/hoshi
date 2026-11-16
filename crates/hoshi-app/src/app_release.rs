@@ -1,6 +1,7 @@
 //! Reads hoshi's published releases on GitHub: the newest one, and the notes of an update.
 
-use hoshi_core::AppRelease;
+use crate::app_update::InstallerFormat;
+use hoshi_core::{AppInstaller, AppRelease};
 use serde_json::Value;
 use std::cmp::Reverse;
 use std::time::Duration;
@@ -21,22 +22,47 @@ fn parse_version(text: &str) -> Option<Version> {
     parts.next().is_none().then_some(version)
 }
 
-fn published(feed: &Value) -> impl Iterator<Item = (Version, AppRelease)> + '_ {
+/// `format`: how this machine installs updates, to find each release's installer.
+fn published(
+    feed: &Value,
+    format: Option<InstallerFormat>,
+) -> impl Iterator<Item = (Version, AppRelease)> + '_ {
     feed.as_array()
         .into_iter()
         .flatten()
         .filter(|release| !flag(release, "draft") && !flag(release, "prerelease"))
-        .filter_map(|release| {
+        .filter_map(move |release| {
             let version = text(release, "tag_name")?.strip_prefix('v')?.to_owned();
             let parsed = parse_version(&version)?;
+            let installer =
+                format.and_then(|format| installer(release, &format.asset_name(&version)));
             let release = AppRelease {
-                version,
                 published_at: text(release, "published_at")?.to_owned(),
                 body: text(release, "body").unwrap_or_default().to_owned(),
                 url: text(release, "html_url").unwrap_or_default().to_owned(),
+                version,
+                installer,
             };
             Some((parsed, release))
         })
+}
+
+/// The asset named `name` and its `.sig`, which a release lists only once both uploaded.
+fn installer(release: &Value, name: &str) -> Option<AppInstaller> {
+    let assets = release.get("assets")?.as_array()?;
+    let asset = |wanted: &str| {
+        assets
+            .iter()
+            .find(|asset| text(asset, "name") == Some(wanted))
+    };
+    let file = asset(name)?;
+    let signature = asset(&format!("{name}.sig"))?;
+    Some(AppInstaller {
+        name: name.to_owned(),
+        url: text(file, "browser_download_url")?.to_owned(),
+        signature_url: text(signature, "browser_download_url")?.to_owned(),
+        size: file.get("size").and_then(Value::as_u64).unwrap_or(0),
+    })
 }
 
 /// The published releases after `installed` up to `available`, newest first.
@@ -44,7 +70,7 @@ fn releases_between(feed: &Value, installed: &str, available: &str) -> Vec<AppRe
     let (Some(after), Some(until)) = (parse_version(installed), parse_version(available)) else {
         return Vec::new();
     };
-    let mut releases: Vec<(Version, AppRelease)> = published(feed)
+    let mut releases: Vec<(Version, AppRelease)> = published(feed, None)
         .filter(|(version, _)| *version > after && *version <= until)
         .collect();
     releases.sort_by_key(|(version, _)| Reverse(*version));
@@ -52,9 +78,13 @@ fn releases_between(feed: &Value, installed: &str, available: &str) -> Vec<AppRe
 }
 
 /// The newest published release, when it is newer than `current`.
-fn newest_after(feed: &Value, current: &str) -> Option<AppRelease> {
+fn newest_after(
+    feed: &Value,
+    current: &str,
+    format: Option<InstallerFormat>,
+) -> Option<AppRelease> {
     let current = parse_version(current)?;
-    published(feed)
+    published(feed, format)
         .filter(|(version, _)| *version > current)
         .max_by_key(|(version, _)| *version)
         .map(|(_, release)| release)
@@ -97,7 +127,7 @@ pub fn release_notes(installed: &str, available: &str) -> Result<Vec<AppRelease>
 /// The newest published release, when it is newer than `current`.
 pub fn latest_release(current: &str) -> Result<Option<AppRelease>, String> {
     let feed = fetch_feed()?;
-    Ok(newest_after(&feed, current))
+    Ok(newest_after(&feed, current, InstallerFormat::current()))
 }
 
 #[cfg(test)]
@@ -193,14 +223,46 @@ mod tests {
             release("v0.0.10", "2026-11-04T00:00:00Z"),
             release("v0.0.9", "2026-11-02T00:00:00Z"),
         ]);
-        let newest = newest_after(&feed, "0.0.9").expect("a newer release");
+        let newest = newest_after(&feed, "0.0.9", None).expect("a newer release");
         assert_eq!(newest.version, "0.0.10");
         assert_eq!(
             newest.url,
             "https://github.com/nxtvoid/hoshi/releases/tag/v0.0.10"
         );
-        assert_eq!(newest_after(&feed, "0.0.10"), None);
-        assert_eq!(newest_after(&feed, "dev"), None);
+        assert_eq!(newest.installer, None);
+        assert_eq!(newest_after(&feed, "0.0.10", None), None);
+        assert_eq!(newest_after(&feed, "dev", None), None);
+    }
+
+    fn asset(name: &str, size: u64) -> Value {
+        json!({
+            "name": name,
+            "size": size,
+            "browser_download_url": format!("https://github.com/nxtvoid/hoshi/releases/download/v1.0.1/{name}"),
+        })
+    }
+
+    #[test]
+    fn finds_the_installer_for_this_machine_with_its_signature() {
+        let mut signed = release("v1.0.1", "2026-12-01T00:00:00Z");
+        signed["assets"] = json!([
+            asset("hoshi_1.0.1_amd64.deb", 11),
+            asset("hoshi_1.0.1_x64-setup.exe", 12),
+            asset("hoshi_1.0.1_x64-setup.exe.sig", 1),
+        ]);
+        let feed = json!([signed]);
+
+        let windows = newest_after(&feed, "1.0.0", Some(InstallerFormat::Nsis)).unwrap();
+        let installer = windows.installer.expect("the setup and its signature");
+        assert_eq!(installer.name, "hoshi_1.0.1_x64-setup.exe");
+        assert_eq!(installer.size, 12);
+        assert_eq!(
+            installer.signature_url,
+            "https://github.com/nxtvoid/hoshi/releases/download/v1.0.1/hoshi_1.0.1_x64-setup.exe.sig"
+        );
+
+        let unsigned = newest_after(&feed, "1.0.0", Some(InstallerFormat::Deb)).unwrap();
+        assert_eq!(unsigned.installer, None);
     }
 
     #[test]

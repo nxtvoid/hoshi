@@ -1,33 +1,16 @@
 {
   "name": "hoshi",
   "private": true,
-  "workspaces": [
-    "apps/*",
-    "packages/*"
-  ],
-  "catalog": {
-    "@hugeicons/core-free-icons": "^4.4.0",
-    "@hugeicons/react": "^1.1.10",
-    "@shadcn/react": "^0.3.1",
-    "@types/bun": "^1.4.4",
-    "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "tailwindcss": "^4",
-    "typescript": "~6.0.3"
-  },
   "scripts": {
-    "dev": "bun run --cwd apps/desktop tauri dev --config src-tauri/tauri.dev.conf.json",
-    "build": "bun run --cwd apps/desktop tauri build",
-    "typecheck": "bun run --filter './apps/*' --filter './packages/*' typecheck",
+    "dev": "cargo run -p hoshi-native",
+    "build": "cargo build --release -p hoshi-native",
     "check": "biome check . && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "fix": "biome check --write . && cargo fmt --all",
-    "test": "cargo test --workspace && bun run --filter './apps/*' --filter './packages/*' test && bun test ./scripts",
-    "bindings": "cargo test -p hoshi-core export_bindings",
+    "test": "cargo test --workspace && bun test ./scripts",
     "bump": "bun scripts/bump.ts"
   },
   "devDependencies": {
-    "@biomejs/biome": "~2.6.6"
+    "@biomejs/biome": "~2.6.6",
+    "@tauri-apps/cli": "2.12.4"
   }
 }

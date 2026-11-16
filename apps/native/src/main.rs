@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app_icon;
 #[cfg(windows)]
 mod app_user_model;
@@ -720,7 +722,7 @@ impl Render for HoshiWindow {
 }
 
 fn main() {
-    let home = home::resolve().expect("hoshi-native needs a home folder");
+    let home = home::resolve().expect("hoshi needs a home folder");
     #[cfg(windows)]
     app_user_model::register(&home);
     let (notify, notifications) = state::channel();

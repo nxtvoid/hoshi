@@ -1,11 +1,9 @@
 use crate::ProviderAccount;
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// How full a thread's context window was after its last model call.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ContextUsage {
     pub used_tokens: u64,
     /// `None` while the provider has not said how large the window is.
@@ -37,18 +35,16 @@ impl ContextUsage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadContextUsage {
     pub thread_id: String,
     pub usage: ContextUsage,
 }
 
 /// The provider plan's rolling limits. Empty when the plan has none, as with API keys.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct UsageLimits {
     pub windows: Vec<UsageWindow>,
     /// `None` when the plan can't bank resets or they couldn't be read.
@@ -82,9 +78,8 @@ impl UsageLimits {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct UsageWindow {
     pub kind: UsageWindowKind,
     /// The model a window is limited to, as the provider names it; `None` covers every model.
@@ -96,18 +91,16 @@ pub struct UsageWindow {
     pub resets_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum UsageWindowKind {
     Session,
     Weekly,
 }
 
 /// Session resets the plan banked, each spendable once to clear the session limit early.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct BankedResets {
     /// Zero when none can be spent now.
     pub count: u32,
@@ -119,13 +112,12 @@ pub struct BankedResets {
 }
 
 /// What spending a banked reset did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum BankedResetSpend {
     /// The session limit was cleared.
     Reset,
@@ -151,9 +143,8 @@ impl BankedResetSpend {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum BankedResetFailure {
     /// The provider's login or account file couldn't be read.
     LoginUnreadable,

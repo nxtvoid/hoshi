@@ -548,7 +548,7 @@ impl LimitAction {
                     thread_id: thread_id.to_owned(),
                 });
                 if let Err(error) = woken {
-                    eprintln!("hoshi-native: could not wake a thread: {error}");
+                    eprintln!("hoshi: could not wake a thread: {error}");
                 }
             }
         }

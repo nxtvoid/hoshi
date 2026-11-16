@@ -82,6 +82,7 @@ gpui_kit::assets::icon_assets!(
         Plug,
         RefreshCw,
         RotateCcw,
+        RotateCw,
         Search,
         Send,
         Settings,

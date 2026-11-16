@@ -639,7 +639,7 @@ impl PullRequestSurface {
                 .background_spawn(async move { engine.dispatch(send) })
                 .await;
             if let Err(error) = sent {
-                eprintln!("hoshi-native: could not address the comments: {error}");
+                eprintln!("hoshi: could not address the comments: {error}");
             }
             this.update(cx, |this, cx| {
                 this.sending = false;

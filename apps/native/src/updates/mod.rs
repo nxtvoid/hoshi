@@ -5,15 +5,19 @@ mod ui_tests;
 
 use crate::m;
 use crate::state::Workspace;
+use futures::StreamExt as _;
+use gpui_kit::component::progress::ProgressCircle;
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use hoshi_app::app_update::InstallerFormat;
 use hoshi_core::{AppRelease, ProviderUpdate, ProviderVersion};
 use hoshi_ui::assets::brand;
 use hoshi_ui::prelude::*;
 use model::{
-    AppUpdate, UpdateBadge, UpdateButton, after_check, check_due, provider_badge, release_changes,
-    release_compare_url, release_notes_key, release_notes_target, update_button, update_ended,
+    AppUpdate, UpdateBadge, UpdateButton, after_check, check_due, download_percent, provider_badge,
+    release_changes, release_compare_url, release_notes_key, release_notes_target, update_button,
+    update_ended,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -107,7 +111,7 @@ impl UpdatesButton {
 
     /// Reads the release feed; `manual` shows the check and how it ended.
     fn check(&mut self, manual: bool, cx: &mut Context<Self>) {
-        if !APP_UPDATES_ENABLED {
+        if !APP_UPDATES_ENABLED || self.app.busy() {
             return;
         }
         if manual {
@@ -132,7 +136,7 @@ impl UpdatesButton {
         }
         self.last_checked = Some(Instant::now());
         if let Err(error) = &found {
-            eprintln!("hoshi-native: failed to check for an app update: {error}");
+            eprintln!("hoshi: failed to check for an app update: {error}");
         }
         self.app = after_check(&self.app, found, INSTALLED);
         match self.app {
@@ -177,11 +181,98 @@ impl UpdatesButton {
                         cx.notify();
                     }
                     Err(error) => {
-                        eprintln!("hoshi-native: failed to read the release notes: {error}")
+                        eprintln!("hoshi: failed to read the release notes: {error}")
                     }
                 }
             })
             .ok();
+        })
+        .detach();
+    }
+
+    /// Downloads the update found last and checks its signature; `restart` installs it.
+    fn download(&mut self, cx: &mut Context<Self>) {
+        if self.app.busy() {
+            return;
+        }
+        let Some(release) = self.app.release().cloned() else {
+            return;
+        };
+        let Some(installer) = release.installer.clone() else {
+            return;
+        };
+        self.app = AppUpdate::Downloading {
+            release: release.clone(),
+            percent: None,
+        };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (sender, mut progress) = futures::channel::mpsc::unbounded();
+            let download = cx.background_spawn(async move {
+                let dir = hoshi_app::home::resolve()
+                    .map_err(|error| error.to_string())?
+                    .join("caches")
+                    .join("app-update");
+                let mut shown = None;
+                hoshi_app::app_update::download(&installer, &dir, |received, total| {
+                    let percent = download_percent(received, total);
+                    if percent != shown {
+                        shown = percent;
+                        let _ = sender.unbounded_send(percent);
+                    }
+                })
+            });
+            while let Some(percent) = progress.next().await {
+                let shown = this.update(cx, |this, cx| {
+                    if let AppUpdate::Downloading { percent: shown, .. } = &mut this.app {
+                        *shown = percent;
+                        cx.notify();
+                    }
+                });
+                if shown.is_err() {
+                    return;
+                }
+            }
+            let downloaded = download.await;
+            this.update(cx, |this, cx| {
+                this.app = match downloaded {
+                    Ok(installer) => AppUpdate::Ready { release, installer },
+                    Err(error) => {
+                        eprintln!("hoshi: failed to download the app update: {error}");
+                        AppUpdate::Failed { release }
+                    }
+                };
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs the downloaded installer and quits, so it can replace hoshi and start it again.
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        let AppUpdate::Ready { release, installer } = &self.app else {
+            return;
+        };
+        let Some(format) = InstallerFormat::current() else {
+            return;
+        };
+        let (release, installer) = (release.clone(), installer.clone());
+        cx.spawn(async move |this, cx| {
+            let installed = cx
+                .background_spawn(async move { hoshi_app::app_update::install(format, &installer) })
+                .await;
+            match installed {
+                Ok(()) => cx.update(|cx| cx.quit()),
+                Err(error) => {
+                    eprintln!("hoshi: failed to install the app update: {error}");
+                    this.update(cx, |this, cx| {
+                        this.app = AppUpdate::Failed { release };
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
         })
         .detach();
     }
@@ -251,7 +342,13 @@ impl UpdatesButton {
 
     fn details_button(&self, badge: UpdateBadge, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.hoshi().clone();
+        let downloading = match &self.app {
+            AppUpdate::Downloading { percent, .. } => Some(*percent),
+            _ => None,
+        };
         let label = match &self.app {
+            AppUpdate::Downloading { percent, .. } => downloading_label(*percent),
+            AppUpdate::Ready { .. } => m::app_update_restart(),
             AppUpdate::Available { release } if badge == UpdateBadge::Available => {
                 m::app_update_to(&release.version)
             }
@@ -259,13 +356,14 @@ impl UpdatesButton {
         };
         let (icon, tone, spin) = match badge {
             UpdateBadge::Running => (IconName::LoaderCircle, colors.foreground, true),
+            UpdateBadge::Ready => (IconName::RotateCw, colors.foreground, false),
             UpdateBadge::Done => (IconName::CircleCheck, colors.status_done, false),
             UpdateBadge::Failed | UpdateBadge::Available => {
                 (IconName::Download, colors.foreground, false)
             }
         };
         let dot = match badge {
-            UpdateBadge::Available => Some(colors.foreground),
+            UpdateBadge::Available | UpdateBadge::Ready => Some(colors.foreground),
             UpdateBadge::Failed => Some(colors.status_error),
             _ => None,
         };
@@ -279,15 +377,13 @@ impl UpdatesButton {
                 cx.listener(|this, change: &PopoverChange, _, cx| this.set_open(change.open, cx)),
             )
             .trigger(move |open| {
-                let frame = trigger_frame(
-                    "updates-details",
-                    icon_view(icon, tone, spin),
-                    dot,
-                    open,
-                    &colors,
-                )
-                .cursor_pointer()
-                .hover(|style| style.bg(colors.muted));
+                let icon = match downloading {
+                    Some(percent) => progress_ring("updates-progress", percent, tone),
+                    None => icon_view(icon, tone, spin),
+                };
+                let frame = trigger_frame("updates-details", icon, dot, open, &colors)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(colors.muted));
                 TooltipTrigger::new(
                     "updates-details-tooltip",
                     frame,
@@ -307,7 +403,7 @@ impl UpdatesButton {
             .flex()
             .flex_col()
             .gap_3()
-            .when(matches!(self.app, AppUpdate::Available { .. }), |this| {
+            .when(self.app.release().is_some(), |this| {
                 this.child(self.app_details(cx))
             })
             .when_some(version, |this, version| {
@@ -318,10 +414,9 @@ impl UpdatesButton {
 
     fn app_details(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.hoshi().clone();
-        let AppUpdate::Available { release } = &self.app else {
+        let Some(release) = self.app.release() else {
             return div().into_any_element();
         };
-        let url = release.url.clone();
         let tile = div()
             .flex()
             .flex_none()
@@ -347,19 +442,99 @@ impl UpdatesButton {
                 version_change(INSTALLED, &release.version, &colors).into_any_element(),
                 &colors,
             ))
-            .child(update_action(
-                m::app_update_from_release_page(),
+            .child(self.app_action(release, &colors, cx))
+            .children(self.release_notes_view(&release.version, &colors))
+            .into_any_element()
+    }
+
+    fn app_action(
+        &self,
+        release: &AppRelease,
+        colors: &Colors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let button = |id: &'static str, label: String| {
+            Button::new(id)
+                .label(label)
+                .variant(ButtonVariant::Outline)
+                .size(ButtonSize::Sm)
+        };
+        let action = match &self.app {
+            AppUpdate::Downloading { percent, .. } => update_action(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .child(progress_ring(
+                        "app-update-progress",
+                        *percent,
+                        colors.muted_foreground,
+                    ))
+                    .child(downloading_label(*percent)),
+                None,
+                colors,
+            ),
+            AppUpdate::Failed { .. } if release.installer.is_some() => update_action(
+                div()
+                    .flex()
+                    .items_start()
+                    .gap_1p5()
+                    .child(
+                        Icon::new(IconName::TriangleAlert)
+                            .size(px(14.))
+                            .mt(px(1.))
+                            .flex_none()
+                            .text_color(colors.status_error),
+                    )
+                    .child(m::app_update_failed()),
                 Some(
-                    Button::new("app-update-download")
-                        .label(m::app_update_download())
-                        .variant(ButtonVariant::Outline)
-                        .size(ButtonSize::Sm)
-                        .on_click(move |_, _, cx| cx.open_url(&url))
+                    button("app-update-retry", m::provider_update_retry())
+                        .on_click(cx.listener(|this, _, _, cx| this.download(cx)))
                         .into_any_element(),
                 ),
-                &colors,
-            ))
-            .children(self.release_notes_view(&release.version, &colors))
+                colors,
+            ),
+            AppUpdate::Ready { .. } => update_action(
+                m::app_update_restarts(),
+                Some(
+                    button("app-update-restart", m::app_update_restart())
+                        .on_click(cx.listener(|this, _, _, cx| this.restart(cx)))
+                        .into_any_element(),
+                ),
+                colors,
+            ),
+            _ if release.installer.is_some() => update_action(
+                m::app_update_restarts(),
+                Some(
+                    button("app-update-download", m::app_update_download())
+                        .on_click(cx.listener(|this, _, _, cx| this.download(cx)))
+                        .into_any_element(),
+                ),
+                colors,
+            ),
+            _ => {
+                let url = release.url.clone();
+                update_action(
+                    m::app_update_from_release_page(),
+                    Some(
+                        button("app-update-download", m::app_update_download())
+                            .on_click(move |_, _, cx| cx.open_url(&url))
+                            .into_any_element(),
+                    ),
+                    colors,
+                )
+            }
+        };
+        let selector = match &self.app {
+            AppUpdate::Downloading { .. } => "updates-app-downloading",
+            AppUpdate::Failed { .. } if release.installer.is_some() => "updates-app-failed",
+            AppUpdate::Ready { .. } => "updates-app-ready",
+            _ if release.installer.is_some() => "updates-app-install",
+            _ => "updates-app-release-page",
+        };
+        div()
+            .debug_selector(move || selector.into())
+            .child(action)
             .into_any_element()
     }
 
@@ -587,6 +762,23 @@ fn reload_models(workspace: &Entity<Workspace>, cx: &mut Context<UpdatesButton>)
             .ok();
     })
     .detach();
+}
+
+fn downloading_label(percent: Option<u8>) -> String {
+    match percent {
+        Some(percent) => m::app_update_downloading_percent(percent),
+        None => m::app_update_downloading(),
+    }
+}
+
+/// How much of the download arrived; spins while its size is unknown.
+fn progress_ring(id: &'static str, percent: Option<u8>, tone: Hsla) -> AnyElement {
+    ProgressCircle::new(id)
+        .value(f32::from(percent.unwrap_or(25)))
+        .loading(percent.is_none())
+        .color(tone)
+        .size(px(14.))
+        .into_any_element()
 }
 
 fn icon_view(icon: IconName, tone: Hsla, spin: bool) -> AnyElement {

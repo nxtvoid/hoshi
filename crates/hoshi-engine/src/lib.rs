@@ -161,8 +161,8 @@ pub struct ProvidersStatus {
     pub usage_limits: HashMap<String, UsageLimits>,
 }
 
-/// Shared by every thread that talks to the engine: Tauri commands and the
-/// reader threads of running turns.
+/// Shared by every thread that talks to the engine: the app and the reader threads of
+/// running turns.
 pub struct Engine {
     state: Arc<Mutex<State>>,
     terminals: Arc<Terminals>,

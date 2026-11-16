@@ -275,7 +275,7 @@ pub fn is_reserved_theme_id(id: &str) -> bool {
     RESERVED_THEME_IDS.contains(&id)
 }
 
-/// `packages/ui/src/styles/globals.css`, `:root`.
+/// `crates/hoshi-ui/assets/globals.css`, `:root`.
 static STANDARD_LIGHT: LazyLock<ThemeColors> = LazyLock::new(|| {
     ThemeColors::from_pairs(&[
         ("background", "oklch(1 0 0)"),
@@ -316,7 +316,7 @@ static STANDARD_LIGHT: LazyLock<ThemeColors> = LazyLock::new(|| {
     ])
 });
 
-/// `packages/ui/src/styles/globals.css`, `.dark`.
+/// `crates/hoshi-ui/assets/globals.css`, `.dark`.
 static STANDARD_DARK: LazyLock<ThemeColors> = LazyLock::new(|| {
     ThemeColors::from_pairs(&[
         ("background", "oklch(0.145 0 0)"),
@@ -1526,7 +1526,7 @@ pub(crate) mod tests {
     fn stylesheet() -> String {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../packages/ui/src/styles/globals.css"
+            "/../../crates/hoshi-ui/assets/globals.css"
         );
         std::fs::read_to_string(path)
             .expect("globals.css")

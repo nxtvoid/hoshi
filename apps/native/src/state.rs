@@ -908,7 +908,7 @@ impl ThreadState {
                         thread.items = page.items;
                         thread.has_older = page.has_older;
                     }
-                    Err(error) => eprintln!("hoshi-native: transcript failed: {error}"),
+                    Err(error) => eprintln!("hoshi: transcript failed: {error}"),
                 }
                 thread.load_history(cx);
                 cx.notify();
@@ -960,7 +960,7 @@ impl ThreadState {
                         cx.notify();
                     }
                     Ok(None) => {}
-                    Err(error) => eprintln!("hoshi-native: could not read a tool call: {error}"),
+                    Err(error) => eprintln!("hoshi: could not read a tool call: {error}"),
                 }
             })
             .ok();
@@ -1005,7 +1005,7 @@ impl ThreadState {
                         items.append(&mut thread.items);
                         thread.items = items;
                     }
-                    Err(error) => eprintln!("hoshi-native: older transcript failed: {error}"),
+                    Err(error) => eprintln!("hoshi: older transcript failed: {error}"),
                 }
                 thread.load_history(cx);
                 cx.notify();
@@ -1047,7 +1047,7 @@ impl ThreadState {
                 match page {
                     Ok(page) => thread.add_history(page, cx),
                     Err(error) => {
-                        eprintln!("hoshi-native: inherited history failed: {error}");
+                        eprintln!("hoshi: inherited history failed: {error}");
                         thread.next_history = thread.lineage.len();
                     }
                 }

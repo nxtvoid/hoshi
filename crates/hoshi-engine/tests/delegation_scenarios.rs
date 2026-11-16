@@ -1,6 +1,5 @@
 //! Real Claude Code agents delegate tasks through hoshi's MCP server while everything the UI
-//! would receive is recorded, for `apps/desktop/tests/lib/task-run-replays.test.ts` to replay
-//! against the UI's own logic. Each run spends tokens, so they only run on request:
+//! would receive is recorded. Each run spends tokens, so they only run on request:
 //! `cargo test -p hoshi-engine --test delegation_scenarios -- --ignored --test-threads=3`
 //!
 //! `HOSHI_SCENARIO_MODEL` picks the model, `HOSHI_SCENARIO_DIR` where the recordings go.
@@ -232,10 +231,7 @@ fn record(scenario: Scenario) {
     });
     scrub(&mut recording, &hidden_paths(&root));
     let dir = std::env::var("HOSHI_SCENARIO_DIR").map_or_else(
-        |_| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../apps/desktop/tests/fixtures/task-runs")
-        },
+        |_| Path::new(env!("CARGO_TARGET_TMPDIR")).join("task-runs"),
         PathBuf::from,
     );
     std::fs::create_dir_all(&dir).unwrap();

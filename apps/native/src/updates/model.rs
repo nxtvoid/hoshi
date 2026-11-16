@@ -1,4 +1,5 @@
 use hoshi_core::{AppRelease, ProviderUpdate, ProviderVersion};
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// A check is due on focus once the last one is this old.
@@ -9,6 +10,7 @@ pub const RECHECK_ON_FOCUS_AFTER: Duration = Duration::from_secs(2 * 60);
 pub enum UpdateBadge {
     Available,
     Running,
+    Ready,
     Failed,
     Done,
 }
@@ -16,7 +18,8 @@ pub enum UpdateBadge {
 impl UpdateBadge {
     fn weight(self) -> u8 {
         match self {
-            Self::Running => 4,
+            Self::Running => 5,
+            Self::Ready => 4,
             Self::Failed => 3,
             Self::Done => 2,
             Self::Available => 1,
@@ -24,15 +27,51 @@ impl UpdateBadge {
     }
 }
 
-/// hoshi's own update, from its release feed. Without an installer, an update found is
-/// downloaded from its release page.
+/// hoshi's own update, from its release feed. A release without an installer for this machine
+/// is downloaded from its release page.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppUpdate {
     Idle,
     Checking,
-    UpToDate { version: String },
-    CheckFailed { message: String },
-    Available { release: AppRelease },
+    UpToDate {
+        version: String,
+    },
+    CheckFailed {
+        message: String,
+    },
+    Available {
+        release: AppRelease,
+    },
+    /// `percent` is `None` while the size is unknown.
+    Downloading {
+        release: AppRelease,
+        percent: Option<u8>,
+    },
+    /// Downloaded and verified; restarting installs it.
+    Ready {
+        release: AppRelease,
+        installer: PathBuf,
+    },
+    Failed {
+        release: AppRelease,
+    },
+}
+
+impl AppUpdate {
+    pub fn release(&self) -> Option<&AppRelease> {
+        match self {
+            Self::Available { release }
+            | Self::Downloading { release, .. }
+            | Self::Ready { release, .. }
+            | Self::Failed { release } => Some(release),
+            _ => None,
+        }
+    }
+
+    /// A download or install is under way, which a check must not replace.
+    pub fn busy(&self) -> bool {
+        matches!(self, Self::Downloading { .. } | Self::Ready { .. })
+    }
 }
 
 /// What the sidebar's update button does: check the feed, or open the update details.
@@ -86,7 +125,13 @@ pub fn provider_badge(version: Option<&ProviderVersion>, seen: bool) -> Option<U
 }
 
 pub fn app_badge(update: &AppUpdate) -> Option<UpdateBadge> {
-    matches!(update, AppUpdate::Available { .. }).then_some(UpdateBadge::Available)
+    match update {
+        AppUpdate::Available { .. } => Some(UpdateBadge::Available),
+        AppUpdate::Downloading { .. } => Some(UpdateBadge::Running),
+        AppUpdate::Ready { .. } => Some(UpdateBadge::Ready),
+        AppUpdate::Failed { .. } => Some(UpdateBadge::Failed),
+        _ => None,
+    }
 }
 
 /// The badge that says the most, so a running update is never hidden.
@@ -109,6 +154,9 @@ pub fn after_check(
     found: Result<Option<AppRelease>, String>,
     installed: &str,
 ) -> AppUpdate {
+    if current.busy() {
+        return current.clone();
+    }
     let checking = matches!(current, AppUpdate::Checking);
     match found {
         Ok(Some(release)) => AppUpdate::Available { release },
@@ -128,10 +176,12 @@ pub fn release_notes_key(installed: &str, available: &str) -> String {
 
 /// The version whose release notes the update details show.
 pub fn release_notes_target(update: &AppUpdate) -> Option<&str> {
-    match update {
-        AppUpdate::Available { release } => Some(&release.version),
-        _ => None,
-    }
+    update.release().map(|release| release.version.as_str())
+}
+
+/// Whole percent of a download; `None` while its size is unknown.
+pub fn download_percent(received: u64, total: u64) -> Option<u8> {
+    (total > 0).then(|| (received.min(total) * 100 / total) as u8)
 }
 
 /// A release body's bullet points, as plain text.
@@ -154,9 +204,9 @@ pub fn release_compare_url(installed: &str, available: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppUpdate, UpdateBadge, UpdateButton, after_check, check_due, provider_badge,
-        release_changes, release_compare_url, release_notes_target, strongest_badge, update_button,
-        update_ended,
+        AppUpdate, UpdateBadge, UpdateButton, after_check, check_due, download_percent,
+        provider_badge, release_changes, release_compare_url, release_notes_target,
+        strongest_badge, update_button, update_ended,
     };
     use hoshi_core::{AppRelease, ProviderUpdate, ProviderUpdateFailure, ProviderVersion};
     use std::time::Duration;
@@ -167,6 +217,7 @@ mod tests {
             published_at: "2026-11-01T00:00:00Z".into(),
             body: String::new(),
             url: format!("https://github.com/nxtvoid/hoshi/releases/tag/v{version}"),
+            installer: None,
         }
     }
 
@@ -304,6 +355,66 @@ mod tests {
         );
         let found = after_check(&AppUpdate::Idle, Ok(Some(release("0.1.0"))), "0.0.9");
         assert_eq!(release_notes_target(&found), Some("0.1.0"));
+    }
+
+    #[test]
+    fn a_check_never_replaces_a_download_or_a_ready_update() {
+        let downloading = AppUpdate::Downloading {
+            release: release("1.0.1"),
+            percent: Some(40),
+        };
+        assert_eq!(
+            after_check(&downloading, Ok(Some(release("1.0.2"))), "1.0.0"),
+            downloading
+        );
+        let ready = AppUpdate::Ready {
+            release: release("1.0.1"),
+            installer: "setup.exe".into(),
+        };
+        assert_eq!(after_check(&ready, Ok(None), "1.0.0"), ready);
+        let failed = AppUpdate::Failed {
+            release: release("1.0.1"),
+        };
+        assert_eq!(
+            after_check(&failed, Ok(Some(release("1.0.2"))), "1.0.0"),
+            AppUpdate::Available {
+                release: release("1.0.2")
+            }
+        );
+    }
+
+    #[test]
+    fn the_app_update_badges_what_it_is_doing() {
+        let badge = |update| update_button(&update, None, true);
+        assert_eq!(
+            badge(AppUpdate::Downloading {
+                release: release("1.0.1"),
+                percent: None
+            }),
+            UpdateButton::Details {
+                badge: UpdateBadge::Running
+            }
+        );
+        assert_eq!(
+            badge(AppUpdate::Ready {
+                release: release("1.0.1"),
+                installer: "setup.exe".into()
+            }),
+            UpdateButton::Details {
+                badge: UpdateBadge::Ready
+            }
+        );
+        assert_eq!(
+            strongest_badge(Some(UpdateBadge::Ready), Some(UpdateBadge::Failed)),
+            Some(UpdateBadge::Ready)
+        );
+    }
+
+    #[test]
+    fn download_percent_is_whole_and_unknown_without_a_size() {
+        assert_eq!(download_percent(0, 0), None);
+        assert_eq!(download_percent(1, 3), Some(33));
+        assert_eq!(download_percent(5, 3), Some(100));
     }
 
     #[test]

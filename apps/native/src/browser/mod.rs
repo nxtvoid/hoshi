@@ -453,7 +453,7 @@ fn run_requests(
             }
         });
     if let Err(error) = spawned {
-        eprintln!("hoshi-native: could not start the browser thread: {error}");
+        eprintln!("hoshi: could not start the browser thread: {error}");
     }
     sender
 }
@@ -500,7 +500,7 @@ fn start_worker(
     match spawned {
         Ok(_) => Some(sender),
         Err(error) => {
-            eprintln!("hoshi-native: could not start a browser page thread: {error}");
+            eprintln!("hoshi: could not start a browser page thread: {error}");
             None
         }
     }
@@ -532,7 +532,7 @@ fn run_request(
         }
     };
     if let Err(error) = result {
-        eprintln!("hoshi-native: browser request failed: {error:?}");
+        eprintln!("hoshi: browser request failed: {error:?}");
         if reported {
             let _ = failures.unbounded_send(thread_id.to_owned());
         }

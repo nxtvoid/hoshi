@@ -25,7 +25,7 @@ mod thread;
 mod usage;
 mod workspace;
 
-pub use app_release::AppRelease;
+pub use app_release::{AppInstaller, AppRelease};
 pub use browser::{BrowserFrame, BrowserInput, BrowserPage, BrowserPoint};
 pub use composer::{EntryKind, MessageAttachment, SlashCommand, WorkspaceEntry};
 pub use diff::{DiffFile, DiffFileStatus, DiffScope, FileDiff};

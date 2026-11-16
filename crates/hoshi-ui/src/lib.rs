@@ -1,4 +1,4 @@
-//! hoshi's native components and theme. Like `@hoshi/ui` on the web, nothing here knows the
+//! hoshi's native components and theme. Nothing here knows the
 //! app: no engine, no `hoshi-core` types, no stores. Text and state come in from the caller.
 
 pub mod assets;

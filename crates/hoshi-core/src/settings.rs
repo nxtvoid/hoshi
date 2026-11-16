@@ -1,10 +1,8 @@
 use crate::{AccessMode, Effort, SnoozePreset, default_snooze_presets};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct AppSettings {
     pub providers: ProviderSettings,
     /// Shows the composer's Plan toggle.
@@ -20,9 +18,8 @@ pub struct AppSettings {
 }
 
 /// What the app shows when it opens.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum StartupView {
     #[default]
     Inbox,
@@ -30,9 +27,8 @@ pub enum StartupView {
     LastProject,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct GeneralSettings {
     pub startup_view: StartupView,
     /// Idle threads untouched for this many days move to Inactive.
@@ -76,18 +72,16 @@ impl Default for GeneralSettings {
 }
 
 /// What a new thread starts with; each `None` keeps what the last one was started with.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct NewThreadSettings {
     pub model: Option<NewThreadModel>,
     pub access_mode: Option<AccessMode>,
     pub workspace: Option<NewThreadWorkspace>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct NewThreadModel {
     pub provider: String,
     pub model: String,
@@ -100,18 +94,16 @@ pub struct NewThreadModel {
 }
 
 /// Where a new thread in a project runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum NewThreadWorkspace {
     Local,
     NewWorktree,
 }
 
 /// hoshi's headless browser: who uses it and how its pages open.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct BrowserSettings {
     /// Agents get the browser's tools. A change reaches an agent when its session next
     /// starts.
@@ -147,9 +139,8 @@ impl Default for BrowserSettings {
 }
 
 /// Where links in the chat open.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum LinkTarget {
     /// The user's default browser.
     #[default]
@@ -158,9 +149,8 @@ pub enum LinkTarget {
     Hoshi,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum SearchEngine {
     #[default]
     DuckDuckGo,
@@ -172,9 +162,8 @@ pub enum SearchEngine {
     Custom,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum PageSize {
     /// The side panel's size, while the panel shows the page.
     Fill,
@@ -184,9 +173,8 @@ pub enum PageSize {
     Phone,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum PageColorScheme {
     /// The browser's own, which follows the system.
     #[default]
@@ -196,9 +184,8 @@ pub enum PageColorScheme {
 }
 
 /// How a new thread gets its title.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadTitleSettings {
     /// A small model reads the first message and names the thread; otherwise its
     /// first line does.
@@ -222,17 +209,15 @@ impl Default for ThreadTitleSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct FavoriteModel {
     pub provider: String,
     pub model: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct ProviderSettings {
     pub claude_code: ClaudeCodeSettings,
     pub copilot: CopilotSettings,
@@ -260,9 +245,8 @@ impl Default for ProviderSettings {
 pub const IDLE_COMPACTION_TOKENS: u64 = 200_000;
 
 /// When an idle Claude thread with a large context compacts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum IdleCompaction {
     /// Once the prompt cache expired, the composer offers to compact before the next message.
     #[default]
@@ -272,9 +256,8 @@ pub enum IdleCompaction {
     Never,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct CodexSettings {
     /// Listed among the providers; one not added is never run.
     pub added: bool,
@@ -296,9 +279,8 @@ impl Default for CodexSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct CopilotSettings {
     /// Listed among the providers; one not added is never run.
     pub added: bool,
@@ -316,9 +298,8 @@ impl Default for CopilotSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct ClaudeCodeSettings {
     /// Listed among the providers; one not added is never run.
     pub added: bool,
@@ -339,9 +320,8 @@ impl Default for ClaudeCodeSettings {
 }
 
 /// The model and effort of the subagents and delegated tasks an agent starts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum SubagentEffort {
     /// The thread's own, unless the user asks for others.
     Thread,

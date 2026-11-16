@@ -1,6 +1,5 @@
-# Builds hoshi for Windows and Linux when a version tag is pushed, then signs the
-# installers for the updater and drafts a GitHub release with them and `latest.json`.
-# Publishing the draft is what makes installed apps see the update.
+# Builds hoshi for Windows and Linux when a version tag is pushed, then drafts a GitHub release
+# with the installers. Publishing the draft is what makes installed apps see the update.
 #
 # Building runs every dependency's code, so it gets no secrets and a read-only token.
 # Only the release job, which runs no build, sees the signing key and may write.
@@ -22,9 +21,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [windows-latest, ubuntu-22.04]
+        include:
+          - platform: windows-latest
+            format: nsis
+          - platform: ubuntu-22.04
+            format: deb
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -35,9 +38,9 @@ jobs:
       - name: Check the tag matches the app version
         shell: bash
         run: |
-          version=$(node -p "require('./apps/desktop/package.json').version")
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in apps/desktop/package.json"
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
             exit 1
           fi
 
@@ -45,29 +48,25 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev pkg-config
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-dev \
+            libfontconfig1-dev libfreetype6-dev libdbus-1-dev pkg-config
 
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.4
-          no-cache: true
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --version 0.11.8 --locked
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      # Unsigned here; the release job signs. `--locked` refuses a Cargo.lock that drifted.
-      - name: Build
+      # Builds with `--locked`, which refuses a Cargo.lock that drifted.
+      - name: Build and package
         shell: bash
-        run: bun run --cwd apps/desktop tauri build --ci --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
+        env:
+          FORMAT: ${{ matrix.format }}
+        run: cargo packager --release -p hoshi-native -f "$FORMAT"
 
       - name: Collect the installers
         shell: bash
         run: |
           shopt -s nullglob
           mkdir installers
-          cp target/release/bundle/nsis/*-setup.exe target/release/bundle/msi/*.msi \
-            target/release/bundle/appimage/*.AppImage target/release/bundle/deb/*.deb \
-            target/release/bundle/rpm/*.rpm installers/
+          cp target/release/hoshi_*-setup.exe target/release/hoshi_*.deb installers/
           ls -l installers
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -78,7 +77,7 @@ jobs:
           retention-days: 7
 
   release:
-    name: Sign and draft the release
+    name: Draft the release
     needs: build
     runs-on: ubuntu-22.04
     timeout-minutes: 15
@@ -96,8 +95,8 @@ jobs:
           bun-version: 1.4.4
           no-cache: true
 
-      # Only for the Tauri CLI; no install scripts run, and nothing gets built.
-      - name: Install the Tauri CLI
+      # Only for the signer; no install scripts run, and nothing gets built.
+      - name: Install the signer
         run: bun install --frozen-lockfile --ignore-scripts
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -106,19 +105,16 @@ jobs:
           path: installers
           merge-multiple: true
 
-      # The signature carries the version, which the updater requires (`requireSignedVersion`).
+      # The app installs an update only when its `.sig` checks out against the key it ships.
       - name: Sign the installers
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
-          version="${GITHUB_REF_NAME#v}"
           for file in "$GITHUB_WORKSPACE"/installers/*; do
-            bun run --cwd apps/desktop tauri signer sign --app-version "$version" "$file"
+            bun x tauri signer sign "$file"
           done
-
-      - name: Write latest.json
-        run: bun scripts/updater-manifest.ts installers "${GITHUB_REF_NAME#v}" "$GITHUB_REPOSITORY" > latest.json
+          ls -l installers
 
       - name: Write the release notes
         run: |
@@ -129,9 +125,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          shopt -s extglob
           gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
             --repo "$GITHUB_REPOSITORY" \
             --title "hoshi $GITHUB_REF_NAME" \
             --notes-file notes.md \
-            installers/!(*.sig) latest.json
+            installers/*

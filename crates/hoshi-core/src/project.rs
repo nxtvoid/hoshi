@@ -1,10 +1,8 @@
 use crate::{CommandError, ForgeKind};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Project {
     pub id: String,
     pub title: String,
@@ -19,9 +17,8 @@ pub struct Project {
 }
 
 /// What the project sets for itself over the app's settings; each `None` inherits them.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export)]
 pub struct ProjectSettings {
     /// Over `general.continue_after_restart`.
     pub continue_after_restart: Option<bool>,
@@ -36,18 +33,16 @@ impl ProjectSettings {
 }
 
 /// Where a setting's value comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum SettingSource {
     Project,
     Global,
 }
 
 /// A setting as it applies to a project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct EffectiveSetting<T> {
     pub value: T,
     pub source: SettingSource,
@@ -70,9 +65,8 @@ impl<T> EffectiveSetting<T> {
 
 /// How hoshi prepares every worktree it makes for the project: files the repository
 /// doesn't track copied from its root, then a command such as `bun install`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct WorktreeSetup {
     /// Paths relative to the project root with `/` separators; `*` and `?` match within
     /// one segment.
@@ -127,9 +121,8 @@ pub fn setup_file_paths<S: AsRef<str>>(raw: &[S]) -> Result<Vec<String>, Command
 
 /// A worktree's setup, running or finished: its files copied, then its command in a
 /// terminal of its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct WorktreeSetupRun {
     pub thread_id: String,
     /// `None` until the command starts, and when there is none.
@@ -148,9 +141,8 @@ pub struct WorktreeSetupRun {
     pub held_messages: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum WorktreeSetupStatus {
     Running,
     Succeeded,
@@ -158,9 +150,8 @@ pub enum WorktreeSetupStatus {
 }
 
 /// The folders inside one folder, for choosing where a project lives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct FolderListing {
     /// Absolute and normalized.
     pub path: String,
@@ -171,9 +162,8 @@ pub struct FolderListing {
 }
 
 /// A repository on a forge, found to be cloned as a project.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct RemoteRepository {
     pub forge: ForgeKind,
     /// `owner/name`.

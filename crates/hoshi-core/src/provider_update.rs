@@ -1,10 +1,8 @@
 use serde::Serialize;
-use ts_rs::TS;
 
 /// A provider's CLI as it changed, by provider id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ProviderVersionUpdate {
     pub provider: String,
     /// `None` once the provider is disabled.
@@ -12,9 +10,8 @@ pub struct ProviderVersionUpdate {
 }
 
 /// An enabled provider's CLI against its latest release.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ProviderVersion {
     /// `None` when the CLI can't be run.
     pub installed: Option<String>,
@@ -27,13 +24,12 @@ pub struct ProviderVersion {
     pub update: ProviderUpdate,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ProviderUpdate {
     #[default]
     Idle,
@@ -53,13 +49,12 @@ pub enum ProviderUpdate {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ProviderUpdateFailure {
     /// Turns are running on the CLI it would replace.
     TurnsRunning,
@@ -80,13 +75,12 @@ pub enum ProviderUpdateFailure {
 }
 
 /// Where an install hoshi runs itself is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum UpdateStep {
     Downloading {
         /// `None` while the size is unknown.

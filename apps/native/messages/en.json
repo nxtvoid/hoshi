@@ -1349,6 +1349,11 @@
   "app_update_off_in_dev": "Updates are off in dev builds",
   "app_update_to": "Update to v{version}",
   "app_update_download": "Download",
+  "app_update_restart": "Restart to update",
+  "app_update_restarts": "hoshi restarts to finish the update.",
+  "app_update_downloading": "Downloading…",
+  "app_update_downloading_percent": "Downloading {percent}%",
+  "app_update_failed": "The update couldn't be installed. Try again later.",
   "app_update_from_release_page": "This build doesn't update itself. Get the new version from its release page.",
   "view_on_github": "View on GitHub",
   "app_update_changes": [

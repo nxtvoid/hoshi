@@ -1,5 +1,4 @@
-// Sets hoshi's version everywhere it is written: `bun run bump 0.2.0`.
-// The app reads it from apps/desktop/package.json; the crates share the workspace's.
+// Sets hoshi's version, which every crate takes from the workspace: `bun run bump 0.2.0`.
 
 const version = Bun.argv[2]
 if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
@@ -8,17 +7,12 @@ if (!version || !/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
 }
 
 const root = new URL('..', import.meta.url).pathname.replace(/^\/(\w:)/, '$1')
-const packagePath = `${root}apps/desktop/package.json`
 const cargoPath = `${root}Cargo.toml`
 
-const pkg = await Bun.file(packagePath).json()
-const previous = pkg.version
-pkg.version = version
-await Bun.write(packagePath, `${JSON.stringify(pkg, null, 2)}\n`)
-
 const cargo = await Bun.file(cargoPath).text()
-const workspaceVersion = /(\[workspace\.package\][^[]*?\nversion = )"[^"]*"/
-if (!workspaceVersion.test(cargo)) {
+const workspaceVersion = /(\[workspace\.package\][^[]*?\nversion = )"([^"]*)"/
+const previous = cargo.match(workspaceVersion)?.[2]
+if (!previous) {
   console.error('No version under [workspace.package] in Cargo.toml')
   process.exit(1)
 }

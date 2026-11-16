@@ -175,7 +175,7 @@ impl SnoozeLine {
         let engine = self.workspace.read(cx).engine.clone();
         cx.background_spawn(async move {
             if let Err(error) = engine.dispatch(Command::ThreadWokeDismiss { thread_id }) {
-                eprintln!("hoshi-native: could not dismiss the woke notice: {error:?}");
+                eprintln!("hoshi: could not dismiss the woke notice: {error:?}");
             }
         })
         .detach();

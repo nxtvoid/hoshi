@@ -1,7 +1,0 @@
-{
-  "extends": "@hoshi/ts-config/react.json",
-  "compilerOptions": {
-    "paths": { "@hoshi/ui/*": ["./src/*"] }
-  },
-  "include": ["src"]
-}

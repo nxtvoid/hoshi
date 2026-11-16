@@ -7,7 +7,6 @@ use chrono::{
     Utc, Weekday,
 };
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// The most choices a snooze menu offers.
 pub const MAX_SNOOZE_PRESETS: usize = 8;
@@ -19,13 +18,12 @@ const HOUR_MS: i64 = 60 * MINUTE_MS;
 const DAY_MS: i64 = 24 * HOUR_MS;
 
 /// A choice of the snooze menu, as the settings keep it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum SnoozePreset {
     /// This many minutes after it is picked.
     After { minutes: u32 },
@@ -34,9 +32,8 @@ pub enum SnoozePreset {
 }
 
 /// A weekday is the next one after today.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum SnoozeDay {
     Today,
     Tomorrow,

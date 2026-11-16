@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// What a thread's browser page painted, a JPEG, while the panel shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,18 +26,16 @@ impl BrowserFrame {
 }
 
 /// A point of the page, in CSS pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct BrowserPoint {
     pub x: f64,
     pub y: f64,
 }
 
 /// Where a thread's browser page is, and what last touched it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct BrowserPage {
     pub thread_id: String,
     /// `false` once the page closed.
@@ -58,13 +55,12 @@ pub struct BrowserPage {
 }
 
 /// What the user does on the page in the panel.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum BrowserInput {
     Click {
         x: f64,

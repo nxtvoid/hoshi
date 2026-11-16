@@ -9,17 +9,15 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use ts_rs::TS;
 
 const TITLE_MAX_CHARS: usize = 60;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum Command {
     ProjectCreate {
         project_id: String,
@@ -163,13 +161,12 @@ pub enum Command {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum Event {
     ProjectCreated {
         project: Project,
@@ -376,13 +373,12 @@ pub enum Event {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(
     tag = "code",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum CommandError {
     #[error("project {project_id} already exists")]
     DuplicateProjectId { project_id: String },
@@ -567,9 +563,8 @@ pub enum CommandError {
 }
 
 /// What the UI reads at startup: every project and thread, without transcripts.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Snapshot {
     pub sequence: u64,
     pub projects: Vec<Project>,
@@ -595,18 +590,16 @@ pub struct Snapshot {
 }
 
 /// The branch a project's root folder is on; `None` off any branch or outside git.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ProjectBranch {
     pub project_id: String,
     pub branch: Option<String>,
 }
 
 /// A message the user sent that waits for its thread's conversation to be compacted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct HeldMessage {
     pub thread_id: String,
     pub message_id: String,
@@ -615,18 +608,16 @@ pub struct HeldMessage {
 }
 
 /// The message a thread holds until it is compacted; `None` once it went or was taken back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadHeldMessage {
     pub thread_id: String,
     pub message: Option<HeldMessage>,
 }
 
 /// Who sent a message waiting in a thread's queue.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum MessageSender {
     User,
     /// News hoshi brought, such as a delegated task's answer or a pull request's update.
@@ -634,9 +625,8 @@ pub enum MessageSender {
 }
 
 /// A message waiting in a thread's queue for a turn of its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct QueueEntry {
     pub message_id: String,
     pub text: String,
@@ -647,9 +637,8 @@ pub struct QueueEntry {
 }
 
 /// The messages waiting in a thread's queue, in the order they go.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadQueue {
     pub thread_id: String,
     pub messages: Vec<QueueEntry>,
@@ -659,9 +648,8 @@ pub struct ThreadQueue {
 }
 
 /// A delegated task's latest message, shortened to one line for its card.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct TaskPreview {
     pub thread_id: String,
     pub text: String,
@@ -681,18 +669,16 @@ pub fn task_preview(text: &str) -> String {
 }
 
 /// An event as delivered to the UI, with its position in the event log.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct EventEnvelope {
     pub sequence: u64,
     pub event: Event,
 }
 
 /// Which item a [`StreamDelta`] is writing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum StreamKind {
     Text,
     Reasoning,
@@ -701,9 +687,8 @@ pub enum StreamKind {
 }
 
 /// Text an assistant is still writing. Sent to the UI as it streams, never stored.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct StreamDelta {
     pub thread_id: String,
     pub item_id: String,

@@ -1,11 +1,11 @@
-//! The colors come from `packages/ui/src/styles/globals.css`, the same tokens the web UI uses.
+//! The colors come from `assets/globals.css`.
 
 use gpui_kit::component::theme::Theme;
 pub use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::*;
 use std::rc::Rc;
 
-const GLOBALS_CSS: &str = include_str!("../../../packages/ui/src/styles/globals.css");
+const GLOBALS_CSS: &str = include_str!("../assets/globals.css");
 
 pub const SANS: &str = "Geist";
 /// The other interface font hoshi ships, as the web does.

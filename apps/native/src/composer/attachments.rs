@@ -443,7 +443,7 @@ impl Composer {
                             engine.save_file(&name, file_type(&name), &bytes)
                         };
                         saved.map_err(|error| {
-                            eprintln!("hoshi-native: could not save an attachment: {error}");
+                            eprintln!("hoshi: could not save an attachment: {error}");
                             m::composer_attachment_failed(&name)
                         })
                     })
