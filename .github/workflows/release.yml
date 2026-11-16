@@ -3,11 +3,15 @@
 #
 # Building runs every dependency's code, so it gets no secrets and a read-only token.
 # Only the release job, which runs no build, sees the signing key and may write.
+#
+# Run by hand on a branch (`gh workflow run release.yml --ref <branch>`), it only builds and
+# checks the installers: a dry run before tagging.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -35,11 +39,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Check the tag matches the app version
+      - name: Read the app version
+        id: version
         shell: bash
         run: |
           version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
             exit 1
           fi
@@ -61,13 +67,29 @@ jobs:
           FORMAT: ${{ matrix.format }}
         run: cargo packager --release -p hoshi-native -f "$FORMAT"
 
-      - name: Collect the installers
+      # The app looks for its update under exactly this name (`InstallerFormat::asset_name`).
+      - name: Collect the installer
         shell: bash
+        env:
+          FORMAT: ${{ matrix.format }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          shopt -s nullglob
+          case "$FORMAT" in
+            nsis) name="hoshi_${VERSION}_x64-setup.exe" ;;
+            deb) name="hoshi_${VERSION}_amd64.deb" ;;
+          esac
           mkdir installers
-          cp target/release/hoshi_*-setup.exe target/release/hoshi_*.deb installers/
+          cp "target/release/$name" installers/
           ls -l installers
+
+      - name: Check the package installs
+        if: matrix.format == 'deb'
+        run: |
+          sudo apt-get install -y ./installers/*.deb
+          test -x /usr/bin/hoshi
+          test -f /usr/share/applications/dev.hoshi.app.desktop
+          test -f /usr/share/metainfo/dev.hoshi.app.metainfo.xml
+          ls /usr/share/icons/hicolor/*/apps/hoshi.png
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -79,6 +101,7 @@ jobs:
   release:
     name: Draft the release
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     environment: release
