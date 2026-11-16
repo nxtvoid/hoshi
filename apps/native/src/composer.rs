@@ -1458,6 +1458,29 @@ mod ui_tests {
     }
 
     #[gpui_kit::test]
+    fn a_long_question_wraps_inside_the_window(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "long-question");
+        let long = Question {
+            question: "Which of these should the note save? ".repeat(20),
+            ..question(&["one", "two"])
+        };
+        ask(
+            &mut h,
+            "q1",
+            ItemContent::Questions {
+                questions: vec![long, question(&["red", "blue"])],
+                status: RequestStatus::Pending,
+                answers: None,
+            },
+        );
+        h.cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let text = h.cx.debug_bounds("question-text").unwrap();
+        assert!(text.right() <= px(800.), "{text:?}");
+        assert!(text.size.height > px(40.), "{text:?}");
+    }
+
+    #[gpui_kit::test]
     fn a_draft_becomes_a_thread_of_its_project_with_its_first_message(cx: &mut TestAppContext) {
         let mut h = harness(cx, "draft");
         h.workspace.update(&mut h.cx, |workspace, cx| {
