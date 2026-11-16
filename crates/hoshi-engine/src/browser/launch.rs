@@ -195,6 +195,7 @@ fn in_use(_: &Path) -> bool {
 
 /// Who started the browser on a profile, as `<pid> <start time>`; a browser outlives its hoshi
 /// on Windows, as when hoshi was killed.
+#[cfg(windows)]
 const OWNER_FILE: &str = "hoshi-owner";
 
 /// Notes this process as the one whose browser holds `profile`.
@@ -309,8 +310,8 @@ fn read_port_file(path: &Path) -> Option<String> {
 mod tests {
     use super::super::cdp::Connection;
     use super::{
-        BrowserProcess, OWNER_FILE, POLL, RELEASE_TIMEOUT, START_TIMEOUT, find_browser, in_use,
-        launch, left_behind, owner_runs, spare_profile,
+        BrowserProcess, POLL, RELEASE_TIMEOUT, START_TIMEOUT, find_browser, in_use, launch,
+        left_behind, owner_runs, spare_profile,
     };
     use serde_json::json;
     use std::path::Path;
@@ -378,7 +379,7 @@ mod tests {
         };
         let profile = std::env::temp_dir().join(format!("hoshi-left-{}", std::process::id()));
         let left = held(&executable, &profile);
-        std::fs::write(profile.join(OWNER_FILE), "1 1").unwrap();
+        std::fs::write(profile.join(super::OWNER_FILE), "1 1").unwrap();
 
         let again = launch(&executable, &profile).unwrap();
 
