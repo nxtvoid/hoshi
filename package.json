@@ -6,7 +6,7 @@
     "build": "cargo build --release -p hoshi-native",
     "check": "biome check . && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "fix": "biome check --write . && cargo fmt --all",
-    "test": "cargo test --workspace && bun test ./scripts",
+    "test": "cargo test --workspace --no-fail-fast && bun test ./scripts",
     "bump": "bun scripts/bump.ts"
   },
   "devDependencies": {

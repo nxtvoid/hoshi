@@ -1617,13 +1617,18 @@ mod tests {
 
     #[test]
     fn the_plan_comes_from_the_plan_file_in_copilots_session() {
+        let path = |parts: &[&str]| parts.join(std::path::MAIN_SEPARATOR_STR);
         let written = json!({
             "sessionUpdate": "tool_call_update",
-            "content": [{ "type": "diff", "path": "C:\\Users\\me\\.copilot\\session-state\\s1\\plan.md", "newText": "# Plan" }],
+            "content": [{
+                "type": "diff",
+                "path": path(&["", "home", "me", ".copilot", "session-state", "s1", "plan.md"]),
+                "newText": "# Plan",
+            }],
         });
         let elsewhere = json!({
             "sessionUpdate": "tool_call_update",
-            "content": [{ "type": "diff", "path": "C:\\repo\\plan.md", "newText": "# Plan" }],
+            "content": [{ "type": "diff", "path": path(&["", "repo", "plan.md"]), "newText": "# Plan" }],
         });
         assert!(plan_file(&written).is_some());
         assert_eq!(plan_file(&elsewhere), None);
