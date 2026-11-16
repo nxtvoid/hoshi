@@ -1084,14 +1084,7 @@ impl RichEditor {
             .xsmall()
             .ml(px(-4.))
             .mr(px(-4.))
-            .map(|this| match (own_font, kind) {
-                (Some((_, size)), kind) => this.text_size(*size * prompt_scale(kind)),
-                (None, BlockKind::Heading(1)) => this.text_xl(),
-                (None, BlockKind::Heading(2)) => this.text_lg(),
-                (None, BlockKind::Heading(_)) => this.text_base(),
-                (None, BlockKind::Code(_)) => this.text_xs(),
-                (None, _) => this.text_sm(),
-            });
+            .map(|this| block_text_size(this, kind, own_font));
         let render = self.token_renderer.clone();
         textarea = textarea.token(move |context, window, cx| {
             if let Some(mark) = mark_of(context.token()) {
@@ -1123,6 +1116,22 @@ enum Caret {
     Start,
     End,
     At(usize),
+}
+
+/// The text size of a block of `kind`: the prompt's own size scaled to it, or the interface's.
+fn block_text_size<E: Styled>(
+    element: E,
+    kind: &BlockKind,
+    own_font: Option<&(SharedString, Pixels)>,
+) -> E {
+    match (own_font, kind) {
+        (Some((_, size)), kind) => element.text_size(*size * prompt_scale(kind)),
+        (None, BlockKind::Heading(1)) => element.text_xl(),
+        (None, BlockKind::Heading(2)) => element.text_lg(),
+        (None, BlockKind::Heading(_)) => element.text_base(),
+        (None, BlockKind::Code(_)) => element.text_xs(),
+        (None, _) => element.text_sm(),
+    }
 }
 
 /// A block's text size against the prompt's own size, as the interface's sizes stand against
@@ -1357,6 +1366,7 @@ impl Render for RichEditor {
                                 .flex_none()
                                 .w_6()
                                 .pl_1()
+                                .map(|this| block_text_size(this, &block.kind, own_font.as_ref()))
                                 .text_color(colors.muted_foreground)
                                 .child(marker),
                         )
