@@ -18,12 +18,6 @@
     "enabled": true,
     "rules": {
       "preset": "recommended",
-      "nursery": {
-        "useTailwindSortedClasses": {
-          "level": "error",
-          "fix": "safe"
-        }
-      },
       "a11y": {
         "noSvgWithoutTitle": "off"
       },
@@ -41,7 +35,6 @@
   },
   "javascript": {
     "formatter": {
-      "jsxQuoteStyle": "single",
       "quoteProperties": "asNeeded",
       "trailingCommas": "none",
       "semicolons": "asNeeded",
@@ -85,15 +78,6 @@
   ],
   "files": {
     "ignoreUnknown": true,
-    "includes": [
-      "**",
-      "!node_modules",
-      "!dist",
-      "!target",
-      "!**/src-tauri/gen",
-      "!**/src/bindings",
-      "!**/src/routeTree.gen.ts"
-    ]
-  },
-  "tailwind": { "mergeFunctions": ["cn"], "variantFunctions": ["cva"] }
+    "includes": ["**", "!node_modules", "!dist", "!target", "!vendor"]
+  }
 }

@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// What started a thread's server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ServerOrigin {
     Agent,
     Terminal,
@@ -12,9 +10,8 @@ pub enum ServerOrigin {
 
 /// A port on this machine's loopback or wildcard address, held by a process the thread
 /// started.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct LocalServer {
     pub port: u16,
     pub pid: u32,
@@ -25,9 +22,8 @@ pub struct LocalServer {
 }
 
 /// The servers a thread's agent and terminals left listening, by port.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadServers {
     pub thread_id: String,
     pub servers: Vec<LocalServer>,

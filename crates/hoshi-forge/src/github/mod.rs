@@ -5,7 +5,7 @@ mod detail;
 use crate::PullRequestFile;
 use hoshi_core::{
     ChecksState, ForgeKind, PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel,
-    PullRequestState, RemoteRepository,
+    PullRequestState, RemoteRepository, ReviewAction, ReviewApproval, ReviewAsk, ReviewTurn,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -20,8 +20,19 @@ macro_rules! pull_request_fields {
         "number title url isDraft state additions deletions updatedAt headRefName headRefOid baseRefName
         reviewDecision mergeable
         author { login }
-        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
-        reviewThreads(first: 100) { nodes { isResolved } }"
+        commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }"
+    };
+}
+
+/// Who spoke when, read for one pull request at a time: across a search it costs too much.
+macro_rules! review_turn_fields {
+    () => {
+        "reviewThreads(first: 100) { nodes { isResolved comments(last: 1) { nodes { author { login } } } } }
+        latestOpinionatedReviews(first: 20, writersOnly: true) { nodes { author { login } state } }
+        timelineItems(last: 50, itemTypes: [ISSUE_COMMENT, PULL_REQUEST_REVIEW]) { nodes {
+          ... on IssueComment { author { __typename login } createdAt }
+          ... on PullRequestReview { author { __typename login } state submittedAt }
+        } }"
     };
 }
 
@@ -33,6 +44,7 @@ query($owner: String!, $name: String!, $branch: String!) {
     pullRequests(headRefName: $branch, first: 1, orderBy: {field: UPDATED_AT, direction: DESC}) {
       nodes { ",
     pull_request_fields!(),
+    review_turn_fields!(),
     " }
     }
   }
@@ -45,6 +57,7 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) { ",
     pull_request_fields!(),
+    review_turn_fields!(),
     " }
   }
 }"
@@ -58,6 +71,7 @@ query($search: String!, $first: Int!) {
   search(query: $search, type: ISSUE, first: $first) {
     nodes { ... on PullRequest { ",
     pull_request_fields!(),
+    "reviewThreads(first: 100) { nodes { isResolved } }",
     " } }
   }
 }"
@@ -568,6 +582,10 @@ struct PullRequestNode {
     author: Option<Author>,
     commits: Nodes<CommitNode>,
     review_threads: Nodes<ReviewThread>,
+    #[serde(default)]
+    latest_opinionated_reviews: Option<Nodes<OpinionatedReview>>,
+    #[serde(default)]
+    timeline_items: Option<Nodes<TimelineNode>>,
 }
 
 #[derive(Deserialize)]
@@ -595,6 +613,65 @@ struct Rollup {
 #[serde(rename_all = "camelCase")]
 struct ReviewThread {
     is_resolved: bool,
+    #[serde(default)]
+    comments: Option<Nodes<ThreadComment>>,
+}
+
+#[derive(Deserialize)]
+struct ThreadComment {
+    author: Option<Author>,
+}
+
+#[derive(Deserialize)]
+struct OpinionatedReview {
+    author: Option<Author>,
+    state: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelineNode {
+    author: Option<Actor>,
+    state: Option<String>,
+    created_at: Option<String>,
+    submitted_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Actor {
+    #[serde(rename = "__typename")]
+    kind: Option<String>,
+    login: String,
+}
+
+impl TimelineNode {
+    fn approval(&self) -> Option<ReviewApproval> {
+        if self.state.as_deref() != Some("APPROVED") {
+            return None;
+        }
+        Some(ReviewApproval {
+            by: self.author.as_ref()?.login.clone(),
+            at: self.submitted_at.clone()?,
+        })
+    }
+
+    fn action(&self) -> Option<ReviewAction> {
+        let author = self.author.as_ref()?;
+        if author.kind.as_deref() == Some("Bot") {
+            return None;
+        }
+        let (ask, at) = match self.state.as_deref() {
+            None => (ReviewAsk::Comment, self.created_at.clone()?),
+            Some("COMMENTED") => (ReviewAsk::Comment, self.submitted_at.clone()?),
+            Some("CHANGES_REQUESTED") => (ReviewAsk::ChangesRequested, self.submitted_at.clone()?),
+            _ => return None,
+        };
+        Some(ReviewAction {
+            by: author.login.clone(),
+            ask,
+            at,
+        })
+    }
 }
 
 fn pull_request_from(
@@ -639,25 +716,62 @@ fn pull_request_of(node: PullRequestNode) -> PullRequest {
             "PENDING" | "EXPECTED" => Some(ChecksState::Pending),
             _ => None,
         });
+    let author = node.author.map(|author| author.login);
+    let answered_by_author = |thread: &ReviewThread| {
+        let last = thread
+            .comments
+            .as_ref()
+            .and_then(|comments| comments.nodes.last())
+            .and_then(|comment| comment.author.as_ref());
+        matches!((last, &author), (Some(last), Some(author)) if last.login.eq_ignore_ascii_case(author))
+    };
     let unresolved_comments = node
         .review_threads
         .nodes
         .iter()
-        .filter(|thread| !thread.is_resolved)
+        .filter(|thread| !thread.is_resolved && !answered_by_author(thread))
         .count() as u32;
+    let changes_requested_by: Vec<String> = node
+        .latest_opinionated_reviews
+        .iter()
+        .flat_map(|reviews| &reviews.nodes)
+        .filter(|review| review.state == "CHANGES_REQUESTED")
+        .filter_map(|review| Some(review.author.as_ref()?.login.clone()))
+        .collect();
+    let actions: Vec<ReviewAction> = node
+        .timeline_items
+        .iter()
+        .flat_map(|items| &items.nodes)
+        .filter_map(TimelineNode::action)
+        .collect();
+    let approvals: Vec<ReviewApproval> = node
+        .timeline_items
+        .iter()
+        .flat_map(|items| &items.nodes)
+        .filter_map(TimelineNode::approval)
+        .collect();
+    let turn = ReviewTurn::of(
+        author.as_deref(),
+        &actions,
+        &changes_requested_by,
+        &approvals,
+    );
     PullRequest {
         forge: ForgeKind::Github,
         number: node.number,
         title: node.title,
         url: node.url,
-        author: node.author.map(|author| author.login),
+        author,
         head_branch: node.head_ref_name,
         head_sha: node.head_ref_oid,
         base_branch: node.base_ref_name,
         state,
         checks,
         unresolved_comments,
-        changes_requested: node.review_decision.as_deref() == Some("CHANGES_REQUESTED"),
+        open_tasks: 0,
+        changes_requested: node.review_decision.as_deref() == Some("CHANGES_REQUESTED")
+            || !changes_requested_by.is_empty(),
+        turn,
         conflicts: node.mergeable.as_deref() == Some("CONFLICTING"),
         additions: node.additions,
         deletions: node.deletions,
@@ -782,5 +896,42 @@ mod tests {
 
         assert!(blocked.changes_requested && blocked.conflicts);
         assert!(!plain.changes_requested && !plain.conflicts);
+    }
+
+    #[test]
+    fn whose_turn_comes_from_people_not_commits_or_bots() {
+        let reviewed = OPEN_PR.replacen(
+            "\"isDraft\"",
+            r#""reviewThreads": {"nodes": [
+                {"isResolved": false, "comments": {"nodes": [{"author": {"login": "NXTVOID"}}]}},
+                {"isResolved": false, "comments": {"nodes": [{"author": {"login": "luis"}}]}}
+            ]},
+            "latestOpinionatedReviews": {"nodes": [{"author": {"login": "luis"}, "state": "CHANGES_REQUESTED"}]},
+            "timelineItems": {"nodes": [
+                {"author": {"__typename": "User", "login": "luis"}, "state": "CHANGES_REQUESTED", "submittedAt": "2026-11-07T10:00:00Z"},
+                {"author": {"__typename": "User", "login": "nxtvoid"}, "createdAt": "2026-11-07T11:00:00Z"},
+                {"author": {"__typename": "Bot", "login": "ci"}, "createdAt": "2026-11-07T12:00:00Z"},
+                {"author": {"__typename": "User", "login": "eva"}, "state": "APPROVED", "submittedAt": "2026-11-07T12:30:00Z"},
+                {}
+            ]},
+            "isDraft""#,
+            1,
+        );
+        let reviewed = reviewed.replacen(
+            r#""reviewThreads": {"nodes": [{"isResolved": false}, {"isResolved": true}, {"isResolved": false}]}"#,
+            r#""unused": null"#,
+            1,
+        );
+        let pull_request = parse(&response(&reviewed), "fix/sidebar").unwrap().unwrap();
+
+        assert_eq!(pull_request.unresolved_comments, 1);
+        assert!(pull_request.changes_requested);
+        assert_eq!(
+            pull_request.turn,
+            Some(ReviewTurn::Reviewers {
+                waiting_on: vec!["luis".into()],
+                replied_at: "2026-11-07T11:00:00Z".into(),
+            })
+        );
     }
 }

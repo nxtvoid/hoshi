@@ -2,7 +2,8 @@
 
 use hoshi_core::{
     ChecksState, DiffFile, DiffFileStatus, ForgeKind, PullRequest, PullRequestCheck,
-    PullRequestState, ReviewComment, ReviewState, ReviewThread, Reviewer, TimelineItem,
+    PullRequestState, ReviewAction, ReviewApproval, ReviewAsk, ReviewComment, ReviewState,
+    ReviewThread, ReviewTurn, Reviewer, TimelineItem,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -20,12 +21,22 @@ pub struct User {
     pub account_id: Option<String>,
     pub nickname: Option<String>,
     pub display_name: Option<String>,
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
 }
 
 impl User {
     /// App accounts have no nickname, only a display name.
     pub fn login(&self) -> Option<String> {
         self.nickname.clone().or_else(|| self.display_name.clone())
+    }
+
+    /// A person's login; `None` for an app account.
+    fn person(&self) -> Option<String> {
+        if self.kind.as_deref() == Some("app_user") {
+            return None;
+        }
+        self.login()
     }
 }
 
@@ -92,6 +103,7 @@ pub struct RawPullRequest {
     pub reviewers: Vec<User>,
     #[serde(default)]
     pub participants: Vec<Participant>,
+    pub task_count: Option<u32>,
 }
 
 impl RawPullRequest {
@@ -124,32 +136,51 @@ impl RawPullRequest {
     }
 }
 
-/// What a listing leaves out and other endpoints add: checks, open threads, votes, conflicts
-/// and line counts.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// What a listing leaves out and other endpoints add: checks, open threads, tasks, votes,
+/// conflicts, line counts and who spoke when.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
     pub checks: Option<ChecksState>,
     pub unresolved_comments: u32,
     pub changes_requested: bool,
+    pub changes_requested_by: Vec<String>,
     pub conflicts: bool,
     pub additions: u32,
     pub deletions: u32,
+    pub comment_actions: Vec<ReviewAction>,
+    pub vote_actions: Vec<ReviewAction>,
+    pub approvals: Vec<ReviewApproval>,
 }
 
 pub fn pull_request(raw: &RawPullRequest, summary: Summary) -> PullRequest {
+    let author = raw.author.as_ref().and_then(User::login);
+    let actions: Vec<ReviewAction> = summary
+        .comment_actions
+        .iter()
+        .chain(&summary.vote_actions)
+        .cloned()
+        .collect();
+    let turn = ReviewTurn::of(
+        author.as_deref(),
+        &actions,
+        &summary.changes_requested_by,
+        &summary.approvals,
+    );
     PullRequest {
         forge: ForgeKind::Bitbucket,
         number: raw.id,
         title: raw.title.clone(),
         url: raw.url(),
-        author: raw.author.as_ref().and_then(User::login),
+        author,
         head_branch: raw.source.branch.name.clone(),
         head_sha: raw.head_commit().map(str::to_owned),
         base_branch: raw.destination.branch.name.clone(),
         state: raw.state(),
         checks: summary.checks,
         unresolved_comments: summary.unresolved_comments,
+        open_tasks: raw.task_count.unwrap_or_default(),
         changes_requested: summary.changes_requested,
+        turn,
         conflicts: summary.conflicts,
         additions: summary.additions,
         deletions: summary.deletions,
@@ -461,9 +492,38 @@ pub fn review_threads(comments: &[RawComment], pull_request_url: &str) -> Vec<Re
         .collect()
 }
 
-pub fn unresolved_threads(comments: &[RawComment]) -> u32 {
+/// Open threads on lines of code whose last word isn't `author`'s.
+pub fn unresolved_threads(comments: &[RawComment], author: Option<&str>) -> u32 {
     let threads = review_threads(comments, "");
-    threads.iter().filter(|thread| !thread.resolved).count() as u32
+    threads
+        .iter()
+        .filter(|thread| !thread.resolved)
+        .filter(|thread| {
+            let last = thread
+                .comments
+                .last()
+                .and_then(|last| last.author.as_deref());
+            !matches!(
+                (last, author),
+                (Some(last), Some(author)) if last.eq_ignore_ascii_case(author)
+            )
+        })
+        .count() as u32
+}
+
+/// Every comment and reply people left, as what passes the turn.
+pub fn comment_actions(comments: &[RawComment]) -> Vec<ReviewAction> {
+    comments
+        .iter()
+        .filter(|comment| !comment.deleted && !comment.pending)
+        .filter_map(|comment| {
+            Some(ReviewAction {
+                by: comment.user.as_ref()?.person()?,
+                ask: ReviewAsk::Comment,
+                at: comment.created_on.clone(),
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -555,10 +615,91 @@ fn created_at(item: &TimelineItem) -> &str {
 
 /// Whether a participant asked for changes; a listing leaves participants out.
 pub fn changes_requested(pull_request: &RawPullRequest) -> bool {
+    asking_for_changes(pull_request).next().is_some()
+}
+
+fn asking_for_changes(pull_request: &RawPullRequest) -> impl Iterator<Item = &Participant> {
     pull_request
         .participants
         .iter()
-        .any(|participant| vote(participant) == Some(ReviewState::ChangesRequested))
+        .filter(|participant| vote(participant) == Some(ReviewState::ChangesRequested))
+}
+
+pub fn changes_requested_by(pull_request: &RawPullRequest) -> Vec<String> {
+    asking_for_changes(pull_request)
+        .filter_map(|participant| participant.user.as_ref()?.login())
+        .collect()
+}
+
+/// An entry of a pull request's activity log, newest first; only requests for changes matter.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawActivity {
+    pub changes_requested: Option<RawVote>,
+    pub approval: Option<RawVote>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawVote {
+    pub date: String,
+    pub user: Option<User>,
+}
+
+/// Standing requests for changes, dated by the activity log. `participated_on` follows the
+/// reviewer's comments, so it only stands in when the log doesn't reach back to the vote.
+pub fn vote_actions(pull_request: &RawPullRequest, activity: &[RawActivity]) -> Vec<ReviewAction> {
+    asking_for_changes(pull_request)
+        .filter_map(|participant| {
+            let user = participant.user.as_ref()?;
+            Some(ReviewAction {
+                by: user.person()?,
+                ask: ReviewAsk::ChangesRequested,
+                at: voted_at(participant, activity, |entry| {
+                    entry.changes_requested.as_ref()
+                })?,
+            })
+        })
+        .collect()
+}
+
+/// Standing approvals, dated like requests for changes.
+pub fn approvals(pull_request: &RawPullRequest, activity: &[RawActivity]) -> Vec<ReviewApproval> {
+    pull_request
+        .participants
+        .iter()
+        .filter(|participant| vote(participant) == Some(ReviewState::Approved))
+        .filter_map(|participant| {
+            Some(ReviewApproval {
+                by: participant.user.as_ref()?.person()?,
+                at: voted_at(participant, activity, |entry| entry.approval.as_ref())?,
+            })
+        })
+        .collect()
+}
+
+/// Whether anyone voted, which is when the activity log is worth reading.
+pub fn has_votes(pull_request: &RawPullRequest) -> bool {
+    pull_request
+        .participants
+        .iter()
+        .any(|participant| vote(participant).is_some())
+}
+
+fn voted_at(
+    participant: &Participant,
+    activity: &[RawActivity],
+    kind: impl Fn(&RawActivity) -> Option<&RawVote>,
+) -> Option<String> {
+    let user = participant.user.as_ref()?;
+    let same = |other: &User| match (&other.uuid, &user.uuid) {
+        (Some(a), Some(b)) => a == b,
+        _ => other.login().is_some() && other.login() == user.login(),
+    };
+    activity
+        .iter()
+        .filter_map(kind)
+        .find(|vote| vote.user.as_ref().is_some_and(same))
+        .map(|vote| vote.date.clone())
+        .or_else(|| participant.participated_on.clone())
 }
 
 fn vote(participant: &Participant) -> Option<ReviewState> {
@@ -733,6 +874,77 @@ mod tests {
     }
 
     #[test]
+    fn the_author_answering_a_request_for_changes_waits_on_the_reviewer() {
+        let raw = raw();
+        let mut reply = comment(1, None, false, "2026-11-07T09:45:00+00:00");
+        reply.user = raw.author.clone();
+        let mut bot = comment(2, None, false, "2026-11-07T09:50:00+00:00");
+        bot.user = Some(account("app", "CI", None));
+        bot.user.as_mut().unwrap().kind = Some("app_user".into());
+        let comments = [reply, bot];
+        let summary = Summary {
+            changes_requested: changes_requested(&raw),
+            changes_requested_by: changes_requested_by(&raw),
+            vote_actions: vote_actions(&raw, &[]),
+            comment_actions: comment_actions(&comments),
+            ..Summary::default()
+        };
+
+        assert_eq!(
+            pull_request(&raw, summary.clone()).turn,
+            Some(ReviewTurn::Reviewers {
+                waiting_on: vec!["dee".into()],
+                replied_at: "2026-11-07T09:45:00+00:00".into(),
+            })
+        );
+
+        let mut early = comment(3, None, false, "2026-11-07T09:00:00+00:00");
+        early.user = raw.author.clone();
+        let answered_before = Summary {
+            comment_actions: comment_actions(&[early]),
+            ..summary
+        };
+        assert_eq!(
+            pull_request(&raw, answered_before).turn,
+            Some(ReviewTurn::Author {
+                by: "dee".into(),
+                ask: ReviewAsk::ChangesRequested,
+                at: "2026-11-07T09:30:00+00:00".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_vote_is_dated_by_the_activity_log_over_the_last_comment() {
+        let raw = raw();
+        let activity: Vec<RawActivity> = serde_json::from_str(
+            r#"[
+                {"comment": {"id": 9}},
+                {"changes_requested": {"date": "2026-11-07T09:50:00+00:00", "user": {"nickname": "dee"}}},
+                {"changes_requested": {"date": "2026-11-07T08:00:00+00:00", "user": {"nickname": "dee"}}}
+            ]"#,
+        )
+        .unwrap();
+        let mut reply = comment(1, None, false, "2026-11-07T09:45:00+00:00");
+        reply.user = raw.author.clone();
+        let summary = Summary {
+            changes_requested_by: changes_requested_by(&raw),
+            vote_actions: vote_actions(&raw, &activity),
+            comment_actions: comment_actions(&[reply]),
+            ..Summary::default()
+        };
+
+        assert_eq!(
+            pull_request(&raw, summary).turn,
+            Some(ReviewTurn::Author {
+                by: "dee".into(),
+                ask: ReviewAsk::ChangesRequested,
+                at: "2026-11-07T09:50:00+00:00".into(),
+            })
+        );
+    }
+
+    #[test]
     fn a_vote_for_changes_marks_the_pull_request() {
         let mut raw = raw();
         assert!(changes_requested(&raw));
@@ -781,7 +993,8 @@ mod tests {
             .collect();
         assert_eq!(bodies, ["comment 1", "comment 2", "comment 3"]);
         assert!(threads[1].resolved);
-        assert_eq!(unresolved_threads(&comments), 1);
+        assert_eq!(unresolved_threads(&comments, Some("ana")), 1);
+        assert_eq!(unresolved_threads(&comments, Some("Bo")), 0);
     }
 
     #[test]
@@ -884,6 +1097,7 @@ then `f(){:x}`"
             account_id: Some(id.into()),
             nickname: nickname.map(Into::into),
             display_name: Some(display_name.into()),
+            kind: None,
         }
     }
 

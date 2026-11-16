@@ -115,6 +115,11 @@ pub enum ProviderOutput {
     CompactionFailed {
         error: String,
     },
+    /// The provider took the turn's context handoff: `injected` into its conversation as
+    /// items of their own, otherwise written ahead of the message.
+    ContextHandoffDelivered {
+        injected: bool,
+    },
     /// The provider's id for its latest message of the conversation, where a rewind can
     /// later resume it.
     ConversationCursor {
@@ -130,4 +135,35 @@ pub enum ProviderOutput {
     /// The process a completed turn left running for its background commands ended; nothing
     /// more comes from it.
     ProcessEnded,
+    /// The provider failed to reach the model and tries again: attempt `attempt` of
+    /// `max_attempts`, the next in `retry_in_ms`. Holds until the run's next output.
+    Retrying {
+        attempt: u32,
+        max_attempts: Option<u32>,
+        retry_in_ms: Option<u64>,
+        error: Option<String>,
+    },
+    /// Messages sent to the running turn, by message id, that the agent never read: the
+    /// turn ended first.
+    MessagesDropped {
+        message_ids: Vec<String>,
+    },
+    /// The provider ran the turn on `model` rather than the one asked, for `reason`.
+    ModelRerouted {
+        model: String,
+        reason: Option<String>,
+    },
+    /// An MCP server the agent was given failed to start: `name`, with the provider's
+    /// `error`.
+    McpServerFailed {
+        name: String,
+        error: String,
+    },
+    /// A hook the user configured for `event` stopped the turn, saying `reason`; `source` is
+    /// where the hook comes from. The turn ends interrupted.
+    HookStopped {
+        event: String,
+        source: Option<String>,
+        reason: String,
+    },
 }

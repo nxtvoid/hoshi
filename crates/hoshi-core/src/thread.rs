@@ -2,11 +2,9 @@ use crate::{
     ApprovalDecision, DiffFile, MessageAttachment, PullRequestUpdate, Question, RequestStatus,
 };
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Thread {
     pub id: String,
     /// `None` for a chat, which belongs to no project and runs in a folder of its own.
@@ -26,6 +24,10 @@ pub struct Thread {
     pub resume_at: Option<String>,
     /// Its agent asked to be woken on its pull request's news.
     pub watching_pull_request: bool,
+    /// The agent CLI it runs on. Once it has a session, another one the user picks waits in
+    /// `pending_model` for the next message.
+    #[serde(default = "crate::default_provider")]
+    pub provider: String,
     /// Provider model alias; `None` uses the provider's default.
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -58,14 +60,42 @@ pub struct Thread {
     /// As a delegated task, its answer went back to the agent that delegated it.
     #[serde(default)]
     pub task_answered: bool,
+    /// RFC 3339: out of its section until then, unless it needs the user sooner. Kept once
+    /// passed, until something wakes it; see [`crate::is_snoozed`].
+    #[serde(default)]
+    pub snoozed_until: Option<String>,
+    /// When it was last snoozed; only what happens after it wakes the thread early.
+    #[serde(default)]
+    pub snoozed_at: Option<String>,
+    /// When the user last woke it from a snooze, by hand or by pinning it.
+    #[serde(default)]
+    pub last_snooze_wake_at: Option<String>,
+    /// When the user last opened it while it showed it woke from a snooze; nothing else
+    /// records visits.
+    #[serde(default)]
+    pub last_visited_at: Option<String>,
+    /// When its latest turn ended, however it ended.
+    #[serde(default)]
+    pub last_turn_ended_at: Option<String>,
+    /// The thread it was forked from, and from which of its turns.
+    #[serde(default)]
+    pub forked_from: Option<Box<ForkOrigin>>,
+    /// Another provider the user picked, which the next message moves the thread to.
+    #[serde(default)]
+    pub pending_model: Option<Box<ModelChoice>>,
+    /// The sessions of the providers it ran on before, resumed on a switch back.
+    #[serde(default)]
+    pub provider_sessions: Vec<ProviderSession>,
+    /// What its agent has yet to be told at the start of its next turn, oldest first.
+    #[serde(default)]
+    pub pending_handoffs: Vec<PendingHandoff>,
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum ThreadStatus {
     Idle,
     Working,
@@ -73,9 +103,8 @@ pub enum ThreadStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[ts(export)]
 pub enum Effort {
     Low,
     Medium,
@@ -97,9 +126,8 @@ impl Effort {
 }
 
 /// What the agent may do without asking.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum AccessMode {
     /// Asks before anything the agent's settings don't allow, file edits included.
     Ask,
@@ -115,13 +143,12 @@ pub enum AccessMode {
 
 /// Where a new thread works. The engine turns `NewWorktree` and `BranchWorktree` into
 /// `Worktree` after creating it, so a thread never exists without its worktree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ThreadWorkspace {
     Local,
     NewWorktree,
@@ -137,9 +164,8 @@ pub enum ThreadWorkspace {
 }
 
 /// Part of a thread's transcript, latest turns first loaded, older ones on request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct TranscriptPage {
     /// Oldest first, each as `ItemContent::summary` leaves it.
     pub items: Vec<ThreadItem>,
@@ -148,9 +174,8 @@ pub struct TranscriptPage {
 }
 
 /// A tool call still waiting for its output.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct OpenToolCall {
     /// The thread's transcript, or one of its subagents'.
     pub thread_id: String,
@@ -158,9 +183,8 @@ pub struct OpenToolCall {
 }
 
 /// A command the agent left running in the background, which its turn waits for.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct BackgroundTask {
     pub task_id: String,
     /// The call that started it, when one did.
@@ -172,9 +196,8 @@ pub struct BackgroundTask {
 }
 
 /// The commands a thread's running turn waits for; empty once none is left.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadBackgroundTasks {
     pub thread_id: String,
     pub tasks: Vec<BackgroundTask>,
@@ -183,9 +206,8 @@ pub struct ThreadBackgroundTasks {
 }
 
 /// One entry in a thread's transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadItem {
     pub id: String,
     pub thread_id: String,
@@ -193,9 +215,8 @@ pub struct ThreadItem {
     pub content: ItemContent,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum CompactionStatus {
     Running,
     Done,
@@ -203,27 +224,227 @@ pub enum CompactionStatus {
 }
 
 /// The point of the conversation a user message started from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum Rewind {
     /// The first message: going back starts a new session.
     Start,
-    /// After the provider's message `cursor`.
-    After { cursor: String },
+    /// After the provider's message `cursor` of its session `session`, when recorded.
+    After {
+        cursor: String,
+        #[serde(default)]
+        session: Option<String>,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// A provider and model a thread runs on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelChoice {
+    pub provider: String,
+    /// `None` uses the provider's default.
+    pub model: Option<String>,
+    pub effort: Option<Effort>,
+    pub fast_mode: bool,
+    pub ultracode: bool,
+}
+
+impl ModelChoice {
+    pub fn of(thread: &Thread) -> Self {
+        Self {
+            provider: thread.provider.clone(),
+            model: thread.model.clone(),
+            effort: thread.effort,
+            fast_mode: thread.fast_mode,
+            ultracode: thread.ultracode,
+        }
+    }
+}
+
+/// The session a thread keeps with a provider it no longer runs on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderSession {
+    pub provider: String,
+    pub session_id: String,
+    pub conversation_cursor: Option<String>,
+    pub resume_at: Option<String>,
+    /// The message the thread moved away with: the provider saw everything before it.
+    pub seen_before: String,
+}
+
+/// How a turn of a thread ended, as its transcript tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TurnStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl TurnStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+/// A turn a fork or a merge-back starts from, read by the engine from the transcript.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnPoint {
+    /// The message that started it.
+    pub turn_id: String,
+    /// Its last item.
+    pub through_item_id: String,
+    /// Its place among the thread's turns, from 1.
+    pub ordinal: u32,
+    pub status: TurnStatus,
+    /// The provider that ran it.
+    pub provider: String,
+    /// That provider's session, and its last message of the conversation once the turn
+    /// ended: where a native fork resumes. `None` when not recorded.
+    pub session_id: Option<String>,
+    pub cursor: Option<String>,
+}
+
+/// Where a fork or a merge-back starts from, as the user asks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
+pub enum ForkPoint {
+    /// The latest turn that completed.
+    LatestStable,
+    /// The turn that holds item `item_id`, such as an answer of the agent.
+    Turn { item_id: String },
+}
+
+/// Where a fork came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkOrigin {
+    pub thread_id: String,
+    /// The source's turn it goes on from: it inherits the source's items through
+    /// `turn.through_item_id`.
+    pub turn: TurnPoint,
+}
+
+/// How a context handoff covers what the agent did not see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HandoffStrategy {
+    /// The whole conversation, to an agent that saw none of it.
+    FullThreadSummary,
+    /// The turns since the agent last saw the thread.
+    DeltaSinceTargetLastSeen,
+    /// A fork's turns, merged back into the thread it came from.
+    ForkDeltaSummary,
+}
+
+impl HandoffStrategy {
+    /// As the handoff names it to the agent.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FullThreadSummary => "full_thread_summary",
+            Self::DeltaSinceTargetLastSeen => "delta_since_target_last_seen",
+            Self::ForkDeltaSummary => "merge_back / fork_delta_summary",
+        }
+    }
+}
+
+/// Context a thread's next turn hands its agent first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PendingHandoff {
+    /// The thread moved from `from` to `to`: the items from `since` (the whole thread when
+    /// `None`) up to message `before` are what `to` never saw.
+    ProviderSwitch {
+        from: ModelChoice,
+        to: ModelChoice,
+        strategy: HandoffStrategy,
+        since: Option<String>,
+        before: String,
+    },
+    /// A fork's first turn takes the source's conversation through the fork point: by forking
+    /// the source's session when `native` and its provider can, otherwise as a transcript.
+    Fork { native: bool },
+    /// A fork merged back through its turn `turn`.
+    MergeBack {
+        fork_thread_id: String,
+        turn: TurnPoint,
+    },
+}
+
+/// Where a context handoff's material came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum HandoffSource {
+    ProviderSwitch {
+        from: ModelChoice,
+        to: ModelChoice,
+        strategy: HandoffStrategy,
+    },
+    /// The history of the thread a fork came from.
+    Fork {
+        thread_id: String,
+    },
+    MergeBack {
+        fork_thread_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HandoffDelivery {
+    /// Prepared; the provider has yet to take it.
+    Pending,
+    /// Written ahead of the user's message.
+    Inline,
+    /// Added to the provider's conversation as items of their own.
+    Injected,
+    /// Its turn ended before the provider took it, or it did not fit; the next turn tries
+    /// again.
+    Failed,
+}
+
+/// Why hoshi went on with a thread by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Resumption {
+    /// A restart cut the turn short; the agent goes on where it left off.
+    Restart,
+    /// A restart ended background work the agent ran; it is told so.
+    RestartEndedWork,
+    /// The usage limit that failed the turn reset.
+    UsageLimitReset,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ItemContent {
     UserMessage {
         text: String,
@@ -239,10 +460,16 @@ pub enum ItemContent {
         /// News on a pull request the thread watches, sent by hoshi, not the user.
         #[serde(default)]
         pull_request_update: Option<PullRequestUpdate>,
+        /// Sent by hoshi to go on with the thread by itself, as after a restart.
+        #[serde(default)]
+        resumed: Option<Resumption>,
         /// Where the conversation goes back to when the user edits from this message; `None`
         /// for a message that can't be edited from, such as a steer.
         #[serde(default)]
         rewind: Option<Rewind>,
+        /// Sent to a running turn that ended before its agent read it.
+        #[serde(default)]
+        dropped: bool,
     },
     AssistantMessage {
         text: String,
@@ -271,6 +498,8 @@ pub enum ItemContent {
     },
     /// The turn stopped before it finished, as the user asked or as the app closed.
     TurnInterrupted,
+    /// The app closed or crashed while the turn ran, which cut it short.
+    TurnCut,
     /// The agent answered one run of a turn that went on, as each background task that
     /// ended gets a run of its own.
     RunEnded,
@@ -293,6 +522,29 @@ pub enum ItemContent {
         after_tokens: Option<u64>,
         /// Why it failed, in the provider's words.
         error: Option<String>,
+    },
+    /// The provider ran the turn on `model` rather than the one asked, for `reason`.
+    ModelRerouted {
+        model: String,
+        reason: Option<String>,
+    },
+    /// The provider got through to the model after retrying, `attempt` times of
+    /// `max_attempts` when it said how many it makes.
+    ProviderRecovered {
+        attempt: u32,
+        max_attempts: Option<u32>,
+    },
+    /// An MCP server the agent was given failed to start; `error` is the provider's own.
+    McpServerFailed {
+        name: String,
+        error: String,
+    },
+    /// A hook the user configured for `event` stopped the turn, saying `reason`; `source` is
+    /// where the hook comes from.
+    HookStopped {
+        event: String,
+        source: Option<String>,
+        reason: String,
     },
     /// A tool call held back until the user approves it.
     Approval {
@@ -329,6 +581,14 @@ pub enum ItemContent {
         status: RequestStatus,
         /// Once resolved: whether the user saved one or declined.
         saved: Option<bool>,
+    },
+    /// Context handed to the agent at the start of its turn, from `sources`: `included_items`
+    /// items whole, `omitted_items` left out to fit.
+    ContextHandoff {
+        sources: Vec<HandoffSource>,
+        delivery: HandoffDelivery,
+        included_items: u32,
+        omitted_items: u32,
     },
     /// A plan mode turn's plan, which the agent carries out once accepted.
     ProposedPlan {
@@ -391,10 +651,24 @@ impl ItemContent {
     }
 }
 
-/// One step of the agent's task list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// The provider failed to reach the model and tries again; holds until the run's next output
+/// or its end.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
+pub struct TurnRetry {
+    pub attempt: u32,
+    pub max_attempts: Option<u32>,
+    /// How long after `at` the next attempt goes.
+    pub retry_in_ms: Option<u64>,
+    /// What failed, in the provider's words.
+    pub error: Option<String>,
+    /// RFC 3339 timestamp of when the provider said so.
+    pub at: String,
+}
+
+/// One step of the agent's task list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Task {
     pub subject: String,
     /// How the agent words it while working on it, such as "Writing a.txt".
@@ -402,9 +676,8 @@ pub struct Task {
     pub status: TaskStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum TaskStatus {
     Pending,
     InProgress,
@@ -412,13 +685,12 @@ pub enum TaskStatus {
 }
 
 /// What a tool call did, as the provider reported it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ToolDetail {
     FileChange {
         path: String,
@@ -456,13 +728,12 @@ impl ToolDetail {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum TurnOutcome {
     Completed,
     Interrupted,
@@ -470,16 +741,54 @@ pub enum TurnOutcome {
 }
 
 /// Why a turn failed. Codes for the UI; `detail` is for logs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "code",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum TurnFailure {
     ProviderDisabled,
-    SpawnFailed { detail: String },
-    ProcessExited { detail: String },
-    ProviderError { detail: String },
+    SpawnFailed {
+        detail: String,
+    },
+    ProcessExited {
+        detail: String,
+    },
+    ProviderError {
+        detail: String,
+    },
+    /// The plan's usage limit was reached; `resets_at` (ISO 8601) is when it resets, when
+    /// the provider told.
+    UsageLimited {
+        detail: String,
+        resets_at: Option<String>,
+    },
+    /// The provider is overloaded or throttled the request: a later try may work.
+    Overloaded {
+        detail: String,
+    },
+    /// The provider refused the account's credentials: the user has to sign in again.
+    AuthenticationFailed {
+        detail: String,
+    },
+    /// The conversation no longer fits the model's context.
+    ContextFull {
+        detail: String,
+    },
+    /// The agent did not finish starting in time.
+    StartupTimedOut {
+        detail: String,
+    },
+    /// The provider could not reopen the thread's conversation; no new one was started in
+    /// its place.
+    ResumeFailed {
+        detail: String,
+    },
+    /// The turn asks for what the agent's process can't change, and starting another would
+    /// end the background work it runs.
+    BackgroundWorkRunning,
+    /// The context the agent had to be handed first leaves too little room for the message;
+    /// nothing was cut.
+    ContextHandoffTooLarge,
 }

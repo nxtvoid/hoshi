@@ -1,0 +1,26 @@
+[package]
+name = "hoshi-app"
+description = "What every hoshi front end shares: its home folder, settings and engine start."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64.workspace = true
+fontdb = "0.24"
+hoshi-core.workspace = true
+hoshi-engine.workspace = true
+hoshi-providers.workspace = true
+hoshi-store.workspace = true
+minisign-verify = "0.3"
+serde_json.workspace = true
+sha2 = "0.10"
+ureq.workspace = true
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tiny_http.workspace = true

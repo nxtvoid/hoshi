@@ -170,8 +170,51 @@ fn text<'a>(arguments: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|text| !text.is_empty())
 }
 
+/// The files a thread's agent may pass as `path`: hoshi reads them for it, so without full
+/// access only those its provider reads without asking, in its own folder or scratchpad.
+pub(crate) enum PageFiles {
+    Any,
+    Within(Vec<PathBuf>),
+}
+
+impl PageFiles {
+    pub(crate) fn within_folder(cwd: Option<&str>) -> Self {
+        let mut roots: Vec<PathBuf> = cwd.map(PathBuf::from).into_iter().collect();
+        roots.push(std::env::temp_dir());
+        if cfg!(unix) {
+            roots.push(PathBuf::from("/tmp"));
+        }
+        Self::Within(roots)
+    }
+
+    fn allows(&self, path: &Path) -> bool {
+        let Self::Within(roots) = self else {
+            return true;
+        };
+        let Ok(path) = path.canonicalize() else {
+            return false;
+        };
+        let temp: Vec<PathBuf> = [std::env::temp_dir(), PathBuf::from("/tmp")]
+            .iter()
+            .filter_map(|dir| dir.canonicalize().ok())
+            .collect();
+        roots
+            .iter()
+            .filter_map(|root| root.canonicalize().ok())
+            .any(|root| match path.strip_prefix(&root) {
+                Ok(rest) if temp.contains(&root) => rest
+                    .components()
+                    .next()
+                    .and_then(|first| first.as_os_str().to_str())
+                    .is_some_and(|first| first.starts_with("claude")),
+                Ok(_) => true,
+                Err(_) => false,
+            })
+    }
+}
+
 /// The page the call passes, inline or as a file.
-fn source(arguments: &Value, full_access: bool) -> Result<String, String> {
+fn source(arguments: &Value, files: &PageFiles) -> Result<String, String> {
     let html = arguments["html"]
         .as_str()
         .filter(|html| !html.trim().is_empty());
@@ -181,8 +224,8 @@ fn source(arguments: &Value, full_access: bool) -> Result<String, String> {
             html.len()
         )),
         (Some(html), None) => Ok(html.to_owned()),
-        (None, Some(_)) if !full_access => Err(
-            "pass `html` instead of `path`: only threads with full access may pass a path".into(),
+        (None, Some(path)) if !files.allows(Path::new(path)) => Err(
+            "pass `html` instead of `path`: without full access, a path must be in your working directory or scratchpad".into(),
         ),
         (None, Some(path)) => read_page_file(Path::new(path)),
         _ => Err("pass exactly one of `html` or `path`".into()),
@@ -532,8 +575,8 @@ pub(crate) fn image_data_url(path: &Path) -> Option<String> {
 }
 
 /// `html_preview`: the page as the user would see it, for the agent to check.
-pub(crate) fn preview(arguments: &Value, full_access: bool) -> Result<Value, String> {
-    let (page, missing) = prepare(&source(arguments, full_access)?)?;
+pub(crate) fn preview(arguments: &Value, files: &PageFiles) -> Result<Value, String> {
+    let (page, missing) = prepare(&source(arguments, files)?)?;
     let appearance = match arguments["appearance"].as_str() {
         Some("light") => "light",
         _ => "dark",
@@ -559,7 +602,7 @@ pub(crate) fn render(
     pages: &Pages,
     caller: &str,
     arguments: &Value,
-    full_access: bool,
+    files: &PageFiles,
 ) -> Result<Value, String> {
     let title: String = text(arguments, "title")
         .ok_or("`title` is required")?
@@ -570,7 +613,7 @@ pub(crate) fn render(
         .as_u64()
         .ok_or("`height` is required")?
         .clamp(MIN_HEIGHT, MAX_HEIGHT);
-    let (page, missing) = prepare(&source(arguments, full_access)?)?;
+    let (page, missing) = prepare(&source(arguments, files)?)?;
     if !missing.is_empty() {
         return Err(format!(
             "these images aren't there or aren't images: {}",
@@ -662,18 +705,57 @@ mod tests {
 
     #[test]
     fn a_path_needs_full_access_and_one_source() {
+        let none = PageFiles::Within(Vec::new());
         let path = json!({ "path": "/tmp/page.html" });
-        assert!(source(&path, false).unwrap_err().contains("full access"));
+        assert!(source(&path, &none).unwrap_err().contains("full access"));
         assert!(
-            source(&json!({}), true)
+            source(&json!({}), &PageFiles::Any)
                 .unwrap_err()
                 .contains("exactly one")
         );
-        assert!(source(&json!({ "html": "<p>a</p>", "path": "/a.html" }), true).is_err());
+        assert!(
+            source(
+                &json!({ "html": "<p>a</p>", "path": "/a.html" }),
+                &PageFiles::Any
+            )
+            .is_err()
+        );
         assert_eq!(
-            source(&json!({ "html": "<p>a</p>" }), false).unwrap(),
+            source(&json!({ "html": "<p>a</p>" }), &none).unwrap(),
             "<p>a</p>"
         );
+    }
+
+    #[test]
+    fn without_full_access_a_path_must_be_in_the_folder_or_a_scratchpad() {
+        let id = std::process::id();
+        let folder = std::env::temp_dir().join(format!("hoshi-page-folder-{id}"));
+        let scratchpad = std::env::temp_dir().join(format!("claude-page-test-{id}"));
+        for dir in [&folder, &scratchpad] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("page.html"), "<!doctype html><p>a</p>").unwrap();
+        }
+        let elsewhere = folder.with_extension("other");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("page.html"), "<!doctype html><p>a</p>").unwrap();
+
+        let files = PageFiles::within_folder(folder.to_str());
+        assert!(files.allows(&folder.join("page.html")));
+        assert!(files.allows(&scratchpad.join("page.html")));
+        assert!(!files.allows(&elsewhere.join("page.html")));
+        assert!(
+            !files.allows(
+                &folder
+                    .join("..")
+                    .join(elsewhere.file_name().unwrap())
+                    .join("page.html")
+            )
+        );
+        assert!(!files.allows(&folder.join("gone.html")));
+
+        for dir in [folder, scratchpad, elsewhere] {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     #[test]

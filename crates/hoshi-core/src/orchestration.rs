@@ -1,23 +1,23 @@
+use crate::snooze;
 use crate::{
-    AccessMode, ApprovalDecision, CompactionStatus, DiffFile, Effort, ItemContent,
-    MessageAttachment, OpenToolCall, Project, ProviderOutput, PullRequestUpdate, RequestResponse,
-    RequestStatus, Rewind, Thread, ThreadBackgroundTasks, ThreadContextUsage, ThreadItem,
-    ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure, TurnOutcome,
-    WorktreeSetup,
+    AccessMode, ApprovalDecision, CompactionStatus, DiffFile, Effort, ForkOrigin, HandoffStrategy,
+    ItemContent, MessageAttachment, ModelChoice, OpenToolCall, PendingHandoff, Project,
+    ProjectSettings, ProviderOutput, ProviderSession, PullRequestUpdate, RequestResponse,
+    RequestStatus, Resumption, Rewind, Thread, ThreadBackgroundTasks, ThreadContextUsage,
+    ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure,
+    TurnOutcome, TurnPoint, TurnRetry, TurnStatus, WorktreeSetup,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use ts_rs::TS;
 
 const TITLE_MAX_CHARS: usize = 60;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum Command {
     ProjectCreate {
         project_id: String,
@@ -32,12 +32,19 @@ pub enum Command {
         project_id: String,
         setup: Option<WorktreeSetup>,
     },
+    /// Replaces what the project sets for itself over the app's settings.
+    ProjectSettingsSet {
+        project_id: String,
+        settings: ProjectSettings,
+    },
     ThreadCreate {
         thread_id: String,
         /// `None` starts a chat, which always works locally in its own folder.
         project_id: Option<String>,
         title: String,
         workspace: ThreadWorkspace,
+        #[serde(default = "crate::default_provider")]
+        provider: String,
         model: Option<String>,
         effort: Option<Effort>,
         fast_mode: bool,
@@ -67,9 +74,30 @@ pub enum Command {
         thread_id: String,
         pinned: bool,
     },
-    /// Applies from the next turn.
+    /// Takes the thread out of its section until `until` (RFC 3339), unless it needs the user
+    /// sooner. Snoozing again replaces the wake time.
+    ThreadSnooze {
+        thread_id: String,
+        until: String,
+    },
+    /// Ends the thread's snooze now, passed or not.
+    ThreadWake {
+        thread_id: String,
+    },
+    /// The user opened the thread, which hides its Woke indicator.
+    ThreadVisit {
+        thread_id: String,
+    },
+    /// Hides the thread's Woke indicator, as a visit when it woke.
+    ThreadWokeDismiss {
+        thread_id: String,
+    },
+    /// Applies from the next turn. Another provider, once the thread has a session, waits
+    /// for the next message, which hands it what it did not see; refused while a turn runs.
     ThreadModelSet {
         thread_id: String,
+        #[serde(default = "crate::default_provider")]
+        provider: String,
         model: Option<String>,
         effort: Option<Effort>,
         fast_mode: bool,
@@ -118,15 +146,27 @@ pub enum Command {
         message_id: String,
         rewind: Rewind,
     },
+    /// Starts thread `fork_thread_id` from `thread_id`'s turn `turn`, which the engine reads
+    /// from the transcript. It goes on from there on its first message.
+    ThreadFork {
+        thread_id: String,
+        fork_thread_id: String,
+        turn: TurnPoint,
+    },
+    /// Hands fork `thread_id`'s turns through `turn` to the thread it came from, on that
+    /// thread's next turn. The engine reads `turn` from the transcript.
+    ThreadMergeBack {
+        thread_id: String,
+        turn: TurnPoint,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum Event {
     ProjectCreated {
         project: Project,
@@ -138,8 +178,12 @@ pub enum Event {
         project_id: String,
         setup: Option<WorktreeSetup>,
     },
+    ProjectSettingsSet {
+        project_id: String,
+        settings: ProjectSettings,
+    },
     ThreadCreated {
-        thread: Thread,
+        thread: Box<Thread>,
     },
     ThreadDeleted {
         thread_id: String,
@@ -186,8 +230,25 @@ pub enum Event {
         thread_id: String,
         pinned: bool,
     },
+    ThreadSnoozed {
+        thread_id: String,
+        /// RFC 3339, in UTC.
+        until: String,
+        at: String,
+    },
+    /// The snooze ended before the thread opened. `woke_at` is set when the user woke it.
+    ThreadUnsnoozed {
+        thread_id: String,
+        woke_at: Option<String>,
+    },
+    ThreadVisited {
+        thread_id: String,
+        at: String,
+    },
     ThreadModelSet {
         thread_id: String,
+        #[serde(default = "crate::default_provider")]
+        provider: String,
         model: Option<String>,
         effort: Option<Effort>,
         fast_mode: bool,
@@ -235,6 +296,16 @@ pub enum Event {
         thread_id: String,
         item_id: String,
     },
+    /// The running turn's provider tries to reach the model again; `None` once it got through.
+    TurnRetrying {
+        thread_id: String,
+        retry: Option<TurnRetry>,
+    },
+    /// Messages sent to the running turn, by id, that its agent never read.
+    MessagesDropped {
+        thread_id: String,
+        message_ids: Vec<String>,
+    },
     /// The thread works on a task another thread's agent delegated to it.
     ThreadDelegated {
         thread_id: String,
@@ -271,21 +342,43 @@ pub enum Event {
         cursor: String,
     },
     /// The transcript lost `message_id` and everything after it. The next turn resumes
-    /// the session after `resume_at`, or starts a new one when it is `None`.
+    /// the session after `resume_at`, or starts a new one when it is `None`, which also
+    /// forgets the sessions of other providers.
     ThreadRewound {
         thread_id: String,
         message_id: String,
         resume_at: Option<String>,
     },
+    /// The user picked another provider, which the next message moves the thread to; `None`
+    /// once that no longer stands.
+    ThreadModelPending {
+        thread_id: String,
+        choice: Option<ModelChoice>,
+    },
+    /// The thread moved to `to`, with the session it keeps with that provider and the
+    /// sessions it keeps with the others.
+    ProviderSwitched {
+        thread_id: String,
+        to: ModelChoice,
+        session_id: Option<String>,
+        conversation_cursor: Option<String>,
+        resume_at: Option<String>,
+        provider_sessions: Vec<ProviderSession>,
+        pending_handoffs: Vec<PendingHandoff>,
+    },
+    /// What the thread's agent has yet to be told at the start of its next turn.
+    ContextHandoffsSet {
+        thread_id: String,
+        handoffs: Vec<PendingHandoff>,
+    },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[serde(
     tag = "code",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum CommandError {
     #[error("project {project_id} already exists")]
     DuplicateProjectId { project_id: String },
@@ -297,10 +390,19 @@ pub enum CommandError {
     DuplicateThreadId { thread_id: String },
     #[error("thread {thread_id} not found")]
     ThreadNotFound { thread_id: String },
+    /// Its session belongs to the provider it started on.
+    #[error("thread {thread_id} already runs on another provider")]
+    ProviderLocked { thread_id: String },
     #[error("thread {thread_id} is already running a turn")]
     ThreadBusy { thread_id: String },
     #[error("thread {thread_id} is not running a turn")]
     ThreadNotWorking { thread_id: String },
+    /// It already went, was removed, or is news hoshi brought rather than the user's.
+    #[error("message {message_id} is not queued for thread {thread_id}")]
+    QueuedMessageNotFound {
+        thread_id: String,
+        message_id: String,
+    },
     /// The message is a steer, a task's answer, or older than rewinds.
     #[error("thread {thread_id} can't go back to before message {message_id}")]
     CannotRewind {
@@ -371,6 +473,12 @@ pub enum CommandError {
     /// The thread works in a worktree it did not create, which stays as it is.
     #[error("the worktree of thread {thread_id} is not hoshi's to remove")]
     WorktreeAdopted { thread_id: String },
+    /// Another thread works in the same worktree, such as a fork of it.
+    #[error("the worktree of thread {thread_id} is also thread {other_thread_id}'s")]
+    WorktreeShared {
+        thread_id: String,
+        other_thread_id: String,
+    },
     /// Removing it would lose uncommitted or untracked files.
     #[error("the worktree of thread {thread_id} has uncommitted changes")]
     WorktreeDirty { thread_id: String },
@@ -412,15 +520,51 @@ pub enum CommandError {
     /// Not `owner/name` or a link to a repository on the chosen forge.
     #[error("{input} does not name a repository")]
     RepositoryNameInvalid { input: String },
+    /// The snooze's wake time is not after now, or not a time.
+    #[error("thread {thread_id} can't be snoozed until a time that passed")]
+    SnoozeTimePassed { thread_id: String },
+    #[error("thread {thread_id} is archived")]
+    ThreadArchived { thread_id: String },
+    /// An approval or another request that isn't a question waits for the user, in the thread
+    /// or in a task it delegated.
+    #[error("thread {thread_id} waits for the user")]
+    ThreadWaitingForUser { thread_id: String },
+    /// A message the user sent waits for the thread to take it.
+    #[error("thread {thread_id} has a message waiting to be sent")]
+    MessageQueued { thread_id: String },
+    /// Switching provider would end the commands the thread's agent runs in the background.
+    #[error("thread {thread_id} still runs background work")]
+    BackgroundWorkRunning { thread_id: String },
+    #[error("thread {thread_id} has no turn that ended")]
+    NoStableTurn { thread_id: String },
+    #[error("thread {thread_id} has no turn holding item {item_id}")]
+    TurnNotFound { thread_id: String, item_id: String },
+    /// The turn still runs.
+    #[error("turn {turn_id} of thread {thread_id} still runs and can't be forked")]
+    TurnNotForkable { thread_id: String, turn_id: String },
+    /// It was not forked from that thread, or that thread is gone.
+    #[error("thread {thread_id} is not a fork of a thread that exists")]
+    NotAFork { thread_id: String },
+    /// Only a turn that completed can be merged back.
+    #[error("turn {turn_id} of fork {thread_id} did not complete")]
+    MergeBackTurnNotFinished { thread_id: String, turn_id: String },
+    /// The thread a fork merges into runs a turn or has messages waiting for one.
+    #[error("thread {thread_id} has work running or waiting")]
+    MergeBackTargetBusy { thread_id: String },
+    /// Another fork's merge-back still waits for the thread's next turn.
+    #[error("thread {thread_id} already waits on the merge-back of fork {fork_thread_id}")]
+    MergeBackPending {
+        thread_id: String,
+        fork_thread_id: String,
+    },
     /// Storage or other failures outside the domain; `detail` is for logs, not the UI.
     #[error("internal error: {detail}")]
     Internal { detail: String },
 }
 
 /// What the UI reads at startup: every project and thread, without transcripts.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Snapshot {
     pub sequence: u64,
     pub projects: Vec<Project>,
@@ -441,12 +585,21 @@ pub struct Snapshot {
     pub task_previews: Vec<TaskPreview>,
     /// The messages that wait for their thread to be compacted.
     pub held_messages: Vec<HeldMessage>,
+    /// The branch each project's root folder is on, as last read.
+    pub project_branches: Vec<ProjectBranch>,
+}
+
+/// The branch a project's root folder is on; `None` off any branch or outside git.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectBranch {
+    pub project_id: String,
+    pub branch: Option<String>,
 }
 
 /// A message the user sent that waits for its thread's conversation to be compacted.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct HeldMessage {
     pub thread_id: String,
     pub message_id: String,
@@ -455,18 +608,48 @@ pub struct HeldMessage {
 }
 
 /// The message a thread holds until it is compacted; `None` once it went or was taken back.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct ThreadHeldMessage {
     pub thread_id: String,
     pub message: Option<HeldMessage>,
 }
 
-/// A delegated task's latest message, shortened to one line for its card.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+/// Who sent a message waiting in a thread's queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
+pub enum MessageSender {
+    User,
+    /// News hoshi brought, such as a delegated task's answer or a pull request's update.
+    Hoshi,
+}
+
+/// A message waiting in a thread's queue for a turn of its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueEntry {
+    pub message_id: String,
+    pub text: String,
+    pub attachments: Vec<MessageAttachment>,
+    /// It waits for the user to go on with the thread, as after they stopped it.
+    pub held: bool,
+    pub sender: MessageSender,
+}
+
+/// The messages waiting in a thread's queue, in the order they go.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadQueue {
+    pub thread_id: String,
+    pub messages: Vec<QueueEntry>,
+    /// The user can go on with the thread: its last turn was stopped, cut short or failed on
+    /// a usage limit and nothing waits for an answer, or else messages wait held.
+    pub can_resume: bool,
+}
+
+/// A delegated task's latest message, shortened to one line for its card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskPreview {
     pub thread_id: String,
     pub text: String,
@@ -486,18 +669,16 @@ pub fn task_preview(text: &str) -> String {
 }
 
 /// An event as delivered to the UI, with its position in the event log.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct EventEnvelope {
     pub sequence: u64,
     pub event: Event,
 }
 
 /// Which item a [`StreamDelta`] is writing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum StreamKind {
     Text,
     Reasoning,
@@ -506,9 +687,8 @@ pub enum StreamKind {
 }
 
 /// Text an assistant is still writing. Sent to the UI as it streams, never stored.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct StreamDelta {
     pub thread_id: String,
     pub item_id: String,
@@ -526,6 +706,10 @@ pub struct ReadModel {
     open_calls: BTreeSet<OpenToolCall>,
     /// The latest message of each delegated task, shortened.
     task_previews: BTreeMap<String, String>,
+    /// How each running turn's provider retries, until it gets through.
+    retries: BTreeMap<String, TurnRetry>,
+    /// The MCP servers each thread already told of failing to start, since the app started.
+    mcp_failures: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl ReadModel {
@@ -552,7 +736,14 @@ impl ReadModel {
                 .iter()
                 .map(|preview| (preview.thread_id.clone(), preview.text.clone()))
                 .collect(),
+            retries: BTreeMap::new(),
+            mcp_failures: BTreeMap::new(),
         }
+    }
+
+    /// How the thread's running turn retries to reach the model, while it does.
+    pub fn retry(&self, thread_id: &str) -> Option<&TurnRetry> {
+        self.retries.get(thread_id)
     }
 
     /// The latest message of each delegated task, shortened.
@@ -582,6 +773,17 @@ impl ReadModel {
         self.requests.get(request_id)
     }
 
+    /// The requests waiting for an answer in the thread's transcript and its subagents', in
+    /// no particular order.
+    pub fn pending_requests_within<'a>(
+        &'a self,
+        thread_id: &'a str,
+    ) -> impl Iterator<Item = &'a ThreadItem> + 'a {
+        self.requests
+            .values()
+            .filter(move |item| root_thread(&item.thread_id) == thread_id)
+    }
+
     /// The thread's requests waiting for an answer, oldest first.
     pub fn pending_requests(&self, thread_id: &str) -> Vec<&ThreadItem> {
         let mut pending: Vec<_> = self
@@ -609,6 +811,22 @@ impl ReadModel {
         self.projects.get(project_id)
     }
 
+    /// The threads forked from `thread_id`, oldest first.
+    pub fn forks_of(&self, thread_id: &str) -> Vec<&Thread> {
+        let mut forks: Vec<&Thread> = self
+            .threads
+            .values()
+            .filter(|thread| {
+                thread
+                    .forked_from
+                    .as_ref()
+                    .is_some_and(|origin| origin.thread_id == thread_id)
+            })
+            .collect();
+        forks.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+        forks
+    }
+
     /// Where the thread's agent runs: its worktree when it has one, never the
     /// project root in that case. `None` for a chat, whose folder only the engine knows.
     pub fn thread_cwd(&self, thread_id: &str) -> Option<&str> {
@@ -632,6 +850,14 @@ impl ReadModel {
                     project.worktree_setup.clone_from(setup);
                 }
             }
+            Event::ProjectSettingsSet {
+                project_id,
+                settings,
+            } => {
+                if let Some(project) = self.projects.get_mut(project_id) {
+                    project.settings.clone_from(settings);
+                }
+            }
             Event::ProjectRemoved { project_id } => {
                 self.projects.remove(project_id);
                 self.threads
@@ -643,13 +869,20 @@ impl ReadModel {
                     .retain(|call| threads.contains_key(root_thread(&call.thread_id)));
                 self.task_previews
                     .retain(|thread_id, _| threads.contains_key(thread_id));
+                self.retries
+                    .retain(|thread_id, _| threads.contains_key(thread_id));
+                self.mcp_failures
+                    .retain(|thread_id, _| threads.contains_key(thread_id));
             }
             Event::ThreadCreated { thread } => {
-                self.threads.insert(thread.id.clone(), thread.clone());
+                self.threads
+                    .insert(thread.id.clone(), Thread::clone(thread));
             }
             Event::ThreadDeleted { thread_id } => {
                 self.threads.remove(thread_id);
                 self.task_previews.remove(thread_id);
+                self.retries.remove(thread_id);
+                self.mcp_failures.remove(thread_id);
                 self.requests.retain(|_, item| &item.thread_id != thread_id);
                 self.open_calls
                     .retain(|call| root_thread(&call.thread_id) != thread_id);
@@ -702,6 +935,7 @@ impl ReadModel {
                     thread.worktree_released = false;
                     thread.worktree_adopted = false;
                     thread.session_id = None;
+                    thread.provider_sessions.clear();
                 }
             }
             Event::ThreadArchivedSet {
@@ -717,14 +951,40 @@ impl ReadModel {
                     thread.pinned = *pinned;
                 }
             }
+            Event::ThreadSnoozed {
+                thread_id,
+                until,
+                at,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.snoozed_until = Some(until.clone());
+                    thread.snoozed_at = Some(at.clone());
+                }
+            }
+            Event::ThreadUnsnoozed { thread_id, woke_at } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.snoozed_until = None;
+                    thread.snoozed_at = None;
+                    if woke_at.is_some() {
+                        thread.last_snooze_wake_at.clone_from(woke_at);
+                    }
+                }
+            }
+            Event::ThreadVisited { thread_id, at } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.last_visited_at = Some(at.clone());
+                }
+            }
             Event::ThreadModelSet {
                 thread_id,
+                provider,
                 model,
                 effort,
                 fast_mode,
                 ultracode,
             } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.provider.clone_from(provider);
                     thread.model.clone_from(model);
                     thread.effort = *effort;
                     thread.fast_mode = *fast_mode;
@@ -751,6 +1011,7 @@ impl ReadModel {
                     thread.active_turn_id = Some(turn_id.clone());
                     thread.updated_at.clone_from(at);
                 }
+                self.retries.remove(thread_id);
             }
             Event::SessionAttached {
                 thread_id,
@@ -785,6 +1046,12 @@ impl ReadModel {
                     ItemContent::ToolCall { .. } => {
                         self.open_calls.remove(&call);
                     }
+                    ItemContent::McpServerFailed { name, .. } => {
+                        self.mcp_failures
+                            .entry(item.thread_id.clone())
+                            .or_default()
+                            .insert(name.clone());
+                    }
                     _ => {}
                 }
                 match item.content.request_status() {
@@ -806,13 +1073,22 @@ impl ReadModel {
                     item_id: item_id.clone(),
                 });
             }
-            Event::ToolCallDetailSet { .. } => {}
+            Event::ToolCallDetailSet { .. } | Event::MessagesDropped { .. } => {}
+            Event::TurnRetrying { thread_id, retry } => match retry {
+                Some(retry) => {
+                    self.retries.insert(thread_id.clone(), retry.clone());
+                }
+                None => {
+                    self.retries.remove(thread_id);
+                }
+            },
             Event::TurnCompleted {
                 thread_id,
                 outcome,
                 at,
                 ..
             } => {
+                self.retries.remove(thread_id);
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.active_turn_id = None;
                     thread.status = match outcome {
@@ -820,6 +1096,7 @@ impl ReadModel {
                         TurnOutcome::Completed | TurnOutcome::Interrupted => ThreadStatus::Idle,
                     };
                     thread.updated_at.clone_from(at);
+                    thread.last_turn_ended_at = Some(at.clone());
                 }
             }
             Event::ThreadStatusSet { thread_id, status } => {
@@ -874,6 +1151,7 @@ impl ReadModel {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     if resume_at.is_none() {
                         thread.session_id = None;
+                        thread.provider_sessions.clear();
                     }
                     thread.conversation_cursor.clone_from(resume_at);
                     thread.resume_at.clone_from(resume_at);
@@ -882,6 +1160,42 @@ impl ReadModel {
                     .retain(|_, item| root_thread(&item.thread_id) != thread_id);
                 self.open_calls
                     .retain(|call| root_thread(&call.thread_id) != thread_id);
+            }
+            Event::ThreadModelPending { thread_id, choice } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.pending_model = choice.clone().map(Box::new);
+                }
+            }
+            Event::ProviderSwitched {
+                thread_id,
+                to,
+                session_id,
+                conversation_cursor,
+                resume_at,
+                provider_sessions,
+                pending_handoffs,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.provider.clone_from(&to.provider);
+                    thread.model.clone_from(&to.model);
+                    thread.effort = to.effort;
+                    thread.fast_mode = to.fast_mode;
+                    thread.ultracode = to.ultracode;
+                    thread.session_id.clone_from(session_id);
+                    thread.conversation_cursor.clone_from(conversation_cursor);
+                    thread.resume_at.clone_from(resume_at);
+                    thread.provider_sessions.clone_from(provider_sessions);
+                    thread.pending_handoffs.clone_from(pending_handoffs);
+                    thread.pending_model = None;
+                }
+            }
+            Event::ContextHandoffsSet {
+                thread_id,
+                handoffs,
+            } => {
+                if let Some(thread) = self.threads.get_mut(thread_id) {
+                    thread.pending_handoffs.clone_from(handoffs);
+                }
             }
         }
     }
@@ -914,6 +1228,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
                     worktree_setup: None,
+                    settings: ProjectSettings::default(),
                 },
             }])
         }
@@ -933,6 +1248,18 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 .filter(|setup| !setup.files.is_empty() || !setup.command.is_empty());
             Ok(vec![Event::ProjectWorktreeSetupSet { project_id, setup }])
         }
+        Command::ProjectSettingsSet {
+            project_id,
+            settings,
+        } => {
+            if !model.projects.contains_key(&project_id) {
+                return Err(CommandError::ProjectNotFound { project_id });
+            }
+            Ok(vec![Event::ProjectSettingsSet {
+                project_id,
+                settings,
+            }])
+        }
         Command::ProjectRemove { project_id } => {
             if !model.projects.contains_key(&project_id) {
                 return Err(CommandError::ProjectNotFound { project_id });
@@ -944,6 +1271,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             project_id,
             title,
             workspace,
+            provider,
             model: thread_model,
             effort,
             fast_mode,
@@ -975,7 +1303,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 }
             };
             Ok(vec![Event::ThreadCreated {
-                thread: Thread {
+                thread: Box::new(Thread {
                     id: thread_id,
                     project_id,
                     title,
@@ -986,6 +1314,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     conversation_cursor: None,
                     resume_at: None,
                     watching_pull_request: false,
+                    provider,
                     model: thread_model,
                     effort,
                     fast_mode,
@@ -1000,9 +1329,18 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     parent_thread_id: None,
                     task_cancelled: false,
                     task_answered: false,
+                    snoozed_until: None,
+                    snoozed_at: None,
+                    last_snooze_wake_at: None,
+                    last_visited_at: None,
+                    last_turn_ended_at: None,
+                    forked_from: None,
+                    pending_model: None,
+                    provider_sessions: Vec::new(),
+                    pending_handoffs: Vec::new(),
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
-                },
+                }),
             }])
         }
         Command::ThreadDelete { thread_id } => {
@@ -1024,12 +1362,128 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             }
             let resume_at = match rewind {
                 Rewind::Start => None,
-                Rewind::After { cursor } => Some(cursor),
+                Rewind::After { cursor, session } => {
+                    let elsewhere = session.is_some_and(|session| {
+                        thread
+                            .provider_sessions
+                            .iter()
+                            .any(|parked| parked.session_id == session)
+                    });
+                    if elsewhere {
+                        return Err(CommandError::CannotRewind {
+                            thread_id,
+                            message_id,
+                        });
+                    }
+                    Some(cursor)
+                }
             };
-            Ok(vec![Event::ThreadRewound {
-                thread_id,
-                message_id,
-                resume_at,
+            let mut events = Vec::with_capacity(2);
+            if resume_at.is_none() {
+                let mut handoffs: Vec<PendingHandoff> = thread
+                    .pending_handoffs
+                    .iter()
+                    .filter(|handoff| matches!(handoff, PendingHandoff::MergeBack { .. }))
+                    .cloned()
+                    .collect();
+                if thread.forked_from.is_some() {
+                    handoffs.insert(0, PendingHandoff::Fork { native: true });
+                }
+                if handoffs != thread.pending_handoffs {
+                    events.push(Event::ContextHandoffsSet {
+                        thread_id: thread_id.clone(),
+                        handoffs,
+                    });
+                }
+            }
+            events.insert(
+                0,
+                Event::ThreadRewound {
+                    thread_id,
+                    message_id,
+                    resume_at,
+                },
+            );
+            Ok(events)
+        }
+        Command::ThreadFork {
+            thread_id,
+            fork_thread_id,
+            turn,
+        } => {
+            let Some(source) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            if model.threads.contains_key(&fork_thread_id) {
+                return Err(CommandError::DuplicateThreadId {
+                    thread_id: fork_thread_id,
+                });
+            }
+            if turn.status == TurnStatus::Running {
+                return Err(CommandError::TurnNotForkable {
+                    thread_id,
+                    turn_id: turn.turn_id,
+                });
+            }
+            Ok(vec![Event::ThreadCreated {
+                thread: Box::new(forked(source, fork_thread_id, turn, now)),
+            }])
+        }
+        Command::ThreadMergeBack { thread_id, turn } => {
+            let Some(fork) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            let Some(parent) = fork
+                .forked_from
+                .as_ref()
+                .and_then(|origin| model.threads.get(&origin.thread_id))
+            else {
+                return Err(CommandError::NotAFork { thread_id });
+            };
+            if turn.status != TurnStatus::Completed {
+                return Err(CommandError::MergeBackTurnNotFinished {
+                    thread_id,
+                    turn_id: turn.turn_id,
+                });
+            }
+            if parent.active_turn_id.is_some() {
+                return Err(CommandError::MergeBackTargetBusy {
+                    thread_id: parent.id.clone(),
+                });
+            }
+            let other = parent
+                .pending_handoffs
+                .iter()
+                .find_map(|handoff| match handoff {
+                    PendingHandoff::MergeBack { fork_thread_id, .. }
+                        if *fork_thread_id != thread_id =>
+                    {
+                        Some(fork_thread_id.clone())
+                    }
+                    _ => None,
+                });
+            if let Some(fork_thread_id) = other {
+                return Err(CommandError::MergeBackPending {
+                    thread_id: parent.id.clone(),
+                    fork_thread_id,
+                });
+            }
+            let mut handoffs: Vec<PendingHandoff> = parent
+                .pending_handoffs
+                .iter()
+                .filter(|handoff| {
+                    !matches!(handoff, PendingHandoff::MergeBack { fork_thread_id, .. }
+                        if *fork_thread_id == thread_id)
+                })
+                .cloned()
+                .collect();
+            handoffs.push(PendingHandoff::MergeBack {
+                fork_thread_id: thread_id,
+                turn,
+            });
+            Ok(vec![Event::ContextHandoffsSet {
+                thread_id: parent.id.clone(),
+                handoffs,
             }])
         }
         Command::ThreadWorktreeRelease { thread_id } => {
@@ -1076,6 +1530,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     archived: true,
                 });
             }
+            events.extend(snooze::unsnoozed(thread, None));
             events.push(Event::ThreadCleanedUp { thread_id });
             Ok(events)
         }
@@ -1086,12 +1541,15 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
-            let mut events = Vec::with_capacity(2);
+            let mut events = Vec::with_capacity(3);
             if archived && thread.pinned {
                 events.push(Event::ThreadPinnedSet {
                     thread_id: thread_id.clone(),
                     pinned: false,
                 });
+            }
+            if archived {
+                events.extend(snooze::unsnoozed(thread, None));
             }
             if thread.archived != archived {
                 events.push(Event::ThreadArchivedSet {
@@ -1105,17 +1563,41 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
-            let mut events = Vec::with_capacity(2);
+            let mut events = Vec::with_capacity(3);
             if pinned && thread.archived {
                 events.push(Event::ThreadArchivedSet {
                     thread_id: thread_id.clone(),
                     archived: false,
                 });
             }
+            if pinned {
+                events.extend(snooze::unsnoozed(thread, Some(now)));
+            }
             if thread.pinned != pinned {
                 events.push(Event::ThreadPinnedSet { thread_id, pinned });
             }
             Ok(events)
+        }
+        Command::ThreadSnooze { thread_id, until } => snooze::snooze(model, thread_id, &until, now),
+        Command::ThreadWake { thread_id } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            Ok(snooze::unsnoozed(thread, Some(now)).into_iter().collect())
+        }
+        Command::ThreadVisit { thread_id } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            Ok(snooze::visited(model, thread, now).into_iter().collect())
+        }
+        Command::ThreadWokeDismiss { thread_id } => {
+            let Some(thread) = model.threads.get(&thread_id) else {
+                return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            Ok(snooze::woke_dismissed(model, thread, now)
+                .into_iter()
+                .collect())
         }
         Command::ThreadAccessSet {
             thread_id,
@@ -1133,21 +1615,49 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
         }
         Command::ThreadModelSet {
             thread_id,
+            provider,
             model: thread_model,
             effort,
             fast_mode,
             ultracode,
         } => {
-            if !model.threads.contains_key(&thread_id) {
+            let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
+            };
+            let has_conversation =
+                thread.session_id.is_some() || !thread.provider_sessions.is_empty();
+            if thread.provider != provider && has_conversation {
+                if thread.active_turn_id.is_some() {
+                    return Err(CommandError::ThreadBusy { thread_id });
+                }
+                let choice = Some(ModelChoice {
+                    provider,
+                    model: thread_model,
+                    effort,
+                    fast_mode,
+                    ultracode,
+                });
+                if thread.pending_model.as_deref() == choice.as_ref() {
+                    return Ok(Vec::new());
+                }
+                return Ok(vec![Event::ThreadModelPending { thread_id, choice }]);
             }
-            Ok(vec![Event::ThreadModelSet {
+            let mut events = Vec::with_capacity(2);
+            if thread.pending_model.is_some() {
+                events.push(Event::ThreadModelPending {
+                    thread_id: thread_id.clone(),
+                    choice: None,
+                });
+            }
+            events.push(Event::ThreadModelSet {
                 thread_id,
+                provider,
                 model: thread_model,
                 effort,
                 fast_mode,
                 ultracode,
-            }])
+            });
+            Ok(events)
         }
         Command::MessageSend {
             thread_id,
@@ -1210,6 +1720,10 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 (ItemContent::ProposedPlan { .. }, RequestResponse::Decision { decision, .. })
                     if decision.accepts()
             );
+            let wakes = matches!(
+                response,
+                RequestResponse::Answers { .. } | RequestResponse::Secret { saved: true }
+            );
             let mut events = vec![Event::ItemAdded {
                 item: ThreadItem {
                     id: request_id.clone(),
@@ -1218,6 +1732,9 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     content,
                 },
             }];
+            if wakes {
+                events.extend(snooze::unsnoozed(thread, None));
+            }
             if implements_plan && thread.plan_mode {
                 events.push(Event::ThreadAccessSet {
                     thread_id: thread_id.clone(),
@@ -1362,7 +1879,7 @@ fn message_events(
     if text.is_empty() && !carried {
         return Err(CommandError::EmptyMessage);
     }
-    let mut events = Vec::with_capacity(5);
+    let mut events = Vec::with_capacity(6);
     if thread.worktree_released {
         // The engine recreated the folder before this command reached here.
         events.push(Event::ThreadWorktreeRestored {
@@ -1375,19 +1892,32 @@ fn message_events(
             archived: false,
         });
     }
+    if matches!(origin, Origin::User) {
+        events.extend(snooze::unsnoozed(thread, None));
+    }
     if thread.title.is_empty() {
         events.push(Event::ThreadTitleSet {
             thread_id: thread_id.clone(),
             title: title_from(&text, &attachments),
         });
     }
+    let switch = thread
+        .active_turn_id
+        .is_none()
+        .then(|| switch_provider(thread, &message_id))
+        .flatten();
+    let rewind = match switch {
+        Some(_) => None,
+        None => rewind_point(thread, !matches!(origin, Origin::User)),
+    };
+    events.extend(switch);
     events.push(Event::ItemAdded {
         item: ThreadItem {
             id: message_id.clone(),
             thread_id: thread_id.clone(),
             created_at: now.to_owned(),
             content: ItemContent::UserMessage {
-                rewind: rewind_point(thread, !matches!(origin, Origin::User)),
+                rewind,
                 text,
                 attachments,
                 steer: thread.active_turn_id.is_some(),
@@ -1399,6 +1929,8 @@ fn message_events(
                     Origin::PullRequest(update) => Some(update),
                     _ => None,
                 },
+                resumed: None,
+                dropped: false,
             },
         },
     });
@@ -1420,11 +1952,167 @@ fn rewind_point(thread: &Thread, task_result: bool) -> Option<Rewind> {
     }
     match (&thread.session_id, &thread.conversation_cursor) {
         (None, _) => Some(Rewind::Start),
-        (Some(_), Some(cursor)) => Some(Rewind::After {
+        (Some(session), Some(cursor)) => Some(Rewind::After {
             cursor: cursor.clone(),
+            session: Some(session.clone()),
         }),
         (Some(_), None) => None,
     }
+}
+
+/// Moves the thread to the provider the user picked as message `message_id` starts a turn:
+/// the current provider's session is kept for a switch back, the picked one's resumed if
+/// the thread has one, and the next turn hands it what it did not see.
+fn switch_provider(thread: &Thread, message_id: &str) -> Option<Event> {
+    let to = thread
+        .pending_model
+        .as_deref()
+        .filter(|to| to.provider != thread.provider)?
+        .clone();
+    let resumed = thread
+        .provider_sessions
+        .iter()
+        .find(|parked| parked.provider == to.provider)
+        .cloned();
+    let mut provider_sessions: Vec<ProviderSession> = thread
+        .provider_sessions
+        .iter()
+        .filter(|parked| parked.provider != to.provider && parked.provider != thread.provider)
+        .cloned()
+        .collect();
+    if let Some(session_id) = &thread.session_id {
+        provider_sessions.push(ProviderSession {
+            provider: thread.provider.clone(),
+            session_id: session_id.clone(),
+            conversation_cursor: thread.conversation_cursor.clone(),
+            resume_at: thread.resume_at.clone(),
+            seen_before: message_id.to_owned(),
+        });
+    }
+    let (strategy, since) = match &resumed {
+        Some(parked) => (
+            HandoffStrategy::DeltaSinceTargetLastSeen,
+            Some(parked.seen_before.clone()),
+        ),
+        None => (HandoffStrategy::FullThreadSummary, None),
+    };
+    let mut pending_handoffs: Vec<PendingHandoff> = thread
+        .pending_handoffs
+        .iter()
+        .filter(|handoff| !matches!(handoff, PendingHandoff::ProviderSwitch { .. }))
+        .cloned()
+        .collect();
+    pending_handoffs.push(PendingHandoff::ProviderSwitch {
+        from: ModelChoice::of(thread),
+        to: to.clone(),
+        strategy,
+        since,
+        before: message_id.to_owned(),
+    });
+    Some(Event::ProviderSwitched {
+        thread_id: thread.id.clone(),
+        to,
+        session_id: resumed.as_ref().map(|parked| parked.session_id.clone()),
+        conversation_cursor: resumed
+            .as_ref()
+            .and_then(|parked| parked.conversation_cursor.clone()),
+        resume_at: resumed.and_then(|parked| parked.resume_at),
+        provider_sessions,
+        pending_handoffs,
+    })
+}
+
+/// A new thread that goes on from `source`'s turn `turn`: in the same project, worktree and
+/// branch, with its models and modes, and none of its place in the list.
+fn forked(source: &Thread, id: String, turn: TurnPoint, now: &str) -> Thread {
+    Thread {
+        id,
+        project_id: source.project_id.clone(),
+        title: format!("{} fork", source.title).trim().to_owned(),
+        status: ThreadStatus::Idle,
+        branch: source.branch.clone(),
+        worktree_path: source.worktree_path.clone(),
+        session_id: None,
+        conversation_cursor: None,
+        resume_at: None,
+        watching_pull_request: false,
+        provider: source.provider.clone(),
+        model: source.model.clone(),
+        effort: source.effort,
+        fast_mode: source.fast_mode,
+        ultracode: source.ultracode,
+        access_mode: source.access_mode,
+        plan_mode: source.plan_mode,
+        active_turn_id: None,
+        archived: false,
+        pinned: false,
+        worktree_released: source.worktree_released,
+        worktree_adopted: source.worktree_adopted,
+        parent_thread_id: None,
+        task_cancelled: false,
+        task_answered: false,
+        forked_from: Some(Box::new(ForkOrigin {
+            thread_id: source.id.clone(),
+            turn,
+        })),
+        pending_model: None,
+        provider_sessions: Vec::new(),
+        pending_handoffs: vec![PendingHandoff::Fork { native: true }],
+        snoozed_until: None,
+        snoozed_at: None,
+        last_snooze_wake_at: None,
+        last_visited_at: None,
+        last_turn_ended_at: None,
+        created_at: now.to_owned(),
+        updated_at: now.to_owned(),
+    }
+}
+
+/// Takes the handoffs a turn delivered off what the thread's agent has yet to be told.
+pub fn consume_handoffs(
+    model: &ReadModel,
+    thread_id: &str,
+    delivered: &[PendingHandoff],
+) -> Vec<Event> {
+    let Some(thread) = model.threads.get(thread_id) else {
+        return Vec::new();
+    };
+    let handoffs: Vec<PendingHandoff> = thread
+        .pending_handoffs
+        .iter()
+        .filter(|handoff| !delivered.contains(handoff))
+        .cloned()
+        .collect();
+    if handoffs == thread.pending_handoffs {
+        return Vec::new();
+    }
+    vec![Event::ContextHandoffsSet {
+        thread_id: thread_id.to_owned(),
+        handoffs,
+    }]
+}
+
+/// The fork's source session could not be forked: its next turn takes the source's history
+/// as a transcript instead.
+pub fn fork_without_native(model: &ReadModel, thread_id: &str) -> Vec<Event> {
+    let Some(thread) = model.threads.get(thread_id) else {
+        return Vec::new();
+    };
+    let handoffs: Vec<PendingHandoff> = thread
+        .pending_handoffs
+        .iter()
+        .map(|handoff| match handoff {
+            PendingHandoff::Fork { .. } => PendingHandoff::Fork { native: false },
+            other => other.clone(),
+        })
+        .collect();
+    if handoffs == thread.pending_handoffs {
+        return Vec::new();
+    }
+    vec![Event::ContextHandoffsSet {
+        thread_id: thread_id.to_owned(),
+        handoffs,
+    }]
 }
 
 /// Records the provider's last message of a turn, which later rewinds come back to.
@@ -1500,6 +2188,21 @@ pub fn record_pull_request_watch(model: &ReadModel, thread_id: &str, watching: b
     }
 }
 
+/// Marks queued messages the user removed as never read by the agent.
+pub fn drop_queued_messages(
+    model: &ReadModel,
+    thread_id: &str,
+    message_ids: Vec<String>,
+) -> Vec<Event> {
+    if message_ids.is_empty() || !model.threads.contains_key(thread_id) {
+        return Vec::new();
+    }
+    vec![Event::MessagesDropped {
+        thread_id: thread_id.to_owned(),
+        message_ids,
+    }]
+}
+
 /// Links a thread to the one whose agent delegated its task to it.
 /// Closes a turn the app's close cut short. Its questions stay open: the agent that asked
 /// is gone, so the user's answers go to the thread as a message.
@@ -1525,7 +2228,50 @@ pub fn close_stale_turn(
     )
     .into_iter()
     .filter(|event| !matches!(event, Event::ItemAdded { item } if questions.contains(&item.id.as_str())))
+    .map(|event| match event {
+        Event::ItemAdded {
+            item:
+                item @ ThreadItem {
+                    content: ItemContent::TurnInterrupted,
+                    ..
+                },
+        } => Event::ItemAdded {
+            item: ThreadItem {
+                content: ItemContent::TurnCut,
+                ..item
+            },
+        },
+        event => event,
+    })
     .collect()
+}
+
+/// Whether hoshi may go on with the thread's conversation by itself, as after a restart or
+/// once a usage limit reset: nothing waits for the user but questions, which the user answers
+/// by message.
+pub fn may_continue_alone(model: &ReadModel, thread_id: &str) -> bool {
+    let Some(thread) = model.threads.get(thread_id) else {
+        return false;
+    };
+    let waits_for_user = model
+        .pending_requests(thread_id)
+        .iter()
+        .any(|item| !matches!(item.content, ItemContent::Questions { .. }));
+    !thread.archived && !thread.task_cancelled && thread.session_id.is_some() && !waits_for_user
+}
+
+/// Gives the thread back the session a turn tried to resume, should a turn that failed to
+/// resume it have replaced it.
+pub fn restore_session(model: &ReadModel, thread_id: &str, session_id: &str) -> Vec<Event> {
+    match model.threads.get(thread_id) {
+        Some(thread) if thread.session_id.as_deref() != Some(session_id) => {
+            vec![Event::SessionAttached {
+                thread_id: thread_id.to_owned(),
+                session_id: session_id.to_owned(),
+            }]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// The user's answers to `questions`, as a message to the agent: each question, then its
@@ -1621,6 +2367,83 @@ pub fn record_output(
     else {
         return Vec::new();
     };
+    let mut events = retry_settled(model, thread_id, turn_id, &output, now);
+    events.extend(record_turn_output(model, thread, turn_id, output, now));
+    events
+}
+
+/// Clears the running turn's retry once the run moves on: any output that comes from the
+/// model, or the turn's end. When the model answered, the turn keeps a note that the
+/// provider recovered.
+pub fn retry_settled(
+    model: &ReadModel,
+    thread_id: &str,
+    turn_id: &str,
+    output: &ProviderOutput,
+    now: &str,
+) -> Vec<Event> {
+    let active = model
+        .threads
+        .get(thread_id)
+        .is_some_and(|thread| thread.active_turn_id.as_deref() == Some(turn_id));
+    let moves_on = !matches!(
+        output,
+        ProviderOutput::Retrying { .. }
+            | ProviderOutput::SessionStarted { .. }
+            | ProviderOutput::WorkingDirectory { .. }
+            | ProviderOutput::UsageLimits(_)
+            | ProviderOutput::BackgroundTasks { .. }
+            | ProviderOutput::ConversationCursor { .. }
+            | ProviderOutput::ContextHandoffDelivered { .. }
+            | ProviderOutput::MessagesDropped { .. }
+            | ProviderOutput::ModelRerouted { .. }
+            | ProviderOutput::McpServerFailed { .. }
+            | ProviderOutput::HookStopped { .. }
+            | ProviderOutput::TurnCompleted { .. }
+    );
+    let Some(retry) = model.retries.get(thread_id).filter(|_| active && moves_on) else {
+        return Vec::new();
+    };
+    let mut events = vec![Event::TurnRetrying {
+        thread_id: thread_id.to_owned(),
+        retry: None,
+    }];
+    let answered = matches!(
+        output,
+        ProviderOutput::TextDelta { .. }
+            | ProviderOutput::ReasoningDelta { .. }
+            | ProviderOutput::Reasoning { .. }
+            | ProviderOutput::AssistantMessage { .. }
+            | ProviderOutput::ToolCallStarted { .. }
+            | ProviderOutput::RequestOpened { .. }
+            | ProviderOutput::TaskList { .. }
+            | ProviderOutput::ContextUsage(_)
+            | ProviderOutput::CompactionFinished { .. }
+    );
+    if answered {
+        events.push(Event::ItemAdded {
+            item: ThreadItem {
+                id: format!("{turn_id}:recovered:{}", retry.at),
+                thread_id: thread_id.to_owned(),
+                created_at: now.to_owned(),
+                content: ItemContent::ProviderRecovered {
+                    attempt: retry.attempt,
+                    max_attempts: retry.max_attempts,
+                },
+            },
+        });
+    }
+    events
+}
+
+fn record_turn_output(
+    model: &ReadModel,
+    thread: &Thread,
+    turn_id: &str,
+    output: ProviderOutput,
+    now: &str,
+) -> Vec<Event> {
+    let thread_id = thread.id.as_str();
     let item = |id: String, content: ItemContent| Event::ItemAdded {
         item: ThreadItem {
             id,
@@ -1672,8 +2495,59 @@ pub fn record_output(
         | ProviderOutput::WorkingDirectory { .. }
         | ProviderOutput::BackgroundTasks { .. }
         | ProviderOutput::ConversationCursor { .. }
+        | ProviderOutput::ContextHandoffDelivered { .. }
         | ProviderOutput::Woke
         | ProviderOutput::ProcessEnded => Vec::new(),
+        ProviderOutput::Retrying {
+            attempt,
+            max_attempts,
+            retry_in_ms,
+            error,
+        } => vec![Event::TurnRetrying {
+            thread_id: thread_id.to_owned(),
+            retry: Some(TurnRetry {
+                attempt,
+                max_attempts,
+                retry_in_ms,
+                error,
+                at: now.to_owned(),
+            }),
+        }],
+        ProviderOutput::MessagesDropped { message_ids } if !message_ids.is_empty() => {
+            vec![Event::MessagesDropped {
+                thread_id: thread_id.to_owned(),
+                message_ids,
+            }]
+        }
+        ProviderOutput::MessagesDropped { .. } => Vec::new(),
+        ProviderOutput::ModelRerouted { model, reason } => vec![item(
+            format!("{turn_id}:rerouted"),
+            ItemContent::ModelRerouted { model, reason },
+        )],
+        ProviderOutput::McpServerFailed { name, .. }
+            if model
+                .mcp_failures
+                .get(thread_id)
+                .is_some_and(|names| names.contains(&name)) =>
+        {
+            Vec::new()
+        }
+        ProviderOutput::McpServerFailed { name, error } => vec![item(
+            format!("{turn_id}:mcp:{name}"),
+            ItemContent::McpServerFailed { name, error },
+        )],
+        ProviderOutput::HookStopped {
+            event,
+            source,
+            reason,
+        } => vec![item(
+            format!("{turn_id}:hook-stopped"),
+            ItemContent::HookStopped {
+                event,
+                source,
+                reason,
+            },
+        )],
         ProviderOutput::Subagent {
             tool_use_id,
             output,
@@ -1940,7 +2814,51 @@ pub fn start_queued_turn(
     message_id: &str,
     now: &str,
 ) -> Vec<Event> {
-    start_idle_turn(model, thread_id, message_id, now)
+    let mut events = start_idle_turn(model, thread_id, message_id, now);
+    if !events.is_empty()
+        && let Some(switch) = model
+            .threads
+            .get(thread_id)
+            .and_then(|thread| switch_provider(thread, message_id))
+    {
+        events.insert(0, switch);
+    }
+    events
+}
+
+/// Starts a turn hoshi sends by itself to go on with the thread, opening with `text` marked
+/// as `resumed`. Nothing when the thread is gone or busy.
+pub fn start_resumed_turn(
+    model: &ReadModel,
+    thread_id: &str,
+    turn_id: &str,
+    text: &str,
+    resumed: Resumption,
+    now: &str,
+) -> Vec<Event> {
+    let mut events = start_queued_turn(model, thread_id, turn_id, now);
+    if events.is_empty() {
+        return events;
+    }
+    let message = Event::ItemAdded {
+        item: ThreadItem {
+            id: turn_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            created_at: now.to_owned(),
+            content: ItemContent::UserMessage {
+                text: text.to_owned(),
+                attachments: Vec::new(),
+                steer: false,
+                task_result: None,
+                pull_request_update: None,
+                resumed: Some(resumed),
+                rewind: None,
+                dropped: false,
+            },
+        },
+    };
+    events.insert(events.len() - 1, message);
+    events
 }
 
 /// Starts a turn the agent began by itself after its own turn completed, as a command it
@@ -2104,6 +3022,7 @@ mod tests {
             project_id: project_id.map(str::to_owned),
             title: String::new(),
             workspace: ThreadWorkspace::Local,
+            provider: crate::default_provider(),
             model: None,
             effort: None,
             fast_mode: false,
@@ -2401,7 +3320,9 @@ const a = 1
                 steer: false,
                 task_result: None,
                 pull_request_update: None,
+                resumed: None,
                 rewind: Some(Rewind::Start),
+                dropped: false,
             }
         )));
     }
@@ -2473,7 +3394,8 @@ const a = 1
         assert_eq!(
             rewind_of(&second),
             Some(Rewind::After {
-                cursor: "u2".into()
+                cursor: "u2".into(),
+                session: Some("s".into()),
             })
         );
     }
@@ -2506,6 +3428,7 @@ const a = 1
             &mut model,
             rewind(Rewind::After {
                 cursor: "u1".into(),
+                session: None,
             }),
         )
         .unwrap();
@@ -2842,6 +3765,7 @@ const a = 1
             &mut model,
             Command::ThreadModelSet {
                 thread_id: "t".into(),
+                provider: crate::default_provider(),
                 model: Some("opus".into()),
                 effort: Some(Effort::High),
                 fast_mode: true,
@@ -2854,6 +3778,333 @@ const a = 1
         assert_eq!(thread.model.as_deref(), Some("opus"));
         assert_eq!(thread.effort, Some(Effort::High));
         assert!(thread.fast_mode && thread.ultracode);
+    }
+
+    fn switch_to_copilot() -> Command {
+        Command::ThreadModelSet {
+            thread_id: "t".into(),
+            provider: "copilot".into(),
+            model: Some("gpt-6.1-sol".into()),
+            effort: None,
+            fast_mode: false,
+            ultracode: false,
+        }
+    }
+
+    #[test]
+    fn a_thread_without_a_session_can_move_to_another_provider() {
+        let mut model = model_with_thread();
+
+        run(&mut model, switch_to_copilot()).unwrap();
+
+        assert_eq!(model.thread("t").unwrap().provider, "copilot");
+    }
+
+    fn switch_to(provider: &str) -> Command {
+        Command::ThreadModelSet {
+            thread_id: "t".into(),
+            provider: provider.into(),
+            model: None,
+            effort: None,
+            fast_mode: false,
+            ultracode: false,
+        }
+    }
+
+    /// The thread ran turn `m1` on its first provider, in session `s`, which ended at `c1`.
+    fn model_with_conversation() -> ReadModel {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "one")).unwrap();
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s".into(),
+            },
+        );
+        finish_turn(&mut model, "m1");
+        let cursor = record_conversation_cursor(&model, "t", "c1".into());
+        model.apply(&cursor[0]);
+        model
+    }
+
+    #[test]
+    fn a_provider_picked_once_the_thread_has_a_session_waits_for_the_next_message() {
+        let mut model = model_with_conversation();
+
+        run(&mut model, switch_to_copilot()).unwrap();
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
+        assert_eq!(thread.pending_model.as_ref().unwrap().provider, "copilot");
+
+        let sent = run(&mut model, send("m2", "two")).unwrap();
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.provider, "copilot");
+        assert_eq!(thread.model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(thread.pending_model, None);
+        assert_eq!(thread.session_id, None);
+        assert_eq!(thread.conversation_cursor, None);
+        assert_eq!(
+            thread.provider_sessions,
+            [ProviderSession {
+                provider: crate::DEFAULT_PROVIDER.into(),
+                session_id: "s".into(),
+                conversation_cursor: Some("c1".into()),
+                resume_at: None,
+                seen_before: "m2".into(),
+            }]
+        );
+        assert!(matches!(
+            thread.pending_handoffs.as_slice(),
+            [PendingHandoff::ProviderSwitch {
+                strategy: HandoffStrategy::FullThreadSummary,
+                since: None,
+                before,
+                from,
+                to,
+            }] if before == "m2" && from.provider == crate::DEFAULT_PROVIDER && to.provider == "copilot"
+        ));
+        assert_eq!(rewind_of(&sent), None);
+    }
+
+    #[test]
+    fn switching_back_resumes_the_provider_s_session_and_hands_it_only_what_it_missed() {
+        let mut model = model_with_conversation();
+        run(&mut model, switch_to_copilot()).unwrap();
+        run(&mut model, send("m2", "two")).unwrap();
+        record(
+            &mut model,
+            "m2",
+            ProviderOutput::SessionStarted {
+                session_id: "x".into(),
+            },
+        );
+        finish_turn(&mut model, "m2");
+
+        run(&mut model, switch_to(crate::DEFAULT_PROVIDER)).unwrap();
+        run(&mut model, send("m3", "three")).unwrap();
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
+        assert_eq!(thread.session_id.as_deref(), Some("s"));
+        assert_eq!(thread.conversation_cursor.as_deref(), Some("c1"));
+        assert_eq!(thread.provider_sessions.len(), 1);
+        assert_eq!(thread.provider_sessions[0].provider, "copilot");
+        assert_eq!(thread.provider_sessions[0].seen_before, "m3");
+        assert!(matches!(
+            thread.pending_handoffs.as_slice(),
+            [PendingHandoff::ProviderSwitch {
+                strategy: HandoffStrategy::DeltaSinceTargetLastSeen,
+                since: Some(since),
+                before,
+                ..
+            }] if since == "m2" && before == "m3"
+        ));
+    }
+
+    #[test]
+    fn another_provider_is_refused_while_a_turn_runs_and_the_current_one_drops_the_pick() {
+        let mut model = model_with_conversation();
+        run(&mut model, send("m2", "two")).unwrap();
+
+        assert_eq!(
+            run(&mut model, switch_to_copilot()).unwrap_err(),
+            CommandError::ThreadBusy {
+                thread_id: "t".into()
+            }
+        );
+        finish_turn(&mut model, "m2");
+        run(&mut model, switch_to_copilot()).unwrap();
+        run(&mut model, switch_to(crate::DEFAULT_PROVIDER)).unwrap();
+        run(&mut model, send("m3", "three")).unwrap();
+
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
+        assert_eq!(thread.session_id.as_deref(), Some("s"));
+        assert!(thread.pending_handoffs.is_empty());
+    }
+
+    #[test]
+    fn a_rewind_to_before_a_provider_switch_is_refused() {
+        let mut model = model_with_conversation();
+        let second = run(&mut model, send("m2", "two")).unwrap();
+        finish_turn(&mut model, "m2");
+        run(&mut model, switch_to_copilot()).unwrap();
+        run(&mut model, send("m3", "three")).unwrap();
+        finish_turn(&mut model, "m3");
+
+        let error = run(
+            &mut model,
+            Command::ThreadRewind {
+                thread_id: "t".into(),
+                message_id: "m2".into(),
+                rewind: rewind_of(&second).unwrap(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, CommandError::CannotRewind { .. }));
+    }
+
+    fn turn_point(turn_id: &str, status: TurnStatus) -> TurnPoint {
+        TurnPoint {
+            turn_id: turn_id.into(),
+            through_item_id: format!("{turn_id}:answer"),
+            ordinal: 1,
+            status,
+            provider: crate::DEFAULT_PROVIDER.into(),
+            session_id: Some("s".into()),
+            cursor: Some("c1".into()),
+        }
+    }
+
+    fn fork(fork_thread_id: &str, status: TurnStatus) -> Command {
+        Command::ThreadFork {
+            thread_id: "t".into(),
+            fork_thread_id: fork_thread_id.into(),
+            turn: turn_point("m1", status),
+        }
+    }
+
+    #[test]
+    fn a_fork_starts_beside_its_source_with_none_of_its_place_in_the_list() {
+        let mut model = model_with_conversation();
+        let source = model.threads.get_mut("t").unwrap();
+        source.worktree_path = Some("/repo/wt".into());
+        source.branch = Some("hoshi/t".into());
+        source.pinned = true;
+        source.watching_pull_request = true;
+        source.title = "Fix login".into();
+
+        run(&mut model, fork("f", TurnStatus::Completed)).unwrap();
+
+        let fork = model.thread("f").unwrap();
+        assert_eq!(fork.title, "Fix login fork");
+        assert_eq!(fork.project_id.as_deref(), Some("p"));
+        assert_eq!(fork.worktree_path.as_deref(), Some("/repo/wt"));
+        assert_eq!(fork.branch.as_deref(), Some("hoshi/t"));
+        assert!(!fork.pinned && !fork.watching_pull_request && !fork.archived);
+        assert_eq!(fork.session_id, None);
+        assert_eq!(fork.forked_from.as_ref().unwrap().thread_id, "t");
+        assert_eq!(fork.forked_from.as_ref().unwrap().turn.turn_id, "m1");
+        assert_eq!(
+            fork.pending_handoffs,
+            [PendingHandoff::Fork { native: true }]
+        );
+        assert_eq!(model.forks_of("t").len(), 1);
+    }
+
+    #[test]
+    fn a_turn_still_running_cannot_be_forked_but_one_that_failed_can() {
+        let mut model = model_with_conversation();
+
+        assert_eq!(
+            run(&mut model, fork("f", TurnStatus::Running)).unwrap_err(),
+            CommandError::TurnNotForkable {
+                thread_id: "t".into(),
+                turn_id: "m1".into()
+            }
+        );
+        run(&mut model, fork("f", TurnStatus::Failed)).unwrap();
+        run(&mut model, fork("g", TurnStatus::Interrupted)).unwrap();
+    }
+
+    #[test]
+    fn a_fork_rewound_to_its_start_takes_its_source_again() {
+        let mut model = model_with_conversation();
+        run(&mut model, fork("f", TurnStatus::Completed)).unwrap();
+        model.threads.get_mut("f").unwrap().pending_handoffs.clear();
+
+        run(
+            &mut model,
+            Command::ThreadRewind {
+                thread_id: "f".into(),
+                message_id: "f1".into(),
+                rewind: Rewind::Start,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            model.thread("f").unwrap().pending_handoffs,
+            [PendingHandoff::Fork { native: true }]
+        );
+    }
+
+    fn merge_back(fork_thread_id: &str, status: TurnStatus) -> Command {
+        Command::ThreadMergeBack {
+            thread_id: fork_thread_id.into(),
+            turn: turn_point(&format!("{fork_thread_id}1"), status),
+        }
+    }
+
+    #[test]
+    fn a_merge_back_waits_for_the_parent_s_next_turn_and_replaces_an_older_one() {
+        let mut model = model_with_conversation();
+        run(&mut model, fork("f", TurnStatus::Completed)).unwrap();
+
+        run(&mut model, merge_back("f", TurnStatus::Completed)).unwrap();
+        let mut newer = merge_back("f", TurnStatus::Completed);
+        if let Command::ThreadMergeBack { turn, .. } = &mut newer {
+            turn.ordinal = 2;
+        }
+        run(&mut model, newer).unwrap();
+
+        let handoffs = &model.thread("t").unwrap().pending_handoffs;
+        assert!(matches!(
+            handoffs.as_slice(),
+            [PendingHandoff::MergeBack { fork_thread_id, turn }]
+                if fork_thread_id == "f" && turn.ordinal == 2
+        ));
+        let delivered = handoffs.clone();
+        let events = consume_handoffs(&model, "t", &delivered);
+        events.iter().for_each(|event| model.apply(event));
+        assert!(model.thread("t").unwrap().pending_handoffs.is_empty());
+    }
+
+    #[test]
+    fn a_merge_back_is_refused_from_no_fork_an_unfinished_turn_a_busy_parent_or_a_rival() {
+        let mut model = model_with_conversation();
+        run(&mut model, fork("f", TurnStatus::Completed)).unwrap();
+        run(&mut model, fork("g", TurnStatus::Completed)).unwrap();
+
+        assert_eq!(
+            run(
+                &mut model,
+                Command::ThreadMergeBack {
+                    thread_id: "t".into(),
+                    turn: turn_point("m1", TurnStatus::Completed),
+                }
+            )
+            .unwrap_err(),
+            CommandError::NotAFork {
+                thread_id: "t".into()
+            }
+        );
+        assert_eq!(
+            run(&mut model, merge_back("f", TurnStatus::Failed)).unwrap_err(),
+            CommandError::MergeBackTurnNotFinished {
+                thread_id: "f".into(),
+                turn_id: "f1".into()
+            }
+        );
+        run(&mut model, send("m2", "two")).unwrap();
+        assert_eq!(
+            run(&mut model, merge_back("f", TurnStatus::Completed)).unwrap_err(),
+            CommandError::MergeBackTargetBusy {
+                thread_id: "t".into()
+            }
+        );
+        finish_turn(&mut model, "m2");
+        run(&mut model, merge_back("f", TurnStatus::Completed)).unwrap();
+        assert_eq!(
+            run(&mut model, merge_back("g", TurnStatus::Completed)).unwrap_err(),
+            CommandError::MergeBackPending {
+                thread_id: "t".into(),
+                fork_thread_id: "f".into()
+            }
+        );
     }
 
     #[test]
@@ -3171,6 +4422,29 @@ Blue"
     }
 
     #[test]
+    fn a_turn_the_app_cut_short_reads_as_cut_not_as_stopped_by_the_user() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+
+        let ends: Vec<_> = close_stale_turn(&model, "t", "m1", NOW)
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::ItemAdded { item } => Some(item.content),
+                _ => None,
+            })
+            .filter(|content| {
+                matches!(content, ItemContent::TurnCut | ItemContent::TurnInterrupted)
+            })
+            .collect();
+
+        assert_eq!(ends, [ItemContent::TurnCut]);
+        let old: ItemContent = serde_json::from_str(r#"{"kind":"turnInterrupted"}"#).unwrap();
+        assert_eq!(old, ItemContent::TurnInterrupted);
+        let cut = serde_json::to_string(&ItemContent::TurnCut).unwrap();
+        assert_eq!(cut, r#"{"kind":"turnCut"}"#);
+    }
+
+    #[test]
     fn a_rewind_drops_the_questions_it_takes_out_of_the_transcript() {
         let mut model = model_with_thread();
         run(&mut model, send("m1", "test it")).unwrap();
@@ -3444,5 +4718,367 @@ Blue"
             );
         }
         assert_eq!(setup_of(&model), None);
+    }
+
+    #[test]
+    fn a_project_keeps_the_settings_it_sets_for_itself() {
+        let mut model = ReadModel::default();
+        run(&mut model, create_project("p", "/repo")).unwrap();
+        assert_eq!(
+            model.project("p").unwrap().settings,
+            ProjectSettings::default()
+        );
+        let settings = ProjectSettings {
+            continue_after_restart: Some(false),
+        };
+
+        run(
+            &mut model,
+            Command::ProjectSettingsSet {
+                project_id: "p".into(),
+                settings: settings.clone(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(model.project("p").unwrap().settings, settings);
+        let missing = run(
+            &mut model,
+            Command::ProjectSettingsSet {
+                project_id: "q".into(),
+                settings,
+            },
+        );
+        assert_eq!(
+            missing,
+            Err(CommandError::ProjectNotFound {
+                project_id: "q".into()
+            })
+        );
+    }
+
+    #[test]
+    fn removing_queued_messages_marks_them_never_read() {
+        let model = model_with_thread();
+        assert_eq!(
+            drop_queued_messages(&model, "t", vec!["m2".into()]),
+            [Event::MessagesDropped {
+                thread_id: "t".into(),
+                message_ids: vec!["m2".into()],
+            }]
+        );
+        assert!(drop_queued_messages(&model, "t", Vec::new()).is_empty());
+        assert!(drop_queued_messages(&model, "gone", vec!["m2".into()]).is_empty());
+    }
+
+    fn with_session(model: &mut ReadModel) {
+        run(model, send("m1", "work")).unwrap();
+        record(
+            model,
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn only_a_resumable_thread_nobody_waits_on_goes_on_alone() {
+        let mut model = model_with_thread();
+        assert!(!may_continue_alone(&model, "t"));
+        with_session(&mut model);
+        assert!(may_continue_alone(&model, "t"));
+
+        let question = Question {
+            header: "Color".into(),
+            question: "Which color?".into(),
+            options: Vec::new(),
+            multi_select: false,
+        };
+        let questions = ItemContent::Questions {
+            questions: vec![question],
+            status: RequestStatus::Pending,
+            answers: None,
+        };
+        open(&mut model, "r1", questions);
+        assert!(may_continue_alone(&model, "t"));
+        open(&mut model, "r2", approval());
+        assert!(!may_continue_alone(&model, "t"));
+
+        let mut model = model_with_thread();
+        with_session(&mut model);
+        run(&mut model, archive(true)).unwrap();
+        assert!(!may_continue_alone(&model, "t"));
+        assert!(!may_continue_alone(&model, "gone"));
+    }
+
+    #[test]
+    fn a_session_a_failed_resume_replaced_comes_back() {
+        let mut model = model_with_thread();
+        with_session(&mut model);
+        assert!(restore_session(&model, "t", "s1").is_empty());
+
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "fresh".into(),
+            },
+        );
+        let events = restore_session(&model, "t", "s1");
+        apply_all(&mut model, &events);
+
+        assert_eq!(model.thread("t").unwrap().session_id.as_deref(), Some("s1"));
+    }
+
+    fn retrying(attempt: u32) -> ProviderOutput {
+        ProviderOutput::Retrying {
+            attempt,
+            max_attempts: Some(10),
+            retry_in_ms: Some(30_000),
+            error: Some("overloaded".into()),
+        }
+    }
+
+    #[test]
+    fn a_retry_holds_until_the_model_answers() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "go")).unwrap();
+
+        record(&mut model, "m1", retrying(1));
+        record(&mut model, "m1", retrying(3));
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::WorkingDirectory {
+                path: "/repo".into(),
+            },
+        );
+
+        assert_eq!(
+            model.retry("t"),
+            Some(&TurnRetry {
+                attempt: 3,
+                max_attempts: Some(10),
+                retry_in_ms: Some(30_000),
+                error: Some("overloaded".into()),
+                at: NOW.into(),
+            })
+        );
+        let events = record(
+            &mut model,
+            "m1",
+            ProviderOutput::TextDelta {
+                item_id: "a".into(),
+                delta: "Hi".into(),
+            },
+        );
+        assert_eq!(
+            events,
+            [
+                Event::TurnRetrying {
+                    thread_id: "t".into(),
+                    retry: None,
+                },
+                Event::ItemAdded {
+                    item: ThreadItem {
+                        id: format!("m1:recovered:{NOW}"),
+                        thread_id: "t".into(),
+                        created_at: NOW.into(),
+                        content: ItemContent::ProviderRecovered {
+                            attempt: 3,
+                            max_attempts: Some(10),
+                        },
+                    },
+                },
+            ]
+        );
+        assert_eq!(model.retry("t"), None);
+        let later = record(
+            &mut model,
+            "m1",
+            ProviderOutput::AssistantMessage {
+                item_id: "a".into(),
+                text: "Hi".into(),
+            },
+        );
+        assert!(
+            !later
+                .iter()
+                .any(|event| matches!(event, Event::TurnRetrying { .. }))
+        );
+    }
+
+    #[test]
+    fn a_retry_ends_with_its_turn() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "go")).unwrap();
+        record(&mut model, "m1", retrying(2));
+        record(&mut model, "x", retrying(1));
+
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Failed {
+                    reason: TurnFailure::Overloaded {
+                        detail: "529".into(),
+                    },
+                },
+            },
+        );
+
+        assert_eq!(model.retry("t"), None);
+        assert!(record(&mut model, "m1", retrying(3)).is_empty());
+    }
+
+    #[test]
+    fn dropped_messages_are_marked_by_id() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "go")).unwrap();
+
+        let events = record(
+            &mut model,
+            "m1",
+            ProviderOutput::MessagesDropped {
+                message_ids: vec!["m2".into()],
+            },
+        );
+
+        assert_eq!(
+            events,
+            [Event::MessagesDropped {
+                thread_id: "t".into(),
+                message_ids: vec!["m2".into()],
+            }]
+        );
+        let none = record(
+            &mut model,
+            "m1",
+            ProviderOutput::MessagesDropped {
+                message_ids: Vec::new(),
+            },
+        );
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn a_rerouted_model_and_a_failed_mcp_server_leave_a_notice_in_the_turn() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "go")).unwrap();
+
+        let rerouted = record(
+            &mut model,
+            "m1",
+            ProviderOutput::ModelRerouted {
+                model: "gpt-5.1-codex-mini".into(),
+                reason: Some("high demand".into()),
+            },
+        );
+        let failed = record(
+            &mut model,
+            "m1",
+            ProviderOutput::McpServerFailed {
+                name: "hoshi".into(),
+                error: "connection closed".into(),
+            },
+        );
+
+        assert!(matches!(
+            rerouted.as_slice(),
+            [Event::ItemAdded { item }]
+                if item.id == "m1:rerouted"
+                    && item.content == ItemContent::ModelRerouted {
+                        model: "gpt-5.1-codex-mini".into(),
+                        reason: Some("high demand".into()),
+                    }
+        ));
+        assert!(matches!(
+            failed.as_slice(),
+            [Event::ItemAdded { item }]
+                if item.id == "m1:mcp:hoshi"
+                    && item.content == ItemContent::McpServerFailed {
+                        name: "hoshi".into(),
+                        error: "connection closed".into(),
+                    }
+        ));
+    }
+
+    #[test]
+    fn a_retry_the_model_never_answered_leaves_no_note() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "go")).unwrap();
+        record(&mut model, "m1", retrying(2));
+
+        let events = record(&mut model, "m1", ProviderOutput::ProcessEnded);
+
+        assert_eq!(
+            events,
+            [Event::TurnRetrying {
+                thread_id: "t".into(),
+                retry: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_failed_mcp_server_shows_once_per_thread() {
+        let mut model = model_with_thread();
+        let failed = |name: &str| ProviderOutput::McpServerFailed {
+            name: name.into(),
+            error: "connection closed".into(),
+        };
+        run(&mut model, send("m1", "go")).unwrap();
+        assert_eq!(record(&mut model, "m1", failed("github")).len(), 1);
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+
+        run(&mut model, send("m2", "again")).unwrap();
+
+        assert!(record(&mut model, "m2", failed("github")).is_empty());
+        assert!(matches!(
+            record(&mut model, "m2", failed("linear")).as_slice(),
+            [Event::ItemAdded { item }] if item.id == "m2:mcp:linear"
+        ));
+    }
+
+    #[test]
+    fn a_resumed_turn_opens_with_hoshis_message_marked_as_such() {
+        let mut model = model_with_thread();
+
+        let events = start_resumed_turn(
+            &model,
+            "t",
+            "r1",
+            "Continue where you left off.",
+            Resumption::Restart,
+            NOW,
+        );
+        apply_all(&mut model, &events);
+
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Event::ItemAdded { item },
+                Event::TurnStarted { turn_id, .. },
+            ] if item.id == "r1"
+                && turn_id == "r1"
+                && matches!(
+                    &item.content,
+                    ItemContent::UserMessage {
+                        resumed: Some(Resumption::Restart),
+                        rewind: None,
+                        steer: false,
+                        ..
+                    }
+                )
+        ));
+        let busy = start_resumed_turn(&model, "t", "r2", "x", Resumption::Restart, NOW);
+        assert!(busy.is_empty());
     }
 }

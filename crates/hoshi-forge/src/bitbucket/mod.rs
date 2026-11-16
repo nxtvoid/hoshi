@@ -15,7 +15,9 @@ use hoshi_core::{
     ChecksState, ForgeKind, MergeMethod, Mergeability, PullRequest, PullRequestAction,
     PullRequestDetail, PullRequestLabel, PullRequestState, PullRequestSupport, RemoteRepository,
 };
-use model::{Page, RawComment, RawCommit, RawDiffStat, RawPullRequest, RawStatus, Summary, User};
+use model::{
+    Page, RawActivity, RawComment, RawCommit, RawDiffStat, RawPullRequest, RawStatus, Summary, User,
+};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -425,7 +427,7 @@ impl Bitbucket {
         let open = !raw.state().is_finished();
         let mut summary = cached
             .as_ref()
-            .map(|extras| extras.summary)
+            .map(|extras| extras.summary.clone())
             .unwrap_or_default();
 
         let mut checks_read_at = cached.as_ref().map_or(now, |extras| extras.checks_read_at);
@@ -450,12 +452,17 @@ impl Bitbucket {
         if (!same_update || now.duration_since(comments_read_at) >= COMMENTS_FRESH_FOR)
             && let Some(comments) = best_effort(self.comments(repository, raw.id))?
         {
-            summary.unresolved_comments = model::unresolved_threads(&comments);
+            let author = raw.author.as_ref().and_then(User::login);
+            summary.unresolved_comments = model::unresolved_threads(&comments, author.as_deref());
+            summary.comment_actions = model::comment_actions(&comments);
             comments_read_at = now;
         }
         let mut review_read_at = cached.as_ref().and_then(|extras| extras.review_read_at);
         if !open {
             summary.changes_requested = false;
+            summary.changes_requested_by.clear();
+            summary.vote_actions.clear();
+            summary.approvals.clear();
             summary.conflicts = false;
         } else if !same_update
             || !same_head
@@ -467,6 +474,18 @@ impl Bitbucket {
             let read_both = full.is_some() && conflicts.is_some();
             if let Some(full) = full {
                 summary.changes_requested = model::changes_requested(&full);
+                summary.changes_requested_by = model::changes_requested_by(&full);
+                let activity = if model::has_votes(&full) {
+                    best_effort(
+                        self.get::<Page<RawActivity>>(&format!("{path}/activity?pagelen=50")),
+                    )?
+                    .map(|page| page.values)
+                    .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                summary.vote_actions = model::vote_actions(&full, &activity);
+                summary.approvals = model::approvals(&full, &activity);
             }
             summary.conflicts = conflicts_after_read(summary.conflicts, conflicts);
             if read_both {
@@ -478,7 +497,7 @@ impl Bitbucket {
             Extras {
                 updated_on: raw.updated_on.clone(),
                 commit,
-                summary,
+                summary: summary.clone(),
                 checks_read_at,
                 comments_read_at,
                 review_read_at,

@@ -9,9 +9,12 @@
 //! the model, `sonnet` by default, and `HOSHI_EVAL_EFFORT` its effort, `low` by default.
 //! Change a case only if it still fails on the text it was written against.
 
-use hoshi_core::{AccessMode, Command, Effort, Event, ItemContent, ThreadStatus, ThreadWorkspace};
+use hoshi_core::{
+    AccessMode, Command, Effort, Event, ItemContent, ModelInfo, ProviderModels, ThreadStatus,
+    ThreadWorkspace, TurnFailure,
+};
 use hoshi_engine::{Engine, Notification, Notify};
-use hoshi_providers::ClaudeCodeAdapter;
+use hoshi_providers::{ClaudeCodeAdapter, OutputSink, ProviderAdapter, RunningTurn, TurnRequest};
 use hoshi_store::Store;
 use std::path::Path;
 use std::sync::Arc;
@@ -147,6 +150,51 @@ fn check(case: &Case, calls: &Calls, answer: &str) -> Vec<String> {
     failures
 }
 
+/// Offers a Codex catalog, so tasks can be delegated to it, and runs their turns on Claude
+/// Code at its own model.
+struct StandInCodex(ClaudeCodeAdapter);
+
+impl ProviderAdapter for StandInCodex {
+    fn provider(&self) -> &'static str {
+        "codex"
+    }
+
+    fn models(&self) -> ProviderModels {
+        ProviderModels {
+            provider: "codex".into(),
+            default_model: Some("gpt-5.5".into()),
+            models: vec![ModelInfo {
+                slug: "gpt-5.5".into(),
+                name: "GPT-5.5".into(),
+                short_name: "5.5".into(),
+                legacy: false,
+                is_new: false,
+                update_required: false,
+                efforts: vec![Effort::Low, Effort::Medium, Effort::High, Effort::Xhigh],
+                default_effort: Some(Effort::Medium),
+                fast_mode: false,
+                ultracode: false,
+            }],
+            compacts_idle_threads: false,
+        }
+    }
+
+    fn start_turn(
+        &self,
+        request: TurnRequest,
+        sink: OutputSink,
+    ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+        self.0.start_turn(
+            TurnRequest {
+                model: None,
+                effort: None,
+                ..request
+            },
+            sink,
+        )
+    }
+}
+
 /// One run of the case: the agent's tool calls once its turn came to rest.
 fn sample(case: &Case, number: usize) -> Result<Run, String> {
     let root = std::env::temp_dir().join(format!(
@@ -184,7 +232,10 @@ fn sample(case: &Case, number: usize) -> Result<Run, String> {
     let engine =
         Engine::from_store(Store::open_in_memory().unwrap(), &root.join("data"), notify).unwrap();
     let model = std::env::var("HOSHI_EVAL_MODEL").unwrap_or_else(|_| "sonnet".into());
-    engine.set_adapter(Some(Arc::new(ClaudeCodeAdapter::new(None, Some(model)))));
+    engine.set_adapters(vec![
+        Arc::new(ClaudeCodeAdapter::new(None, Some(model.clone()))),
+        Arc::new(StandInCodex(ClaudeCodeAdapter::new(None, Some(model)))),
+    ]);
     engine
         .dispatch(Command::ProjectCreate {
             project_id: "p".into(),
@@ -198,6 +249,7 @@ fn sample(case: &Case, number: usize) -> Result<Run, String> {
             project_id: Some("p".into()),
             title: "Eval".into(),
             workspace: ThreadWorkspace::Local,
+            provider: hoshi_core::default_provider(),
             model: None,
             effort: Some(case.effort.unwrap_or_else(|| {
                 std::env::var("HOSHI_EVAL_EFFORT")
@@ -608,6 +660,27 @@ fn a_background_agent_is_a_task() {
         answer: &[],
         at_most: &[],
         effort: Some(Effort::High),
+    });
+}
+
+#[test]
+#[ignore = "spends tokens on real Claude Code turns"]
+fn another_providers_agent_is_a_task_on_it() {
+    run(Case {
+        name: "review-by-codex-is-a-codex-task",
+        kind: Kind::Bad,
+        files: &[MATH],
+        prompt: "Have Codex review src/math.ts and tell me what it finds.",
+        then: Vec::new(),
+        calls: vec![Call {
+            tool: "delegate_task",
+            input: &["\"provider\":\"codex\""],
+        }],
+        must_not: vec![call("Agent")],
+        order: &[],
+        answer: &[],
+        at_most: &[],
+        effort: None,
     });
 }
 

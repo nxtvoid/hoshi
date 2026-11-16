@@ -218,7 +218,12 @@ fn tools() -> Value {
                         "enum": ["shared", "worktree"],
                         "description": "shared (default) works in this thread's checkout; worktree in a new one from it.",
                     },
-                    "model": { "type": "string", "description": "The child's model, by slug or name; this thread's when omitted. Set only when the user or your instructions ask for one." },
+                    "provider": {
+                        "type": "string",
+                        "enum": ["claudeCode", "codex", "copilot"],
+                        "description": "The child's provider; this thread's when omitted. Set only when the user asks for one.",
+                    },
+                    "model": { "type": "string", "description": "The child's model among its provider's, by slug or name; this thread's when omitted, or that provider's default. Set only when the user or your instructions ask for one." },
                     "effort": {
                         "type": "string",
                         "enum": ["low", "medium", "high", "xhigh", "max"],
@@ -269,13 +274,15 @@ fn tools() -> Value {
         },
         {
             "name": "thread_read",
-            "description": "Read another hoshi thread: its status and latest messages from the user and its agent, oldest first. Read a thread before you answer about it.",
+            "description": "Read another hoshi thread: its status and latest messages from the user and its agent, oldest first. Read a thread before you answer about it. One item, as a cut message: itemId, then textOffset=nextTextOffset until null.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "threadId": { "type": "string" },
                     "limit": { "type": "integer", "description": "The latest messages to read, 1 to 100; 10 by default." },
                     "maxCharsPerItem": { "type": "integer", "description": "Longer messages are cut, 1 to 50000; 1500 by default." },
+                    "itemId": { "type": "string", "description": "Read only this item." },
+                    "textOffset": { "type": "integer" },
                 },
                 "required": ["threadId"],
             },
@@ -302,6 +309,18 @@ fn tools() -> Value {
                     "timeoutMs": { "type": "integer", "description": "How long to wait; 5 minutes by default, at most an hour." },
                 },
                 "required": ["threadId"],
+            },
+        },
+        {
+            "name": "thread_snooze",
+            "description": "Snooze a hoshi thread until `until`, or wake it with `wake`. Omit `threadId` for this thread. It leaves its section until then, or until it needs the user.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threadId": { "type": "string" },
+                    "until": { "type": "string", "description": "RFC 3339, with its offset." },
+                    "wake": { "type": "boolean", "description": "End its snooze now." },
+                },
             },
         },
         {
@@ -601,6 +620,7 @@ mod tests {
                 "thread_read",
                 "thread_send",
                 "thread_wait",
+                "thread_snooze",
                 "create_pull_request",
                 "watch_pull_request",
                 "unwatch_pull_request",

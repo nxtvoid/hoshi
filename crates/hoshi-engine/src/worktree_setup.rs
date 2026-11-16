@@ -276,6 +276,13 @@ impl WorktreeSetups {
         held.unwrap_or_default()
     }
 
+    /// Whether the thread's setup holds messages for its agent.
+    pub fn holds(&self, thread_id: &str) -> bool {
+        guard(&self.runs)
+            .get(thread_id)
+            .is_some_and(|run| !run.held.is_empty())
+    }
+
     pub fn launch(&self, thread_id: &str) -> Option<SetupLaunch> {
         guard(&self.runs)
             .get(thread_id)

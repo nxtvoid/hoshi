@@ -13,16 +13,21 @@ mod editors;
 mod folders;
 mod git;
 mod git_actions;
+mod handoffs;
 mod html_pages;
 mod mcp;
+mod merged_worktrees;
 use delegation::Delegation;
 use mcp::{McpServer, ToolFilter, ToolHandler};
 mod paths;
 mod project_icon;
+mod provider_cache;
 mod pull_request_cache;
 mod pull_request_tool;
 mod pull_request_watch;
 mod pull_requests;
+mod recent_folders;
+mod recovery;
 mod refreshing;
 mod secret_requests;
 mod secrets;
@@ -39,15 +44,16 @@ mod worktree;
 mod worktree_setup;
 
 use attachments::Attachments;
+/// The name hoshi's own MCP server goes by in the agents' configs.
+pub use attachments::MAX_FILE_BYTES;
 use background::Lingering;
 use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
-use hoshi_core::ProviderAccountStatus;
 use hoshi_core::{BankedResetFailure, BankedResetSpend, HeldMessage, ThreadHeldMessage};
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, BrowserSettings, GitActionProgress, ProviderUpdate,
-    ProviderUpdateFailure, ProviderVersion, TranscriptPage,
+    ProviderUpdateFailure, ProviderVersion, ProviderVersionUpdate, TranscriptPage,
 };
 use hoshi_core::{
     ChangesSummary, Command, CommandError, ContextUsage, DiffFile, DiffScope, Editor, Event,
@@ -59,25 +65,35 @@ use hoshi_core::{
     ThreadTitleSettings, ThreadWorkspace, TurnFailure, TurnOutcome, UsageLimits, WorkspaceEntry,
     answers_message, close_stale_turn, decide, record_branch, record_conversation_cursor,
     record_output, record_title, record_turn_changes, record_worktree, record_worktree_left,
-    start_queued_turn, turn_failed,
+    retry_settled, start_queued_turn, turn_failed,
 };
+use hoshi_core::{
+    CodexAccount, DEFAULT_PROVIDER, ProviderAccountStatus, ProviderSignIn, ProviderSignInFailure,
+};
+use hoshi_core::{IdleCompaction, compaction_before_expiry, snooze_pending};
 use hoshi_forge::{
     Bitbucket, BitbucketCredentials, Forge, ForgeError, GitHub, RepositoryRef,
     parse_pull_request_url, parse_remote, parse_repository_name,
 };
+pub use hoshi_providers::MCP_SERVER_NAME;
 use hoshi_providers::{
-    Installation, ProviderAdapter, RunningTurn, TitleRequest, TurnAttachment, TurnRequest, Updater,
-    run_update,
+    CodexSetup, Installation, ProviderAdapter, RunningTurn, TitleRequest, TurnAttachment,
+    TurnRequest, UpdateProgress, Updater, codex_account, codex_sign_out, run_update,
+    start_codex_sign_in,
 };
 use hoshi_store::{CachedPullRequestDetail, Store, StoreError};
 use html_pages::Pages;
+pub use merged_worktrees::{KeptReason, MergedCleanup};
 use pull_request_cache::{PullRequestCache, Version};
 use pull_request_watch::Wake;
 use pull_requests::PullRequestSync;
+pub use recent_folders::RecentFolder;
 use refreshing::Refreshing;
 use secrets::SecretKey;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -102,8 +118,7 @@ pub enum Notification {
     BackgroundTasks(ThreadBackgroundTasks),
     /// The provider plan's limits, as a running turn last reported them.
     UsageLimits(UsageLimits),
-    /// `None` once the provider is disabled.
-    ProviderVersion(Option<ProviderVersion>),
+    ProviderVersion(ProviderVersionUpdate),
     /// The step a running git action reached.
     GitActionProgress(GitActionProgress),
     /// What a thread's browser page painted, while the panel shows it.
@@ -112,30 +127,58 @@ pub enum Notification {
     BrowserPage(BrowserPage),
     /// The message a thread holds until it is compacted, or that it holds none any more.
     HeldMessage(ThreadHeldMessage),
+    /// A thread's queue, or whether the user can resume it, changed.
+    Queue(hoshi_core::ThreadQueue),
     /// A worktree's setup command started, wrote output, or ended.
     WorktreeSetup(hoshi_core::WorktreeSetupRun),
     /// The servers of a thread a view watches, when they change.
     Servers(hoshi_core::ThreadServers),
+    /// The branch a project's root folder is on, when it changes.
+    ProjectBranch(hoshi_core::ProjectBranch),
+    /// The providers as now known, after a sign-in changed or an install put a CLI in place.
+    Providers(ProvidersStatus),
+    /// What a sweep of merged worktrees just did.
+    MergedCleanup(MergedCleanup),
 }
 
 pub type Notify = Arc<dyn Fn(Notification) + Send + Sync>;
 
-/// Shared by every thread that talks to the engine: Tauri commands and the
-/// reader threads of running turns.
+/// The enabled providers' CLIs and accounts, by provider id, as last checked.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProvidersStatus {
+    pub versions: HashMap<String, ProviderVersion>,
+    pub accounts: HashMap<String, ProviderAccountStatus>,
+    /// When [`Engine::check_providers`] last ran, as an RFC 3339 time.
+    pub checked_at: Option<String>,
+    /// The sign-ins hoshi ran, by provider id.
+    pub sign_ins: HashMap<String, ProviderSignIn>,
+    /// Who each provider that reports it is signed in as, by provider id.
+    pub logins: HashMap<String, String>,
+    /// Who Codex is signed in as; `None` when signed out, unknown or Codex isn't enabled.
+    pub codex_account: Option<CodexAccount>,
+    /// Each provider plan's limits as last read or reported, possibly in an earlier run, by
+    /// provider id.
+    pub usage_limits: HashMap<String, UsageLimits>,
+}
+
+/// Shared by every thread that talks to the engine: the app and the reader threads of
+/// running turns.
 pub struct Engine {
     state: Arc<Mutex<State>>,
     terminals: Arc<Terminals>,
     /// The headless browser agents open pages in; apart from the state, as pages are slow.
-    browsing: Arc<Mutex<Browsing>>,
+    browsing: Arc<Browsing>,
+    /// How its pages open; set without waiting for a page that is busy.
+    browser_settings: Arc<Mutex<BrowserSettings>>,
     /// Per working folder.
     paths: Refreshing<Vec<paths::Indexed>>,
     /// Per working folder, which may add its own commands and skills.
     slash_commands: Refreshing<Vec<SlashCommand>>,
-    /// Held while the provider is asked for its limits, so one ask serves everyone waiting.
-    usage_probe: Arc<Mutex<()>>,
-    /// Held while a banked reset is spent: the grant and the request id a retry reuses until
-    /// the provider answers.
-    reset_spend: Mutex<Option<(String, String)>>,
+    /// Held while a provider is asked for its limits, so one ask serves everyone waiting.
+    usage_probes: Arc<UsageProbes>,
+    /// Held while a banked reset is spent: by provider, the grant and the request id a retry
+    /// reuses until the provider answers.
+    reset_spend: Mutex<HashMap<String, (String, String)>>,
     /// Held while the provider's CLI is checked against its releases or updated.
     maintenance: Arc<Mutex<()>>,
     servers: servers::Servers,
@@ -148,7 +191,13 @@ const USAGE_LIMITS_FRESH_FOR: Duration = Duration::from_secs(60);
 const PROVIDER_VERSION_CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
 const PROVIDER_VERSION_FRESH_FOR: Duration = Duration::from_secs(10 * 60);
 const UPDATE_PROGRESS_EVERY: Duration = Duration::from_millis(250);
+const CODEX: &str = "codex";
 const IDLE_BROWSER_CHECK: Duration = Duration::from_secs(60);
+const IDLE_LINGERING_CHECK: Duration = Duration::from_secs(60);
+/// The folder under hoshi's home that notes the agent processes each run of hoshi runs.
+const AGENT_PROCESSES_DIR: &str = "agent-processes";
+/// The most quitting waits for the browser, which may be busy with a slow page.
+const BROWSER_CLOSE_WAIT: Duration = Duration::from_secs(2);
 /// How long the agent gets to take a command it was told to stop as stopped.
 const STOPPED_WITHIN: Duration = Duration::from_secs(5);
 const STOPPED_POLL: Duration = Duration::from_millis(100);
@@ -178,11 +227,16 @@ struct State {
     lingering: HashMap<String, Lingering>,
     /// How many agent processes the engine started, which numbers each one.
     processes: u64,
-    /// `None` when the provider is disabled.
+    /// The default provider's adapter, which also answers for the plan's limits and the CLI's
+    /// version; `None` when it is disabled.
     adapter: Option<Arc<dyn ProviderAdapter>>,
+    /// Every enabled provider's adapter, the default one included.
+    adapters: Vec<Arc<dyn ProviderAdapter>>,
     notify: Notify,
     /// New worktrees go under here, one folder per project.
     worktrees_dir: PathBuf,
+    /// Each provider's models as its CLI last listed them.
+    provider_cache_dir: PathBuf,
     /// Each chat works in its own folder under here, named by its id.
     chats_dir: PathBuf,
     attachments: Attachments,
@@ -197,6 +251,8 @@ struct State {
     forges: HashMap<ForgeKind, Arc<dyn Forge>>,
     /// The forge repository of each project whose `origin` a forge serves.
     repositories: HashMap<String, RepositoryRef>,
+    /// The branch each project's root folder is on, as last read.
+    root_branches: HashMap<String, Option<String>>,
     pull_requests: PullRequestSync,
     /// The files of the pull request last read for each thread, with their patches, so the
     /// UI can ask for one patch at a time.
@@ -210,13 +266,26 @@ struct State {
     subagent_effort: SubagentEffort,
     /// Threads whose generated title missed the subject; named again after their turn.
     titles_to_refine: HashSet<String>,
-    /// `None` until the provider reports or is asked for them; kept across restarts.
-    usage_limits: Option<UsageLimits>,
-    /// When the provider last answered for its limits in this run.
-    usage_checked_at: Option<Instant>,
-    /// `None` until the enabled provider's CLI was checked.
-    provider_version: Option<ProviderVersion>,
+    /// By provider, once it reports or is asked for them; kept across restarts.
+    usage_limits: HashMap<String, UsageLimits>,
+    /// When each provider last answered for its limits in this run.
+    usage_checked_at: HashMap<String, Instant>,
+    /// Each enabled provider's CLI, once checked, by provider id.
+    provider_versions: HashMap<String, ProviderVersion>,
+    /// When the default provider's CLI was last checked.
     provider_version_checked_at: Option<Instant>,
+    /// Whether each enabled provider's CLI is installed and signed in, once checked.
+    provider_accounts: HashMap<String, ProviderAccountStatus>,
+    /// When the providers were last checked, as an RFC 3339 time.
+    providers_checked_at: Option<String>,
+    /// Where Codex is found and keeps its sign-in; `None` while it isn't enabled.
+    codex: Option<CodexSetup>,
+    provider_sign_ins: HashMap<String, ProviderSignIn>,
+    /// The account each provider that reports one that way is signed in as.
+    provider_logins: HashMap<String, String>,
+    codex_account: Option<CodexAccount>,
+    /// Stops the Codex sign-in that waits for the user.
+    codex_sign_in: Option<Arc<AtomicBool>>,
     /// Where each thread's agent last moved its session, until git confirmed it.
     session_moves: HashMap<String, String>,
     /// Messages sent while a thread's turn was ending, too late to join it, oldest first.
@@ -228,6 +297,10 @@ struct State {
     delegations: HashMap<String, Delegation>,
     /// Messages waiting for their thread's `/compact` turn to end, sent once it does.
     after_compaction: HashMap<String, QueuedMessage>,
+    idle_compaction: IdleCompaction,
+    /// Idle threads that compact before their prompt cache expires, with when, in Unix
+    /// milliseconds. Kept in memory only: after a restart, they compact when the user returns.
+    idle_compactions: HashMap<String, u64>,
     /// Folders git changes outside the lock, normalized: a worktree being created, restored
     /// or removed, or the files a rewind puts back. No turn starts in one until it's done.
     folder_ops: HashSet<String>,
@@ -249,11 +322,15 @@ struct State {
     pending_wakes: HashMap<String, Vec<Wake>>,
     /// The account each forge is read with, whose own comments never wake its agent.
     viewers: HashMap<ForgeKind, String>,
-    /// The thread whose transcript the UI shows, the only one whose text streams to it.
-    streamed: Option<String>,
+    /// The threads whose transcripts the UI holds, the only ones whose text streams to it.
+    streamed: Vec<String>,
+    recovery: recovery::Recovery,
+    merged_worktrees: merged_worktrees::MergedWorktrees,
 }
 
 /// A message waiting for the thread's running turn to end.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct QueuedMessage {
     id: String,
     text: String,
@@ -261,6 +338,9 @@ struct QueuedMessage {
     /// The user sent it, so a running turn reads it at once. News hoshi brings, such as a
     /// task's answer, waits for the agent to finish its step.
     from_user: bool,
+    /// It waits for the user to go on with the thread, as after its turn failed.
+    #[serde(default)]
+    held: bool,
 }
 
 fn held_message(thread_id: &str, message: &QueuedMessage) -> HeldMessage {
@@ -425,6 +505,10 @@ struct Turn {
     cursor: Option<String>,
     /// The commands running in the background, once the turn reported any.
     background: Option<ThreadBackgroundTasks>,
+    /// Started by `/compact`, which never compacts again once idle.
+    compacting: bool,
+    /// What it hands its agent first, until delivered.
+    handoff: Option<handoffs::TurnHandoff>,
 }
 
 /// What a background check for a worktree the turn created needs from the state.
@@ -436,8 +520,10 @@ struct WorktreeCheck {
 }
 
 impl Engine {
-    /// Keeps everything under `data_dir`: the database, worktrees, chats and attachments.
+    /// Keeps everything under `data_dir`: the database, worktrees, chats and attachments. Ends
+    /// the agent processes an earlier run of hoshi left running.
     pub fn open(data_dir: &Path, notify: Notify) -> Result<Self, StoreError> {
+        hoshi_providers::agent_processes::record_in(&data_dir.join(AGENT_PROCESSES_DIR));
         Self::from_store(
             Store::open(&data_dir.join("state.sqlite"))?,
             data_dir,
@@ -461,9 +547,9 @@ impl Engine {
             .iter()
             .map(|cached| (cached.thread_id.clone(), cached.usage))
             .collect();
-        let usage_limits = store.usage_limits().unwrap_or_else(|error| {
+        let usage_limits = store.provider_usage_limits().unwrap_or_else(|error| {
             eprintln!("hoshi: failed to read the cached usage limits: {error}");
-            None
+            HashMap::new()
         });
         let terminals = Arc::new(Terminals::default());
         let setups = WorktreeSetups::new(terminals.clone(), notify.clone());
@@ -477,8 +563,10 @@ impl Engine {
             lingering: HashMap::new(),
             processes: 0,
             adapter: None,
+            adapters: Vec::new(),
             notify,
             worktrees_dir: data_dir.join("worktrees"),
+            provider_cache_dir: provider_cache::dir(data_dir),
             chats_dir: data_dir.join("chats"),
             attachments: Attachments::new(data_dir.join("attachments")),
             pages: Pages::new(data_dir.join("attachments").join("pages")),
@@ -487,19 +575,29 @@ impl Engine {
             sync_wake: None,
             forges: HashMap::new(),
             repositories: HashMap::new(),
+            root_branches: HashMap::new(),
             pull_requests,
             pull_request_cache: PullRequestCache::default(),
             linked_pull_requests: HashMap::new(),
             context_usages,
             usage_limits,
-            usage_checked_at: None,
-            provider_version: None,
+            usage_checked_at: HashMap::new(),
+            provider_versions: HashMap::new(),
             provider_version_checked_at: None,
+            provider_accounts: HashMap::new(),
+            providers_checked_at: None,
+            codex: None,
+            provider_sign_ins: HashMap::new(),
+            provider_logins: HashMap::new(),
+            codex_account: None,
+            codex_sign_in: None,
             session_moves: HashMap::new(),
             queued: HashMap::new(),
             mcp: None,
             delegations: HashMap::new(),
             after_compaction: HashMap::new(),
+            idle_compaction: IdleCompaction::default(),
+            idle_compactions: HashMap::new(),
             folder_ops: HashSet::new(),
             parked: HashMap::new(),
             thread_ops: HashMap::new(),
@@ -509,13 +607,21 @@ impl Engine {
             watches,
             watch_reads: HashMap::new(),
             pending_wakes: HashMap::new(),
-            streamed: None,
+            streamed: Vec::new(),
             viewers: HashMap::new(),
             thread_titles: ThreadTitleSettings::default(),
             browser: BrowserSettings::default(),
             subagent_effort: SubagentEffort::default(),
             titles_to_refine: HashSet::new(),
+            recovery: recovery::Recovery::default(),
+            merged_worktrees: merged_worktrees::MergedWorktrees::default(),
         };
+        state.recover_from_restart();
+        let merged_cleanup = state.store.merged_cleanup().unwrap_or_else(|error| {
+            eprintln!("hoshi: failed to read the last merged worktree cleanup: {error}");
+            None
+        });
+        state.merged_worktrees.restore(merged_cleanup);
         let stale: Vec<_> = state
             .model
             .threads()
@@ -534,6 +640,7 @@ impl Engine {
         let thread_ids = state
             .model
             .threads()
+            .filter(|thread| follows_its_folder(thread))
             .map(|thread| thread.id.clone())
             .collect();
         let shared = Arc::new_cyclic(|this| {
@@ -542,18 +649,17 @@ impl Engine {
         });
         restore_pull_request_details(Arc::downgrade(&shared));
         refresh_branches(Arc::downgrade(&shared), thread_ids);
+        end_idle_lingering(Arc::downgrade(&shared));
         let weak = Arc::downgrade(&shared);
-        let browsing = Arc::new(Mutex::new(Browsing::new(
+        let browsing = Arc::new(Browsing::new(
             data_dir.join("browser"),
             lock(&shared).notify.clone(),
-        )));
+        ));
+        let browser_settings = browsing.settings_handle();
         let idle = Arc::downgrade(&browsing);
         thread::spawn(move || {
             while let Some(browsing) = idle.upgrade() {
-                browsing
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .end_idle_browser();
+                browsing.end_idle_browser();
                 drop(browsing);
                 thread::sleep(IDLE_BROWSER_CHECK);
             }
@@ -562,22 +668,26 @@ impl Engine {
         let html_pages = lock(&shared).pages.clone();
         let tools: Arc<ToolHandler> = Arc::new(move |caller, tool, arguments| {
             if tool.starts_with("preview_") {
-                let mut pages = pages
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 return pages.call(caller, tool, arguments);
             }
             if matches!(tool, html_pages::PREVIEW_TOOL | html_pages::RENDER_TOOL) {
                 let shared = weak.upgrade().ok_or("hoshi is closing")?;
-                let full_access = lock(&shared)
-                    .model
-                    .thread(caller)
-                    .is_some_and(|thread| thread.access_mode == hoshi_core::AccessMode::FullAccess);
+                let files = {
+                    let state = lock(&shared);
+                    let full_access = state.model.thread(caller).is_some_and(|thread| {
+                        thread.access_mode == hoshi_core::AccessMode::FullAccess
+                    });
+                    if full_access {
+                        html_pages::PageFiles::Any
+                    } else {
+                        html_pages::PageFiles::within_folder(state.cwd(caller).as_deref())
+                    }
+                };
                 drop(shared);
                 return if tool == html_pages::PREVIEW_TOOL {
-                    html_pages::preview(arguments, full_access)
+                    html_pages::preview(arguments, &files)
                 } else {
-                    html_pages::render(&html_pages, caller, arguments, full_access)
+                    html_pages::render(&html_pages, caller, arguments, &files)
                 };
             }
             match tool {
@@ -618,13 +728,15 @@ impl Engine {
         let maintenance = Arc::<Mutex<()>>::default();
         watch_provider_version(Arc::downgrade(&shared), maintenance.clone());
         thread::spawn(editors::installed);
+        merged_worktrees::watch(Arc::downgrade(&shared), Arc::downgrade(&terminals));
         Ok(Self {
             state: shared,
             terminals,
             browsing,
+            browser_settings,
             paths: Refreshing::new(PATHS_FRESH_FOR),
             slash_commands: Refreshing::new(SLASH_COMMANDS_FRESH_FOR),
-            usage_probe: Arc::default(),
+            usage_probes: Arc::default(),
             reset_spend: Mutex::default(),
             maintenance,
             servers: servers::Servers::new(notify_servers),
@@ -989,7 +1101,16 @@ impl Engine {
             git::switch(&cwd, branch).map_err(|detail| CommandError::GitFailed { detail });
         lock(&self.state).end_op(op, None)?;
         switched?;
-        read_branches(&Arc::downgrade(&self.state), &[thread_id.to_owned()]);
+        let state = Arc::downgrade(&self.state);
+        read_branches(&state, &[thread_id.to_owned()]);
+        let project_id = lock(&self.state)
+            .model
+            .thread(thread_id)
+            .filter(|thread| thread.worktree_path.is_none())
+            .and_then(|thread| thread.project_id.clone());
+        if let Some(project_id) = project_id {
+            read_root_branches(&state, &[project_id]);
+        }
         Ok(())
     }
 
@@ -1057,37 +1178,22 @@ impl Engine {
     /// message creates the folder again. Refused while it has uncommitted or untracked files,
     /// while the agent works, or while a terminal is open in it. Everything stays local.
     pub fn release_worktree(&self, thread_id: &str) -> Result<(), CommandError> {
-        if self.terminals.any_open_for(thread_id) {
-            return Err(CommandError::TerminalsOpen {
-                thread_id: thread_id.to_owned(),
-            });
-        }
-        let release = Command::ThreadWorktreeRelease {
-            thread_id: thread_id.to_owned(),
-        };
-        let (op, root, path, checkpoints) = {
-            let mut state = lock(&self.state);
-            let (thread, root) = state.removable(thread_id)?;
-            let path =
-                thread
-                    .worktree_path
-                    .clone()
-                    .ok_or_else(|| CommandError::NothingToClean {
-                        thread_id: thread_id.to_owned(),
-                    })?;
-            if thread.worktree_released {
-                return state.decide_and_commit(release);
-            }
-            state.close_lingering(thread_id);
-            let op = state.begin_op(thread_id, &[&path])?;
-            (op, root, path, state.checkpoints.clone())
-        };
-        checkpoints.settle(&path);
-        let removed = State::remove_clean_worktree(&root, &path, thread_id);
-        let mut state = lock(&self.state);
-        let released = removed.and_then(|()| state.decide_and_commit(release));
-        state.end_op(op, None)?;
-        released
+        release_worktree(&self.state, &self.terminals, thread_id)
+    }
+
+    /// Removes now the worktree folders [`merged_worktrees`] would, and tells what it did.
+    pub fn delete_merged_worktrees(&self) -> MergedCleanup {
+        merged_worktrees::sweep(&self.state, &self.terminals)
+    }
+
+    /// What the last sweep of merged worktrees did in this run, if one ran.
+    pub fn merged_cleanup(&self) -> Option<MergedCleanup> {
+        lock(&self.state).merged_worktrees.last()
+    }
+
+    /// The worktree folders of threads whose pull request merged are removed by themselves.
+    pub fn set_delete_merged_worktrees(&self, on: bool) {
+        lock(&self.state).merged_worktrees.set(on);
     }
 
     /// Once the thread's pull request is merged: removes its worktree and its local branch,
@@ -1250,49 +1356,92 @@ impl Engine {
         project_icon::data_url(Path::new(&root))
     }
 
+    /// Where the project's icon is among its files. Reads the disk.
+    pub fn project_icon_path(&self, project_id: &str) -> Option<std::path::PathBuf> {
+        let root = lock(&self.state)
+            .model
+            .project(project_id)?
+            .workspace_root
+            .clone();
+        project_icon::find(Path::new(&root))
+    }
+
     /// Also reads the plan's limits in the background, so they are ready when asked for.
     /// Also reads the plan's limits and checks the CLI against its releases in the background.
     pub fn set_adapter(&self, adapter: Option<Arc<dyn ProviderAdapter>>) {
+        self.set_adapters(adapter.into_iter().collect());
+    }
+
+    /// The enabled providers' adapters, one per provider. Each that reports them also reads
+    /// its plan's limits in the background, and the CLIs are checked against their releases.
+    pub fn set_adapters(&self, adapters: Vec<Arc<dyn ProviderAdapter>>) {
+        let adapter = adapters
+            .iter()
+            .find(|adapter| adapter.provider() == DEFAULT_PROVIDER)
+            .cloned();
         let enabled = adapter.is_some();
+        let any_enabled = !adapters.is_empty();
+        let reporting: Vec<String> = adapters
+            .iter()
+            .filter(|adapter| adapter.reports_usage_limits())
+            .map(|adapter| adapter.provider().to_owned())
+            .collect();
         {
             let mut state = lock(&self.state);
+            let mut gone: Vec<String> = state
+                .adapters
+                .iter()
+                .map(|adapter| adapter.provider().to_owned())
+                .filter(|provider| !adapters.iter().any(|kept| kept.provider() == provider))
+                .collect();
+            if !enabled && !gone.iter().any(|provider| provider == DEFAULT_PROVIDER) {
+                gone.push(DEFAULT_PROVIDER.to_owned());
+            }
             state.adapter = adapter;
-            if !enabled {
-                state.provider_version = None;
-                (state.notify)(Notification::ProviderVersion(None));
+            state.adapters = adapters;
+            for provider in gone {
+                state.forget_provider(provider);
             }
         }
         self.slash_commands.clear();
-        if enabled {
+        for provider in reporting {
             let state = Arc::downgrade(&self.state);
-            let probe = self.usage_probe.clone();
+            let probes = self.usage_probes.clone();
             thread::spawn(move || {
                 if let Some(state) = state.upgrade() {
-                    check_usage_limits(&state, &probe, false);
+                    check_usage_limits(&state, &probes, &provider, false);
                 }
             });
+        }
+        if any_enabled {
             let state = Arc::downgrade(&self.state);
             let maintenance = self.maintenance.clone();
             thread::spawn(move || {
                 if let Some(state) = state.upgrade() {
-                    check_provider_version(&state, &maintenance);
+                    check_provider_versions(&state, &maintenance, None);
                 }
             });
         }
     }
 
-    /// The enabled provider's CLI as last checked, without checking it.
+    /// The default provider's CLI as last checked, without checking it.
     pub fn provider_version(&self) -> Option<ProviderVersion> {
-        lock(&self.state).provider_version.clone()
+        self.provider_version_of(DEFAULT_PROVIDER)
     }
 
-    /// Checks the CLI against its latest release. While an update or another check
-    /// runs, answers with what is known.
+    /// Provider `provider`'s CLI as last checked, without checking it.
+    pub fn provider_version_of(&self, provider: &str) -> Option<ProviderVersion> {
+        lock(&self.state).provider_versions.get(provider).cloned()
+    }
+
+    /// Checks the default provider's CLI against its latest release. While an update or
+    /// another check runs, answers with what is known.
     pub fn check_provider_version(&self) -> Option<ProviderVersion> {
-        check_provider_version(&self.state, &self.maintenance)
+        check_provider_versions(&self.state, &self.maintenance, Some(DEFAULT_PROVIDER));
+        self.provider_version()
     }
 
-    /// Whether the enabled provider's CLI is installed and signed in. Runs the CLI.
+    /// Whether the default provider's CLI is installed and signed in. Runs the CLI.
     pub fn provider_account_status(&self) -> ProviderAccountStatus {
         let adapter = lock(&self.state).adapter.clone();
         adapter.map_or(ProviderAccountStatus::Unknown, |adapter| {
@@ -1300,14 +1449,165 @@ impl Engine {
         })
     }
 
-    /// Updates the provider's CLI in the background; its progress arrives as
+    /// Every enabled provider's CLI and account as last checked, without checking them.
+    pub fn providers_status(&self) -> ProvidersStatus {
+        lock(&self.state).providers_status()
+    }
+
+    /// Checks every enabled provider's CLI against its latest release, and whether it is
+    /// installed and signed in. Runs each CLI, so it can take a few seconds.
+    pub fn check_providers(&self) -> ProvidersStatus {
+        let adapters = lock(&self.state).adapters.clone();
+        let accounts: Vec<(String, ProviderAccountStatus, Option<String>)> =
+            thread::scope(|scope| {
+                let accounts: Vec<_> = adapters
+                    .iter()
+                    .map(|adapter| {
+                        scope.spawn(|| {
+                            let status = adapter.account_status();
+                            (
+                                adapter.provider().to_owned(),
+                                status,
+                                adapter.signed_in_as(),
+                            )
+                        })
+                    })
+                    .collect();
+                check_provider_versions(&self.state, &self.maintenance, None);
+                accounts
+                    .into_iter()
+                    .filter_map(|account| account.join().ok())
+                    .collect()
+            });
+        let codex = lock(&self.state).codex.clone();
+        let codex_account = codex.and_then(|codex| codex_account(codex.home.as_deref()));
+        let mut state = lock(&self.state);
+        state.provider_logins.clear();
+        for (provider, account, login) in accounts {
+            if state.adapter_for(&provider).is_some() {
+                if let Some(login) = login {
+                    state.provider_logins.insert(provider.clone(), login);
+                }
+                state.provider_accounts.insert(provider, account);
+            }
+        }
+        state.codex_account = codex_account.filter(|_| state.codex.is_some());
+        state.providers_checked_at = Some(now());
+        state.providers_status()
+    }
+
+    /// Where Codex is found and keeps its sign-in; `None` while it isn't enabled.
+    pub fn set_codex(&self, setup: Option<CodexSetup>) {
+        let mut state = lock(&self.state);
+        if setup.is_none() {
+            state.codex_account = None;
+            if let Some(cancel) = state.codex_sign_in.take() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            state.provider_sign_ins.remove(CODEX);
+        }
+        state.codex = setup;
+    }
+
+    /// Starts signing Codex in with ChatGPT and returns the page the user signs in on, for
+    /// their browser. The sign-in then waits in the background; how it ends arrives as
+    /// `Notification::Providers`. Runs the CLI.
+    pub fn sign_in_codex(&self) -> Result<String, ProviderSignInFailure> {
+        let setup = {
+            let mut state = lock(&self.state);
+            let setup = state
+                .codex
+                .clone()
+                .ok_or(ProviderSignInFailure::NotInstalled)?;
+            if let Some(cancel) = state.codex_sign_in.take() {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            state.set_sign_in(CODEX, ProviderSignIn::Starting);
+            setup
+        };
+        let sign_in = match start_codex_sign_in(&setup) {
+            Ok(sign_in) => sign_in,
+            Err(reason) => {
+                lock(&self.state).set_sign_in(
+                    CODEX,
+                    ProviderSignIn::Failed {
+                        reason: reason.clone(),
+                    },
+                );
+                return Err(reason);
+            }
+        };
+        let url = sign_in.url().to_owned();
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut state = lock(&self.state);
+            state.codex_sign_in = Some(cancel.clone());
+            state.set_sign_in(CODEX, ProviderSignIn::Waiting { url: url.clone() });
+        }
+        let state = Arc::downgrade(&self.state);
+        thread::spawn(move || {
+            let result = sign_in.wait(&cancel);
+            let account = codex_account(setup.home.as_deref());
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            let mut state = lock(&state);
+            let current = state
+                .codex_sign_in
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &cancel));
+            if !current {
+                return;
+            }
+            state.codex_sign_in = None;
+            match result {
+                Ok(()) => {
+                    state.keep_codex_account(account, ProviderAccountStatus::Ready);
+                    state.set_sign_in(CODEX, ProviderSignIn::Succeeded);
+                }
+                Err(reason) => state.set_sign_in(CODEX, ProviderSignIn::Failed { reason }),
+            }
+        });
+        Ok(url)
+    }
+
+    /// Stops the Codex sign-in that waits for the user.
+    pub fn cancel_codex_sign_in(&self) {
+        let mut state = lock(&self.state);
+        if let Some(cancel) = state.codex_sign_in.take() {
+            cancel.store(true, Ordering::SeqCst);
+            state.set_sign_in(CODEX, ProviderSignIn::Idle);
+        }
+    }
+
+    /// Signs Codex out through Codex itself. Runs the CLI.
+    pub fn sign_out_codex(&self) -> Result<(), ProviderSignInFailure> {
+        let setup = lock(&self.state)
+            .codex
+            .clone()
+            .ok_or(ProviderSignInFailure::NotInstalled)?;
+        codex_sign_out(&setup)?;
+        let mut state = lock(&self.state);
+        state.keep_codex_account(None, ProviderAccountStatus::SignedOut);
+        state.set_sign_in(CODEX, ProviderSignIn::Idle);
+        Ok(())
+    }
+
+    /// Updates the default provider's CLI in the background; its progress arrives as
     /// `Notification::ProviderVersion`.
     pub fn update_provider(&self) {
+        self.update_provider_of(DEFAULT_PROVIDER);
+    }
+
+    /// Updates provider `provider`'s CLI in the background; its progress arrives as
+    /// `Notification::ProviderVersion`.
+    pub fn update_provider_of(&self, provider: &str) {
         let state = Arc::downgrade(&self.state);
         let maintenance = self.maintenance.clone();
+        let provider = provider.to_owned();
         thread::spawn(move || {
             if let Some(state) = state.upgrade() {
-                update_provider(&state, &maintenance);
+                update_provider(&state, &maintenance, &provider);
             }
         });
     }
@@ -1320,7 +1620,7 @@ impl Engine {
     /// were given until their session starts again; they are refused once access is off.
     pub fn set_browser(&self, settings: BrowserSettings) {
         lock(&self.state).browser = settings.clone();
-        self.browsing().configure(settings);
+        *hold(&self.browser_settings) = settings;
     }
 
     /// How agents choose the model and effort of their subagents, from their next turn on.
@@ -1328,8 +1628,143 @@ impl Engine {
         lock(&self.state).subagent_effort = policy;
     }
 
+    /// When idle threads with a large context compact. Threads already idle under another
+    /// mode wait for the user.
+    pub fn set_idle_compaction(&self, mode: IdleCompaction) {
+        let mut state = lock(&self.state);
+        state.idle_compaction = mode;
+        if mode != IdleCompaction::BeforeCacheExpires {
+            state.idle_compactions.clear();
+        }
+    }
+
     /// Names the thread again from its whole conversation, in the background. The
     /// title only changes if the user did not rename it meanwhile.
+    /// Whether threads a restart cut short go on by themselves; see
+    /// [`Engine::continue_cut_threads`].
+    pub fn set_continue_after_restart(&self, on: bool) {
+        lock(&self.state).recovery.continue_after_restart = on;
+    }
+
+    /// Whether a thread whose turn failed on its plan's usage limit goes on by itself once the
+    /// limit resets.
+    pub fn set_resume_after_usage_limit(&self, on: bool) {
+        lock(&self.state).recovery.resume_after_usage_limit = on;
+    }
+
+    /// Has the threads whose turn the last close or crash cut short go on where they left off,
+    /// told of the background work that ended with it. Once, after the adapters and settings
+    /// are set.
+    pub fn continue_cut_threads(&self) {
+        lock(&self.state).continue_cut_threads();
+    }
+
+    /// The messages queued for the thread that wait for the user to go on with it, as after a
+    /// restart or a failed turn.
+    pub fn held_queue(&self, thread_id: &str) -> Vec<HeldMessage> {
+        lock(&self.state).held_queue(thread_id)
+    }
+
+    /// Sends what waits in the thread's held queue, one turn each.
+    pub fn resume_queue(&self, thread_id: &str) {
+        lock(&self.state).release_queue(thread_id);
+    }
+
+    /// The messages waiting in the thread's queue, in the order they go, and whether the
+    /// user can resume it. [`Notification::Queue`] tells of each change.
+    pub fn thread_queue(&self, thread_id: &str) -> hoshi_core::ThreadQueue {
+        lock(&self.state).thread_queue(thread_id)
+    }
+
+    /// Goes on with the stopped thread: when its last turn was stopped, cut short or failed on
+    /// its usage limit and nothing waits for an answer, its agent is told to continue first;
+    /// then what waited in its queue follows.
+    pub fn resume_thread(&self, thread_id: &str) -> Result<(), CommandError> {
+        let resumable = {
+            let state = lock(&self.state);
+            if state.model.thread(thread_id).is_none() {
+                return Err(CommandError::ThreadNotFound {
+                    thread_id: thread_id.to_owned(),
+                });
+            }
+            state.resumable(thread_id) && state.model.pending_requests(thread_id).is_empty()
+        };
+        if resumable {
+            self.dispatch(Command::MessageSend {
+                thread_id: thread_id.to_owned(),
+                message_id: delegation::new_id(),
+                text: recovery::LIMIT_RESET_PROMPT.to_owned(),
+                attachments: Vec::new(),
+            })?;
+        }
+        lock(&self.state).release_queue(thread_id);
+        Ok(())
+    }
+
+    /// Starts a turn with one of the user's queued messages, while the thread runs none; the
+    /// rest of its queue follows.
+    pub fn send_queued_now(&self, thread_id: &str, message_id: &str) -> Result<(), CommandError> {
+        lock(&self.state).send_queued_now(thread_id, message_id)
+    }
+
+    /// Takes a message out of the thread's queue; the transcript shows it never read.
+    pub fn remove_queued_message(
+        &self,
+        thread_id: &str,
+        message_id: &str,
+    ) -> Result<(), CommandError> {
+        lock(&self.state).remove_queued(thread_id, Some(message_id))
+    }
+
+    /// Takes every message out of the thread's queue.
+    pub fn clear_queue(&self, thread_id: &str) -> Result<(), CommandError> {
+        lock(&self.state).remove_queued(thread_id, None)
+    }
+
+    /// Whether the project's threads a restart cut short go on by themselves, as it sets for
+    /// itself or inherits from `general.continue_after_restart`; `None` for chats.
+    pub fn continue_after_restart_in(
+        &self,
+        project_id: Option<&str>,
+    ) -> hoshi_core::EffectiveSetting<bool> {
+        lock(&self.state).continue_after_restart_in(project_id)
+    }
+
+    /// When the thread goes on by itself, as RFC 3339: once the usage limit that failed its
+    /// turn resets.
+    pub fn usage_limit_resume(&self, thread_id: &str) -> Option<String> {
+        lock(&self.state).limit_resume(thread_id)
+    }
+
+    /// The thread no longer goes on by itself once its usage limit resets, whatever the
+    /// settings say.
+    pub fn cancel_usage_limit_resume(&self, thread_id: &str) {
+        lock(&self.state).choose_limit_resume(thread_id, false);
+    }
+
+    /// The thread goes on by itself once the usage limit that failed its turn resets, whatever
+    /// the settings say. Whether it will: not when no reset is ahead.
+    pub fn resume_at_usage_limit_reset(&self, thread_id: &str) -> bool {
+        lock(&self.state).choose_limit_resume(thread_id, true)
+    }
+
+    /// Threads whose turn fails on their usage limit are snoozed until it resets.
+    pub fn set_snooze_until_limit_resets(&self, on: bool) {
+        lock(&self.state).recovery.snooze_until_limit_resets = on;
+    }
+
+    /// Snoozes the thread until the usage limit that failed its turn resets. Whether it did:
+    /// not when no reset is ahead, or the thread is archived or waits for the user.
+    pub fn snooze_until_usage_limit_resets(&self, thread_id: &str) -> bool {
+        lock(&self.state).snooze_until_limit_resets(thread_id)
+    }
+
+    /// The thread's snooze is the one its usage limit put it in, until the reset; waking it
+    /// with [`Command::ThreadWake`] drops only that snooze, not the resumption.
+    pub fn usage_limit_snoozed(&self, thread_id: &str) -> bool {
+        lock(&self.state).limit_snoozed(thread_id)
+    }
+
     pub fn regenerate_title(&self, thread_id: &str) -> Result<(), CommandError> {
         let mut state = lock(&self.state);
         if state.model.thread(thread_id).is_none() {
@@ -1406,35 +1841,129 @@ impl Engine {
                 chats_dir.to_string_lossy().into_owned()
             }
         };
-        let Some(adapter) = lock(&self.state).adapter.clone() else {
+        let adapter = {
+            let state = lock(&self.state);
+            let provider = thread_id
+                .and_then(|thread_id| state.model.thread(thread_id))
+                .map_or(DEFAULT_PROVIDER, |thread| thread.provider.as_str());
+            state.adapter_for(provider)
+        };
+        let Some(adapter) = adapter else {
             return Ok(None);
         };
         let root = PathBuf::from(&cwd);
+        let key = format!("{}\n{cwd}", adapter.provider());
         let commands = self
             .slash_commands
-            .get(&cwd, move || adapter.slash_commands(&root));
+            .get(&key, move || adapter.slash_commands(&root));
         Ok(commands.map(|commands| commands.as_ref().clone()))
     }
 
-    /// The enabled provider's models. Can run the provider's CLI.
+    /// The default provider's models. Can run the provider's CLI.
     pub fn models(&self) -> Option<ProviderModels> {
         let adapter = lock(&self.state).adapter.clone()?;
         Some(adapter.models())
     }
 
-    /// The limits last read or reported, possibly in an earlier run, without asking the provider.
+    /// Every enabled provider's models, the default provider first. Runs the providers' CLIs
+    /// side by side, and keeps what they list for [`Engine::known_provider_models`].
+    pub fn provider_models(&self) -> Vec<ProviderModels> {
+        let (adapters, cache_dir) = {
+            let state = lock(&self.state);
+            (state.adapters.clone(), state.provider_cache_dir.clone())
+        };
+        let mut catalogs: Vec<ProviderModels> = thread::scope(|scope| {
+            let reads: Vec<_> = adapters
+                .iter()
+                .map(|adapter| {
+                    scope.spawn(|| ProviderModels {
+                        compacts_idle_threads: adapter.compacts_idle_threads(),
+                        ..adapter.models()
+                    })
+                })
+                .collect();
+            reads
+                .into_iter()
+                .filter_map(|read| read.join().ok())
+                .collect()
+        });
+        catalogs.sort_by_key(|catalog| catalog.provider != DEFAULT_PROVIDER);
+        for catalog in catalogs.iter().filter(|catalog| !catalog.models.is_empty()) {
+            if let Err(error) = provider_cache::write(&cache_dir, catalog) {
+                eprintln!(
+                    "hoshi: failed to keep the models of {}: {error}",
+                    catalog.provider
+                );
+            }
+        }
+        catalogs
+    }
+
+    /// Every enabled provider's models as known without running a CLI, the default provider
+    /// first: its offline catalog, then what [`Engine::provider_models`] last kept. Providers
+    /// with neither are left out.
+    pub fn known_provider_models(&self) -> Vec<ProviderModels> {
+        let (adapters, cache_dir) = {
+            let state = lock(&self.state);
+            (state.adapters.clone(), state.provider_cache_dir.clone())
+        };
+        let mut catalogs: Vec<ProviderModels> = adapters
+            .iter()
+            .filter_map(|adapter| {
+                let kept = provider_cache::read(&cache_dir, adapter.provider());
+                let catalog = provider_cache::hydrate(adapter.offline_models(), kept)?;
+                Some(ProviderModels {
+                    compacts_idle_threads: adapter.compacts_idle_threads(),
+                    ..catalog
+                })
+            })
+            .collect();
+        catalogs.sort_by_key(|catalog| catalog.provider != DEFAULT_PROVIDER);
+        catalogs
+    }
+
+    /// The default provider's limits last read or reported, possibly in an earlier run,
+    /// without asking it.
     pub fn known_usage_limits(&self) -> Option<UsageLimits> {
-        lock(&self.state).usage_limits.clone()
+        self.known_usage_limits_of(DEFAULT_PROVIDER)
     }
 
-    /// The plan's limits, asking the provider unless it answered within the last minute.
-    /// `force` always waits for an answer given after the call. `None` when it can't say.
+    /// Provider `provider`'s limits last read or reported, possibly in an earlier run, without
+    /// asking it.
+    pub fn known_usage_limits_of(&self, provider: &str) -> Option<UsageLimits> {
+        lock(&self.state).usage_limits.get(provider).cloned()
+    }
+
+    /// The default provider plan's limits; see [`Engine::usage_limits_of`].
     pub fn usage_limits(&self, force: bool) -> Option<UsageLimits> {
-        check_usage_limits(&self.state, &self.usage_probe, force)
+        self.usage_limits_of(DEFAULT_PROVIDER, force)
     }
 
-    /// Spends the next banked reset, then reads the limits again. Reaches the network.
+    /// Provider `provider`'s plan limits, asking it unless it answered within the last minute.
+    /// `force` always waits for an answer given after the call. `None` when it can't say or
+    /// isn't enabled.
+    pub fn usage_limits_of(&self, provider: &str, force: bool) -> Option<UsageLimits> {
+        check_usage_limits(&self.state, &self.usage_probes, provider, force)
+    }
+
+    /// The enabled providers that can read their plan's limits, in the order they were set.
+    pub fn usage_limit_providers(&self) -> Vec<String> {
+        lock(&self.state)
+            .adapters
+            .iter()
+            .filter(|adapter| adapter.reports_usage_limits())
+            .map(|adapter| adapter.provider().to_owned())
+            .collect()
+    }
+
+    /// Spends the default provider's next banked reset; see [`Engine::spend_banked_reset_of`].
     pub fn spend_banked_reset(&self) -> BankedResetSpend {
+        self.spend_banked_reset_of(DEFAULT_PROVIDER)
+    }
+
+    /// Spends provider `provider`'s next banked reset, then reads its limits again. Reaches
+    /// the network.
+    pub fn spend_banked_reset_of(&self, provider: &str) -> BankedResetSpend {
         let mut pending = self
             .reset_spend
             .lock()
@@ -1443,28 +1972,28 @@ impl Engine {
             let state = lock(&self.state);
             let grant = state
                 .usage_limits
-                .as_ref()
+                .get(provider)
                 .and_then(|limits| limits.banked_resets.as_ref())
                 .filter(|banked| banked.count > 0)
                 .and_then(|banked| banked.next_grant_id.clone());
-            (state.adapter.clone(), grant)
+            (state.adapter_for(provider), grant)
         };
         let (Some(adapter), Some(grant)) = (adapter, grant) else {
             return BankedResetSpend::NoneLeft;
         };
-        let request_id = match pending.take() {
+        let request_id = match pending.remove(provider) {
             Some((pending_grant, request_id)) if pending_grant == grant => request_id,
             _ => delegation::new_id(),
         };
         let spend = adapter.spend_banked_reset(&grant, &request_id);
         if !spend.settled() {
-            *pending = Some((grant, request_id));
+            pending.insert(provider.to_owned(), (grant, request_id));
             return spend;
         }
         if matches!(spend, BankedResetSpend::Failed { .. }) {
             return spend;
         }
-        let refreshed = check_usage_limits(&self.state, &self.usage_probe, true);
+        let refreshed = check_usage_limits(&self.state, &self.usage_probes, provider, true);
         if spend == BankedResetSpend::Reset && refreshed.is_none() {
             return BankedResetSpend::Failed {
                 reason: BankedResetFailure::LimitsUnread,
@@ -1533,6 +2062,14 @@ impl Engine {
                 .iter()
                 .map(|(thread_id, message)| held_message(thread_id, message))
                 .collect(),
+            project_branches: state
+                .root_branches
+                .iter()
+                .map(|(project_id, branch)| hoshi_core::ProjectBranch {
+                    project_id: project_id.clone(),
+                    branch: branch.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -1595,7 +2132,27 @@ impl Engine {
                 .map(|since| (thread_id.clone(), task_id.clone(), since)),
             _ => None,
         };
+        let sent_to = match &command {
+            Command::MessageSend {
+                thread_id,
+                message_id,
+                ..
+            } => Some((thread_id.clone(), message_id.clone())),
+            _ => None,
+        };
+        if let Command::TurnInterrupt { thread_id } = &command
+            && state.hold_for_stop(thread_id)
+            && state
+                .model
+                .thread(thread_id)
+                .is_some_and(|thread| thread.active_turn_id.is_none())
+        {
+            return Ok(());
+        }
         state.run_command(command)?;
+        if let Some((thread_id, message_id)) = sent_to {
+            state.release_queue_after(&thread_id, Some(&message_id));
+        }
         let model = &state.model;
         self.terminals
             .retain_threads(|thread_id| model.thread(thread_id).is_some());
@@ -1604,10 +2161,12 @@ impl Engine {
             self.end_servers_of(thread_id, task_id, since);
         }
         if !deleted.is_empty() {
-            let mut browsing = self.browsing();
-            for thread_id in &deleted {
-                browsing.forget(thread_id);
-            }
+            let browsing = self.browsing.clone();
+            thread::spawn(move || {
+                for thread_id in &deleted {
+                    browsing.forget(thread_id);
+                }
+            });
         }
         Ok(())
     }
@@ -1620,6 +2179,7 @@ impl Engine {
             project_id,
             title,
             workspace,
+            provider,
             model,
             effort,
             fast_mode,
@@ -1658,6 +2218,7 @@ impl Engine {
             project_id,
             title,
             workspace,
+            provider,
             model,
             effort,
             fast_mode,
@@ -1724,15 +2285,19 @@ impl Engine {
         Ok(None)
     }
 
-    fn browsing(&self) -> std::sync::MutexGuard<'_, Browsing> {
-        self.browsing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn browsing(&self) -> &Browsing {
+        &self.browsing
     }
 
     /// The UI shows this thread's transcript, `None` for none: only its text streams to it.
     pub fn stream_thread(&self, thread_id: Option<String>) {
-        lock(&self.state).streamed = thread_id;
+        self.stream_threads(thread_id.into_iter().collect());
+    }
+
+    /// The UI holds these threads' transcripts, shown or kept for a quick return: only their
+    /// text streams to it.
+    pub fn stream_threads(&self, thread_ids: Vec<String>) {
+        lock(&self.state).streamed = thread_ids;
     }
 
     /// The panel shows the thread's browser page, which then streams to it, or stopped.
@@ -1784,6 +2349,25 @@ impl Engine {
             .map_err(|detail| CommandError::BrowserFailed { detail })
     }
 
+    /// The screen showing the thread's page has `scale` device pixels per pixel, which the
+    /// page then paints at.
+    pub fn browser_scale(&self, thread_id: &str, scale: f64) -> Result<(), CommandError> {
+        self.browsing()
+            .user_scale(thread_id, scale)
+            .map_err(|detail| CommandError::BrowserFailed { detail })
+    }
+
+    /// Runs `expression` in the thread's open page, awaiting a promise, and gives its value.
+    pub fn browser_evaluate(
+        &self,
+        thread_id: &str,
+        expression: &str,
+    ) -> Result<serde_json::Value, CommandError> {
+        self.browsing()
+            .user_evaluate(thread_id, expression)
+            .map_err(|detail| CommandError::BrowserFailed { detail })
+    }
+
     /// The user closed the thread's page from the panel.
     pub fn browser_close(&self, thread_id: &str) {
         self.browsing().user_close(thread_id);
@@ -1792,12 +2376,35 @@ impl Engine {
     /// Closes every page and the headless browser, as when the app quits.
     /// Ends the agent processes kept between turns, and the commands running in them, as
     /// when the app quits.
+    /// Ends the agent processes kept between turns, as hoshi quits.
     pub fn close_lingering_agents(&self) {
-        lock(&self.state).close_all_lingering();
+        let mut state = lock(&self.state);
+        state.recovery.quitting = true;
+        state.close_all_lingering();
+    }
+
+    /// Ends every agent process, those running turns and those kept between turns, and
+    /// everything they started, as when the app quits. Waits a moment for them to end.
+    pub fn end_agents(&self) {
+        {
+            let mut state = lock(&self.state);
+            state.recovery.quitting = true;
+            state.close_all_lingering();
+            for turn in state.turns.values() {
+                turn.running.close();
+            }
+        }
+        hoshi_providers::agent_processes::end_all();
     }
 
     pub fn close_browser(&self) {
-        self.browsing().close();
+        let browsing = self.browsing.clone();
+        let (closed, done) = mpsc::channel();
+        thread::spawn(move || {
+            browsing.close();
+            let _ = closed.send(());
+        });
+        let _ = done.recv_timeout(BROWSER_CLOSE_WAIT);
     }
 
     /// Compacts the thread's conversation with `/compact`, then sends the message, as when
@@ -1826,7 +2433,9 @@ impl Engine {
             attachments: attachments.clone(),
         };
         if busy {
-            return state.run_command(send);
+            state.run_command(send)?;
+            state.release_queue_after(thread_id, Some(message_id));
+            return Ok(());
         }
         state.hold_until_compacted(
             thread_id,
@@ -1835,6 +2444,7 @@ impl Engine {
                 text,
                 attachments,
                 from_user: true,
+                held: false,
             },
         );
         let compacted = state.run_command(Command::MessageSend {
@@ -1858,6 +2468,11 @@ impl Engine {
     pub fn send_held_message_now(&self, thread_id: &str) -> Result<(), CommandError> {
         let mut state = lock(&self.state);
         if !state.after_compaction.contains_key(thread_id) {
+            return Ok(());
+        }
+        // A restart ended the compaction it waited for.
+        if !state.turns.contains_key(thread_id) {
+            state.send_after_compaction(thread_id);
             return Ok(());
         }
         state.run_command(Command::TurnInterrupt {
@@ -1940,6 +2555,12 @@ impl Engine {
         pages.read(id)
     }
 
+    /// The file of a page an agent showed; `None` when it is gone.
+    pub fn html_page_path(&self, id: &str) -> Option<PathBuf> {
+        let pages = lock(&self.state).pages.clone();
+        pages.path(id).filter(|path| path.is_file())
+    }
+
     /// A sent image as a data URL; `None` when its file is gone.
     pub fn image_data_url(&self, id: &str, mime_type: &str) -> Option<String> {
         let path = lock(&self.state).attachments.path(id, mime_type)?;
@@ -2003,6 +2624,65 @@ impl Engine {
             command: None,
         };
         self.terminals.open(terminal_id, launch, size, sink)
+    }
+
+    /// Runs `command` in a shell in the home folder, shown through `sink` like a thread's
+    /// terminal; the shell exits with the command.
+    pub fn run_in_terminal(
+        &self,
+        terminal_id: &str,
+        command: &str,
+        size: (u16, u16),
+        sink: TerminalSink,
+    ) -> Result<TerminalAttach, CommandError> {
+        let home = std::env::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .to_string_lossy()
+            .into_owned();
+        let launch = Launch {
+            thread_id: "",
+            cwd: &home,
+            project_root: &home,
+            worktree_path: None,
+            command: Some(command),
+        };
+        self.terminals.open(terminal_id, launch, size, sink)
+    }
+
+    /// The folders the enabled agents ran sessions in, newest first, read from their own
+    /// history. Reads many files, so it takes a moment.
+    pub fn recent_folders(&self) -> Vec<RecentFolder> {
+        let (adapters, data_dir, roots) = {
+            let state = lock(&self.state);
+            let data_dir = state
+                .worktrees_dir
+                .parent()
+                .map_or_else(|| state.worktrees_dir.clone(), Path::to_path_buf);
+            let roots: Vec<String> = state
+                .model
+                .projects()
+                .map(|project| project.workspace_root.clone())
+                .collect();
+            (state.adapters.clone(), data_dir, roots)
+        };
+        let found = thread::scope(|scope| {
+            let scans: Vec<_> = adapters
+                .iter()
+                .map(|adapter| {
+                    scope.spawn(|| (adapter.provider().to_owned(), adapter.session_folders()))
+                })
+                .collect();
+            scans
+                .into_iter()
+                .filter_map(|scan| scan.join().ok())
+                .collect()
+        });
+        let home = std::env::home_dir();
+        recent_folders::gather(
+            found,
+            &recent_folders::Excluded::new(home.as_deref(), &data_dir, &std::env::temp_dir()),
+            &roots,
+        )
     }
 
     /// Every worktree setup since the app started, running or ended.
@@ -2090,6 +2770,14 @@ impl Engine {
 }
 
 impl State {
+    /// The adapter of `provider`, when it is enabled.
+    fn adapter_for(&self, provider: &str) -> Option<Arc<dyn ProviderAdapter>> {
+        self.adapters
+            .iter()
+            .find(|adapter| adapter.provider() == provider)
+            .cloned()
+    }
+
     /// Where the thread's agent runs. A chat's own folder is created when first asked for.
     fn cwd(&self, thread_id: &str) -> Option<String> {
         let thread = self.model.thread(thread_id)?;
@@ -2144,7 +2832,32 @@ impl State {
                 })
             }
             Command::MessageSend { ref thread_id, .. } => {
+                let switching = self.model.thread(thread_id).is_some_and(|thread| {
+                    thread.active_turn_id.is_none() && thread.pending_model.is_some()
+                });
+                if switching {
+                    self.refuse_ending_background_work(thread_id)?;
+                }
                 self.restore_released_worktree(thread_id)?;
+                Ok(command)
+            }
+            Command::ThreadSnooze { ref thread_id, .. } if self.holds_user_message(thread_id) => {
+                Err(CommandError::MessageQueued {
+                    thread_id: thread_id.clone(),
+                })
+            }
+            Command::ThreadModelSet {
+                ref thread_id,
+                ref provider,
+                ..
+            } => {
+                if self
+                    .model
+                    .thread(thread_id)
+                    .is_some_and(|thread| thread.provider != *provider)
+                {
+                    self.refuse_ending_background_work(thread_id)?;
+                }
                 Ok(command)
             }
             Command::ThreadCreate {
@@ -2153,6 +2866,7 @@ impl State {
                 title,
                 workspace:
                     workspace @ (ThreadWorkspace::NewWorktree | ThreadWorkspace::BranchWorktree { .. }),
+                provider,
                 model,
                 effort,
                 fast_mode,
@@ -2173,6 +2887,7 @@ impl State {
                     project_id,
                     title,
                     workspace,
+                    provider,
                     model,
                     effort,
                     fast_mode,
@@ -2183,6 +2898,56 @@ impl State {
             }
             other => Ok(other),
         }
+    }
+
+    /// A message the user sent waits for the thread: for its turn, its compaction, its git
+    /// work or its worktree's setup.
+    fn holds_user_message(&self, thread_id: &str) -> bool {
+        self.queued
+            .get(thread_id)
+            .is_some_and(|queued| queued.iter().any(|message| message.from_user))
+            || self
+                .after_compaction
+                .get(thread_id)
+                .is_some_and(|message| message.from_user)
+            || self
+                .thread_ops
+                .get(thread_id)
+                .is_some_and(|held| !held.is_empty())
+            || self.setups.holds(thread_id)
+    }
+
+    /// The thread's snooze is still ahead, whatever woke it since.
+    fn snoozed(&self, thread_id: &str) -> bool {
+        self.model
+            .thread(thread_id)
+            .is_some_and(|thread| snooze_pending(thread, Utc::now()))
+    }
+
+    /// [`Self::snoozed`] at `now`, in Unix milliseconds.
+    fn snoozed_at_millis(&self, thread_id: &str, now: u64) -> bool {
+        let now = i64::try_from(now)
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis);
+        self.model
+            .thread(thread_id)
+            .zip(now)
+            .is_some_and(|(thread, now)| snooze_pending(thread, now))
+    }
+
+    /// Refuses what would close the process the thread's completed turn kept while it still
+    /// runs commands in the background.
+    fn refuse_ending_background_work(&self, thread_id: &str) -> Result<(), CommandError> {
+        if self
+            .lingering
+            .get(thread_id)
+            .is_some_and(background::Lingering::runs_background_work)
+        {
+            return Err(CommandError::BackgroundWorkRunning {
+                thread_id: thread_id.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Creates again the worktree a released thread had, before a message runs in it.
@@ -2250,8 +3015,31 @@ impl State {
                 thread_id: thread_id.to_owned(),
             });
         }
+        if let Some(other) = self.sharing_worktree(thread, &[]) {
+            return Err(CommandError::WorktreeShared {
+                thread_id: thread_id.to_owned(),
+                other_thread_id: other.to_owned(),
+            });
+        }
         let root = self.project_root(thread)?;
         Ok((thread, root))
+    }
+
+    /// Another thread that works in `thread`'s worktree as its own, such as a fork, besides
+    /// those in `leaving`.
+    fn sharing_worktree(&self, thread: &hoshi_core::Thread, leaving: &[String]) -> Option<&str> {
+        let path = git::normalize(thread.worktree_path.as_deref()?);
+        self.model
+            .threads()
+            .filter(|other| other.id != thread.id && !other.worktree_adopted)
+            .filter(|other| !leaving.contains(&other.id))
+            .find(|other| {
+                other
+                    .worktree_path
+                    .as_deref()
+                    .is_some_and(|other| git::normalize(other) == path)
+            })
+            .map(|other| other.id.as_str())
     }
 
     /// The other threads that run in `thread`'s project root, and so change branch with it.
@@ -2411,15 +3199,28 @@ impl State {
     }
 
     fn worktrees_freed_by(&self, command: &Command) -> Vec<(String, String)> {
+        let deleted: Vec<String> = self
+            .threads_deleted_by(command)
+            .into_iter()
+            .map(|thread| thread.id.clone())
+            .collect();
         self.threads_deleted_by(command)
             .into_iter()
             .filter(|thread| !thread.worktree_adopted)
+            .filter(|thread| self.sharing_worktree(thread, &deleted).is_none())
             .filter_map(|thread| {
                 let path = thread.worktree_path.clone()?;
                 let project = self.model.project(thread.project_id.as_deref()?)?;
                 Some((project.workspace_root.clone(), path))
             })
-            .collect()
+            .fold(Vec::new(), |mut freed, (root, path)| {
+                if !freed.iter().any(|(_, kept): &(String, String)| {
+                    git::normalize(kept) == git::normalize(&path)
+                }) {
+                    freed.push((root, path));
+                }
+                freed
+            })
     }
 
     fn commit(&mut self, events: &[Event], now: &str) -> Result<(), CommandError> {
@@ -2436,10 +3237,19 @@ impl State {
             }));
         }
         self.close_lingering_after(events);
+        self.recovery_after(events);
         Ok(())
     }
 
     fn receive(&mut self, thread_id: &str, turn_id: &str, output: ProviderOutput) {
+        if self.recovery.quitting {
+            return;
+        }
+        let now = now();
+        let settled = retry_settled(&self.model, thread_id, turn_id, &output, &now);
+        if let Err(error) = self.commit(&settled, &now) {
+            eprintln!("hoshi: failed to record a retry's end: {error}");
+        }
         let (item_id, kind, delta) = match output {
             ProviderOutput::TextDelta { item_id, delta } => (item_id, StreamKind::Text, delta),
             ProviderOutput::ReasoningDelta { item_id, delta } => {
@@ -2450,7 +3260,7 @@ impl State {
             }
             other => return self.record(thread_id, turn_id, other),
         };
-        let shown = self.streamed.as_deref() == Some(thread_id);
+        let shown = self.streamed.iter().any(|streamed| streamed == thread_id);
         let active = self
             .model
             .thread(thread_id)
@@ -2466,15 +3276,33 @@ impl State {
     }
 
     fn record(&mut self, thread_id: &str, turn_id: &str, output: ProviderOutput) {
+        match &output {
+            ProviderOutput::ContextHandoffDelivered { injected } => {
+                self.handoff_delivered(thread_id, turn_id, *injected);
+                return;
+            }
+            ProviderOutput::SessionStarted { .. } => self.native_fork_started(thread_id, turn_id),
+            ProviderOutput::TurnCompleted { outcome } => {
+                self.handoff_turn_ended(thread_id, turn_id, outcome);
+            }
+            _ => {}
+        }
         match output {
             ProviderOutput::ContextUsage(usage) => {
                 self.record_context_usage(thread_id, turn_id, usage);
                 return;
             }
             ProviderOutput::UsageLimits(update) => {
-                let mut limits = self.usage_limits.clone().unwrap_or_default();
-                limits.merge(update);
-                self.keep_usage_limits(limits);
+                let provider = self.model.thread(thread_id).map(|t| t.provider.clone());
+                if let Some(provider) = provider {
+                    let mut limits = self
+                        .usage_limits
+                        .get(&provider)
+                        .cloned()
+                        .unwrap_or_default();
+                    limits.merge(update);
+                    self.keep_usage_limits(&provider, limits);
+                }
                 return;
             }
             ProviderOutput::WorkingDirectory { path } => {
@@ -2500,6 +3328,7 @@ impl State {
                     };
                     turn.background = Some(background.clone());
                     (self.notify)(Notification::BackgroundTasks(background));
+                    self.save_recovery(thread_id);
                 }
                 return;
             }
@@ -2541,11 +3370,14 @@ impl State {
         if let Err(error) = self.commit(&events, &now) {
             eprintln!("hoshi: failed to record provider output: {error}");
         }
+        let current = !events.is_empty();
         if completed {
             let ended_turn = match self.turns.get(thread_id) {
                 Some(turn) if turn.id == turn_id => self.turns.remove(thread_id),
                 _ => None,
             };
+            let compacts_when_idle = ended == Some(TurnOutcome::Completed)
+                && ended_turn.as_ref().is_some_and(|turn| !turn.compacting);
             let workspace = ended_turn.and_then(|mut turn| {
                 let workspace = turn.workspace.take();
                 self.keep_between_turns(thread_id, turn);
@@ -2565,11 +3397,17 @@ impl State {
                 self.rename_from_conversation(thread_id, false);
             }
             if let Some(outcome) = &ended {
+                if current {
+                    self.turn_ended(thread_id, turn_id, outcome);
+                }
                 self.deliver_task_result(thread_id, outcome);
             }
             self.start_next_queued(thread_id);
             self.send_after_compaction(thread_id);
             self.deliver_pending_wakes(thread_id);
+            if compacts_when_idle {
+                self.schedule_idle_compaction(thread_id);
+            }
         }
     }
 
@@ -2946,6 +3784,7 @@ impl State {
                         text: text.clone(),
                         attachments: attachments.clone(),
                         from_user: task_result.is_none() && pull_request_update.is_none(),
+                        held: false,
                     });
                     joining = Some(thread_id.clone());
                     if let Some((thread_id, provisional)) = titled.first() {
@@ -2980,6 +3819,7 @@ impl State {
                         watcher.unwatch(project_id);
                     }
                     self.repositories.remove(project_id);
+                    self.root_branches.remove(project_id);
                 }
                 Event::ThreadDeleted { thread_id } => self.forget_thread(thread_id),
                 _ => {}
@@ -3090,11 +3930,13 @@ impl State {
         self.pull_request_cache.forget(thread_id);
         self.queued.remove(thread_id);
         self.after_compaction.remove(thread_id);
+        self.idle_compactions.remove(thread_id);
         self.watches.remove(thread_id);
         self.watch_reads.remove(thread_id);
         self.pending_wakes.remove(thread_id);
         self.titles_to_refine.remove(thread_id);
         self.session_moves.remove(thread_id);
+        self.recovery.forget(thread_id);
         if let Some(folder) = self.chat_folder(thread_id) {
             let _ = std::fs::remove_dir_all(folder);
         }
@@ -3111,10 +3953,13 @@ impl State {
         if joined {
             return;
         }
+        let held = self.queue_holds(thread_id);
         self.queued
             .entry(thread_id.to_owned())
             .or_default()
-            .push_back(message);
+            .push_back(QueuedMessage { held, ..message });
+        self.save_recovery(thread_id);
+        self.show_queue(thread_id);
         // The turn may have ended between the message's events and this call.
         if !self.turns.contains_key(thread_id) {
             self.start_next_queued(thread_id);
@@ -3128,10 +3973,12 @@ impl State {
             message: Some(held_message(thread_id, &message)),
         }));
         self.after_compaction.insert(thread_id.to_owned(), message);
+        self.save_recovery(thread_id);
     }
 
     fn take_held(&mut self, thread_id: &str) -> Option<QueuedMessage> {
         let message = self.after_compaction.remove(thread_id)?;
+        self.save_recovery(thread_id);
         (self.notify)(Notification::HeldMessage(ThreadHeldMessage {
             thread_id: thread_id.to_owned(),
             message: None,
@@ -3151,23 +3998,117 @@ impl State {
         let Some(message) = self.take_held(thread_id) else {
             return;
         };
+        let message_id = message.id;
         let send = Command::MessageSend {
             thread_id: thread_id.to_owned(),
-            message_id: message.id,
+            message_id: message_id.clone(),
             text: message.text,
             attachments: message.attachments,
         };
         if let Err(error) = self.run_command(send) {
             eprintln!("hoshi: failed to send a message after compacting: {error}");
+            return;
+        }
+        self.release_queue_after(thread_id, Some(&message_id));
+    }
+
+    /// When the idle thread compacts before its prompt cache expires; `None` while it does
+    /// not, as when its provider doesn't or something is still due to reach its agent.
+    fn idle_compaction_window(&self, thread_id: &str) -> Option<Range<u64>> {
+        let thread = self.model.thread(thread_id)?;
+        let busy = thread.active_turn_id.is_some()
+            || thread.archived
+            || self.snoozed(thread_id)
+            || thread.parent_thread_id.is_some()
+            || self.lingering.contains_key(thread_id)
+            || self
+                .queued
+                .get(thread_id)
+                .is_some_and(|queued| !queued.is_empty())
+            || self.after_compaction.contains_key(thread_id)
+            || self.thread_ops.contains_key(thread_id)
+            || self
+                .pending_wakes
+                .get(thread_id)
+                .is_some_and(|wakes| !wakes.is_empty())
+            || self
+                .delegations
+                .values()
+                .any(|task| task.parent == thread_id)
+            || !self.model.pending_requests(thread_id).is_empty();
+        let compacts = self
+            .adapter_for(&thread.provider)
+            .is_some_and(|adapter| adapter.compacts_idle_threads());
+        if busy || !compacts {
+            return None;
+        }
+        compaction_before_expiry(self.idle_compaction, self.context_usages.get(thread_id))
+    }
+
+    fn schedule_idle_compaction(&mut self, thread_id: &str) {
+        match self.idle_compaction_window(thread_id) {
+            Some(window) => {
+                self.idle_compactions
+                    .insert(thread_id.to_owned(), window.start);
+            }
+            None => {
+                self.idle_compactions.remove(thread_id);
+            }
+        }
+    }
+
+    /// Sends `/compact` to the idle threads whose time came, while their prompt cache holds.
+    fn compact_idle_threads(&mut self, now: u64) {
+        let due: Vec<String> = self
+            .idle_compactions
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in due {
+            self.idle_compactions.remove(&thread_id);
+            let open = self
+                .idle_compaction_window(&thread_id)
+                .is_some_and(|window| window.contains(&now));
+            if !open {
+                continue;
+            }
+            let compact = Command::MessageSend {
+                thread_id,
+                message_id: delegation::new_id(),
+                text: COMPACT_COMMAND.to_owned(),
+                attachments: Vec::new(),
+            };
+            if let Err(error) = self.run_command(compact) {
+                eprintln!("hoshi: failed to compact an idle thread: {error}");
+            }
         }
     }
 
     /// Starts the oldest message waiting for its own turn, such as one sent while the user
-    /// stopped the running turn.
+    /// stopped the running turn, unless it waits for the user.
     fn start_next_queued(&mut self, thread_id: &str) {
-        let Some(message) = self.queued.get_mut(thread_id).and_then(VecDeque::pop_front) else {
+        let idle = self
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| thread.active_turn_id.is_none());
+        let Some(queued) = self.queued.get_mut(thread_id).filter(|_| idle) else {
             return;
         };
+        let Some(message) = queued
+            .iter()
+            .position(|message| !message.held)
+            .and_then(|next| queued.remove(next))
+        else {
+            return;
+        };
+        self.save_recovery(thread_id);
+        self.start_queued(thread_id, message);
+        self.show_queue(thread_id);
+    }
+
+    /// Starts a turn of its own for a message taken out of the idle thread's queue.
+    fn start_queued(&mut self, thread_id: &str, message: QueuedMessage) {
         let now = now();
         let events = start_queued_turn(&self.model, thread_id, &message.id, &now);
         if events.is_empty() {
@@ -3226,7 +4167,12 @@ impl State {
     /// Asks the provider for a title in the background, retrying a first title twice.
     /// It replaces `current` only if the thread still has that title by then.
     fn name_thread(&mut self, thread_id: &str, current: &str, mut request: TitleRequest) {
-        let Some(adapter) = self.adapter.clone() else {
+        let provider = self
+            .thread_titles
+            .provider
+            .as_deref()
+            .unwrap_or(DEFAULT_PROVIDER);
+        let Some(adapter) = self.adapter_for(provider) else {
             return;
         };
         let forced = request.previous_title.is_some();
@@ -3335,29 +4281,86 @@ impl State {
         self.name_thread(thread_id, &current, request);
     }
 
-    fn keep_provider_version(&mut self, installation: &Installation, update: ProviderUpdate) {
-        self.provider_version = Some(ProviderVersion {
+    fn keep_provider_version(
+        &mut self,
+        provider: &str,
+        installation: &Installation,
+        update: ProviderUpdate,
+    ) {
+        let version = ProviderVersion {
             installed: installation.installed.clone(),
             latest: installation.latest.clone(),
             update_available: installation.update_available(),
             update_command: installation.updater.as_ref().map(Updater::display),
             update,
-        });
-        (self.notify)(Notification::ProviderVersion(self.provider_version.clone()));
+        };
+        self.provider_versions.insert(provider.to_owned(), version);
+        self.notify_provider_version(provider);
     }
 
-    fn set_provider_update(&mut self, update: ProviderUpdate) {
-        let version = self.provider_version.get_or_insert_default();
+    fn set_provider_update(&mut self, provider: &str, update: ProviderUpdate) {
+        let version = self
+            .provider_versions
+            .entry(provider.to_owned())
+            .or_default();
         version.update = update;
-        (self.notify)(Notification::ProviderVersion(self.provider_version.clone()));
+        self.notify_provider_version(provider);
     }
 
-    fn keep_usage_limits(&mut self, limits: UsageLimits) {
-        if let Err(error) = self.store.save_usage_limits(&limits) {
+    fn forget_provider(&mut self, provider: String) {
+        self.provider_versions.remove(&provider);
+        self.provider_accounts.remove(&provider);
+        (self.notify)(Notification::ProviderVersion(ProviderVersionUpdate {
+            provider,
+            version: None,
+        }));
+    }
+
+    fn notify_provider_version(&self, provider: &str) {
+        (self.notify)(Notification::ProviderVersion(ProviderVersionUpdate {
+            provider: provider.to_owned(),
+            version: self.provider_versions.get(provider).cloned(),
+        }));
+    }
+
+    fn providers_status(&self) -> ProvidersStatus {
+        ProvidersStatus {
+            versions: self.provider_versions.clone(),
+            accounts: self.provider_accounts.clone(),
+            checked_at: self.providers_checked_at.clone(),
+            sign_ins: self.provider_sign_ins.clone(),
+            logins: self.provider_logins.clone(),
+            codex_account: self.codex_account.clone(),
+            usage_limits: self.usage_limits.clone(),
+        }
+    }
+
+    fn notify_providers(&self) {
+        (self.notify)(Notification::Providers(self.providers_status()));
+    }
+
+    fn set_sign_in(&mut self, provider: &str, sign_in: ProviderSignIn) {
+        self.provider_sign_ins.insert(provider.to_owned(), sign_in);
+        self.notify_providers();
+    }
+
+    /// Codex signed in or out: its account as its files now say.
+    fn keep_codex_account(&mut self, account: Option<CodexAccount>, status: ProviderAccountStatus) {
+        self.codex_account = account;
+        if self.adapter_for(CODEX).is_some() {
+            self.provider_accounts.insert(CODEX.to_owned(), status);
+        }
+    }
+
+    fn keep_usage_limits(&mut self, provider: &str, limits: UsageLimits) {
+        if let Err(error) = self.store.save_provider_usage_limits(provider, &limits) {
             eprintln!("hoshi: failed to cache the usage limits: {error}");
         }
-        (self.notify)(Notification::UsageLimits(limits.clone()));
-        self.usage_limits = Some(limits);
+        if provider == DEFAULT_PROVIDER {
+            (self.notify)(Notification::UsageLimits(limits.clone()));
+        }
+        self.usage_limits.insert(provider.to_owned(), limits);
+        self.notify_providers();
     }
 
     fn record_context_usage(&mut self, thread_id: &str, turn_id: &str, usage: ContextUsage) {
@@ -3370,8 +4373,7 @@ impl State {
         }
         let mut usage = usage.merged_into(self.context_usages.get(thread_id).copied());
         if let Some(ttl) = usage.cache_ttl_secs {
-            let now = Utc::now().timestamp_millis().max(0) as u64;
-            usage.cache_expires_at = Some(now + ttl * 1000);
+            usage.cache_expires_at = Some(unix_millis() + ttl * 1000);
         }
         self.context_usages.insert(thread_id.to_owned(), usage);
         let update = ThreadContextUsage {
@@ -3447,6 +4449,44 @@ fn changes_since_arrival(
         checkpoint::rename(folder, &arrived, &before)?;
     }
     checkpoint::changes(folder, &before, &after)
+}
+
+/// [`Engine::release_worktree`], also for [`merged_worktrees`]' sweeps.
+fn release_worktree(
+    shared: &Arc<Mutex<State>>,
+    terminals: &Terminals,
+    thread_id: &str,
+) -> Result<(), CommandError> {
+    if terminals.any_open_for(thread_id) {
+        return Err(CommandError::TerminalsOpen {
+            thread_id: thread_id.to_owned(),
+        });
+    }
+    let release = Command::ThreadWorktreeRelease {
+        thread_id: thread_id.to_owned(),
+    };
+    let (op, root, path, checkpoints) = {
+        let mut state = lock(shared);
+        let (thread, root) = state.removable(thread_id)?;
+        let path = thread
+            .worktree_path
+            .clone()
+            .ok_or_else(|| CommandError::NothingToClean {
+                thread_id: thread_id.to_owned(),
+            })?;
+        if thread.worktree_released {
+            return state.decide_and_commit(release);
+        }
+        state.close_lingering(thread_id);
+        let op = state.begin_op(thread_id, &[&path])?;
+        (op, root, path, state.checkpoints.clone())
+    };
+    checkpoints.settle(&path);
+    let removed = State::remove_clean_worktree(&root, &path, thread_id);
+    let mut state = lock(shared);
+    let released = removed.and_then(|()| state.decide_and_commit(release));
+    state.end_op(op, None)?;
+    released
 }
 
 /// Attaches a worktree the turn created, then reads the thread's branch.
@@ -3555,13 +4595,20 @@ fn in_any(project_ids: &[String], thread: &hoshi_core::Thread) -> bool {
         .is_some_and(|project_id| project_ids.contains(project_id))
 }
 
-/// Reads the branch of every thread in the given projects. A running turn that
-/// created a worktree moves to it now, not only when the turn ends.
+/// Whether a branch change in the thread's folder is the thread's own: its worktree, or
+/// the project root while one of its turns runs there. Idle threads in the root keep the
+/// branch they worked on.
+fn follows_its_folder(thread: &hoshi_core::Thread) -> bool {
+    thread.worktree_path.is_some() || thread.active_turn_id.is_some()
+}
+
+/// Reads the branch of the threads in the given projects that follow their folder. A
+/// running turn that created a worktree moves to it now, not only when the turn ends.
 fn refresh_projects(state: &Weak<Mutex<State>>, project_ids: &[String]) {
     let Some(shared) = state.upgrade() else {
         return;
     };
-    let (thread_ids, checks) = {
+    let (thread_ids, following, checks) = {
         let state = lock(&shared);
         let in_projects = |thread_id: &str| {
             state
@@ -3573,6 +4620,12 @@ fn refresh_projects(state: &Weak<Mutex<State>>, project_ids: &[String]) {
             .model
             .threads()
             .filter(|thread| in_any(project_ids, thread))
+            .map(|thread| thread.id.clone())
+            .collect();
+        let following: Vec<String> = state
+            .model
+            .threads()
+            .filter(|thread| in_any(project_ids, thread) && follows_its_folder(thread))
             .map(|thread| thread.id.clone())
             .collect();
         let checks: Vec<(String, WorktreeCheck)> = state
@@ -3587,15 +4640,44 @@ fn refresh_projects(state: &Weak<Mutex<State>>, project_ids: &[String]) {
                 ))
             })
             .collect();
-        (thread_ids, checks)
+        (thread_ids, following, checks)
     };
     for (thread_id, check) in &checks {
         attach_created_worktree(state, thread_id, check);
     }
-    read_branches(state, &thread_ids);
+    read_root_branches(state, project_ids);
+    read_branches(state, &following);
     let mut state = lock(&shared);
     for thread_id in &thread_ids {
         state.pull_requests.check_soon(thread_id);
+    }
+}
+
+/// Reads the branch of each project's root folder off the lock, and tells the UI of changes.
+fn read_root_branches(state: &Weak<Mutex<State>>, project_ids: &[String]) {
+    for project_id in project_ids {
+        let Some(shared) = state.upgrade() else {
+            return;
+        };
+        let root = lock(&shared)
+            .model
+            .project(project_id)
+            .map(|project| project.workspace_root.clone());
+        let Some(root) = root else { continue };
+        let branch = git::current_branch(&root);
+        let mut state = lock(&shared);
+        if state.model.project(project_id).is_none()
+            || state.root_branches.get(project_id) == Some(&branch)
+        {
+            continue;
+        }
+        state
+            .root_branches
+            .insert(project_id.clone(), branch.clone());
+        (state.notify)(Notification::ProjectBranch(hoshi_core::ProjectBranch {
+            project_id: project_id.clone(),
+            branch,
+        }));
     }
 }
 
@@ -3605,6 +4687,8 @@ fn watch_projects(state: Weak<Mutex<State>>, projects: Vec<(String, String)>) {
         return;
     }
     thread::spawn(move || {
+        let project_ids: Vec<String> = projects.iter().map(|(id, _)| id.clone()).collect();
+        read_root_branches(&state, &project_ids);
         for (project_id, root) in projects {
             let Some(git_dir) = git::common_dir(&root) else {
                 continue;
@@ -3658,6 +4742,19 @@ fn refresh_branches(state: Weak<Mutex<State>>, thread_ids: Vec<String>) {
         return;
     }
     thread::spawn(move || read_branches(&state, &thread_ids));
+}
+
+/// Ends, now and then, the processes kept between turns that went quiet for too long.
+fn end_idle_lingering(state: Weak<Mutex<State>>) {
+    thread::spawn(move || {
+        loop {
+            thread::sleep(IDLE_LINGERING_CHECK);
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            lock(&state).close_idle_lingering(Instant::now());
+        }
+    });
 }
 
 fn read_branches(state: &Weak<Mutex<State>>, thread_ids: &[String]) {
@@ -3782,6 +4879,8 @@ fn sync_pull_requests(state: Weak<Mutex<State>>) {
                 let secrets = lock(&shared).secrets_dir.clone();
                 secret_requests::forget_old(&secrets);
             }
+            lock(&shared).compact_idle_threads(unix_millis());
+            lock(&shared).resume_limited_threads(unix_millis());
             let jobs = lock(&shared).due_pull_request_jobs();
             for job in jobs {
                 let result = job
@@ -3911,7 +5010,15 @@ fn start_turn(
     prompt: String,
     attachments: Vec<MessageAttachment>,
 ) {
-    let Some(adapter) = state.adapter.clone() else {
+    state.idle_compactions.remove(thread_id);
+    let Some(provider) = state
+        .model
+        .thread(thread_id)
+        .map(|thread| thread.provider.clone())
+    else {
+        return;
+    };
+    let Some(adapter) = state.adapter_for(&provider) else {
         state.receive(
             thread_id,
             turn_id,
@@ -3919,9 +5026,6 @@ fn start_turn(
         );
         return;
     };
-    if state.model.thread(thread_id).is_none() {
-        return;
-    }
     let Some(cwd) = state.cwd(thread_id) else {
         let failure = TurnFailure::SpawnFailed {
             detail: format!("thread {thread_id} has no folder to run in"),
@@ -3948,6 +5052,19 @@ fn start_turn(
         state.receive(thread_id, turn_id, turn_failed(failure));
         return;
     }
+    let prompt = state.carry_cut_work(thread_id, turn_id, prompt);
+    let prepared =
+        match state.prepare_handoff(thread_id, turn_id, &prompt, &attachments, adapter.as_ref()) {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                state.receive(thread_id, turn_id, turn_failed(failure));
+                return;
+            }
+        };
+    let (fork_from, context, handoff) = match prepared {
+        Some(prepared) => (prepared.fork_from, prepared.context, Some(prepared.handoff)),
+        None => (None, None, None),
+    };
     let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
@@ -3973,13 +5090,15 @@ fn start_turn(
             state.browser.agent_access,
         )
     });
-    let request = TurnRequest {
+    let mut request = TurnRequest {
         cwd: cwd.to_owned(),
         prompt,
         attachments,
         earlier_media,
         resume_session_id: thread.session_id.clone(),
         resume_session_at: thread.resume_at.clone(),
+        fork_session: false,
+        handoff: context,
         model: thread.model.clone(),
         effort: thread.effort,
         fast_mode: thread.fast_mode,
@@ -3991,6 +5110,18 @@ fn start_turn(
         subagent_effort: state.subagent_effort,
         environment: servers::agent_environment(thread_id),
     };
+    if let Some((session, cursor)) = fork_from {
+        request.resume_session_id = Some(session);
+        request.resume_session_at = Some(cursor);
+        request.fork_session = true;
+    }
+    let delivers_inline = request.handoff.is_some() && !adapter.injects_context();
+    let compacting = request.prompt.trim() == COMPACT_COMMAND && request.attachments.is_empty();
+    let resumed = request
+        .resume_session_id
+        .as_deref()
+        .filter(|_| !request.fork_session);
+    state.note_resumed_session(thread_id, resumed);
     let (workspace, checkpointed) = state.turn_workspace(thread_id, turn_id, &cwd);
     if let Some(lingering) = state.lingering.remove(thread_id) {
         if lingering.running.continue_with(&request) {
@@ -4003,8 +5134,20 @@ fn start_turn(
                 arrivals: 0,
                 cursor: None,
                 background: lingering.background,
+                compacting,
+                handoff,
             };
             state.turns.insert(thread_id.to_owned(), turn);
+            if delivers_inline {
+                state.handoff_delivered(thread_id, turn_id, false);
+            }
+            return;
+        }
+        if lingering.runs_background_work() {
+            state.lingering.insert(thread_id.to_owned(), lingering);
+            state.abandon_handoff(handoff);
+            let refused = turn_failed(TurnFailure::BackgroundWorkRunning);
+            state.receive(thread_id, turn_id, refused);
             return;
         }
         state.end_lingering(thread_id, lingering);
@@ -4029,10 +5172,18 @@ fn start_turn(
                 arrivals: 0,
                 cursor: None,
                 background: None,
+                compacting,
+                handoff,
             };
             state.turns.insert(thread_id.to_owned(), turn);
+            if delivers_inline {
+                state.handoff_delivered(thread_id, turn_id, false);
+            }
         }
-        Err(failure) => state.receive(thread_id, turn_id, turn_failed(failure)),
+        Err(failure) => {
+            state.abandon_handoff(handoff);
+            state.receive(thread_id, turn_id, turn_failed(failure));
+        }
     }
 }
 
@@ -4076,37 +5227,50 @@ impl State {
     }
 }
 
-fn check_provider_version(
-    state: &Mutex<State>,
-    maintenance: &Mutex<()>,
-) -> Option<ProviderVersion> {
+/// Checks the enabled providers' CLIs, or only `only`'s. Skipped while an update or
+/// another check runs.
+fn check_provider_versions(state: &Mutex<State>, maintenance: &Mutex<()>, only: Option<&str>) {
     let _checking = match maintenance.try_lock() {
         Ok(guard) => guard,
         Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
-        Err(TryLockError::WouldBlock) => return lock(state).provider_version.clone(),
+        Err(TryLockError::WouldBlock) => return,
     };
-    let adapter = lock(state).adapter.clone()?;
-    adapter.forget_version();
-    let installation = adapter.installation()?;
-    let mut state = lock(state);
-    state.provider_version_checked_at = Some(Instant::now());
-    let update = state
-        .provider_version
-        .as_ref()
-        .map(|known| known.update.clone())
-        .unwrap_or_default();
-    state.keep_provider_version(&installation, update);
-    state.provider_version.clone()
+    let adapters: Vec<_> = lock(state)
+        .adapters
+        .iter()
+        .filter(|adapter| only.is_none_or(|provider| adapter.provider() == provider))
+        .cloned()
+        .collect();
+    for adapter in adapters {
+        let provider = adapter.provider();
+        adapter.forget_version();
+        let Some(installation) = adapter.installation() else {
+            continue;
+        };
+        let mut state = lock(state);
+        if state.adapter_for(provider).is_none() {
+            continue;
+        }
+        if provider == DEFAULT_PROVIDER {
+            state.provider_version_checked_at = Some(Instant::now());
+        }
+        let update = state
+            .provider_versions
+            .get(provider)
+            .map(|known| known.update.clone())
+            .unwrap_or_default();
+        state.keep_provider_version(provider, &installation, update);
+    }
 }
 
 /// Turns spawn the CLI the update replaces, so it refuses while any runs.
-fn update_provider(state: &Mutex<State>, maintenance: &Mutex<()>) {
+fn update_provider(state: &Mutex<State>, maintenance: &Mutex<()>, provider: &str) {
     let _updating = maintenance
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (adapter, turns_running) = {
         let state = lock(state);
-        (state.adapter.clone(), !state.turns.is_empty())
+        (state.adapter_for(provider), !state.turns.is_empty())
     };
     let Some(adapter) = adapter else {
         return;
@@ -4116,40 +5280,71 @@ fn update_provider(state: &Mutex<State>, maintenance: &Mutex<()>) {
         output: None,
     };
     if turns_running {
-        lock(state).set_provider_update(failed(ProviderUpdateFailure::TurnsRunning));
+        lock(state).set_provider_update(provider, failed(ProviderUpdateFailure::TurnsRunning));
         return;
     }
-    lock(state).set_provider_update(ProviderUpdate::Running { line: None });
+    lock(state).set_provider_update(
+        provider,
+        ProviderUpdate::Running {
+            line: None,
+            step: None,
+        },
+    );
     let Some(before) = adapter.installation() else {
-        lock(state).set_provider_update(failed(ProviderUpdateFailure::Unsupported));
+        lock(state).set_provider_update(provider, failed(ProviderUpdateFailure::Unsupported));
         return;
     };
     let Some(updater) = before.updater.clone() else {
-        lock(state).keep_provider_version(&before, failed(ProviderUpdateFailure::Unsupported));
+        lock(state).keep_provider_version(
+            provider,
+            &before,
+            failed(ProviderUpdateFailure::Unsupported),
+        );
         return;
     };
-    if before.latest.is_some() && !before.update_available() {
-        lock(state).keep_provider_version(&before, ProviderUpdate::Idle);
+    if before.installed.is_some() && before.latest.is_some() && !before.update_available() {
+        lock(state).keep_provider_version(provider, &before, ProviderUpdate::Idle);
         return;
     }
     let mut notified_at: Option<Instant> = None;
-    let result = run_update(&updater, |line| {
-        if notified_at.is_none_or(|at| at.elapsed() >= UPDATE_PROGRESS_EVERY) {
+    let mut shown_step = None;
+    let result = run_update(&updater, |progress| {
+        let (line, step) = match progress {
+            UpdateProgress::Line(line) => (Some(line), None),
+            UpdateProgress::Step(step) => (None, Some(step)),
+        };
+        let next_step = step.is_some_and(|step| {
+            shown_step
+                .is_none_or(|shown| std::mem::discriminant(&shown) != std::mem::discriminant(&step))
+        });
+        if next_step || notified_at.is_none_or(|at| at.elapsed() >= UPDATE_PROGRESS_EVERY) {
             notified_at = Some(Instant::now());
-            lock(state).set_provider_update(ProviderUpdate::Running { line: Some(line) });
+            shown_step = step.or(shown_step);
+            lock(state).set_provider_update(provider, ProviderUpdate::Running { line, step });
         }
     });
     adapter.forget_version();
-    let after = adapter.installation().unwrap_or(before);
+    let after = adapter.installation().unwrap_or(before.clone());
+    let was_missing = before.installed.is_none() && after.installed.is_some();
+    let account = was_missing.then(|| adapter.account_status());
     let update = match result {
         Err(failure) => ProviderUpdate::Failed {
             reason: failure.reason,
             output: failure.output,
         },
-        Ok(()) if after.update_available() => ProviderUpdate::Unchanged,
+        Ok(()) if after.update_available() || after.installed.is_none() => {
+            ProviderUpdate::Unchanged
+        }
         Ok(()) => ProviderUpdate::Succeeded,
     };
-    lock(state).keep_provider_version(&after, update);
+    let mut state = lock(state);
+    state.keep_provider_version(provider, &after, update);
+    if let Some(account) = account
+        && state.adapter_for(provider).is_some()
+    {
+        state.provider_accounts.insert(provider.to_owned(), account);
+        state.notify_providers();
+    }
 }
 
 /// Checks again every few hours, for as long as the engine lives.
@@ -4160,45 +5355,65 @@ fn watch_provider_version(state: Weak<Mutex<State>>, maintenance: Arc<Mutex<()>>
             let Some(state) = state.upgrade() else {
                 return;
             };
-            check_provider_version(&state, &maintenance);
+            check_provider_versions(&state, &maintenance, None);
         }
     });
 }
 
-fn check_usage_limits(state: &Mutex<State>, probe: &Mutex<()>, force: bool) -> Option<UsageLimits> {
+/// One lock per provider, held while it is asked for its limits.
+type UsageProbes = Mutex<HashMap<String, Arc<Mutex<()>>>>;
+
+fn check_usage_limits(
+    state: &Mutex<State>,
+    probes: &UsageProbes,
+    provider: &str,
+    force: bool,
+) -> Option<UsageLimits> {
     let requested_at = Instant::now();
-    let _probing = probe
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let probe = hold(probes).entry(provider.to_owned()).or_default().clone();
+    let _probing = hold(&probe);
     let adapter = {
         let state = lock(state);
-        let fresh = state.usage_checked_at.is_some_and(|checked_at| {
-            if force {
-                checked_at >= requested_at
-            } else {
-                checked_at.elapsed() < USAGE_LIMITS_FRESH_FOR
-            }
-        });
+        let fresh = state
+            .usage_checked_at
+            .get(provider)
+            .is_some_and(|checked_at| {
+                if force {
+                    *checked_at >= requested_at
+                } else {
+                    checked_at.elapsed() < USAGE_LIMITS_FRESH_FOR
+                }
+            });
         if fresh {
-            return state.usage_limits.clone();
+            return state.usage_limits.get(provider).cloned();
         }
-        state.adapter.clone()?
+        state.adapter_for(provider)?
     };
     let limits = adapter.usage_limits()?;
     let mut state = lock(state);
-    state.usage_checked_at = Some(Instant::now());
-    state.keep_usage_limits(limits.clone());
+    state
+        .usage_checked_at
+        .insert(provider.to_owned(), Instant::now());
+    state.keep_usage_limits(provider, limits.clone());
     Some(limits)
 }
 
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
-    state
+    hold(state)
+}
+
+fn hold<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn unix_millis() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
 }
 
 /// GitHub through its CLI's account, Bitbucket Cloud through the API token kept in the
@@ -4309,6 +5524,10 @@ mod tests {
     }
 
     impl ProviderAdapter for FakeAdapter {
+        fn provider(&self) -> &'static str {
+            hoshi_core::DEFAULT_PROVIDER
+        }
+
         fn models(&self) -> hoshi_core::ProviderModels {
             hoshi_core::ProviderModels::default()
         }
@@ -4321,6 +5540,10 @@ mod tests {
                 title: self.title.clone()?,
                 needs_refinement: false,
             })
+        }
+
+        fn compacts_idle_threads(&self) -> bool {
+            true
         }
 
         fn start_turn(
@@ -4385,6 +5608,10 @@ mod tests {
     }
 
     impl ProviderAdapter for LimitsAdapter {
+        fn provider(&self) -> &'static str {
+            hoshi_core::DEFAULT_PROVIDER
+        }
+
         fn models(&self) -> hoshi_core::ProviderModels {
             hoshi_core::ProviderModels::default()
         }
@@ -4422,6 +5649,10 @@ mod tests {
     }
 
     impl ProviderAdapter for ResetAdapter {
+        fn provider(&self) -> &'static str {
+            hoshi_core::DEFAULT_PROVIDER
+        }
+
         fn models(&self) -> hoshi_core::ProviderModels {
             hoshi_core::ProviderModels::default()
         }
@@ -4455,15 +5686,28 @@ mod tests {
         }
     }
 
-    /// Reports 1.0.0 against a 1.1.0 release until its updater ran.
-    /// Its update writes `marker`, which the installed version reads.
+    /// Reports 1.0.0 against a 1.1.0 release until its updater ran, or nothing installed when
+    /// `missing`. Its update writes `marker`, which the installed version reads.
     struct OutdatedAdapter {
         marker: PathBuf,
+        missing: bool,
     }
 
     impl ProviderAdapter for OutdatedAdapter {
+        fn provider(&self) -> &'static str {
+            hoshi_core::DEFAULT_PROVIDER
+        }
+
         fn models(&self) -> hoshi_core::ProviderModels {
             hoshi_core::ProviderModels::default()
+        }
+
+        fn account_status(&self) -> ProviderAccountStatus {
+            if self.marker.is_file() || !self.missing {
+                ProviderAccountStatus::Ready
+            } else {
+                ProviderAccountStatus::NotInstalled
+            }
         }
 
         fn installation(&self) -> Option<Installation> {
@@ -4480,10 +5724,15 @@ mod tests {
                     vec!["-c".to_owned(), format!("echo updated > '{marker}'")],
                 )
             };
+            let installed = match (updated, self.missing) {
+                (true, _) => Some("1.1.0".into()),
+                (false, true) => None,
+                (false, false) => Some("1.0.0".into()),
+            };
             Some(Installation {
-                installed: Some(if updated { "1.1.0" } else { "1.0.0" }.into()),
+                installed,
                 latest: Some("1.1.0".into()),
-                updater: Some(Updater {
+                updater: Some(Updater::Command {
                     program: program.into(),
                     args,
                 }),
@@ -4503,7 +5752,11 @@ mod tests {
     fn an_outdated_cli_is_updated_and_checked_again() {
         let (sender, versions) = mpsc::channel();
         let notify: Notify = Arc::new(move |notification| {
-            if let Notification::ProviderVersion(Some(version)) = notification {
+            if let Notification::ProviderVersion(ProviderVersionUpdate {
+                version: Some(version),
+                ..
+            }) = notification
+            {
                 let _ = sender.send(version);
             }
         });
@@ -4511,6 +5764,7 @@ mod tests {
         let engine = Engine::from_store(Store::open_in_memory().unwrap(), &dir, notify).unwrap();
         engine.set_adapter(Some(Arc::new(OutdatedAdapter {
             marker: dir.join("updated"),
+            missing: false,
         })));
 
         let checked = engine.check_provider_version().unwrap();
@@ -4534,6 +5788,168 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_cli_is_installed_and_its_account_checked_again() {
+        let (sender, notifications) = mpsc::channel();
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::Providers(status) = notification {
+                let _ = sender.send(status);
+            }
+        });
+        let dir = scratch_dir("provider-install");
+        let engine = Engine::from_store(Store::open_in_memory().unwrap(), &dir, notify).unwrap();
+        engine.set_adapter(Some(Arc::new(OutdatedAdapter {
+            marker: dir.join("updated"),
+            missing: true,
+        })));
+        let checked = engine.check_provider_version().unwrap();
+        assert_eq!(checked.installed, None);
+        assert!(!checked.update_available);
+
+        engine.update_provider();
+        let status = notifications.recv_timeout(Duration::from_secs(30)).unwrap();
+
+        let version = &status.versions[DEFAULT_PROVIDER];
+        assert_eq!(version.update, ProviderUpdate::Succeeded);
+        assert_eq!(version.installed.as_deref(), Some("1.1.0"));
+        assert_eq!(
+            status.accounts.get(DEFAULT_PROVIDER),
+            Some(&ProviderAccountStatus::Ready)
+        );
+    }
+
+    /// Reports `version` as installed, with no release to compare it with.
+    struct InstalledAdapter {
+        provider: &'static str,
+        version: &'static str,
+        account: ProviderAccountStatus,
+    }
+
+    impl ProviderAdapter for InstalledAdapter {
+        fn provider(&self) -> &'static str {
+            self.provider
+        }
+
+        fn models(&self) -> hoshi_core::ProviderModels {
+            hoshi_core::ProviderModels::default()
+        }
+
+        fn installation(&self) -> Option<Installation> {
+            Some(Installation {
+                installed: Some(self.version.into()),
+                latest: None,
+                updater: None,
+            })
+        }
+
+        fn account_status(&self) -> ProviderAccountStatus {
+            self.account
+        }
+
+        fn start_turn(
+            &self,
+            _request: TurnRequest,
+            _sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            Err(TurnFailure::ProviderDisabled)
+        }
+    }
+
+    fn installed(
+        provider: &'static str,
+        version: &'static str,
+        account: ProviderAccountStatus,
+    ) -> Arc<dyn ProviderAdapter> {
+        Arc::new(InstalledAdapter {
+            provider,
+            version,
+            account,
+        })
+    }
+
+    fn version_updates() -> (Notify, Receiver<ProviderVersionUpdate>) {
+        let (sender, updates) = mpsc::channel();
+        let sender = Mutex::new(sender);
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::ProviderVersion(update) = notification {
+                let _ = sender.lock().unwrap().send(update);
+            }
+        });
+        (notify, updates)
+    }
+
+    /// Waits for each of `providers` to report a version.
+    fn wait_for_versions(updates: &Receiver<ProviderVersionUpdate>, providers: &[&str]) {
+        let mut waiting: HashSet<&str> = providers.iter().copied().collect();
+        while !waiting.is_empty() {
+            let update = updates.recv_timeout(Duration::from_secs(10)).unwrap();
+            if update.version.is_some() {
+                waiting.remove(update.provider.as_str());
+            }
+        }
+    }
+
+    #[test]
+    fn each_enabled_provider_keeps_its_own_version_and_account() {
+        let (notify, updates) = version_updates();
+        let dir = scratch_dir("provider-versions");
+        let engine = Engine::from_store(Store::open_in_memory().unwrap(), &dir, notify).unwrap();
+        engine.set_adapters(vec![
+            installed(DEFAULT_PROVIDER, "2.1.325", ProviderAccountStatus::Ready),
+            installed("copilot", "1.0.112", ProviderAccountStatus::NotInstalled),
+        ]);
+        wait_for_versions(&updates, &[DEFAULT_PROVIDER, "copilot"]);
+
+        let status = engine.check_providers();
+
+        let installed_of = |provider: &str| status.versions[provider].installed.clone();
+        assert_eq!(installed_of(DEFAULT_PROVIDER).as_deref(), Some("2.1.325"));
+        assert_eq!(installed_of("copilot").as_deref(), Some("1.0.112"));
+        assert_eq!(
+            status.accounts["copilot"],
+            ProviderAccountStatus::NotInstalled
+        );
+        assert_eq!(
+            status.accounts[DEFAULT_PROVIDER],
+            ProviderAccountStatus::Ready
+        );
+        assert!(status.checked_at.is_some());
+        assert_eq!(
+            engine.provider_version().unwrap().installed.as_deref(),
+            Some("2.1.325")
+        );
+        assert_eq!(engine.providers_status(), status);
+    }
+
+    #[test]
+    fn a_disabled_provider_forgets_its_version_and_says_so() {
+        let (notify, updates) = version_updates();
+        let dir = scratch_dir("provider-disabled");
+        let engine = Engine::from_store(Store::open_in_memory().unwrap(), &dir, notify).unwrap();
+        engine.set_adapters(vec![
+            installed(DEFAULT_PROVIDER, "2.1.325", ProviderAccountStatus::Ready),
+            installed("copilot", "1.0.112", ProviderAccountStatus::Ready),
+        ]);
+        wait_for_versions(&updates, &[DEFAULT_PROVIDER, "copilot"]);
+        engine.check_providers();
+
+        engine.set_adapters(vec![installed(
+            DEFAULT_PROVIDER,
+            "2.1.325",
+            ProviderAccountStatus::Ready,
+        )]);
+
+        let forgotten = updates
+            .iter()
+            .find(|update| update.version.is_none())
+            .unwrap();
+        assert_eq!(forgotten.provider, "copilot");
+        let status = engine.providers_status();
+        assert!(!status.versions.contains_key("copilot"));
+        assert!(!status.accounts.contains_key("copilot"));
+        assert!(status.versions.contains_key(DEFAULT_PROVIDER));
+    }
+
+    #[test]
     fn usage_limits_are_read_once_while_fresh_and_kept_across_restarts() {
         let data_dir = scratch_dir("usage-limits");
         let notify: Notify = Arc::new(|_| {});
@@ -4553,6 +5969,50 @@ mod tests {
 
         let restarted = Engine::open(&data_dir, notify).unwrap();
         assert_eq!(restarted.known_usage_limits(), Some(forced));
+    }
+
+    #[test]
+    fn settings_deletes_and_quitting_never_wait_for_a_busy_browser() {
+        let engine = Engine::open(&scratch_dir("busy-browser"), Arc::new(|_| {})).unwrap();
+        engine
+            .dispatch(Command::ThreadCreate {
+                thread_id: "t".into(),
+                project_id: None,
+                title: "chat".into(),
+                workspace: ThreadWorkspace::Local,
+                provider: hoshi_core::default_provider(),
+                model: None,
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+                access_mode: AccessMode::default(),
+                plan_mode: false,
+            })
+            .unwrap();
+        let (held, busy) = mpsc::channel();
+        let browsing = engine.browsing.clone();
+        let slow_page = thread::spawn(move || {
+            let _launching = browsing.hold_launch();
+            held.send(()).unwrap();
+            thread::sleep(Duration::from_secs(5));
+        });
+        busy.recv().unwrap();
+
+        let started = Instant::now();
+        engine.set_browser(BrowserSettings {
+            agent_access: false,
+            ..BrowserSettings::default()
+        });
+        engine
+            .dispatch(Command::ThreadDelete {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        engine.close_browser();
+        assert!(started.elapsed() < BROWSER_CLOSE_WAIT + Duration::from_secs(1));
+        assert!(!hold(&engine.browser_settings).agent_access);
+        slow_page.join().unwrap();
     }
 
     #[test]
@@ -4684,6 +6144,7 @@ mod tests {
                 project_id: project_id.map(str::to_owned),
                 title: String::new(),
                 workspace,
+                provider: hoshi_core::default_provider(),
                 model: Some("haiku".into()),
                 effort: Some(Effort::Low),
                 fast_mode: false,
@@ -4899,6 +6360,7 @@ mod tests {
                 text: "later".into(),
                 attachments: Vec::new(),
                 from_user: true,
+                held: false,
             };
             state
                 .queued
@@ -4955,6 +6417,243 @@ mod tests {
             _ => None,
         });
         assert_eq!(title, "Empty TSX Snippet");
+    }
+
+    /// A fake adapter answering as another provider.
+    struct OtherProvider(Arc<FakeAdapter>);
+
+    const OTHER_PROVIDER: &str = "copilot";
+
+    impl ProviderAdapter for OtherProvider {
+        fn provider(&self) -> &'static str {
+            OTHER_PROVIDER
+        }
+
+        fn models(&self) -> hoshi_core::ProviderModels {
+            self.0.models()
+        }
+
+        fn generate_title(
+            &self,
+            request: &TitleRequest,
+        ) -> Option<hoshi_providers::GeneratedTitle> {
+            self.0.generate_title(request)
+        }
+
+        fn start_turn(
+            &self,
+            request: TurnRequest,
+            sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            self.0.start_turn(request, sink)
+        }
+    }
+
+    fn fake(title: Option<&str>) -> Arc<FakeAdapter> {
+        Arc::new(FakeAdapter {
+            requests: Mutex::new(Vec::new()),
+            script: completed_turn(),
+            title: title.map(str::to_owned),
+            responses: Arc::default(),
+            steers: None,
+            finishers: Mutex::default(),
+        })
+    }
+
+    #[test]
+    fn a_thread_runs_on_the_provider_it_chose() {
+        let harness = Harness::in_memory("other-provider", completed_turn());
+        let (default, other) = (fake(None), fake(None));
+        harness.engine.set_adapters(vec![
+            default.clone(),
+            Arc::new(OtherProvider(other.clone())),
+        ]);
+        harness
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: OTHER_PROVIDER.into(),
+                model: Some("gpt-6.1-sol".into()),
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap();
+
+        harness.send("t", "m1", "hi");
+        harness.wait_for_turn_end();
+
+        assert!(default.requests.lock().unwrap().is_empty());
+        let requests = other.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].model.as_deref(), Some("gpt-6.1-sol"));
+    }
+
+    #[test]
+    fn limits_a_turn_reports_are_its_threads_provider_s() {
+        let harness = Harness::in_memory("limits-by-provider", completed_turn());
+        let window = |kind, used_percent| hoshi_core::UsageWindow {
+            kind,
+            model: None,
+            used_percent,
+            window_minutes: 300,
+            resets_at: None,
+        };
+        let reported = |windows| {
+            ProviderOutput::UsageLimits(UsageLimits {
+                windows,
+                banked_resets: None,
+                account: None,
+            })
+        };
+        let mut script = completed_turn();
+        script.insert(
+            1,
+            reported(vec![
+                window(hoshi_core::UsageWindowKind::Session, 70),
+                window(hoshi_core::UsageWindowKind::Weekly, 40),
+            ]),
+        );
+        script.insert(
+            2,
+            reported(vec![window(hoshi_core::UsageWindowKind::Session, 100)]),
+        );
+        let other = Arc::new(FakeAdapter {
+            script,
+            ..Arc::into_inner(fake(None)).unwrap()
+        });
+        harness
+            .engine
+            .set_adapters(vec![fake(None), Arc::new(OtherProvider(other))]);
+        harness
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: OTHER_PROVIDER.into(),
+                model: None,
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap();
+
+        harness.send("t", "m1", "hi");
+        harness.wait_for_turn_end();
+
+        assert_eq!(harness.engine.known_usage_limits(), None);
+        let limits = harness
+            .engine
+            .known_usage_limits_of(OTHER_PROVIDER)
+            .unwrap();
+        let used: Vec<u8> = limits.windows.iter().map(|w| w.used_percent).collect();
+        assert_eq!(used, [100, 40]);
+        let status = harness.engine.providers_status();
+        assert_eq!(status.usage_limits.get(OTHER_PROVIDER), Some(&limits));
+        assert!(!status.usage_limits.contains_key(DEFAULT_PROVIDER));
+    }
+
+    #[test]
+    fn each_provider_is_asked_for_its_own_limits() {
+        let data_dir = scratch_dir("limits-each-provider");
+        let engine = Engine::open(&data_dir, Arc::new(|_| {})).unwrap();
+        let (claude, other) = (
+            Arc::new(LimitsAdapter {
+                asks: Mutex::new(0),
+            }),
+            Arc::new(LimitsAdapter {
+                asks: Mutex::new(9),
+            }),
+        );
+        engine.set_adapters(vec![claude.clone(), Arc::new(OtherLimits(other.clone()))]);
+
+        assert_eq!(
+            engine.usage_limits(false).unwrap().windows[0].used_percent,
+            1
+        );
+        let others = engine.usage_limits_of(OTHER_PROVIDER, false).unwrap();
+        assert_eq!(others.windows[0].used_percent, 10);
+        assert_eq!(engine.usage_limits_of("codex", false), None);
+        assert_eq!(*claude.asks.lock().unwrap(), 1);
+        assert_eq!(*other.asks.lock().unwrap(), 10);
+        assert_eq!(engine.usage_limit_providers(), Vec::<String>::new());
+        drop(engine);
+
+        let restarted = Engine::open(&data_dir, Arc::new(|_| {})).unwrap();
+        assert_eq!(
+            restarted.known_usage_limits_of(OTHER_PROVIDER),
+            Some(others)
+        );
+    }
+
+    /// Limits answered as another provider.
+    struct OtherLimits(Arc<LimitsAdapter>);
+
+    impl ProviderAdapter for OtherLimits {
+        fn provider(&self) -> &'static str {
+            OTHER_PROVIDER
+        }
+
+        fn models(&self) -> hoshi_core::ProviderModels {
+            hoshi_core::ProviderModels::default()
+        }
+
+        fn usage_limits(&self) -> Option<UsageLimits> {
+            self.0.usage_limits()
+        }
+
+        fn start_turn(
+            &self,
+            request: TurnRequest,
+            sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            self.0.start_turn(request, sink)
+        }
+    }
+
+    #[test]
+    fn a_thread_on_a_disabled_provider_fails_its_turn() {
+        let harness = Harness::in_memory("disabled-other", completed_turn());
+        harness
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: OTHER_PROVIDER.into(),
+                model: None,
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap();
+
+        harness.send("t", "m1", "hi");
+
+        assert_eq!(
+            harness.wait_for_turn_end(),
+            TurnOutcome::Failed {
+                reason: TurnFailure::ProviderDisabled
+            }
+        );
+    }
+
+    #[test]
+    fn titles_come_from_the_provider_the_settings_name() {
+        let harness = Harness::in_memory("other-titles", completed_turn());
+        harness.engine.set_adapters(vec![
+            fake(Some("From Claude")),
+            Arc::new(OtherProvider(fake(Some("From Copilot")))),
+        ]);
+        harness.engine.set_thread_titles(ThreadTitleSettings {
+            provider: Some(OTHER_PROVIDER.into()),
+            ..ThreadTitleSettings::default()
+        });
+
+        harness.send("t", "m1", "fix the login bug");
+
+        let title = harness.wait_for(|event| match event {
+            Event::ThreadTitleSet { title, .. } if title != "fix the login bug" => Some(title),
+            _ => None,
+        });
+        assert_eq!(title, "From Copilot");
     }
 
     #[test]
@@ -5047,6 +6746,554 @@ mod tests {
         let thread = &engine.snapshot().threads[0];
         assert_eq!(thread.status, ThreadStatus::Idle);
         assert_eq!(thread.active_turn_id, None);
+    }
+
+    /// The engine on `database` again, as after a restart, with a fresh fake provider.
+    fn reopen(name: &str, database: &Path) -> (Engine, Arc<FakeAdapter>, Receiver<Event>) {
+        let (sender, events) = mpsc::channel();
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::Event(envelope) = notification {
+                let _ = sender.send(envelope.event);
+            }
+        });
+        let engine = Engine::from_store(
+            Store::open(database).unwrap(),
+            &scratch_dir(&format!("{name}-reopened")),
+            notify,
+        )
+        .unwrap();
+        let adapter = adapter(None);
+        engine.set_adapter(Some(adapter.clone()));
+        (engine, adapter, events)
+    }
+
+    #[test]
+    fn the_last_merged_cleanup_survives_a_restart() {
+        let dir = scratch_dir("merged-cleanup-restart");
+        let database = dir.join("state.sqlite");
+        let harness = Harness::new(
+            "merged-cleanup-restart",
+            dir,
+            Store::open(&database).unwrap(),
+            Vec::new(),
+        );
+        let cleanup = harness.engine.delete_merged_worktrees();
+        drop(harness);
+
+        let (engine, ..) = reopen("merged-cleanup-restart", &database);
+        assert_eq!(engine.merged_cleanup(), Some(cleanup));
+    }
+
+    /// Once the engine is done starting it.
+    fn wait_for_turn_start(engine: &Engine, events: &Receiver<Event>) -> String {
+        let turn_id = events
+            .iter()
+            .find_map(|event| match event {
+                Event::TurnStarted { turn_id, .. } => Some(turn_id),
+                _ => None,
+            })
+            .unwrap();
+        engine.snapshot();
+        turn_id
+    }
+
+    /// Why hoshi sent the message that opened turn `turn_id` of thread "t" by itself.
+    fn resumption(engine: &Engine, turn_id: &str) -> Option<hoshi_core::Resumption> {
+        match engine.thread_item("t", turn_id).unwrap()?.content {
+            ItemContent::UserMessage { resumed, .. } => resumed,
+            _ => None,
+        }
+    }
+
+    fn session_started(harness: &Harness) {
+        harness.wait_for(|event| matches!(event, Event::SessionAttached { .. }).then_some(()));
+    }
+
+    #[test]
+    fn a_turn_a_restart_cut_short_goes_on_once_told_of_the_subagent_it_lost() {
+        let dir = scratch_dir("restart-continues");
+        let database = dir.join("state.sqlite");
+        let script = vec![
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+            ProviderOutput::ToolCallStarted {
+                item_id: "toolu_a".into(),
+                name: "Agent".into(),
+                input: serde_json::json!({ "description": "Count the files" }).to_string(),
+            },
+        ];
+        let harness = Harness::new(
+            "restart-continues",
+            dir,
+            Store::open(&database).unwrap(),
+            script,
+        );
+        harness.send("t", "m1", "count them");
+        harness.wait_for(|event| match event {
+            Event::ItemAdded { item } if item.id == "toolu_a" => Some(()),
+            _ => None,
+        });
+        drop(harness);
+
+        let (engine, adapter, events) = reopen("restart-continues", &database);
+        assert_eq!(engine.snapshot().threads[0].active_turn_id, None);
+        engine.continue_cut_threads();
+        wait_for_turn_start(&engine, &events);
+        engine.continue_cut_threads();
+
+        let requests = adapter.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].resume.as_deref(), Some("s1"));
+        assert_eq!(
+            requests[0].prompt,
+            format!(
+                "{}\n- subagent: Count the files (id toolu_a)\n\n{}",
+                recovery::CUT_WORK_NOTE,
+                recovery::CONTINUE_PROMPT
+            )
+        );
+    }
+
+    #[test]
+    fn a_project_s_own_setting_decides_whether_its_threads_go_on_after_a_restart() {
+        let cases = [
+            (false, Some(true), true),
+            (true, Some(false), false),
+            (false, None, false),
+        ];
+        for (case, (global, own, continues)) in cases.into_iter().enumerate() {
+            let name = format!("restart-project-{case}");
+            let dir = scratch_dir(&name);
+            let database = dir.join("state.sqlite");
+            let script = vec![ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            }];
+            let harness = Harness::new(&name, dir, Store::open(&database).unwrap(), script);
+            harness
+                .engine
+                .dispatch(Command::ProjectSettingsSet {
+                    project_id: "p".into(),
+                    settings: hoshi_core::ProjectSettings {
+                        continue_after_restart: own,
+                    },
+                })
+                .unwrap();
+            harness.send("t", "m1", "work");
+            session_started(&harness);
+            drop(harness);
+
+            let (engine, adapter, events) = reopen(&name, &database);
+            engine.set_continue_after_restart(global);
+            let effective = engine.continue_after_restart_in(Some("p"));
+            assert_eq!(effective.value, continues, "case {case}");
+            let source = match own {
+                Some(_) => hoshi_core::SettingSource::Project,
+                None => hoshi_core::SettingSource::Global,
+            };
+            assert_eq!(effective.source, source, "case {case}");
+            engine.continue_cut_threads();
+            if continues {
+                assert!(next_turn_start(&events).is_some(), "case {case}");
+                engine.snapshot();
+            }
+            assert_eq!(
+                adapter.requests.lock().unwrap().len(),
+                usize::from(continues),
+                "case {case}"
+            );
+            if !continues {
+                assert!(engine.thread_queue("t").can_resume, "case {case}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_restart_s_cut_commands_reach_the_next_message_when_threads_do_not_go_on() {
+        let dir = scratch_dir("restart-note");
+        let database = dir.join("state.sqlite");
+        let script = vec![ProviderOutput::SessionStarted {
+            session_id: "s1".into(),
+        }];
+        let harness = Harness::new("restart-note", dir, Store::open(&database).unwrap(), script);
+        harness.send("t", "m1", "start the dev server");
+        session_started(&harness);
+        lock(&harness.engine.state).receive(
+            "t",
+            "m1",
+            ProviderOutput::BackgroundTasks {
+                tasks: vec![dev_server()],
+                waiting: false,
+            },
+        );
+        drop(harness);
+
+        let (engine, adapter, events) = reopen("restart-note", &database);
+        engine.set_continue_after_restart(false);
+        engine.continue_cut_threads();
+        assert!(adapter.requests.lock().unwrap().is_empty());
+        let send = |message_id: &str, text: &str| {
+            engine
+                .dispatch(Command::MessageSend {
+                    thread_id: "t".into(),
+                    message_id: message_id.into(),
+                    text: text.into(),
+                    attachments: Vec::new(),
+                })
+                .unwrap();
+            wait_for_turn_start(&engine, &events);
+        };
+        send("m2", "is it up?");
+        finish(&adapter, 0, TurnOutcome::Completed);
+        send("m3", "and now?");
+
+        let prompts = prompts(&adapter);
+        assert_eq!(
+            prompts[0],
+            format!(
+                "{}\n- shell: Start the dev server (id b1)\n\nUser message:\nis it up?",
+                recovery::CUT_WORK_NOTE
+            )
+        );
+        assert_eq!(prompts[1], "and now?");
+    }
+
+    #[test]
+    fn messages_queued_before_a_restart_wait_for_the_user_then_follow() {
+        let dir = scratch_dir("restart-queue");
+        let database = dir.join("state.sqlite");
+        let harness = Harness::new(
+            "restart-queue",
+            dir,
+            Store::open(&database).unwrap(),
+            Vec::new(),
+        );
+        harness.engine.set_adapter(Some(adapter(None)));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+        drop(harness);
+
+        let (engine, adapter, events) = reopen("restart-queue", &database);
+        engine.continue_cut_threads();
+        let held: Vec<_> = engine
+            .held_queue("t")
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(held, ["m2"]);
+        assert!(adapter.requests.lock().unwrap().is_empty());
+
+        engine
+            .dispatch(Command::MessageSend {
+                thread_id: "t".into(),
+                message_id: "m3".into(),
+                text: "and this".into(),
+                attachments: Vec::new(),
+            })
+            .unwrap();
+        assert_eq!(wait_for_turn_start(&engine, &events), "m3");
+        finish(&adapter, 0, TurnOutcome::Completed);
+        assert_eq!(wait_for_turn_start(&engine, &events), "m2");
+
+        assert_eq!(prompts(&adapter), ["and this", "also this"]);
+        assert!(engine.held_queue("t").is_empty());
+    }
+
+    #[test]
+    fn a_message_held_for_a_compaction_a_restart_cut_short_still_goes() {
+        let dir = scratch_dir("restart-compaction");
+        let database = dir.join("state.sqlite");
+        let harness = Harness::new(
+            "restart-compaction",
+            dir,
+            Store::open(&database).unwrap(),
+            Vec::new(),
+        );
+        harness.engine.set_adapter(Some(adapter(None)));
+        harness
+            .engine
+            .compact_then_send("t", "m1", "carry on".into(), Vec::new())
+            .unwrap();
+        drop(harness);
+
+        let (engine, adapter, events) = reopen("restart-compaction", &database);
+        engine.continue_cut_threads();
+        let held = engine.snapshot().held_messages;
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].message_id, "m1");
+
+        engine.send_held_message_now("t").unwrap();
+
+        assert_eq!(wait_for_turn_start(&engine, &events), "m1");
+        assert_eq!(prompts(&adapter), ["carry on"]);
+        assert!(engine.snapshot().held_messages.is_empty());
+    }
+
+    fn usage_limited(resets_at: &str) -> TurnOutcome {
+        TurnOutcome::Failed {
+            reason: TurnFailure::UsageLimited {
+                detail: "limit reached".into(),
+                resets_at: Some(resets_at.into()),
+            },
+        }
+    }
+
+    #[test]
+    fn a_usage_limit_holds_the_queue_and_the_thread_goes_on_once_it_resets() {
+        let dir = scratch_dir("usage-limit");
+        let database = dir.join("state.sqlite");
+        let harness = Harness::new(
+            "usage-limit",
+            dir,
+            Store::open(&database).unwrap(),
+            Vec::new(),
+        );
+        let first = adapter(None);
+        harness.engine.set_adapter(Some(first.clone()));
+        harness.send("t", "m1", "long task");
+        lock(&harness.engine.state).receive(
+            "t",
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+        );
+        harness.send("t", "m2", "also this");
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        let reset_ms = reset.timestamp_millis() as u64;
+        finish(&first, 0, usage_limited(&reset.to_rfc3339()));
+        harness.wait_for_turn_end();
+        assert_eq!(first.requests.lock().unwrap().len(), 1);
+        drop(harness);
+
+        let (engine, adapter, events) = reopen("usage-limit", &database);
+        let held: Vec<_> = engine
+            .held_queue("t")
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect();
+        assert_eq!(held, ["m2"]);
+        lock(&engine.state).resume_limited_threads(reset_ms);
+        assert!(adapter.requests.lock().unwrap().is_empty());
+        engine.set_resume_after_usage_limit(true);
+        lock(&engine.state).resume_limited_threads(reset_ms - 1);
+        assert!(adapter.requests.lock().unwrap().is_empty());
+        assert!(engine.usage_limit_resume("t").is_some());
+
+        lock(&engine.state).resume_limited_threads(reset_ms);
+        wait_for_turn_start(&engine, &events);
+        lock(&engine.state).resume_limited_threads(reset_ms);
+        finish(&adapter, 0, TurnOutcome::Completed);
+        events
+            .iter()
+            .find(|event| matches!(event, Event::TurnCompleted { .. }))
+            .unwrap();
+        assert_eq!(engine.held_queue("t").len(), 1);
+
+        engine.resume_queue("t");
+        assert_eq!(wait_for_turn_start(&engine, &events), "m2");
+        assert_eq!(
+            prompts(&adapter),
+            [recovery::LIMIT_RESET_PROMPT, "also this"]
+        );
+        assert_eq!(
+            adapter.requests.lock().unwrap()[0].resume.as_deref(),
+            Some("s1")
+        );
+    }
+
+    fn snooze(engine: &Engine, until: chrono::DateTime<Utc>) -> Result<(), CommandError> {
+        engine.dispatch(Command::ThreadSnooze {
+            thread_id: "t".into(),
+            until: until.to_rfc3339(),
+        })
+    }
+
+    #[test]
+    fn a_running_turn_can_be_snoozed_but_not_a_message_the_user_queued() {
+        let harness = Harness::in_memory("snooze-queue", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        let later = Utc::now() + chrono::Duration::hours(1);
+        harness.send("t", "m1", "long task");
+        snooze(&harness.engine, later).unwrap();
+        assert!(harness.thread("t").snoozed_until.is_some());
+
+        lock(&harness.engine.state)
+            .queued
+            .entry("t".into())
+            .or_default()
+            .push_back(QueuedMessage {
+                id: "news".into(),
+                text: "the pull request changed".into(),
+                attachments: Vec::new(),
+                from_user: false,
+                held: false,
+            });
+        snooze(&harness.engine, later).unwrap();
+
+        harness.send("t", "m2", "also this");
+        assert_eq!(harness.thread("t").snoozed_until, None);
+        assert_eq!(
+            snooze(&harness.engine, later),
+            Err(CommandError::MessageQueued {
+                thread_id: "t".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_snoozed_thread_does_not_go_on_after_a_restart() {
+        let dir = scratch_dir("snooze-restart");
+        let database = dir.join("state.sqlite");
+        let script = vec![ProviderOutput::SessionStarted {
+            session_id: "s1".into(),
+        }];
+        let harness = Harness::new(
+            "snooze-restart",
+            dir,
+            Store::open(&database).unwrap(),
+            script,
+        );
+        harness.send("t", "m1", "long task");
+        session_started(&harness);
+        snooze(&harness.engine, Utc::now() + chrono::Duration::hours(1)).unwrap();
+        drop(harness);
+
+        let (engine, adapter, _events) = reopen("snooze-restart", &database);
+        engine.continue_cut_threads();
+
+        assert!(adapter.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_snoozed_thread_does_not_compact_while_idle() {
+        let harness = Harness::in_memory("snooze-compact", large_cached_turn());
+        harness
+            .engine
+            .set_idle_compaction(IdleCompaction::BeforeCacheExpires);
+        harness.send("t", "m1", "work");
+        harness.wait_for_turn_end();
+        let at = lock(&harness.engine.state).idle_compactions["t"];
+        snooze(&harness.engine, Utc::now() + chrono::Duration::hours(1)).unwrap();
+
+        lock(&harness.engine.state).compact_idle_threads(at);
+
+        assert_eq!(prompts(&harness.adapter), ["work"]);
+    }
+
+    #[test]
+    fn a_usage_limit_snoozes_until_its_reset_and_waking_keeps_the_resumption() {
+        let harness = Harness::in_memory("snooze-limit", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        lock(&harness.engine.state).receive(
+            "t",
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+        );
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        let reset_ms = reset.timestamp_millis() as u64;
+        finish(&adapter, 0, usage_limited(&reset.to_rfc3339()));
+        harness.wait_for_turn_end();
+        assert_eq!(harness.thread("t").snoozed_until, None);
+
+        harness.engine.set_snooze_until_limit_resets(true);
+        harness.send("t", "m2", "go on");
+        finish(&adapter, 1, usage_limited(&reset.to_rfc3339()));
+        harness.wait_for_turn_end();
+        let thread = harness.thread("t");
+        let until = chrono::DateTime::parse_from_rfc3339(thread.snoozed_until.as_deref().unwrap());
+        assert_eq!(until.unwrap().timestamp_millis(), reset.timestamp_millis());
+        assert!(harness.engine.usage_limit_snoozed("t"));
+
+        harness.engine.set_resume_after_usage_limit(true);
+        lock(&harness.engine.state).resume_limited_threads(reset_ms - 1);
+        harness
+            .engine
+            .dispatch(Command::ThreadWake {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert_eq!(harness.thread("t").snoozed_until, None);
+        assert!(harness.thread("t").last_snooze_wake_at.is_some());
+        assert!(!harness.engine.usage_limit_snoozed("t"));
+        assert!(harness.engine.usage_limit_resume("t").is_some());
+
+        snooze(&harness.engine, reset + chrono::Duration::hours(1)).unwrap();
+        lock(&harness.engine.state).resume_limited_threads(reset_ms);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+
+        lock(&harness.engine.state).resume_limited_threads(reset_ms + 2 * 60 * 60 * 1000);
+        let turn_id = harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } if turn_id != "m2" => Some(turn_id),
+            _ => None,
+        });
+        assert_eq!(prompts(&adapter)[2], recovery::LIMIT_RESET_PROMPT);
+        assert_eq!(
+            resumption(&harness.engine, &turn_id),
+            Some(hoshi_core::Resumption::UsageLimitReset)
+        );
+    }
+
+    #[test]
+    fn a_task_s_answer_waits_while_its_parent_is_held_by_a_failure() {
+        let harness = Harness::in_memory("held-answer", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        delegate(&harness, serde_json::json!({ "task": "count the files" }));
+        finish(&adapter, 0, usage_limited("2020-01-01T00:00:00Z"));
+        harness.wait_for_turn_end();
+
+        child_turn_ends(&harness, &adapter, 1);
+
+        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+        assert_eq!(harness.thread("t").active_turn_id, None);
+        assert_eq!(harness.engine.held_queue("t").len(), 1);
+        harness.send("t", "m2", "go on");
+        finish(&adapter, 2, TurnOutcome::Completed);
+        harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } if turn_id != "m2" => Some(()),
+            _ => None,
+        });
+        harness.thread("t");
+        assert!(prompts(&adapter)[3].starts_with("Delegated task"));
+    }
+
+    #[test]
+    fn a_turn_that_fails_to_resume_its_session_keeps_it_for_a_retry() {
+        let harness = Harness::in_memory("resume-failed", completed_turn());
+        harness.send("t", "m1", "first");
+        harness.wait_for_turn_end();
+        let failing = Arc::new(FakeAdapter {
+            requests: Mutex::new(Vec::new()),
+            script: vec![
+                ProviderOutput::SessionStarted {
+                    session_id: "s2".into(),
+                },
+                turn_failed(TurnFailure::ResumeFailed {
+                    detail: "no conversation found".into(),
+                }),
+            ],
+            title: None,
+            responses: Arc::default(),
+            steers: None,
+            finishers: Mutex::default(),
+        });
+        harness.engine.set_adapter(Some(failing.clone()));
+
+        harness.send("t", "m2", "second");
+        harness.wait_for_turn_end();
+
+        assert_eq!(
+            failing.requests.lock().unwrap()[0].resume.as_deref(),
+            Some("s1")
+        );
+        assert_eq!(harness.thread("t").session_id.as_deref(), Some("s1"));
     }
 
     fn approval_requested() -> Vec<ProviderOutput> {
@@ -5288,13 +7535,295 @@ Blue"
         assert_eq!(requests[1].prompt, "also this");
     }
 
+    fn stop(harness: &Harness) {
+        harness
+            .engine
+            .dispatch(Command::TurnInterrupt {
+                thread_id: "t".into(),
+            })
+            .unwrap();
+        assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Interrupted);
+        // Waits for the engine to finish reacting.
+        harness.thread("t");
+    }
+
+    fn queue_of(harness: &Harness) -> Vec<(String, bool, hoshi_core::MessageSender)> {
+        harness
+            .engine
+            .thread_queue("t")
+            .messages
+            .into_iter()
+            .map(|entry| (entry.message_id, entry.held, entry.sender))
+            .collect()
+    }
+
+    /// The next turn to start, within ten seconds.
+    fn turn_started(harness: &Harness) -> String {
+        let turn_id = next_turn_start(&harness.events).expect("a turn to start");
+        harness.thread("t");
+        turn_id
+    }
+
+    fn next_turn_start(events: &Receiver<Event>) -> Option<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.checked_duration_since(Instant::now())?;
+            if let Event::TurnStarted { turn_id, .. } = events.recv_timeout(left).ok()? {
+                return Some(turn_id);
+            }
+        }
+    }
+
     #[test]
-    fn a_message_sent_while_a_turn_stops_starts_the_next_one() {
+    fn a_message_queued_before_a_stop_waits_for_the_user_s_next_one() {
         let harness = Harness::in_memory("stopped-queue", Vec::new());
         let adapter = adapter(None);
         harness.engine.set_adapter(Some(adapter.clone()));
         harness.send("t", "m1", "long task");
         harness.send("t", "m2", "also this");
+
+        stop(&harness);
+
+        assert_eq!(harness.thread("t").active_turn_id, None);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+        assert_eq!(
+            queue_of(&harness),
+            [("m2".to_owned(), true, hoshi_core::MessageSender::User)]
+        );
+        assert!(harness.engine.thread_queue("t").can_resume);
+
+        harness.send("t", "m3", "and this");
+        assert_eq!(turn_started(&harness), "m3");
+        assert!(!queue_of(&harness)[0].1);
+        finish(&adapter, 1, TurnOutcome::Completed);
+        assert_eq!(turn_started(&harness), "m2");
+        assert_eq!(prompts(&adapter), ["long task", "and this", "also this"]);
+    }
+
+    #[test]
+    fn a_message_sent_while_a_turn_stops_goes_first_and_the_held_ones_follow() {
+        let harness = Harness::in_memory("stopping-queue", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+        assert!(lock(&harness.engine.state).hold_for_stop("t"));
+        assert!(queue_of(&harness)[0].1);
+
+        harness.send("t", "m3", "and this");
+        assert_eq!(
+            queue_of(&harness)
+                .into_iter()
+                .map(|(id, held, _)| (id, held))
+                .collect::<Vec<_>>(),
+            [("m3".to_owned(), false), ("m2".to_owned(), false)]
+        );
+        finish(&adapter, 0, TurnOutcome::Interrupted);
+        harness.wait_for_turn_end();
+        assert_eq!(turn_started(&harness), "m3");
+        finish(&adapter, 1, TurnOutcome::Completed);
+        assert_eq!(turn_started(&harness), "m2");
+    }
+
+    #[test]
+    fn resuming_a_stopped_thread_tells_its_agent_to_continue_then_sends_its_queue() {
+        let harness = Harness::in_memory("resume-stopped", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+        stop(&harness);
+
+        harness.engine.resume_thread("t").unwrap();
+
+        turn_started(&harness);
+        assert!(!harness.engine.thread_queue("t").can_resume);
+        finish(&adapter, 1, TurnOutcome::Completed);
+        assert_eq!(turn_started(&harness), "m2");
+        assert_eq!(
+            prompts(&adapter),
+            ["long task", recovery::LIMIT_RESET_PROMPT, "also this"]
+        );
+    }
+
+    #[test]
+    fn resuming_a_thread_that_only_holds_its_queue_just_sends_it() {
+        let harness = Harness::in_memory("resume-held", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+        let failure = TurnOutcome::Failed {
+            reason: TurnFailure::ProcessExited {
+                detail: "exit 1".into(),
+            },
+        };
+        finish(&adapter, 0, failure);
+        harness.wait_for_turn_end();
+        harness.thread("t");
+        assert!(harness.engine.thread_queue("t").can_resume);
+
+        harness.engine.resume_thread("t").unwrap();
+
+        assert_eq!(turn_started(&harness), "m2");
+        assert_eq!(prompts(&adapter), ["long task", "also this"]);
+    }
+
+    #[test]
+    fn a_queued_message_is_sent_now_only_while_the_thread_is_stopped() {
+        let harness = Harness::in_memory("send-now", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+        harness.send("t", "m3", "and this");
+        assert_eq!(
+            harness.engine.send_queued_now("t", "m3"),
+            Err(CommandError::ThreadBusy {
+                thread_id: "t".into()
+            })
+        );
+        stop(&harness);
+        assert_eq!(
+            harness.engine.send_queued_now("t", "m9"),
+            Err(CommandError::QueuedMessageNotFound {
+                thread_id: "t".into(),
+                message_id: "m9".into(),
+            })
+        );
+
+        harness.engine.send_queued_now("t", "m3").unwrap();
+
+        assert_eq!(turn_started(&harness), "m3");
+        assert_eq!(
+            queue_of(&harness),
+            [("m2".to_owned(), false, hoshi_core::MessageSender::User)]
+        );
+        finish(&adapter, 1, TurnOutcome::Completed);
+        assert_eq!(turn_started(&harness), "m2");
+    }
+
+    #[test]
+    fn removed_queued_messages_never_go_and_show_unread() {
+        let harness = Harness::in_memory("remove-queued", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        harness.send("t", "m2", "also this");
+        harness.send("t", "m3", "and this");
+        harness.send("t", "m4", "and that");
+        stop(&harness);
+
+        harness.engine.remove_queued_message("t", "m3").unwrap();
+        assert_eq!(
+            queue_of(&harness)
+                .into_iter()
+                .map(|(id, ..)| id)
+                .collect::<Vec<_>>(),
+            ["m2", "m4"]
+        );
+        harness.engine.clear_queue("t").unwrap();
+
+        assert!(queue_of(&harness).is_empty());
+        let items = harness.engine.transcript("t", None).unwrap().items;
+        let dropped: Vec<&str> = items
+            .iter()
+            .filter(|item| matches!(item.content, ItemContent::UserMessage { dropped: true, .. }))
+            .map(|item| item.id.as_str())
+            .collect();
+        assert_eq!(dropped, ["m2", "m3", "m4"]);
+        harness.send("t", "m5", "something else");
+        turn_started(&harness);
+        finish(&adapter, 1, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        harness.thread("t");
+        assert_eq!(prompts(&adapter), ["long task", "something else"]);
+    }
+
+    #[test]
+    fn hoshi_s_news_starts_a_stopped_thread_whose_user_messages_stay_held() {
+        let harness = Harness::in_memory("stopped-news", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        let first = delegate(&harness, serde_json::json!({ "task": "count the files" }));
+        let second = delegate(&harness, serde_json::json!({ "task": "count the lines" }));
+        let first = first["taskId"].as_str().unwrap().to_owned();
+        let second = second["taskId"].as_str().unwrap().to_owned();
+        harness.send("t", "m2", "also this");
+        child_turn_ends(&harness, &adapter, 1);
+        let answer = queue_of(&harness)[1].clone();
+        assert_eq!(answer.2, hoshi_core::MessageSender::Hoshi);
+
+        stop(&harness);
+        assert!(queue_of(&harness).iter().all(|(_, held, _)| *held));
+
+        child_turn_ends(&harness, &adapter, 2);
+        let news = turn_started(&harness);
+        assert!(prompts(&adapter)[3].contains(&second));
+        assert_eq!(queue_of(&harness).len(), 2);
+        finish(&adapter, 3, TurnOutcome::Completed);
+
+        assert_eq!(turn_started(&harness), answer.0);
+        assert_ne!(news, answer.0);
+        assert!(prompts(&adapter)[4].contains(&first));
+        assert_eq!(
+            queue_of(&harness),
+            [("m2".to_owned(), true, hoshi_core::MessageSender::User)]
+        );
+        finish(&adapter, 4, TurnOutcome::Completed);
+        harness.wait_for_turn_end();
+        harness.thread("t");
+        assert_eq!(adapter.requests.lock().unwrap().len(), 5);
+        assert!(queue_of(&harness)[0].1);
+    }
+
+    #[test]
+    fn a_turn_the_user_stopped_never_lets_hoshi_s_held_news_go() {
+        let harness = Harness::in_memory("stopped-completes", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "split the work");
+        delegate(&harness, serde_json::json!({ "task": "count the files" }));
+        child_turn_ends(&harness, &adapter, 1);
+        assert_eq!(queue_of(&harness).len(), 1);
+        {
+            let mut state = lock(&harness.engine.state);
+            assert!(state.hold_for_stop("t"));
+            state.receive(
+                "t",
+                "m1",
+                ProviderOutput::TurnCompleted {
+                    outcome: TurnOutcome::Completed,
+                },
+            );
+        }
+
+        assert_eq!(harness.thread("t").active_turn_id, None);
+        assert!(queue_of(&harness)[0].1);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn stopping_a_usage_limited_thread_turns_its_resumption_off() {
+        let harness = Harness::in_memory("stop-limited", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.engine.set_resume_after_usage_limit(true);
+        harness.send("t", "m1", "long task");
+        lock(&harness.engine.state).receive(
+            "t",
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+        );
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        let reset_ms = reset.timestamp_millis() as u64;
+        finish(&adapter, 0, usage_limited(&reset.to_rfc3339()));
+        harness.wait_for_turn_end();
+        lock(&harness.engine.state).resume_limited_threads(reset_ms - 1);
+        assert!(harness.engine.usage_limit_resume("t").is_some());
 
         harness
             .engine
@@ -5302,13 +7831,87 @@ Blue"
                 thread_id: "t".into(),
             })
             .unwrap();
-        harness.wait_for(|event| match event {
-            Event::TurnStarted { turn_id, .. } if turn_id == "m2" => Some(()),
-            _ => None,
-        });
 
-        assert_eq!(harness.thread("t").active_turn_id.as_deref(), Some("m2"));
-        assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+        assert_eq!(harness.engine.usage_limit_resume("t"), None);
+        lock(&harness.engine.state).resume_limited_threads(reset_ms);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+        assert!(harness.engine.thread_queue("t").can_resume);
+        harness.engine.resume_thread("t").unwrap();
+        turn_started(&harness);
+        assert_eq!(prompts(&adapter)[1], recovery::LIMIT_RESET_PROMPT);
+    }
+
+    #[test]
+    fn the_user_chooses_whether_a_limited_thread_resumes_whatever_the_setting() {
+        let harness = Harness::in_memory("limit-choice", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        lock(&harness.engine.state).receive(
+            "t",
+            "m1",
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+        );
+        let reset = Utc::now() + chrono::Duration::hours(1);
+        let reset_ms = reset.timestamp_millis() as u64;
+        finish(&adapter, 0, usage_limited(&reset.to_rfc3339()));
+        harness.wait_for_turn_end();
+        assert_eq!(harness.engine.usage_limit_resume("t"), None);
+
+        assert!(harness.engine.resume_at_usage_limit_reset("t"));
+        assert!(harness.engine.usage_limit_resume("t").is_some());
+        harness.engine.cancel_usage_limit_resume("t");
+        assert_eq!(harness.engine.usage_limit_resume("t"), None);
+        harness.engine.set_resume_after_usage_limit(true);
+        lock(&harness.engine.state).resume_limited_threads(reset_ms);
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+
+        harness.engine.set_resume_after_usage_limit(false);
+        assert!(harness.engine.resume_at_usage_limit_reset("t"));
+        lock(&harness.engine.state).resume_limited_threads(reset_ms);
+        turn_started(&harness);
+        assert_eq!(prompts(&adapter)[1], recovery::LIMIT_RESET_PROMPT);
+        assert!(!harness.engine.resume_at_usage_limit_reset("t"));
+    }
+
+    #[test]
+    fn pull_request_news_kept_through_a_stop_waits_for_the_user() {
+        let harness = Harness::in_memory("stopped-wake", Vec::new());
+        let adapter = adapter(None);
+        harness.engine.set_adapter(Some(adapter.clone()));
+        harness.send("t", "m1", "long task");
+        lock(&harness.engine.state).pending_wakes.insert(
+            "t".into(),
+            vec![Wake {
+                update: hoshi_core::PullRequestUpdate::default(),
+                text: "a check failed".into(),
+            }],
+        );
+
+        stop(&harness);
+
+        assert_eq!(adapter.requests.lock().unwrap().len(), 1);
+        assert!(!lock(&harness.engine.state).pending_wakes.is_empty());
+        harness.send("t", "m2", "go on");
+        assert_eq!(turn_started(&harness), "m2");
+        finish(&adapter, 1, TurnOutcome::Completed);
+        turn_started(&harness);
+        assert_eq!(prompts(&adapter)[2], "a check failed");
+    }
+
+    #[test]
+    fn stopping_an_idle_thread_that_waits_for_nothing_is_refused() {
+        let harness = Harness::in_memory("stop-idle", Vec::new());
+        assert_eq!(
+            harness.engine.dispatch(Command::TurnInterrupt {
+                thread_id: "t".into(),
+            }),
+            Err(CommandError::ThreadNotWorking {
+                thread_id: "t".into()
+            })
+        );
     }
 
     fn delegate(harness: &Harness, arguments: serde_json::Value) -> serde_json::Value {
@@ -5396,6 +7999,7 @@ Blue"
                 background: None,
                 owes_answer: true,
                 ended: false,
+                heard_at: Instant::now(),
             },
         );
 
@@ -5466,6 +8070,7 @@ Blue"
                 background: None,
                 owes_answer,
                 ended: false,
+                heard_at: Instant::now(),
             },
         );
         child_turn_ends(&harness, &adapter, 1);
@@ -5657,6 +8262,7 @@ Blue"
                 background: None,
                 owes_answer: true,
                 ended: false,
+                heard_at: Instant::now(),
             },
         );
         child_turn_ends(&harness, &adapter, 1);
@@ -5775,6 +8381,39 @@ Blue"
         assert!(told(0).is_some_and(|told| !told.contains(delegation::TASK_INSTRUCTIONS)));
         assert!(told(1).is_some_and(|told| told.contains(delegation::TASK_INSTRUCTIONS)));
         assert_eq!(told(2), None);
+    }
+
+    #[test]
+    fn a_task_runs_on_the_enabled_provider_it_names() {
+        let harness = Harness::in_memory("delegate-provider", Vec::new());
+        let (default, other) = (adapter(None), adapter(None));
+        harness.engine.set_adapters(vec![
+            default.clone(),
+            Arc::new(OtherProvider(other.clone())),
+        ]);
+        harness.send("t", "m1", "split the work");
+        let call = |arguments: serde_json::Value| {
+            lock(&harness.engine.state).call_tool("t", "delegate_task", &arguments)
+        };
+
+        let unknown = call(serde_json::json!({ "task": "x", "provider": "gemini" })).unwrap_err();
+        assert!(unknown.contains("claudeCode, copilot"), "{unknown}");
+        let disabled = call(serde_json::json!({ "task": "x", "provider": "codex" })).unwrap_err();
+        assert!(
+            disabled.contains("codex is not an enabled provider"),
+            "{disabled}"
+        );
+        let unread =
+            call(serde_json::json!({ "task": "x", "provider": OTHER_PROVIDER, "model": "gpt" }));
+        assert!(unread.unwrap_err().contains("can't be read"));
+
+        let task =
+            call(serde_json::json!({ "task": "review it", "provider": OTHER_PROVIDER })).unwrap();
+        let child = harness.thread(task["taskId"].as_str().unwrap());
+        assert_eq!(child.provider, OTHER_PROVIDER);
+        assert_eq!(child.model, None);
+        assert_eq!(default.requests.lock().unwrap().len(), 1);
+        assert_eq!(other.requests.lock().unwrap()[0].prompt, "review it");
     }
 
     #[test]
@@ -6281,6 +8920,82 @@ Blue"
         assert!(expires > now + 3_500_000 && expires <= now + 3_600_000);
     }
 
+    fn large_cached_turn() -> Vec<ProviderOutput> {
+        let mut script = completed_turn();
+        script.insert(
+            1,
+            ProviderOutput::ContextUsage(ContextUsage {
+                used_tokens: 250_000,
+                max_tokens: Some(1_000_000),
+                cache_ttl_secs: Some(3600),
+                cache_expires_at: None,
+            }),
+        );
+        script
+    }
+
+    fn prompts(adapter: &FakeAdapter) -> Vec<String> {
+        adapter
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|request| request.prompt.clone())
+            .collect()
+    }
+
+    #[test]
+    fn an_idle_thread_compacts_once_shortly_before_its_cache_expires() {
+        let harness = Harness::in_memory("idle-compact", large_cached_turn());
+        harness
+            .engine
+            .set_idle_compaction(IdleCompaction::BeforeCacheExpires);
+        harness.send("t", "m1", "work");
+        harness.wait_for_turn_end();
+
+        let (at, expires) = {
+            let state = lock(&harness.engine.state);
+            (
+                state.idle_compactions["t"],
+                state.context_usages["t"].cache_expires_at.unwrap(),
+            )
+        };
+        assert_eq!(at, expires - hoshi_core::IDLE_COMPACTION_LEAD_MS);
+        lock(&harness.engine.state).compact_idle_threads(at - 1);
+        assert_eq!(prompts(&harness.adapter), ["work"]);
+
+        lock(&harness.engine.state).compact_idle_threads(at);
+        harness.wait_for_turn_end();
+
+        assert_eq!(prompts(&harness.adapter), ["work", "/compact"]);
+        assert!(lock(&harness.engine.state).idle_compactions.is_empty());
+    }
+
+    #[test]
+    fn an_idle_thread_waits_for_the_user_once_its_cache_ran_out_or_it_moved_on() {
+        let harness = Harness::in_memory("idle-compact-late", large_cached_turn());
+        harness
+            .engine
+            .set_idle_compaction(IdleCompaction::BeforeCacheExpires);
+        harness.send("t", "m1", "work");
+        harness.wait_for_turn_end();
+        let expires = lock(&harness.engine.state).context_usages["t"]
+            .cache_expires_at
+            .unwrap();
+
+        lock(&harness.engine.state).compact_idle_threads(expires);
+        harness.send("t", "m2", "more");
+        harness.wait_for_turn_end();
+        harness
+            .engine
+            .set_idle_compaction(IdleCompaction::WhenYouReturn);
+        harness.send("t", "m3", "again");
+        harness.wait_for_turn_end();
+
+        assert_eq!(prompts(&harness.adapter), ["work", "more", "again"]);
+        assert!(lock(&harness.engine.state).idle_compactions.is_empty());
+    }
+
     #[test]
     fn a_message_held_while_compacting_shows_and_can_be_taken_back() {
         let harness = Harness::in_memory("compact-held", Vec::new());
@@ -6366,7 +9081,9 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            open_tasks: 0,
             changes_requested: false,
+            turn: None,
             conflicts: false,
             additions: 0,
             deletions: 0,
@@ -6459,7 +9176,9 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            open_tasks: 0,
             changes_requested: false,
+            turn: None,
             conflicts: false,
             additions: 0,
             deletions: 0,
@@ -6559,7 +9278,9 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            open_tasks: 0,
             changes_requested: false,
+            turn: None,
             conflicts: false,
             additions: 0,
             deletions: 0,
@@ -6828,7 +9549,9 @@ Blue"
                 state: hoshi_core::PullRequestState::Open,
                 checks: None,
                 unresolved_comments: 0,
+                open_tasks: 0,
                 changes_requested: false,
+                turn: None,
                 conflicts: false,
                 additions: 0,
                 deletions: 0,
@@ -7101,7 +9824,9 @@ Blue"
             state,
             checks: None,
             unresolved_comments: 0,
+            open_tasks: 0,
             changes_requested: false,
+            turn: None,
             conflicts: false,
             additions: 0,
             deletions: 0,
@@ -7255,6 +9980,86 @@ Blue"
         );
         assert!(Path::new(&worktree).is_dir());
         assert!(git::branch_tip(&harness.root, "hoshi/c1234567").is_some());
+    }
+
+    #[test]
+    fn the_sweep_removes_merged_worktrees_and_keeps_their_branches() {
+        let repo = git::tests::temp_repository("engine-merged-sweep");
+        let harness = Harness::new(
+            "merged-sweep",
+            repo,
+            Store::open_in_memory().unwrap(),
+            Vec::new(),
+        );
+        for id in [
+            "s1234567-rest",
+            "o1234567-rest",
+            "p1234567-rest",
+            "d1234567-rest",
+        ] {
+            harness
+                .create_thread(id, ThreadWorkspace::NewWorktree)
+                .unwrap();
+        }
+        let path = |id: &str| harness.thread(id).worktree_path.unwrap();
+        let (merged, open, moved_on) = (
+            path("s1234567-rest"),
+            path("o1234567-rest"),
+            path("p1234567-rest"),
+        );
+        let head = commit_in(&merged, "a.txt");
+        set_pull_request(
+            &harness,
+            "s1234567-rest",
+            hoshi_core::PullRequestState::Merged,
+            Some(head),
+        );
+        let head = commit_in(&open, "b.txt");
+        set_pull_request(
+            &harness,
+            "o1234567-rest",
+            hoshi_core::PullRequestState::Open,
+            Some(head),
+        );
+        let head = commit_in(&moved_on, "c.txt");
+        commit_in(&moved_on, "after-merge.txt");
+        set_pull_request(
+            &harness,
+            "p1234567-rest",
+            hoshi_core::PullRequestState::Merged,
+            Some(head),
+        );
+        let dirty = path("d1234567-rest");
+        let head = commit_in(&dirty, "d.txt");
+        std::fs::write(Path::new(&dirty).join("draft.txt"), "wip").unwrap();
+        set_pull_request(
+            &harness,
+            "d1234567-rest",
+            hoshi_core::PullRequestState::Merged,
+            Some(head),
+        );
+
+        let mut cleanup = harness.engine.delete_merged_worktrees();
+        assert_eq!(cleanup.removed, ["s1234567-rest"]);
+        assert_eq!(harness.engine.merged_cleanup(), Some(cleanup.clone()));
+        cleanup.kept.sort();
+        assert_eq!(
+            cleanup.kept,
+            [
+                ("d1234567-rest".to_owned(), KeptReason::Changes),
+                ("p1234567-rest".to_owned(), KeptReason::NewCommits),
+            ]
+        );
+        assert!(Path::new(&dirty).is_dir());
+
+        assert!(!Path::new(&merged).exists());
+        assert!(harness.thread("s1234567-rest").worktree_released);
+        assert!(git::branch_tip(&harness.root, "hoshi/s1234567").is_some());
+        assert!(Path::new(&open).is_dir());
+        assert!(
+            Path::new(&moved_on).is_dir(),
+            "commits after the merge stay checked out"
+        );
     }
 
     #[test]
@@ -7732,6 +10537,7 @@ Blue"
                         project_id: Some("p".into()),
                         title: String::new(),
                         workspace: ThreadWorkspace::NewWorktree,
+                        provider: hoshi_core::default_provider(),
                         model: None,
                         effort: None,
                         fast_mode: false,
@@ -7828,7 +10634,9 @@ Blue"
             state: hoshi_core::PullRequestState::Open,
             checks: None,
             unresolved_comments: 0,
+            open_tasks: 0,
             changes_requested: false,
+            turn: None,
             conflicts: false,
             additions: 0,
             deletions: 0,
@@ -8017,6 +10825,39 @@ Blue"
     }
 
     #[test]
+    fn an_idle_local_thread_keeps_its_branch_when_the_root_switches() {
+        let repo = git::tests::temp_repository("engine-root-switch");
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("root-switch", repo, store, Vec::new());
+        harness.wait_for(|event| match event {
+            Event::ThreadBranchSet { thread_id, .. } if thread_id == "t" => Some(()),
+            _ => None,
+        });
+        harness
+            .create_thread("w1234567-rest", ThreadWorkspace::NewWorktree)
+            .unwrap();
+        let worktree = harness.thread("w1234567-rest").worktree_path.unwrap();
+
+        source_control::create_branch(&harness.root, "fix").unwrap();
+        source_control::create_branch(&worktree, "other").unwrap();
+        refresh_projects(&Arc::downgrade(&harness.engine.state), &["p".into()]);
+
+        assert_eq!(harness.thread("t").branch.as_deref(), Some("main"));
+        assert_eq!(
+            harness.thread("w1234567-rest").branch.as_deref(),
+            Some("other")
+        );
+        assert_eq!(
+            harness.engine.snapshot().project_branches,
+            vec![hoshi_core::ProjectBranch {
+                project_id: "p".into(),
+                branch: Some("fix".into()),
+            }]
+        );
+        let _ = git::remove_worktree(&harness.root, &worktree);
+    }
+
+    #[test]
     fn a_worktree_needs_a_git_repository() {
         let harness = Harness::in_memory("no-git", Vec::new());
 
@@ -8033,6 +10874,7 @@ Blue"
         sink: Mutex<Option<OutputSink>>,
         spawned: Mutex<usize>,
         lingers: Mutex<bool>,
+        awaits_work: Mutex<bool>,
         /// Whether a next turn may run in it.
         takes_turns: Mutex<bool>,
         continued: Mutex<Vec<String>>,
@@ -8079,6 +10921,10 @@ Blue"
             *self.0.lingers.lock().unwrap()
         }
 
+        fn awaits_work(&self) -> bool {
+            *self.0.awaits_work.lock().unwrap()
+        }
+
         fn continue_with(&self, request: &TurnRequest) -> bool {
             if !*self.0.takes_turns.lock().unwrap() {
                 return false;
@@ -8097,6 +10943,10 @@ Blue"
     }
 
     impl ProviderAdapter for KeptAdapter {
+        fn provider(&self) -> &'static str {
+            hoshi_core::DEFAULT_PROVIDER
+        }
+
         fn models(&self) -> hoshi_core::ProviderModels {
             hoshi_core::ProviderModels::default()
         }
@@ -8148,8 +10998,187 @@ Blue"
         (harness, process)
     }
 
+    /// Thread `t` on `database` left the dev server running and hoshi quit, `awaited` when
+    /// its agent waited for it.
+    fn quit_with_dev_server_running(name: &str, database: &Path, awaited: bool) {
+        let dir = database.parent().unwrap().to_owned();
+        let harness = Harness::new(name, dir, Store::open(database).unwrap(), Vec::new());
+        let process = Arc::new(KeptProcess::default());
+        harness
+            .engine
+            .set_adapter(Some(Arc::new(KeptAdapter(process.clone()))));
+        harness.send("t", "m1", "start the dev server");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        process.report(ProviderOutput::SessionStarted {
+            session_id: "s1".into(),
+        });
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: vec![dev_server()],
+            waiting: false,
+        });
+        if awaited {
+            let arguments = serde_json::json!({ "backgroundTaskIds": ["b1"] });
+            lock(&harness.engine.state)
+                .call_tool("t", background::TOOL, &arguments)
+                .unwrap();
+        }
+        *process.lingers.lock().unwrap() = true;
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        harness.wait_for_turn_end();
+        harness.engine.end_agents();
+        assert!(*process.closed.lock().unwrap());
+    }
+
+    #[test]
+    fn a_turn_quitting_cut_short_goes_on_though_its_agent_said_it_stopped() {
+        let database = scratch_dir("quit-mid-turn").join("state.sqlite");
+        let dir = database.parent().unwrap().to_owned();
+        let harness = Harness::new(
+            "quit-mid-turn",
+            dir,
+            Store::open(&database).unwrap(),
+            Vec::new(),
+        );
+        let process = Arc::new(KeptProcess::default());
+        harness
+            .engine
+            .set_adapter(Some(Arc::new(KeptAdapter(process.clone()))));
+        harness.send("t", "m1", "refactor it");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        process.report(ProviderOutput::SessionStarted {
+            session_id: "s1".into(),
+        });
+        session_started(&harness);
+
+        harness.engine.end_agents();
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Interrupted,
+        });
+        drop(harness);
+
+        let (engine, adapter, events) = reopen("quit-mid-turn", &database);
+        engine.continue_cut_threads();
+        let turn_id = wait_for_turn_start(&engine, &events);
+        let requests = adapter.requests.lock().unwrap().clone();
+        assert_eq!(requests[0].resume.as_deref(), Some("s1"));
+        assert_eq!(requests[0].prompt, recovery::CONTINUE_PROMPT);
+        assert_eq!(
+            resumption(&engine, &turn_id),
+            Some(hoshi_core::Resumption::Restart)
+        );
+    }
+
+    #[test]
+    fn a_command_the_agent_waited_for_that_quitting_ended_has_it_go_on() {
+        let database = scratch_dir("quit-awaited").join("state.sqlite");
+        quit_with_dev_server_running("quit-awaited", &database, true);
+
+        let (engine, adapter, events) = reopen("quit-awaited", &database);
+        engine.continue_cut_threads();
+        let turn_id = wait_for_turn_start(&engine, &events);
+        assert_eq!(
+            resumption(&engine, &turn_id),
+            Some(hoshi_core::Resumption::RestartEndedWork)
+        );
+
+        assert_eq!(
+            prompts(&adapter),
+            [format!(
+                "{}
+- shell: Start the dev server (id b1)",
+                recovery::CUT_WORK_NOTE
+            )]
+        );
+        assert_eq!(
+            adapter.requests.lock().unwrap()[0].resume.as_deref(),
+            Some("s1")
+        );
+    }
+
+    #[test]
+    fn quitting_ends_the_commands_left_running_and_the_next_message_says_so() {
+        let database = scratch_dir("quit-kept").join("state.sqlite");
+        quit_with_dev_server_running("quit-kept", &database, false);
+
+        let (engine, adapter, events) = reopen("quit-kept", &database);
+        engine.continue_cut_threads();
+        assert!(adapter.requests.lock().unwrap().is_empty());
+        engine
+            .dispatch(Command::MessageSend {
+                thread_id: "t".into(),
+                message_id: "m2".into(),
+                text: "is it up?".into(),
+                attachments: Vec::new(),
+            })
+            .unwrap();
+        wait_for_turn_start(&engine, &events);
+
+        assert_eq!(
+            prompts(&adapter),
+            [format!(
+                "{}
+- shell: Start the dev server (id b1)
+
+User message:
+is it up?",
+                recovery::CUT_WORK_NOTE
+            )]
+        );
+    }
+
     fn running_in_background(harness: &Harness) -> Vec<ThreadBackgroundTasks> {
         harness.engine.snapshot().background_tasks
+    }
+
+    #[test]
+    fn a_retry_clears_once_the_answer_starts_streaming() {
+        let harness = Harness::in_memory("retry-stream", Vec::new());
+        let process = Arc::new(KeptProcess::default());
+        harness
+            .engine
+            .set_adapter(Some(Arc::new(KeptAdapter(process.clone()))));
+        harness.send("t", "m1", "go");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+
+        process.report(ProviderOutput::Retrying {
+            attempt: 1,
+            max_attempts: Some(10),
+            retry_in_ms: Some(500),
+            error: Some("overloaded".into()),
+        });
+        let retry = harness.wait_for(|event| match event {
+            Event::TurnRetrying { retry, .. } => Some(retry),
+            _ => None,
+        });
+        assert_eq!(retry.map(|retry| retry.attempt), Some(1));
+
+        process.report(ProviderOutput::TextDelta {
+            item_id: "a1".into(),
+            delta: "Hi".into(),
+        });
+        process.report(ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        });
+        let cleared = harness.wait_for(|event| match event {
+            Event::TurnRetrying { retry, .. } => Some(retry.is_none()),
+            Event::TurnCompleted { .. } => Some(false),
+            _ => None,
+        });
+        assert!(cleared, "the retry outlived the streamed answer");
+        let recovered = harness.wait_for(|event| match event {
+            Event::ItemAdded { item } => match item.content {
+                ItemContent::ProviderRecovered {
+                    attempt,
+                    max_attempts,
+                } => Some(Some((attempt, max_attempts))),
+                _ => None,
+            },
+            Event::TurnCompleted { .. } => Some(None),
+            _ => None,
+        });
+        assert_eq!(recovered, Some((1, Some(10))));
     }
 
     #[test]
@@ -8251,12 +11280,30 @@ Blue"
     }
 
     #[test]
-    fn a_next_message_the_kept_process_cannot_take_starts_a_fresh_one() {
+    fn a_next_message_the_kept_process_cannot_take_waits_for_its_commands_to_end() {
         let (harness, process) = leave_dev_server_running("kept-process-refuses");
         *process.takes_turns.lock().unwrap() = false;
 
         harness.send("t", "m2", "now with another model");
-        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        assert_eq!(
+            harness.wait_for_turn_end(),
+            TurnOutcome::Failed {
+                reason: TurnFailure::BackgroundWorkRunning
+            }
+        );
+        assert!(!*process.closed.lock().unwrap());
+        assert_eq!(*process.spawned.lock().unwrap(), 1);
+        assert_eq!(running_in_background(&harness).len(), 1);
+
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false,
+        });
+        harness.send("t", "m3", "now with another model");
+        harness.wait_for(|event| match event {
+            Event::TurnStarted { turn_id, .. } if turn_id == "m3" => Some(()),
+            _ => None,
+        });
 
         assert!(*process.closed.lock().unwrap());
         assert_eq!(*process.spawned.lock().unwrap(), 2);
@@ -8288,6 +11335,80 @@ Blue"
     }
 
     #[test]
+    fn a_kept_process_that_stays_quiet_too_long_is_ended() {
+        let (harness, process) = leave_dev_server_running("kept-process-quiet");
+        let now = Instant::now();
+
+        lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(60 * 60));
+        assert!(!*process.closed.lock().unwrap(), "its dev server runs");
+
+        lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(5 * 60 * 60));
+        assert!(*process.closed.lock().unwrap());
+        assert!(lock(&harness.engine.state).lingering.is_empty());
+        assert!(running_in_background(&harness).is_empty());
+    }
+
+    #[test]
+    fn a_kept_process_whose_commands_ended_is_ended_after_half_an_hour_quiet() {
+        let (harness, process) = leave_dev_server_running("kept-process-done");
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false,
+        });
+        let now = Instant::now();
+
+        lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(20 * 60));
+        assert!(!*process.closed.lock().unwrap());
+
+        lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(31 * 60));
+        assert!(*process.closed.lock().unwrap());
+    }
+
+    #[test]
+    fn a_kept_process_with_a_run_ahead_may_stay_quiet_as_long_as_one_with_commands() {
+        let (harness, process) = leave_dev_server_running("kept-process-wakeup");
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false,
+        });
+        *process.awaits_work.lock().unwrap() = true;
+        let now = Instant::now();
+
+        lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(60 * 60));
+        assert!(!*process.closed.lock().unwrap(), "its wakeup is ahead");
+
+        lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(5 * 60 * 60));
+        assert!(*process.closed.lock().unwrap());
+    }
+
+    #[test]
+    fn what_a_kept_process_reports_counts_as_heard() {
+        let (harness, process) = leave_dev_server_running("kept-process-heard");
+        let heard = || lock(&harness.engine.state).lingering["t"].heard_at;
+        let before = heard();
+        thread::sleep(Duration::from_millis(20));
+
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: vec![dev_server()],
+            waiting: true,
+        });
+
+        assert!(heard() > before);
+    }
+
+    #[test]
+    fn ending_the_agents_ends_running_turns_and_kept_processes() {
+        let (harness, process) = leave_dev_server_running("kept-process-quit");
+        harness.send("t", "m2", "is it up?");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+        assert!(lock(&harness.engine.state).turns.contains_key("t"));
+
+        harness.engine.end_agents();
+
+        assert!(*process.closed.lock().unwrap());
+    }
+
+    #[test]
     fn the_agent_awaits_its_background_commands_while_its_turn_runs() {
         let (harness, _process) = leave_dev_server_running("kept-process-await");
         let call = |harness: &Harness| {
@@ -8306,5 +11427,209 @@ Blue"
         assert_eq!(answer["backgroundTaskIds"], serde_json::json!(["b1"]));
         assert_eq!(answer["notRunning"], serde_json::json!(["b9"]));
         assert!(answer["next"].is_string());
+    }
+
+    /// Lists `live` and knows `offline` without running anything.
+    struct CatalogAdapter {
+        provider: &'static str,
+        live: Vec<&'static str>,
+        offline: Option<Vec<&'static str>>,
+    }
+
+    fn catalog_of(provider: &str, slugs: &[&str]) -> hoshi_core::ProviderModels {
+        hoshi_core::ProviderModels {
+            provider: provider.into(),
+            default_model: slugs.first().map(|slug| (*slug).to_owned()),
+            models: slugs
+                .iter()
+                .map(|slug| hoshi_core::ModelInfo {
+                    slug: (*slug).into(),
+                    name: format!("Model {slug}"),
+                    short_name: (*slug).into(),
+                    legacy: false,
+                    is_new: false,
+                    update_required: false,
+                    efforts: Vec::new(),
+                    default_effort: None,
+                    fast_mode: false,
+                    ultracode: false,
+                })
+                .collect(),
+            compacts_idle_threads: false,
+        }
+    }
+
+    impl ProviderAdapter for CatalogAdapter {
+        fn provider(&self) -> &'static str {
+            self.provider
+        }
+
+        fn models(&self) -> hoshi_core::ProviderModels {
+            catalog_of(self.provider, &self.live)
+        }
+
+        fn offline_models(&self) -> Option<hoshi_core::ProviderModels> {
+            self.offline
+                .as_ref()
+                .map(|slugs| catalog_of(self.provider, slugs))
+        }
+
+        fn compacts_idle_threads(&self) -> bool {
+            self.provider == DEFAULT_PROVIDER
+        }
+
+        fn start_turn(
+            &self,
+            _request: TurnRequest,
+            _sink: OutputSink,
+        ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+            Err(TurnFailure::ProviderDisabled)
+        }
+    }
+
+    fn catalog_adapter(
+        provider: &'static str,
+        live: &[&'static str],
+        offline: Option<&[&'static str]>,
+    ) -> Arc<dyn ProviderAdapter> {
+        Arc::new(CatalogAdapter {
+            provider,
+            live: live.to_vec(),
+            offline: offline.map(<[_]>::to_vec),
+        })
+    }
+
+    fn slugs(catalog: &hoshi_core::ProviderModels) -> Vec<&str> {
+        catalog
+            .models
+            .iter()
+            .map(|model| model.slug.as_str())
+            .collect()
+    }
+
+    fn catalog_engine(data_dir: &Path) -> Engine {
+        Engine::from_store(Store::open_in_memory().unwrap(), data_dir, Arc::new(|_| {})).unwrap()
+    }
+
+    #[test]
+    fn the_models_listed_last_run_are_known_at_once_after_a_restart() {
+        let data_dir = scratch_dir("known-models");
+        let engine = catalog_engine(&data_dir);
+        engine.set_adapters(vec![
+            catalog_adapter("copilot", &["gpt-6"], None),
+            catalog_adapter(DEFAULT_PROVIDER, &["claude-haiku-5-5"], None),
+        ]);
+        assert!(engine.known_provider_models().is_empty());
+        engine.provider_models();
+
+        let restarted = catalog_engine(&data_dir);
+        restarted.set_adapters(vec![
+            catalog_adapter("copilot", &[], None),
+            catalog_adapter(DEFAULT_PROVIDER, &[], None),
+        ]);
+        let known = restarted.known_provider_models();
+
+        let providers: Vec<_> = known
+            .iter()
+            .map(|catalog| catalog.provider.as_str())
+            .collect();
+        assert_eq!(providers, [DEFAULT_PROVIDER, "copilot"]);
+        assert_eq!(slugs(&known[0]), ["claude-haiku-5-5"]);
+        assert_eq!(known[0].models[0].name, "Model claude-haiku-5-5");
+        assert!(known[0].compacts_idle_threads);
+        assert_eq!(slugs(&known[1]), ["gpt-6"]);
+        assert!(
+            data_dir
+                .join("caches")
+                .join("providers")
+                .join("copilot.json")
+                .exists()
+        );
+    }
+
+    #[test]
+    fn a_listing_that_comes_back_empty_keeps_the_models_known_before() {
+        let data_dir = scratch_dir("known-models-empty");
+        let engine = catalog_engine(&data_dir);
+        engine.set_adapters(vec![catalog_adapter("copilot", &["gpt-6"], None)]);
+        engine.provider_models();
+
+        engine.set_adapters(vec![catalog_adapter("copilot", &[], None)]);
+        engine.provider_models();
+
+        assert_eq!(slugs(&engine.known_provider_models()[0]), ["gpt-6"]);
+    }
+
+    #[test]
+    fn a_disabled_provider_s_kept_models_are_left_out() {
+        let data_dir = scratch_dir("known-models-disabled");
+        let engine = catalog_engine(&data_dir);
+        engine.set_adapters(vec![
+            catalog_adapter(DEFAULT_PROVIDER, &["opus"], None),
+            catalog_adapter("copilot", &["gpt-6"], None),
+        ]);
+        engine.provider_models();
+
+        engine.set_adapters(vec![catalog_adapter(DEFAULT_PROVIDER, &[], None)]);
+        let known = engine.known_provider_models();
+
+        assert_eq!(known.len(), 1);
+        assert_eq!(known[0].provider, DEFAULT_PROVIDER);
+    }
+
+    #[test]
+    fn the_offline_catalog_comes_first_and_kept_models_add_what_it_lacks() {
+        let data_dir = scratch_dir("known-models-offline");
+        let engine = catalog_engine(&data_dir);
+        engine.set_adapters(vec![catalog_adapter(
+            DEFAULT_PROVIDER,
+            &["haiku", "opus"],
+            None,
+        )]);
+        engine.provider_models();
+
+        engine.set_adapters(vec![catalog_adapter(
+            DEFAULT_PROVIDER,
+            &[],
+            Some(&["opus", "sonnet"]),
+        )]);
+        let known = engine.known_provider_models();
+
+        assert_eq!(slugs(&known[0]), ["opus", "sonnet", "haiku"]);
+        assert_eq!(known[0].default_model.as_deref(), Some("opus"));
+    }
+
+    #[test]
+    fn an_offline_catalog_is_known_before_any_listing() {
+        let engine = catalog_engine(&scratch_dir("known-models-first-run"));
+        engine.set_adapters(vec![
+            catalog_adapter("copilot", &["gpt-6"], None),
+            catalog_adapter(DEFAULT_PROVIDER, &["opus"], Some(&["opus"])),
+        ]);
+
+        let known = engine.known_provider_models();
+
+        assert_eq!(known.len(), 1);
+        assert_eq!(slugs(&known[0]), ["opus"]);
+    }
+
+    #[test]
+    fn a_kept_file_holding_another_provider_s_models_is_ignored() {
+        let data_dir = scratch_dir("known-models-identity");
+        let dir = provider_cache::dir(&data_dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("codex.json"),
+            serde_json::to_string(&catalog_of("copilot", &["gpt-6"])).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join(format!("{DEFAULT_PROVIDER}.json")), "not json").unwrap();
+        let engine = catalog_engine(&data_dir);
+        engine.set_adapters(vec![
+            catalog_adapter("codex", &[], None),
+            catalog_adapter(DEFAULT_PROVIDER, &[], None),
+        ]);
+
+        assert!(engine.known_provider_models().is_empty());
     }
 }

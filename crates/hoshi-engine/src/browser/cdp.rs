@@ -13,7 +13,7 @@ use tungstenite::{Message, WebSocket};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the socket thread waits for the browser before sending what is queued.
-const POLL: Duration = Duration::from_millis(15);
+const POLL: Duration = Duration::from_millis(4);
 
 type Reply = mpsc::Sender<Result<Value, String>>;
 
@@ -133,6 +133,19 @@ impl Connection {
         }
     }
 
+    /// A connection to a browser that takes every call and never answers.
+    pub fn unanswered() -> (Self, mpsc::Receiver<String>) {
+        let (outgoing, sent) = mpsc::channel();
+        let connection = Self {
+            outgoing,
+            pending: Arc::default(),
+            listeners: Arc::default(),
+            next_id: AtomicU64::new(1),
+            open: Arc::new(AtomicBool::new(true)),
+        };
+        (connection, sent)
+    }
+
     /// Hands `event` to every listener still there; returns how many took it.
     pub fn report(&self, event: &CdpEvent) -> usize {
         let mut listeners = lock(&self.listeners);
@@ -156,7 +169,9 @@ fn run(
         loop {
             match queued.try_recv() {
                 Ok(text) => {
-                    if socket.send(Message::text(text)).is_err() {
+                    if let Err(error) = socket.send(Message::text(text))
+                        && !transient(&error)
+                    {
                         break 'serve;
                     }
                 }
@@ -168,11 +183,23 @@ fn run(
             Ok(Message::Text(text)) => dispatch(text.as_str(), pending, listeners),
             Ok(Message::Close(_)) => break,
             Ok(_) => {}
-            Err(tungstenite::Error::Io(error))
-                if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+            Err(error) if transient(&error) => {}
             Err(_) => break,
         }
     }
+}
+
+/// The read timeout ran out, or a signal cut the call short, as a child process ending does
+/// on Linux: the socket is still open, and a frame half sent or read stays buffered.
+fn transient(error: &tungstenite::Error) -> bool {
+    matches!(
+        error,
+        tungstenite::Error::Io(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+            )
+    )
 }
 
 fn dispatch(
@@ -205,4 +232,52 @@ fn dispatch(
         session_id: value["sessionId"].as_str().map(str::to_owned),
     };
     lock(listeners).retain(|listener| listener.send(event.clone()).is_ok());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Connection, transient};
+    use serde_json::json;
+    use std::io::{Error, ErrorKind};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_signal_or_a_timeout_keeps_the_socket_open() {
+        let io = |kind: ErrorKind| tungstenite::Error::Io(Error::from(kind));
+        assert!(transient(&io(ErrorKind::Interrupted)));
+        assert!(transient(&io(ErrorKind::WouldBlock)));
+        assert!(transient(&io(ErrorKind::TimedOut)));
+        assert!(!transient(&io(ErrorKind::ConnectionReset)));
+        assert!(!transient(&tungstenite::Error::ConnectionClosed));
+    }
+
+    #[test]
+    fn a_call_the_browser_never_answers_gives_up_in_time() {
+        let (connection, sent) = Connection::unanswered();
+        let started = Instant::now();
+
+        let result = connection.call_within(
+            "Page.navigate",
+            json!({}),
+            Some("page"),
+            Duration::from_millis(200),
+        );
+
+        assert_eq!(
+            result,
+            Err("the browser didn't answer Page.navigate in time".into())
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(sent.try_recv().unwrap().contains("Page.navigate"));
+        assert!(connection.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_closed_browser_fails_calls_at_once() {
+        let connection = Connection::offline();
+        let started = Instant::now();
+        let result = connection.call("Page.navigate", json!({}), None);
+        assert_eq!(result, Err("the browser closed".into()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }

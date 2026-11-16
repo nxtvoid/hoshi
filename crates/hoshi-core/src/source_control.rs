@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// What a thread's checkout allows: whether there is something to commit, push or pull.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct GitStatus {
     /// `None` on a detached HEAD.
     pub branch: Option<String>,
@@ -22,9 +20,8 @@ pub struct GitStatus {
     pub ahead_of_default: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum GitAction {
     Commit,
     CommitPush,
@@ -35,9 +32,8 @@ pub enum GitAction {
     Pull,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct GitActionRequest {
     pub action: GitAction,
     /// The user's own commit message; written for them when `None`.
@@ -51,9 +47,8 @@ pub struct GitActionRequest {
 }
 
 /// The step a git action is at, as it reports it while running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum GitActionPhase {
     WritingCommitMessage,
     CreatingBranch,
@@ -64,18 +59,16 @@ pub enum GitActionPhase {
     Pulling,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct GitActionProgress {
     pub thread_id: String,
     pub phase: GitActionPhase,
 }
 
 /// What a git action did.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct GitActionResult {
     /// The new commit's short hash.
     pub commit: Option<String>,
@@ -87,9 +80,8 @@ pub struct GitActionResult {
     pub pull_request: Option<GitActionPullRequest>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct GitActionPullRequest {
     pub number: u32,
     pub title: String,

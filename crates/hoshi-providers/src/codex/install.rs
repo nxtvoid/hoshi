@@ -1,0 +1,1072 @@
+//! Codex from npm, installed into hoshi's home: each release in its own folder under
+//! `tools/codex`, the one in use named by `active.json`. Also the adapter that runs the Codex
+//! the settings, that install or the `PATH` provide.
+
+use super::login;
+use crate::process::{hide_console, kill_tree};
+use crate::updater::{UpdateFailure, Updater, find_program};
+use crate::{
+    CommitMessage, CommitMessageRequest, GeneratedTitle, Installation, OutputSink, ProviderAdapter,
+    PullRequestText, PullRequestTextRequest, RunningTurn, TitleRequest, TurnRequest,
+};
+use base64::Engine as _;
+use hoshi_core::{
+    BankedResetSpend, ProviderAccountStatus, ProviderModels, ProviderUpdateFailure, SlashCommand,
+    TurnFailure, UpdateStep, UsageLimits,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha512};
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::{Component, Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
+
+const PACKAGE: &str = "@openai/codex";
+const REGISTRY: &str = "https://registry.npmjs.org";
+const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+/// A fresh binary can take long to start while the system scans it.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(90);
+/// Releases are about 200 MB packed.
+const MAX_DOWNLOAD_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_ENTRIES: usize = 10_000;
+const STAGING_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
+const ACTIVE_FILE: &str = "active.json";
+const COMPLETE_FILE: &str = ".install-complete.json";
+const MANIFEST_FILE: &str = "codex-package.json";
+const STAGING_PREFIX: &str = ".install-";
+
+/// A platform OpenAI publishes Codex for: npm's name for it and the target its binary is built
+/// for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Platform {
+    npm: &'static str,
+    target: &'static str,
+}
+
+const PLATFORMS: [(&str, &str, Platform); 6] = [
+    platform("linux", "x86_64", "linux-x64", "x86_64-unknown-linux-musl"),
+    platform(
+        "linux",
+        "aarch64",
+        "linux-arm64",
+        "aarch64-unknown-linux-musl",
+    ),
+    platform("macos", "x86_64", "darwin-x64", "x86_64-apple-darwin"),
+    platform("macos", "aarch64", "darwin-arm64", "aarch64-apple-darwin"),
+    platform("windows", "x86_64", "win32-x64", "x86_64-pc-windows-msvc"),
+    platform(
+        "windows",
+        "aarch64",
+        "win32-arm64",
+        "aarch64-pc-windows-msvc",
+    ),
+];
+
+const fn platform(
+    os: &'static str,
+    arch: &'static str,
+    npm: &'static str,
+    target: &'static str,
+) -> (&'static str, &'static str, Platform) {
+    (os, arch, Platform { npm, target })
+}
+
+fn platform_for(os: &str, arch: &str) -> Option<Platform> {
+    PLATFORMS
+        .iter()
+        .find(|(known_os, known_arch, _)| *known_os == os && *known_arch == arch)
+        .map(|(_, _, platform)| *platform)
+}
+
+fn current_platform() -> Option<Platform> {
+    platform_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+impl Platform {
+    fn executable(&self) -> &'static str {
+        if self.target.contains("windows") {
+            "codex.exe"
+        } else {
+            "codex"
+        }
+    }
+}
+
+/// One platform's package of a release, as npm serves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Release {
+    version: String,
+    tarball: String,
+    /// The tarball's SHA-512.
+    sha512: Vec<u8>,
+}
+
+/// `1.2.3`, maybe with a prerelease such as `-alpha.1`, and nothing else: it names a folder.
+fn is_version(text: &str) -> bool {
+    let (release, prerelease) = match text.split_once('-') {
+        Some((release, prerelease)) => (release, Some(prerelease)),
+        None => (text, None),
+    };
+    let parts: Vec<_> = release.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        && prerelease.is_none_or(|prerelease| {
+            !prerelease.is_empty()
+                && prerelease
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-')
+                && !prerelease.contains("..")
+        })
+}
+
+/// The version `@openai/codex` names latest, from its metadata.
+fn version_of(latest: &Value) -> Option<String> {
+    let version = latest["version"].as_str()?;
+    is_version(version).then(|| version.to_owned())
+}
+
+/// The package that holds `platform`'s binary, as the main package's metadata names it: an
+/// alias such as `npm:@openai/codex@0.169.0-win32-x64`.
+fn platform_package(latest: &Value, platform: &Platform) -> Option<(String, String)> {
+    let key = format!("{PACKAGE}-{}", platform.npm);
+    let spec = latest["optionalDependencies"][&key].as_str()?;
+    let (name, version) = match spec.strip_prefix("npm:") {
+        Some(alias) => {
+            let (name, version) = alias.rsplit_once('@')?;
+            (name.to_owned(), version.to_owned())
+        }
+        None => (key, spec.to_owned()),
+    };
+    (name == PACKAGE && !version.is_empty()).then_some((name, version))
+}
+
+fn package_url(name: &str, version: &str) -> String {
+    format!("{REGISTRY}/{name}/{version}")
+}
+
+/// The tarball and checksum of a platform package, from its metadata.
+fn release_of(version: &str, package: &Value) -> Option<Release> {
+    let tarball = package["dist"]["tarball"].as_str()?;
+    if !tarball.starts_with(&format!("{REGISTRY}/")) {
+        return None;
+    }
+    let integrity = package["dist"]["integrity"].as_str()?;
+    let sha512 = integrity
+        .split_whitespace()
+        .find_map(|hash| hash.strip_prefix("sha512-"))
+        .and_then(|hash| base64::engine::general_purpose::STANDARD.decode(hash).ok())
+        .filter(|hash| hash.len() == 64)?;
+    Some(Release {
+        version: version.to_owned(),
+        tarball: tarball.to_owned(),
+        sha512,
+    })
+}
+
+fn get_json(url: &str) -> Option<Value> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(LOOKUP_TIMEOUT))
+        .build()
+        .into();
+    let text = agent
+        .get(url)
+        .call()
+        .ok()?
+        .body_mut()
+        .read_to_string()
+        .ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn latest_metadata() -> Option<Value> {
+    get_json(&format!("{REGISTRY}/{PACKAGE}/latest"))
+}
+
+/// The latest Codex release on npm; reaches the network.
+pub fn latest_version() -> Option<String> {
+    version_of(&latest_metadata()?)
+}
+
+fn latest_release(platform: &Platform) -> Option<Release> {
+    let latest = latest_metadata()?;
+    let version = version_of(&latest)?;
+    let (name, package_version) = platform_package(&latest, platform)?;
+    let package = get_json(&package_url(&name, &package_version))?;
+    release_of(&version, &package)
+}
+
+fn failure(reason: ProviderUpdateFailure) -> UpdateFailure {
+    UpdateFailure {
+        reason,
+        output: None,
+    }
+}
+
+fn write_failed(_: io::Error) -> UpdateFailure {
+    failure(ProviderUpdateFailure::WriteFailed)
+}
+
+/// hoshi's own installs of Codex, under `<hoshi home>/tools/codex`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexInstall {
+    dir: PathBuf,
+}
+
+impl CodexInstall {
+    pub fn new(hoshi_home: &Path) -> Self {
+        Self {
+            dir: hoshi_home.join("tools").join("codex"),
+        }
+    }
+
+    /// The npm package it installs.
+    pub fn package(&self) -> &'static str {
+        PACKAGE
+    }
+
+    /// The executable of the release in use; `None` until one was installed.
+    pub fn binary(&self) -> Option<PathBuf> {
+        let platform = current_platform()?;
+        let version = self.active()?;
+        let dir = self.dir.join(&version);
+        dir.join(COMPLETE_FILE).is_file().then_some(())?;
+        let binary = dir.join("bin").join(platform.executable());
+        binary.is_file().then_some(binary)
+    }
+
+    fn active(&self) -> Option<String> {
+        let text = fs::read_to_string(self.dir.join(ACTIVE_FILE)).ok()?;
+        let active: Value = serde_json::from_str(&text).ok()?;
+        let version = active["version"].as_str()?;
+        is_version(version).then(|| version.to_owned())
+    }
+
+    /// Installs npm's latest release unless it is the one in use, and switches to it once it
+    /// is whole and starts. Returns the version now in use. Reaches the network.
+    pub fn install(&self, mut step: impl FnMut(UpdateStep)) -> Result<String, UpdateFailure> {
+        let platform =
+            current_platform().ok_or_else(|| failure(ProviderUpdateFailure::Unsupported))?;
+        step(UpdateStep::Downloading { percent: None });
+        let release = latest_release(&platform)
+            .ok_or_else(|| failure(ProviderUpdateFailure::DownloadFailed))?;
+        self.install_release(&platform, &release, &mut step)?;
+        Ok(release.version)
+    }
+
+    fn install_release(
+        &self,
+        platform: &Platform,
+        release: &Release,
+        step: &mut impl FnMut(UpdateStep),
+    ) -> Result<(), UpdateFailure> {
+        fs::create_dir_all(&self.dir).map_err(write_failed)?;
+        self.sweep_staging();
+        let destination = self.dir.join(&release.version);
+        if destination.exists() {
+            step(UpdateStep::Verifying);
+            if completed(&destination, platform, release)
+                && verify(&destination, platform, &release.version).is_ok()
+            {
+                return self.activate(&release.version);
+            }
+            remove_release(&destination).map_err(write_failed)?;
+        }
+        let staging = self.dir.join(format!("{STAGING_PREFIX}{}", unique()));
+        fs::create_dir(&staging).map_err(write_failed)?;
+        let result = self.stage(platform, release, &staging, &destination, step);
+        let _ = fs::remove_dir_all(&staging);
+        result?;
+        self.activate(&release.version)
+    }
+
+    fn stage(
+        &self,
+        platform: &Platform,
+        release: &Release,
+        staging: &Path,
+        destination: &Path,
+        step: &mut impl FnMut(UpdateStep),
+    ) -> Result<(), UpdateFailure> {
+        let archive = staging.join("download.tgz");
+        download(release, &archive, step)?;
+        step(UpdateStep::Extracting);
+        let runtime = staging.join("runtime");
+        fs::create_dir(&runtime).map_err(write_failed)?;
+        extract(&archive, platform, &runtime)?;
+        let _ = fs::remove_file(&archive);
+        step(UpdateStep::Verifying);
+        verify(&runtime, platform, &release.version)?;
+        let record = json!({
+            "version": release.version,
+            "target": platform.target,
+            "sha512": hex(&release.sha512),
+        });
+        fs::write(runtime.join(COMPLETE_FILE), record.to_string()).map_err(write_failed)?;
+        rename_with_retries(&runtime, destination).map_err(write_failed)
+    }
+
+    /// Points `active.json` at `version` in one rename, then drops the releases no longer in
+    /// use, as far as nothing holds them.
+    fn activate(&self, version: &str) -> Result<(), UpdateFailure> {
+        let pointer = self.dir.join(format!(".active-{}.json", unique()));
+        fs::write(&pointer, json!({ "version": version }).to_string()).map_err(write_failed)?;
+        if let Err(error) = rename_with_retries(&pointer, &self.dir.join(ACTIVE_FILE)) {
+            let _ = fs::remove_file(&pointer);
+            return Err(write_failed(error));
+        }
+        self.prune(version);
+        Ok(())
+    }
+
+    fn prune(&self, keep: &str) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == keep || !is_version(&name) {
+                continue;
+            }
+            let _ = remove_release(&entry.path());
+        }
+    }
+
+    fn sweep_staging(&self) {
+        let Ok(entries) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.starts_with(STAGING_PREFIX) && !name.starts_with(".active-") {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_none_or(|age| age >= STAGING_STALE_AFTER);
+            if stale {
+                let path = entry.path();
+                let _ = fs::remove_dir_all(&path).or_else(|_| fs::remove_file(&path));
+            }
+        }
+    }
+}
+
+/// Removes the completion record first, so a release only partly removed is never taken
+/// for whole.
+fn remove_release(dir: &Path) -> io::Result<()> {
+    match fs::remove_file(dir.join(COMPLETE_FILE)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::remove_dir_all(dir)
+}
+
+fn completed(dir: &Path, platform: &Platform, release: &Release) -> bool {
+    let Ok(text) = fs::read_to_string(dir.join(COMPLETE_FILE)) else {
+        return false;
+    };
+    let Ok(record) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    record["version"] == release.version.as_str()
+        && record["target"] == platform.target
+        && record["sha512"] == hex(&release.sha512).as_str()
+}
+
+fn unique() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|since| since.as_nanos())
+        .unwrap_or_default();
+    format!("{}-{nanos}", std::process::id())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The system can hold a binary that just ran for a moment after it exits.
+fn rename_with_retries(from: &Path, to: &Path) -> io::Result<()> {
+    let mut attempt = 0;
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt >= 20 => return Err(error),
+            Err(_) => {
+                attempt += 1;
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+}
+
+fn download(
+    release: &Release,
+    archive: &Path,
+    step: &mut impl FnMut(UpdateStep),
+) -> Result<(), UpdateFailure> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_global(Some(DOWNLOAD_TIMEOUT))
+        .build()
+        .into();
+    let download_failed = |_| failure(ProviderUpdateFailure::DownloadFailed);
+    let mut response = agent
+        .get(&release.tarball)
+        .call()
+        .map_err(download_failed)?;
+    let total = response.body().content_length();
+    let mut reader = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_DOWNLOAD_BYTES)
+        .reader();
+    let mut file = fs::File::create(archive).map_err(write_failed)?;
+    let mut hash = Sha512::new();
+    let mut buffer = vec![0u8; 256 * 1024];
+    let (mut downloaded, mut shown) = (0u64, None);
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err(failure(ProviderUpdateFailure::DownloadFailed)),
+        };
+        hash.update(&buffer[..read]);
+        file.write_all(&buffer[..read]).map_err(write_failed)?;
+        downloaded += read as u64;
+        let percent = percent(downloaded, total);
+        if percent.is_some() && percent != shown {
+            shown = percent;
+            step(UpdateStep::Downloading { percent });
+        }
+    }
+    file.flush().map_err(write_failed)?;
+    if hash.finalize().as_slice() != release.sha512.as_slice() {
+        return Err(failure(ProviderUpdateFailure::VerifyFailed));
+    }
+    Ok(())
+}
+
+fn percent(done: u64, total: Option<u64>) -> Option<u8> {
+    let total = total.filter(|total| *total > 0)?;
+    Some((done.min(total) * 100 / total) as u8)
+}
+
+/// Where an entry of the package goes under the release folder: only the platform's vendor
+/// folder is kept. `Err` for a path that would leave it.
+fn entry_destination(entry: &Path, platform: &Platform) -> Result<Option<PathBuf>, ()> {
+    let mut components = entry.components();
+    let prefix = ["package", "vendor", platform.target];
+    for expected in prefix {
+        match components.next() {
+            Some(Component::Normal(part)) if part == expected => {}
+            Some(Component::Normal(_)) | None => return Ok(None),
+            Some(_) => return Err(()),
+        }
+    }
+    let mut relative = PathBuf::new();
+    for component in components {
+        match component {
+            Component::Normal(part) => {
+                let text = part.to_string_lossy();
+                if text.contains(':') || text.contains('\\') {
+                    return Err(());
+                }
+                relative.push(part);
+            }
+            Component::CurDir => {}
+            _ => return Err(()),
+        }
+    }
+    Ok((!relative.as_os_str().is_empty()).then_some(relative))
+}
+
+fn extract(archive: &Path, platform: &Platform, runtime: &Path) -> Result<(), UpdateFailure> {
+    let corrupt = || failure(ProviderUpdateFailure::VerifyFailed);
+    let file = fs::File::open(archive).map_err(write_failed)?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(io::BufReader::new(file)));
+    let entries = tar.entries().map_err(|_| corrupt())?;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_ENTRIES {
+            return Err(corrupt());
+        }
+        let mut entry = entry.map_err(|_| corrupt())?;
+        let kind = entry.header().entry_type();
+        if kind.is_pax_global_extensions() || kind.is_pax_local_extensions() {
+            continue;
+        }
+        let path = entry.path().map_err(|_| corrupt())?.into_owned();
+        let Some(relative) = entry_destination(&path, platform).map_err(|()| corrupt())? else {
+            continue;
+        };
+        let target = runtime.join(relative);
+        if kind.is_dir() {
+            fs::create_dir_all(&target).map_err(write_failed)?;
+        } else if kind.is_file() {
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(write_failed)?;
+            }
+            entry.unpack(&target).map_err(write_failed)?;
+        } else {
+            return Err(corrupt());
+        }
+    }
+    Ok(())
+}
+
+/// The release in `dir` is the one expected for `platform`, whole, and its binary starts and
+/// says so.
+fn verify(dir: &Path, platform: &Platform, version: &str) -> Result<(), UpdateFailure> {
+    let corrupt = || failure(ProviderUpdateFailure::VerifyFailed);
+    let text = fs::read_to_string(dir.join(MANIFEST_FILE)).map_err(|_| corrupt())?;
+    let manifest: Value = serde_json::from_str(&text).map_err(|_| corrupt())?;
+    if !manifest_matches(&manifest, platform, version) {
+        return Err(corrupt());
+    }
+    let binary = dir.join("bin").join(platform.executable());
+    let whole =
+        fs::metadata(&binary).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
+    if !whole {
+        return Err(corrupt());
+    }
+    match run_version(&binary, VERIFY_TIMEOUT) {
+        Some(reported) if reported == version => Ok(()),
+        _ => Err(corrupt()),
+    }
+}
+
+fn manifest_matches(manifest: &Value, platform: &Platform, version: &str) -> bool {
+    manifest["layoutVersion"] == 1
+        && manifest["version"] == version
+        && manifest["target"] == platform.target
+        && manifest["entrypoint"] == format!("bin/{}", platform.executable()).as_str()
+}
+
+/// The version `codex --version` reports, as `codex-cli 0.169.0`.
+fn parse_cli_version(output: &str) -> Option<String> {
+    let version = output
+        .trim()
+        .lines()
+        .next()?
+        .trim()
+        .strip_prefix("codex-cli ")?;
+    is_version(version).then(|| version.to_owned())
+}
+
+fn run_version(binary: &Path, timeout: Duration) -> Option<String> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_console(&mut command);
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let pid = child.id();
+    let child = Mutex::new(child);
+    let reader = thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).ok().map(|_| text)
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        let status = child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_wait();
+        match status {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if Instant::now() >= deadline => {
+                kill_tree(pid, &child);
+                return None;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    parse_cli_version(&reader.join().ok()??)
+}
+
+/// Where hoshi finds Codex and where Codex keeps its configuration and sign-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSetup {
+    /// The user's own binary, which then always runs.
+    pub binary_path: Option<String>,
+    /// `CODEX_HOME`; `None` is Codex's default.
+    pub home: Option<PathBuf>,
+    pub install: CodexInstall,
+}
+
+/// The Codex binary hoshi runs, by where it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexBinary {
+    /// The settings name it.
+    Configured(PathBuf),
+    /// hoshi installed it.
+    Managed(PathBuf),
+    /// Found on the `PATH`.
+    OnPath(PathBuf),
+}
+
+impl CodexBinary {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Configured(path) | Self::Managed(path) | Self::OnPath(path) => path,
+        }
+    }
+}
+
+impl CodexSetup {
+    /// The settings' binary, else hoshi's install, else `codex` on the `PATH`.
+    pub fn binary(&self) -> Option<CodexBinary> {
+        resolve(
+            self.binary_path.as_deref(),
+            || self.install.binary(),
+            || find_program("codex", true),
+        )
+    }
+}
+
+fn resolve(
+    configured: Option<&str>,
+    managed: impl FnOnce() -> Option<PathBuf>,
+    on_path: impl FnOnce() -> Option<PathBuf>,
+) -> Option<CodexBinary> {
+    if let Some(configured) = configured.map(str::trim).filter(|path| !path.is_empty()) {
+        let path = find_program(configured, true).unwrap_or_else(|| PathBuf::from(configured));
+        return Some(CodexBinary::Configured(path));
+    }
+    managed()
+        .map(CodexBinary::Managed)
+        .or_else(|| on_path().map(CodexBinary::OnPath))
+}
+
+/// Builds the adapter that runs Codex from its binary and `CODEX_HOME`.
+pub type CodexAdapterFactory =
+    Box<dyn Fn(Option<String>, Option<String>) -> Arc<dyn ProviderAdapter> + Send + Sync>;
+
+/// The Codex adapter on the binary [`CodexSetup::binary`] picks, picked again after an install.
+/// It answers for the installation and account itself and leaves the rest to the adapter.
+pub struct ManagedCodex {
+    setup: CodexSetup,
+    make: CodexAdapterFactory,
+    current: Mutex<(Option<CodexBinary>, Arc<dyn ProviderAdapter>)>,
+    /// `None` until asked; then `Some(None)` when the binary can't be run.
+    version: Mutex<Option<Option<String>>>,
+}
+
+impl ManagedCodex {
+    pub fn new(setup: CodexSetup, make: CodexAdapterFactory) -> Self {
+        let binary = setup.binary();
+        let adapter = make_adapter(&make, &setup, binary.as_ref());
+        Self {
+            setup,
+            make,
+            current: Mutex::new((binary, adapter)),
+            version: Mutex::default(),
+        }
+    }
+
+    pub fn setup(&self) -> &CodexSetup {
+        &self.setup
+    }
+
+    fn adapter(&self) -> Arc<dyn ProviderAdapter> {
+        lock(&self.current).1.clone()
+    }
+
+    fn installed(&self) -> Option<String> {
+        let mut version = lock(&self.version);
+        version
+            .get_or_insert_with(|| {
+                let binary = lock(&self.current).0.clone()?;
+                run_version(binary.path(), LOOKUP_TIMEOUT)
+            })
+            .clone()
+    }
+}
+
+fn make_adapter(
+    make: &CodexAdapterFactory,
+    setup: &CodexSetup,
+    binary: Option<&CodexBinary>,
+) -> Arc<dyn ProviderAdapter> {
+    make(
+        binary.map(|binary| binary.path().to_string_lossy().into_owned()),
+        setup
+            .home
+            .as_ref()
+            .map(|home| home.to_string_lossy().into_owned()),
+    )
+}
+
+/// Only hoshi's own install is updated: a Codex the user put in place stays as it is.
+fn updater_for(binary: Option<&CodexBinary>, install: &CodexInstall) -> Option<Updater> {
+    match binary {
+        None | Some(CodexBinary::Managed(_)) => {
+            current_platform().map(|_| Updater::Managed(install.clone()))
+        }
+        Some(CodexBinary::Configured(_) | CodexBinary::OnPath(_)) => None,
+    }
+}
+
+fn account_status(
+    installed: bool,
+    auth: login::Auth,
+    fallback: impl FnOnce() -> ProviderAccountStatus,
+) -> ProviderAccountStatus {
+    if !installed {
+        return ProviderAccountStatus::NotInstalled;
+    }
+    match auth {
+        login::Auth::SignedIn(_) => ProviderAccountStatus::Ready,
+        login::Auth::SignedOut => ProviderAccountStatus::SignedOut,
+        login::Auth::Unknown => fallback(),
+    }
+}
+
+impl ProviderAdapter for ManagedCodex {
+    fn provider(&self) -> &'static str {
+        self.adapter().provider()
+    }
+
+    fn models(&self) -> ProviderModels {
+        self.adapter().models()
+    }
+
+    fn usage_limits(&self) -> Option<UsageLimits> {
+        self.adapter().usage_limits()
+    }
+
+    fn reports_usage_limits(&self) -> bool {
+        self.adapter().reports_usage_limits()
+    }
+
+    fn spend_banked_reset(&self, grant_id: &str, request_id: &str) -> BankedResetSpend {
+        self.adapter().spend_banked_reset(grant_id, request_id)
+    }
+
+    fn installation(&self) -> Option<Installation> {
+        let binary = lock(&self.current).0.clone();
+        Some(Installation {
+            installed: self.installed(),
+            latest: latest_version(),
+            updater: updater_for(binary.as_ref(), &self.setup.install),
+        })
+    }
+
+    fn forget_version(&self) {
+        *lock(&self.version) = None;
+        let binary = self.setup.binary();
+        let mut current = lock(&self.current);
+        if current.0 != binary {
+            let adapter = make_adapter(&self.make, &self.setup, binary.as_ref());
+            *current = (binary, adapter);
+        } else {
+            current.1.forget_version();
+        }
+    }
+
+    fn account_status(&self) -> ProviderAccountStatus {
+        let installed = self.installed().is_some();
+        let auth = login::auth(self.setup.home.as_deref());
+        account_status(installed, auth, || self.adapter().account_status())
+    }
+
+    fn slash_commands(&self, cwd: &Path) -> Option<Vec<SlashCommand>> {
+        self.adapter().slash_commands(cwd)
+    }
+
+    fn generate_title(&self, request: &TitleRequest) -> Option<GeneratedTitle> {
+        self.adapter().generate_title(request)
+    }
+
+    fn write_commit_message(&self, request: &CommitMessageRequest) -> Option<CommitMessage> {
+        self.adapter().write_commit_message(request)
+    }
+
+    fn write_pull_request(&self, request: &PullRequestTextRequest) -> Option<PullRequestText> {
+        self.adapter().write_pull_request(request)
+    }
+
+    fn start_turn(
+        &self,
+        request: TurnRequest,
+        sink: OutputSink,
+    ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+        self.adapter().start_turn(request, sink)
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hoshi_core::CodexAccount;
+
+    fn latest() -> Value {
+        json!({
+            "name": "@openai/codex",
+            "version": "0.169.0",
+            "optionalDependencies": {
+                "@openai/codex-linux-x64": "npm:@openai/codex@0.169.0-linux-x64",
+                "@openai/codex-linux-arm64": "npm:@openai/codex@0.169.0-linux-arm64",
+                "@openai/codex-darwin-x64": "npm:@openai/codex@0.169.0-darwin-x64",
+                "@openai/codex-darwin-arm64": "npm:@openai/codex@0.169.0-darwin-arm64",
+                "@openai/codex-win32-x64": "npm:@openai/codex@0.169.0-win32-x64",
+                "@openai/codex-win32-arm64": "npm:@openai/codex@0.169.0-win32-arm64",
+            },
+        })
+    }
+
+    #[test]
+    fn each_platform_downloads_its_own_package() {
+        let latest = latest();
+        let expected = [
+            ("linux", "x86_64", "linux-x64"),
+            ("linux", "aarch64", "linux-arm64"),
+            ("macos", "x86_64", "darwin-x64"),
+            ("macos", "aarch64", "darwin-arm64"),
+            ("windows", "x86_64", "win32-x64"),
+            ("windows", "aarch64", "win32-arm64"),
+        ];
+
+        for (os, arch, npm) in expected {
+            let platform = platform_for(os, arch).unwrap();
+            let (name, version) = platform_package(&latest, &platform).unwrap();
+            assert_eq!(
+                package_url(&name, &version),
+                format!("https://registry.npmjs.org/@openai/codex/0.169.0-{npm}")
+            );
+        }
+        assert_eq!(version_of(&latest).as_deref(), Some("0.169.0"));
+        assert_eq!(platform_for("freebsd", "x86_64"), None);
+        assert_eq!(platform_for("windows", "x86"), None);
+    }
+
+    #[test]
+    fn a_platform_package_gives_its_tarball_and_checksum() {
+        let sha512 = vec![7u8; 64];
+        let integrity = format!(
+            "sha512-{}",
+            base64::engine::general_purpose::STANDARD.encode(&sha512)
+        );
+        let tarball = "https://registry.npmjs.org/@openai/codex/-/codex-0.169.0-win32-x64.tgz";
+        let package = json!({
+            "name": "@openai/codex",
+            "version": "0.169.0-win32-x64",
+            "dist": { "tarball": tarball, "integrity": integrity },
+        });
+
+        assert_eq!(
+            release_of("0.169.0", &package),
+            Some(Release {
+                version: "0.169.0".into(),
+                tarball: tarball.into(),
+                sha512,
+            })
+        );
+        let elsewhere = json!({ "dist": { "tarball": "https://example.com/codex.tgz", "integrity": integrity } });
+        assert_eq!(release_of("0.169.0", &elsewhere), None);
+        let sha1_only = json!({ "dist": { "tarball": tarball, "integrity": "sha1-abc" } });
+        assert_eq!(release_of("0.169.0", &sha1_only), None);
+    }
+
+    #[test]
+    fn a_platform_package_must_alias_codex_itself() {
+        let platform = platform_for("linux", "x86_64").unwrap();
+        let plain = json!({ "optionalDependencies": { "@openai/codex-linux-x64": "0.170.0" } });
+        let foreign = json!({
+            "optionalDependencies": { "@openai/codex-linux-x64": "npm:evil-codex@1.0.0" },
+        });
+
+        assert_eq!(platform_package(&plain, &platform), None);
+        assert_eq!(platform_package(&foreign, &platform), None);
+        assert_eq!(platform_package(&json!({}), &platform), None);
+    }
+
+    #[test]
+    fn only_the_platforms_vendor_folder_is_unpacked() {
+        let platform = platform_for("windows", "x86_64").unwrap();
+        let destination = |path: &str| entry_destination(Path::new(path), &platform);
+
+        assert_eq!(
+            destination("package/vendor/x86_64-pc-windows-msvc/bin/codex.exe"),
+            Ok(Some(PathBuf::from("bin").join("codex.exe")))
+        );
+        assert_eq!(destination("package/package.json"), Ok(None));
+        assert_eq!(
+            destination("package/vendor/aarch64-pc-windows-msvc/bin/codex.exe"),
+            Ok(None)
+        );
+        assert_eq!(
+            destination("package/vendor/x86_64-pc-windows-msvc"),
+            Ok(None)
+        );
+        assert_eq!(
+            destination("package/vendor/x86_64-pc-windows-msvc/../../escape"),
+            Err(())
+        );
+        assert_eq!(destination("/etc/passwd"), Err(()));
+    }
+
+    #[test]
+    fn the_manifest_must_name_the_release_and_its_binary() {
+        let platform = platform_for("windows", "x86_64").unwrap();
+        let manifest = json!({
+            "layoutVersion": 1,
+            "version": "0.169.0",
+            "target": "x86_64-pc-windows-msvc",
+            "entrypoint": "bin/codex.exe",
+        });
+
+        assert!(manifest_matches(&manifest, &platform, "0.169.0"));
+        assert!(!manifest_matches(&manifest, &platform, "0.170.0"));
+        let linux = platform_for("linux", "x86_64").unwrap();
+        assert!(!manifest_matches(&manifest, &linux, "0.169.0"));
+    }
+
+    #[test]
+    fn only_plain_versions_name_a_release_folder() {
+        assert!(is_version("0.169.0"));
+        assert!(is_version("0.170.0-alpha.2"));
+        assert!(!is_version("0.169"));
+        assert!(!is_version("../0.169.0"));
+        assert!(!is_version("0.169.0-.."));
+        assert!(!is_version("0.169.0/x"));
+    }
+
+    #[test]
+    fn the_cli_reports_its_version() {
+        assert_eq!(
+            parse_cli_version("codex-cli 0.169.0\n").as_deref(),
+            Some("0.169.0")
+        );
+        assert_eq!(parse_cli_version("0.169.0"), None);
+        assert_eq!(parse_cli_version(""), None);
+    }
+
+    #[test]
+    fn the_settings_binary_wins_then_hoshis_install_then_the_path() {
+        let managed = || Some(PathBuf::from("/hoshi/tools/codex/0.169.0/bin/codex"));
+        let on_path = || Some(PathBuf::from("/usr/local/bin/codex"));
+        let none = || None;
+
+        assert_eq!(
+            resolve(Some("/opt/codex/bin/codex"), managed, on_path),
+            Some(CodexBinary::Configured(PathBuf::from(
+                "/opt/codex/bin/codex"
+            )))
+        );
+        assert_eq!(
+            resolve(Some("  "), managed, on_path),
+            Some(CodexBinary::Managed(PathBuf::from(
+                "/hoshi/tools/codex/0.169.0/bin/codex"
+            )))
+        );
+        assert_eq!(
+            resolve(None, none, on_path),
+            Some(CodexBinary::OnPath(PathBuf::from("/usr/local/bin/codex")))
+        );
+        assert_eq!(resolve(None, none, none), None);
+    }
+
+    #[test]
+    fn only_hoshis_own_install_is_updated() {
+        let install = CodexInstall::new(Path::new("/hoshi"));
+        let managed = CodexBinary::Managed(PathBuf::from("/hoshi/tools/codex/0.1.0/bin/codex"));
+        let own = CodexBinary::OnPath(PathBuf::from("/usr/local/bin/codex"));
+        let configured = CodexBinary::Configured(PathBuf::from("/opt/codex"));
+        let expected = current_platform().map(|_| Updater::Managed(install.clone()));
+
+        assert_eq!(updater_for(Some(&managed), &install), expected);
+        assert_eq!(updater_for(None, &install), expected);
+        assert_eq!(updater_for(Some(&own), &install), None);
+        assert_eq!(updater_for(Some(&configured), &install), None);
+    }
+
+    #[test]
+    fn the_account_follows_auth_json_and_asks_the_adapter_when_it_cant_tell() {
+        let signed_in = login::Auth::SignedIn(CodexAccount::default());
+        let ready = || ProviderAccountStatus::Ready;
+
+        assert_eq!(
+            account_status(false, signed_in.clone(), ready),
+            ProviderAccountStatus::NotInstalled
+        );
+        assert_eq!(
+            account_status(true, signed_in, || ProviderAccountStatus::SignedOut),
+            ProviderAccountStatus::Ready
+        );
+        assert_eq!(
+            account_status(true, login::Auth::SignedOut, ready),
+            ProviderAccountStatus::SignedOut
+        );
+        assert_eq!(
+            account_status(true, login::Auth::Unknown, ready),
+            ProviderAccountStatus::Ready
+        );
+    }
+
+    #[test]
+    fn the_active_release_needs_its_completion_record() {
+        let Some(platform) = current_platform() else {
+            return;
+        };
+        let home = std::env::temp_dir().join(format!("hoshi-codex-install-{}", unique()));
+        let install = CodexInstall::new(&home);
+        let bin = install.dir.join("0.169.0").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join(platform.executable()), b"binary").unwrap();
+        fs::write(install.dir.join(ACTIVE_FILE), r#"{"version":"0.169.0"}"#).unwrap();
+        assert_eq!(install.binary(), None);
+
+        fs::write(install.dir.join("0.169.0").join(COMPLETE_FILE), "{}").unwrap();
+        assert_eq!(install.binary(), Some(bin.join(platform.executable())));
+
+        fs::write(install.dir.join(ACTIVE_FILE), r#"{"version":"../x"}"#).unwrap();
+        assert_eq!(install.binary(), None);
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    #[ignore = "downloads Codex from npm, about 200 MB"]
+    fn installs_the_latest_release_into_a_new_home() {
+        let home = std::env::temp_dir().join(format!("hoshi-codex-live-{}", unique()));
+        let install = CodexInstall::new(&home);
+        let mut steps = Vec::new();
+
+        let version = install.install(|step| steps.push(step)).unwrap();
+
+        let binary = install.binary().expect("the install is active");
+        assert_eq!(
+            run_version(&binary, VERIFY_TIMEOUT).as_deref(),
+            Some(version.as_str())
+        );
+        assert!(steps.contains(&UpdateStep::Extracting));
+        assert!(steps.contains(&UpdateStep::Verifying));
+        assert!(steps.contains(&UpdateStep::Downloading { percent: Some(100) }));
+
+        let mut again = Vec::new();
+        assert_eq!(install.install(|step| again.push(step)).unwrap(), version);
+        assert!(!again.contains(&UpdateStep::Extracting));
+        let _ = fs::remove_dir_all(&home);
+    }
+}

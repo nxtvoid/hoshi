@@ -76,6 +76,7 @@ fn stopping_a_background_command_ends_its_server_and_leaves_the_agent_at_rest() 
             project_id: Some("p".into()),
             title: "Dev server".into(),
             workspace: ThreadWorkspace::Local,
+            provider: hoshi_core::default_provider(),
             model: None,
             effort: Some(hoshi_core::Effort::Low),
             fast_mode: false,

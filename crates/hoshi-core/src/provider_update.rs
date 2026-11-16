@@ -1,10 +1,17 @@
 use serde::Serialize;
-use ts_rs::TS;
 
-/// The enabled provider's CLI against its latest release.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+/// A provider's CLI as it changed, by provider id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
+pub struct ProviderVersionUpdate {
+    pub provider: String,
+    /// `None` once the provider is disabled.
+    pub version: Option<ProviderVersion>,
+}
+
+/// An enabled provider's CLI against its latest release.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderVersion {
     /// `None` when the CLI can't be run.
     pub installed: Option<String>,
@@ -17,19 +24,20 @@ pub struct ProviderVersion {
     pub update: ProviderUpdate,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ProviderUpdate {
     #[default]
     Idle,
     Running {
         /// The updater's last line of output.
         line: Option<String>,
+        /// Where an install hoshi runs itself is; `None` for an updater command.
+        step: Option<UpdateStep>,
     },
     Succeeded,
     /// The updater finished, yet the CLI still reports an older version.
@@ -41,13 +49,12 @@ pub enum ProviderUpdate {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-#[ts(export)]
 pub enum ProviderUpdateFailure {
     /// Turns are running on the CLI it would replace.
     TurnsRunning,
@@ -59,4 +66,26 @@ pub enum ProviderUpdateFailure {
         code: Option<i32>,
     },
     TimedOut,
+    /// The release couldn't be looked up or downloaded.
+    DownloadFailed,
+    /// What was downloaded isn't the release it claims to be, or doesn't start.
+    VerifyFailed,
+    /// The release couldn't be written to disk.
+    WriteFailed,
+}
+
+/// Where an install hoshi runs itself is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum UpdateStep {
+    Downloading {
+        /// `None` while the size is unknown.
+        percent: Option<u8>,
+    },
+    Extracting,
+    Verifying,
 }

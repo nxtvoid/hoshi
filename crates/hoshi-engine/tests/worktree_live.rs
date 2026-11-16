@@ -75,6 +75,7 @@ fn thread_follows(name: &str, prompt: &str) {
             project_id: Some("p".into()),
             title: "Export".into(),
             workspace: ThreadWorkspace::Local,
+            provider: hoshi_core::default_provider(),
             model: None,
             effort: Some(hoshi_core::Effort::Low),
             fast_mode: false,

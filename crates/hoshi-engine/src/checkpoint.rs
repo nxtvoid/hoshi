@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn a_branch_checked_out_during_the_turn_is_not_the_turn_s_change() {
-        let repo = git::tests::temp_repository("switch");
+        let repo = git::tests::temp_repository("checkpoint-switch");
         let dir = repo.to_string_lossy().into_owned();
         let write = |name: &str, text: &str| std::fs::write(repo.join(name), text).unwrap();
         write(

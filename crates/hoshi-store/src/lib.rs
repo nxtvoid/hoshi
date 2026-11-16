@@ -10,6 +10,7 @@ use hoshi_core::{
     ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits, task_preview,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, types::Type};
+use std::collections::HashMap;
 use std::path::Path;
 
 const MIGRATIONS: &[&str] = &[
@@ -215,6 +216,45 @@ const MIGRATIONS: &[&str] = &[
       AND coalesce(substr(thread_id, 1, nullif(instr(thread_id, ':'), 0) - 1), thread_id)
           NOT IN (SELECT id FROM threads);
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN provider TEXT NOT NULL DEFAULT 'claudeCode';
+    ",
+    r"
+    CREATE TABLE provider_usage_limits (
+        provider TEXT PRIMARY KEY,
+        limits_json TEXT NOT NULL
+    );
+    INSERT INTO provider_usage_limits (provider, limits_json)
+        SELECT 'claudeCode', limits_json FROM usage_limits WHERE id = 1;
+    ",
+    r"
+    CREATE TABLE thread_recoveries (
+        thread_id TEXT PRIMARY KEY,
+        recovery_json TEXT NOT NULL
+    );
+    ",
+    r"
+    ALTER TABLE threads ADD COLUMN snoozed_until TEXT;
+    ALTER TABLE threads ADD COLUMN snoozed_at TEXT;
+    ALTER TABLE threads ADD COLUMN last_snooze_wake_at TEXT;
+    ALTER TABLE threads ADD COLUMN last_visited_at TEXT;
+    ALTER TABLE threads ADD COLUMN last_turn_ended_at TEXT;
+    ",
+    r"
+    ALTER TABLE projects ADD COLUMN settings TEXT;
+    ",
+    r"
+    ALTER TABLE threads ADD COLUMN forked_from TEXT;
+    ALTER TABLE threads ADD COLUMN pending_model TEXT;
+    ALTER TABLE threads ADD COLUMN provider_sessions TEXT;
+    ALTER TABLE threads ADD COLUMN pending_handoffs TEXT;
+    ",
+    r"
+    CREATE TABLE merged_cleanup (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        cleanup_json TEXT NOT NULL
+    );
+    ",
 ];
 
 const JOURNAL_SIZE_LIMIT: i64 = 8 * 1024 * 1024;
@@ -399,7 +439,8 @@ impl Store {
         let projects = self
             .conn
             .prepare(
-                "SELECT id, title, workspace_root, created_at, updated_at, worktree_setup
+                "SELECT id, title, workspace_root, created_at, updated_at, worktree_setup,
+                        settings
                  FROM projects ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -410,6 +451,7 @@ impl Store {
                     created_at: row.get(3)?,
                     updated_at: row.get(4)?,
                     worktree_setup: optional_json_document_column(row, 5)?,
+                    settings: optional_json_document_column(row, 6)?.unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -420,7 +462,10 @@ impl Store {
                         active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                         fast_mode, ultracode, access_mode, plan_mode, worktree_released,
                         worktree_adopted, parent_thread_id, task_cancelled, task_answered,
-                        conversation_cursor, resume_at, watching_pull_request
+                        conversation_cursor, resume_at, watching_pull_request, provider,
+                        snoozed_until, snoozed_at, last_snooze_wake_at, last_visited_at,
+                        last_turn_ended_at,
+                        forked_from, pending_model, provider_sessions, pending_handoffs
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -451,6 +496,16 @@ impl Store {
                     conversation_cursor: row.get(23)?,
                     resume_at: row.get(24)?,
                     watching_pull_request: row.get(25)?,
+                    provider: row.get(26)?,
+                    snoozed_until: row.get(27)?,
+                    snoozed_at: row.get(28)?,
+                    last_snooze_wake_at: row.get(29)?,
+                    last_visited_at: row.get(30)?,
+                    last_turn_ended_at: row.get(31)?,
+                    forked_from: optional_json_document_column(row, 32)?,
+                    pending_model: optional_json_document_column(row, 33)?,
+                    provider_sessions: optional_json_document_column(row, 34)?.unwrap_or_default(),
+                    pending_handoffs: optional_json_document_column(row, 35)?.unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -521,6 +576,7 @@ impl Store {
             background_tasks: Vec::new(),
             task_previews,
             held_messages: Vec::new(),
+            project_branches: Vec::new(),
         })
     }
 
@@ -542,21 +598,25 @@ impl Store {
         Ok(())
     }
 
-    /// The provider plan's limits as last read, to show at once on the next start.
-    pub fn usage_limits(&self) -> Result<Option<UsageLimits>, StoreError> {
+    /// Each provider plan's limits as last read, by provider id, to show at once on the next
+    /// start.
+    pub fn provider_usage_limits(&self) -> Result<HashMap<String, UsageLimits>, StoreError> {
         let limits = self
             .conn
-            .prepare("SELECT limits_json FROM usage_limits WHERE id = 1")?
-            .query_map([], |row| json_document_column(row, 0))?
-            .next()
-            .transpose()?;
+            .prepare("SELECT provider, limits_json FROM provider_usage_limits")?
+            .query_map([], |row| Ok((row.get(0)?, json_document_column(row, 1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(limits)
     }
 
-    pub fn save_usage_limits(&mut self, limits: &UsageLimits) -> Result<(), StoreError> {
+    pub fn save_provider_usage_limits(
+        &mut self,
+        provider: &str,
+        limits: &UsageLimits,
+    ) -> Result<(), StoreError> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO usage_limits (id, limits_json) VALUES (1, ?1)",
-            [serde_json::to_string(limits)?],
+            "INSERT OR REPLACE INTO provider_usage_limits (provider, limits_json) VALUES (?1, ?2)",
+            params![provider, serde_json::to_string(limits)?],
         )?;
         Ok(())
     }
@@ -619,6 +679,63 @@ impl Store {
         Ok(())
     }
 
+    /// What the engine keeps of each thread to pick it up again after a restart, such as the
+    /// messages still to reach its agent, by thread id. Gone with its thread.
+    pub fn thread_recoveries<T: serde::de::DeserializeOwned>(
+        &self,
+    ) -> Result<Vec<(String, T)>, StoreError> {
+        let recoveries = self
+            .conn
+            .prepare("SELECT thread_id, recovery_json FROM thread_recoveries")?
+            .query_map([], |row| Ok((row.get(0)?, json_document_column(row, 1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(recoveries)
+    }
+
+    /// Not an event: it changes as messages queue and background work starts and ends.
+    /// `None` forgets it.
+    pub fn save_thread_recovery<T: serde::Serialize>(
+        &self,
+        thread_id: &str,
+        recovery: Option<&T>,
+    ) -> Result<(), StoreError> {
+        match recovery {
+            Some(recovery) => self
+                .conn
+                .prepare_cached(
+                    "INSERT OR REPLACE INTO thread_recoveries (thread_id, recovery_json)
+                     VALUES (?1, ?2)",
+                )?
+                .execute(params![thread_id, serde_json::to_string(recovery)?])?,
+            None => self
+                .conn
+                .prepare_cached("DELETE FROM thread_recoveries WHERE thread_id = ?1")?
+                .execute([thread_id])?,
+        };
+        Ok(())
+    }
+
+    /// What the last sweep of merged worktrees did, to show after a restart.
+    pub fn merged_cleanup<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
+        let cleanup = self
+            .conn
+            .query_row(
+                "SELECT cleanup_json FROM merged_cleanup WHERE id = 1",
+                [],
+                |row| json_document_column(row, 0),
+            )
+            .optional()?;
+        Ok(cleanup)
+    }
+
+    pub fn save_merged_cleanup<T: serde::Serialize>(&self, cleanup: &T) -> Result<(), StoreError> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO merged_cleanup (id, cleanup_json) VALUES (1, ?1)",
+            [serde_json::to_string(cleanup)?],
+        )?;
+        Ok(())
+    }
+
     /// Caches what a forge last said about a thread's pull request. Not an event: it is
     /// read again from the forge, and polling would flood the event log.
     pub fn save_pull_request(&mut self, update: &ThreadPullRequest) -> Result<(), StoreError> {
@@ -654,11 +771,30 @@ impl Store {
         turns: usize,
         max_items: usize,
     ) -> Result<(Vec<ThreadItem>, bool), StoreError> {
+        self.transcript_page_through(thread_id, None, before, turns, max_items)
+    }
+
+    /// As [`Store::transcript_page`], of the items up to `through` and that item itself when
+    /// set; nothing when the thread has no such item.
+    pub fn transcript_page_through(
+        &self,
+        thread_id: &str,
+        through: Option<&str>,
+        before: Option<&str>,
+        turns: usize,
+        max_items: usize,
+    ) -> Result<(Vec<ThreadItem>, bool), StoreError> {
         let ordinal_of = |id: &str| self.first::<i64>(ORDINAL_OF, [thread_id, id]);
-        let end = match before {
+        let mut end = match before {
             Some(id) => ordinal_of(id)?.unwrap_or(i64::MAX),
             None => i64::MAX,
         };
+        if let Some(through) = through {
+            let Some(last) = ordinal_of(through)? else {
+                return Ok((Vec::new(), false));
+            };
+            end = end.min(last + 1);
+        }
         let start = self
             .first::<i64>(
                 TURN_START,
@@ -812,6 +948,11 @@ fn optional_json(value: Option<&impl serde::Serialize>) -> Result<Option<String>
     Ok(value.map(serde_json::to_string).transpose()?)
 }
 
+/// `NULL` for an empty list.
+fn list_json<T: serde::Serialize>(list: &[T]) -> Result<Option<String>, StoreError> {
+    optional_json(Some(&list).filter(|list| !list.is_empty()))
+}
+
 fn optional_json_column<T: serde::de::DeserializeOwned>(
     row: &Row,
     index: usize,
@@ -863,6 +1004,11 @@ fn forget_thread(tx: &Transaction, thread_id: &str, sequence: i64) -> Result<(),
         "DELETE FROM pull_request_watches WHERE thread_id = ?1",
         [thread_id],
     )?;
+    execute(
+        tx,
+        "DELETE FROM thread_recoveries WHERE thread_id = ?1",
+        [thread_id],
+    )?;
     execute(tx, "DELETE FROM threads WHERE id = ?1", [thread_id])
 }
 
@@ -872,16 +1018,27 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
             execute(
                 tx,
                 "INSERT INTO projects
-                 (id, title, workspace_root, created_at, updated_at, worktree_setup)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                 (id, title, workspace_root, created_at, updated_at, worktree_setup, settings)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     project.id,
                     project.title,
                     project.workspace_root,
                     project.created_at,
                     project.updated_at,
-                    optional_json(project.worktree_setup.as_ref())?
+                    optional_json(project.worktree_setup.as_ref())?,
+                    serde_json::to_string(&project.settings)?
                 ],
+            )?;
+        }
+        Event::ProjectSettingsSet {
+            project_id,
+            settings,
+        } => {
+            execute(
+                tx,
+                "UPDATE projects SET settings = ?2 WHERE id = ?1",
+                params![project_id, serde_json::to_string(settings)?],
             )?;
         }
         Event::ProjectWorktreeSetupSet { project_id, setup } => {
@@ -909,9 +1066,13 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                   active_turn_id, created_at, updated_at, model, effort, archived, pinned,
                   fast_mode, ultracode, access_mode, plan_mode, worktree_released,
                   worktree_adopted, parent_thread_id, task_cancelled, task_answered,
-                  conversation_cursor, resume_at, watching_pull_request)
+                  conversation_cursor, resume_at, watching_pull_request, provider,
+                  snoozed_until, snoozed_at, last_snooze_wake_at, last_visited_at,
+                  last_turn_ended_at, forked_from, pending_model, provider_sessions,
+                  pending_handoffs)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                         ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
+                         ?31, ?32, ?33, ?34, ?35, ?36)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -938,7 +1099,17 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                     thread.task_answered,
                     thread.conversation_cursor,
                     thread.resume_at,
-                    thread.watching_pull_request
+                    thread.watching_pull_request,
+                    thread.provider,
+                    thread.snoozed_until,
+                    thread.snoozed_at,
+                    thread.last_snooze_wake_at,
+                    thread.last_visited_at,
+                    thread.last_turn_ended_at,
+                    optional_json(thread.forked_from.as_ref())?,
+                    optional_json(thread.pending_model.as_ref())?,
+                    list_json(&thread.provider_sessions)?,
+                    list_json(&thread.pending_handoffs)?
                 ],
             )?;
         }
@@ -996,7 +1167,8 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
             execute(
                 tx,
                 "UPDATE threads SET worktree_path = NULL, branch = NULL, session_id = NULL,
-                 worktree_released = 0, worktree_adopted = 0 WHERE id = ?1",
+                 provider_sessions = NULL, worktree_released = 0, worktree_adopted = 0
+                 WHERE id = ?1",
                 [thread_id],
             )?;
         }
@@ -1017,8 +1189,35 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 params![thread_id, pinned],
             )?;
         }
+        Event::ThreadSnoozed {
+            thread_id,
+            until,
+            at,
+        } => {
+            execute(
+                tx,
+                "UPDATE threads SET snoozed_until = ?2, snoozed_at = ?3 WHERE id = ?1",
+                params![thread_id, until, at],
+            )?;
+        }
+        Event::ThreadUnsnoozed { thread_id, woke_at } => {
+            execute(
+                tx,
+                "UPDATE threads SET snoozed_until = NULL, snoozed_at = NULL,
+                 last_snooze_wake_at = coalesce(?2, last_snooze_wake_at) WHERE id = ?1",
+                params![thread_id, woke_at],
+            )?;
+        }
+        Event::ThreadVisited { thread_id, at } => {
+            execute(
+                tx,
+                "UPDATE threads SET last_visited_at = ?2 WHERE id = ?1",
+                params![thread_id, at],
+            )?;
+        }
         Event::ThreadModelSet {
             thread_id,
+            provider,
             model,
             effort,
             fast_mode,
@@ -1026,9 +1225,16 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
         } => {
             execute(
                 tx,
-                "UPDATE threads SET model = ?2, effort = ?3, fast_mode = ?4, ultracode = ?5
-                 WHERE id = ?1",
-                params![thread_id, model, effort_text(*effort), fast_mode, ultracode],
+                "UPDATE threads SET provider = ?2, model = ?3, effort = ?4, fast_mode = ?5,
+                 ultracode = ?6 WHERE id = ?1",
+                params![
+                    thread_id,
+                    provider,
+                    model,
+                    effort_text(*effort),
+                    fast_mode,
+                    ultracode
+                ],
             )?;
         }
         Event::ThreadAccessSet {
@@ -1116,8 +1322,8 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
             };
             execute(
                 tx,
-                "UPDATE threads SET status = ?2, active_turn_id = NULL, updated_at = ?3
-                 WHERE id = ?1",
+                "UPDATE threads SET status = ?2, active_turn_id = NULL, updated_at = ?3,
+                 last_turn_ended_at = ?3 WHERE id = ?1",
                 params![thread_id, enum_text(status)?, at],
             )?;
         }
@@ -1142,6 +1348,22 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 params![thread_id, item_id],
             )?;
         }
+        Event::MessagesDropped {
+            thread_id,
+            message_ids,
+        } => {
+            for message_id in message_ids {
+                execute(
+                    tx,
+                    "UPDATE thread_items
+                     SET content_json = json_set(content_json, '$.dropped', json('true'))
+                     WHERE thread_id = ?1 AND id = ?2
+                       AND json_extract(content_json, '$.kind') = 'userMessage'",
+                    params![thread_id, message_id],
+                )?;
+            }
+        }
+        Event::TurnRetrying { .. } => {}
         Event::ThreadDelegated {
             thread_id,
             parent_thread_id,
@@ -1208,9 +1430,57 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
             execute(
                 tx,
                 "UPDATE threads SET conversation_cursor = ?2, resume_at = ?2,
-                 session_id = CASE WHEN ?2 IS NULL THEN NULL ELSE session_id END
+                 session_id = CASE WHEN ?2 IS NULL THEN NULL ELSE session_id END,
+                 provider_sessions = CASE WHEN ?2 IS NULL THEN NULL ELSE provider_sessions END
                  WHERE id = ?1",
                 params![thread_id, resume_at],
+            )?;
+        }
+        Event::ThreadModelPending { thread_id, choice } => {
+            execute(
+                tx,
+                "UPDATE threads SET pending_model = ?2 WHERE id = ?1",
+                params![thread_id, optional_json(choice.as_ref())?],
+            )?;
+        }
+        Event::ProviderSwitched {
+            thread_id,
+            to,
+            session_id,
+            conversation_cursor,
+            resume_at,
+            provider_sessions,
+            pending_handoffs,
+        } => {
+            execute(
+                tx,
+                "UPDATE threads SET provider = ?2, model = ?3, effort = ?4, fast_mode = ?5,
+                 ultracode = ?6, session_id = ?7, conversation_cursor = ?8, resume_at = ?9,
+                 provider_sessions = ?10, pending_handoffs = ?11, pending_model = NULL
+                 WHERE id = ?1",
+                params![
+                    thread_id,
+                    to.provider,
+                    to.model,
+                    effort_text(to.effort),
+                    to.fast_mode,
+                    to.ultracode,
+                    session_id,
+                    conversation_cursor,
+                    resume_at,
+                    list_json(provider_sessions)?,
+                    list_json(pending_handoffs)?
+                ],
+            )?;
+        }
+        Event::ContextHandoffsSet {
+            thread_id,
+            handoffs,
+        } => {
+            execute(
+                tx,
+                "UPDATE threads SET pending_handoffs = ?2 WHERE id = ?1",
+                params![thread_id, list_json(handoffs)?],
             )?;
         }
     }
@@ -1237,6 +1507,7 @@ mod tests {
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
                 worktree_setup: None,
+                settings: hoshi_core::ProjectSettings::default(),
             },
         }
     }
@@ -1261,6 +1532,35 @@ mod tests {
                 wait: true,
             })
         );
+    }
+
+    #[test]
+    fn a_project_keeps_the_settings_it_sets_for_itself() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.append(&[project_created("p")], NOW).unwrap();
+        store
+            .conn
+            .execute("UPDATE projects SET settings = NULL WHERE id = 'p'", [])
+            .unwrap();
+        assert_eq!(
+            store.snapshot().unwrap().projects[0].settings,
+            hoshi_core::ProjectSettings::default()
+        );
+        let settings = hoshi_core::ProjectSettings {
+            continue_after_restart: Some(false),
+        };
+
+        store
+            .append(
+                &[Event::ProjectSettingsSet {
+                    project_id: "p".into(),
+                    settings: settings.clone(),
+                }],
+                NOW,
+            )
+            .unwrap();
+
+        assert_eq!(store.snapshot().unwrap().projects[0].settings, settings);
     }
 
     #[test]
@@ -1301,6 +1601,41 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_s_recovery_is_kept_until_forgotten_or_its_thread_goes() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .append(
+                &[
+                    project_created("p"),
+                    thread_created("t", "p"),
+                    thread_created("u", "p"),
+                ],
+                NOW,
+            )
+            .unwrap();
+        let queued = serde_json::json!({ "queued": [{ "id": "m2", "text": "also this" }] });
+        store.save_thread_recovery("t", Some(&queued)).unwrap();
+        store.save_thread_recovery("u", Some(&queued)).unwrap();
+        let read: Vec<(String, serde_json::Value)> = store.thread_recoveries().unwrap();
+        assert_eq!(read.len(), 2);
+        assert!(read.contains(&("t".to_owned(), queued.clone())));
+
+        store
+            .save_thread_recovery::<serde_json::Value>("u", None)
+            .unwrap();
+        store
+            .append(
+                &[Event::ThreadDeleted {
+                    thread_id: "t".into(),
+                }],
+                NOW,
+            )
+            .unwrap();
+        let read: Vec<(String, serde_json::Value)> = store.thread_recoveries().unwrap();
+        assert!(read.is_empty());
+    }
+
+    #[test]
     fn a_pull_request_watch_is_kept_until_its_thread_goes() {
         let mut store = Store::open_in_memory().unwrap();
         store
@@ -1333,7 +1668,10 @@ mod tests {
     #[test]
     fn upgrading_forgets_the_events_of_threads_deleted_before() {
         let mut conn = Connection::open_in_memory().unwrap();
-        let before = MIGRATIONS.len() - 1;
+        let before = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("DELETE FROM events"))
+            .unwrap();
         let tx = conn.transaction().unwrap();
         for migration in &MIGRATIONS[..before] {
             tx.execute_batch(migration).unwrap();
@@ -1396,7 +1734,7 @@ mod tests {
 
     fn thread_created(id: &str, project_id: &str) -> Event {
         Event::ThreadCreated {
-            thread: Thread {
+            thread: Box::new(Thread {
                 id: id.into(),
                 project_id: Some(project_id.into()),
                 title: String::new(),
@@ -1407,6 +1745,7 @@ mod tests {
                 conversation_cursor: None,
                 resume_at: None,
                 watching_pull_request: false,
+                provider: "copilot".into(),
                 model: Some("sonnet".into()),
                 effort: Some(Effort::High),
                 fast_mode: true,
@@ -1421,9 +1760,18 @@ mod tests {
                 parent_thread_id: None,
                 task_cancelled: false,
                 task_answered: false,
+                snoozed_until: Some("2026-11-08T09:00:00.000Z".into()),
+                snoozed_at: Some(NOW.into()),
+                last_snooze_wake_at: Some("2026-11-06T09:00:00.000Z".into()),
+                last_visited_at: Some("2026-11-06T10:00:00.000Z".into()),
+                last_turn_ended_at: Some("2026-11-06T11:00:00.000Z".into()),
+                forked_from: None,
+                pending_model: None,
+                provider_sessions: Vec::new(),
+                pending_handoffs: Vec::new(),
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
-            },
+            }),
         }
     }
 
@@ -1483,7 +1831,7 @@ mod tests {
         let Event::ThreadCreated { thread } = thread_created("t", "p") else {
             unreachable!()
         };
-        assert_eq!(snapshot.threads, [thread]);
+        assert_eq!(snapshot.threads, [*thread]);
     }
 
     #[test]
@@ -1508,7 +1856,23 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(store.snapshot().unwrap().threads, [thread]);
+        assert_eq!(store.snapshot().unwrap().threads, [*thread]);
+    }
+
+    #[test]
+    fn the_last_merged_cleanup_is_replaced_by_the_next() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.merged_cleanup::<serde_json::Value>().unwrap(), None);
+        store
+            .save_merged_cleanup(&serde_json::json!({ "removed": 1 }))
+            .unwrap();
+        store
+            .save_merged_cleanup(&serde_json::json!({ "removed": 2 }))
+            .unwrap();
+        assert_eq!(
+            store.merged_cleanup().unwrap(),
+            Some(serde_json::json!({ "removed": 2 }))
+        );
     }
 
     #[test]
@@ -1534,6 +1898,8 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].project_id.as_deref(), Some("p"));
         assert!(threads[0].pinned);
+        assert_eq!(threads[0].snoozed_until, None);
+        assert_eq!(threads[0].last_turn_ended_at, None);
     }
 
     fn commit(store: &mut Store, model: &mut ReadModel, events: Vec<Event>) {
@@ -1603,7 +1969,9 @@ mod tests {
                 state: PullRequestState::Open,
                 checks: Some(ChecksState::Failing),
                 unresolved_comments: 3,
+                open_tasks: 0,
                 changes_requested: false,
+                turn: None,
                 conflicts: false,
                 additions: 1,
                 deletions: 2,
@@ -1656,11 +2024,8 @@ mod tests {
         assert!(store.snapshot().unwrap().context_usages.is_empty());
     }
 
-    #[test]
-    fn the_last_usage_limits_replace_the_previous_ones() {
-        let mut store = Store::open_in_memory().unwrap();
-        assert_eq!(store.usage_limits().unwrap(), None);
-        let window = |used_percent| UsageLimits {
+    fn usage_limits(used_percent: u8) -> UsageLimits {
+        UsageLimits {
             windows: vec![UsageWindow {
                 kind: UsageWindowKind::Session,
                 model: None,
@@ -1674,12 +2039,55 @@ mod tests {
                 expires_at: vec!["2026-12-01T00:00:00Z".into()],
             }),
             account: None,
-        };
+        }
+    }
 
-        store.save_usage_limits(&window(20)).unwrap();
-        store.save_usage_limits(&window(35)).unwrap();
+    #[test]
+    fn each_providers_last_usage_limits_replace_only_its_previous_ones() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(store.provider_usage_limits().unwrap().is_empty());
 
-        assert_eq!(store.usage_limits().unwrap(), Some(window(35)));
+        store
+            .save_provider_usage_limits("claudeCode", &usage_limits(20))
+            .unwrap();
+        store
+            .save_provider_usage_limits("codex", &usage_limits(60))
+            .unwrap();
+        store
+            .save_provider_usage_limits("claudeCode", &usage_limits(35))
+            .unwrap();
+
+        let limits = store.provider_usage_limits().unwrap();
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits["claudeCode"], usage_limits(35));
+        assert_eq!(limits["codex"], usage_limits(60));
+    }
+
+    #[test]
+    fn the_usage_limits_from_before_providers_become_claude_codes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let before = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("CREATE TABLE provider_usage_limits"))
+            .unwrap();
+        let tx = conn.transaction().unwrap();
+        for migration in &MIGRATIONS[..before] {
+            tx.execute_batch(migration).unwrap();
+        }
+        tx.execute(
+            "INSERT INTO usage_limits (id, limits_json) VALUES (1, ?1)",
+            [serde_json::to_string(&usage_limits(42)).unwrap()],
+        )
+        .unwrap();
+        tx.pragma_update(None, "user_version", before as i64)
+            .unwrap();
+        tx.commit().unwrap();
+
+        let store = Store::init(conn).unwrap();
+
+        let limits = store.provider_usage_limits().unwrap();
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits["claudeCode"], usage_limits(42));
     }
 
     #[test]
@@ -1721,6 +2129,53 @@ mod tests {
         let thread = &store.snapshot().unwrap().threads[0];
         assert!(thread.archived);
         assert!(!thread.pinned);
+    }
+
+    #[test]
+    fn a_snooze_its_visits_and_its_wake_survive_a_restart() {
+        let (mut store, mut model) = store_with_thread();
+        let thread_id = || "t".to_owned();
+        let snooze = Command::ThreadSnooze {
+            thread_id: thread_id(),
+            until: "2026-11-07T15:00:00.000Z".into(),
+        };
+        let steps = [
+            (snooze, NOW),
+            (
+                Command::ThreadVisit {
+                    thread_id: thread_id(),
+                },
+                "2026-11-07T16:00:00.000Z",
+            ),
+            (
+                Command::ThreadPin {
+                    thread_id: thread_id(),
+                    pinned: true,
+                },
+                "2026-11-07T17:00:00.000Z",
+            ),
+        ];
+        for (command, at) in steps {
+            let events = decide(&model, command, at).unwrap();
+            store.append(&events, at).unwrap();
+            for event in &events {
+                model.apply(event);
+            }
+            let expected: Vec<_> = model.threads().cloned().collect();
+            assert_eq!(store.snapshot().unwrap().threads, expected);
+        }
+
+        let thread = &store.snapshot().unwrap().threads[0];
+        assert_eq!(thread.snoozed_until, None);
+        assert_eq!(thread.snoozed_at, None);
+        assert_eq!(
+            thread.last_visited_at.as_deref(),
+            Some("2026-11-07T16:00:00.000Z")
+        );
+        assert_eq!(
+            thread.last_snooze_wake_at.as_deref(),
+            Some("2026-11-07T17:00:00.000Z")
+        );
     }
 
     fn send_text(message_id: &str) -> Command {
@@ -1765,6 +2220,7 @@ mod tests {
         commit(&mut store, &mut model, events);
         let model_set = Command::ThreadModelSet {
             thread_id: "t".into(),
+            provider: "copilot".into(),
             model: Some("opus".into()),
             effort: Some(Effort::Max),
             fast_mode: true,
@@ -1829,6 +2285,127 @@ mod tests {
                 interrupted: false,
             }
         );
+    }
+
+    #[test]
+    fn thread_projection_matches_the_read_model_through_a_switch_a_fork_and_a_merge_back() {
+        let (mut store, mut model) = store_with_thread();
+        let matches = |store: &Store, model: &ReadModel| {
+            let expected: Vec<_> = model.threads().cloned().collect();
+            assert_eq!(store.snapshot().unwrap().threads, expected);
+        };
+        let events = send(&model);
+        commit(&mut store, &mut model, events);
+        for output in [
+            ProviderOutput::SessionStarted {
+                session_id: "s1".into(),
+            },
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        ] {
+            let events = record_output(&model, "t", "m1", output, NOW);
+            commit(&mut store, &mut model, events);
+        }
+        let events = hoshi_core::record_conversation_cursor(&model, "t", "c1".into());
+        commit(&mut store, &mut model, events);
+        let pick = Command::ThreadModelSet {
+            thread_id: "t".into(),
+            provider: "codex".into(),
+            model: Some("gpt-6".into()),
+            effort: Some(Effort::High),
+            fast_mode: false,
+            ultracode: false,
+        };
+        let events = decide(&model, pick, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        matches(&store, &model);
+        let second = Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: "m2".into(),
+            text: "Go on".into(),
+            attachments: Vec::new(),
+        };
+        let events = decide(&model, second, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        matches(&store, &model);
+        assert_eq!(model.thread("t").unwrap().provider, "codex");
+        assert_eq!(model.thread("t").unwrap().provider_sessions.len(), 1);
+
+        let turn = hoshi_core::TurnPoint {
+            turn_id: "m1".into(),
+            through_item_id: "m1".into(),
+            ordinal: 1,
+            status: hoshi_core::TurnStatus::Completed,
+            provider: "claudeCode".into(),
+            session_id: Some("s1".into()),
+            cursor: Some("c1".into()),
+        };
+        let fork = Command::ThreadFork {
+            thread_id: "t".into(),
+            fork_thread_id: "f".into(),
+            turn: turn.clone(),
+        };
+        let events = decide(&model, fork, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        matches(&store, &model);
+        let events = record_output(
+            &model,
+            "t",
+            "m2",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+            NOW,
+        );
+        commit(&mut store, &mut model, events);
+        let merge_back = Command::ThreadMergeBack {
+            thread_id: "f".into(),
+            turn,
+        };
+        let events = decide(&model, merge_back, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        matches(&store, &model);
+        let delivered = model.thread("t").unwrap().pending_handoffs.clone();
+        let events = hoshi_core::consume_handoffs(&model, "t", &delivered);
+        commit(&mut store, &mut model, events);
+        matches(&store, &model);
+
+        let rewind = Command::ThreadRewind {
+            thread_id: "t".into(),
+            message_id: "m1".into(),
+            rewind: hoshi_core::Rewind::Start,
+        };
+        let events = decide(&model, rewind, NOW).unwrap();
+        commit(&mut store, &mut model, events);
+        matches(&store, &model);
+        assert!(model.thread("t").unwrap().provider_sessions.is_empty());
+    }
+
+    #[test]
+    fn a_fork_s_inherited_page_ends_at_its_fork_point() {
+        let (mut store, mut model) = store_with_thread();
+        let events = send(&model);
+        commit(&mut store, &mut model, events);
+        for (id, text) in [("a1", "one"), ("a2", "two")] {
+            let output = ProviderOutput::AssistantMessage {
+                item_id: id.into(),
+                text: text.into(),
+            };
+            let events = record_output(&model, "t", "m1", output, NOW);
+            commit(&mut store, &mut model, events);
+        }
+
+        let (items, _) = store
+            .transcript_page_through("t", Some("a1"), None, 20, 600)
+            .unwrap();
+        let (missing, _) = store
+            .transcript_page_through("t", Some("gone"), None, 20, 600)
+            .unwrap();
+
+        let ids: Vec<&str> = items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["m1", "a1"]);
+        assert!(missing.is_empty());
     }
 
     #[test]
@@ -1922,6 +2499,7 @@ mod tests {
             message_id: "m2".into(),
             rewind: hoshi_core::Rewind::After {
                 cursor: "u-m1".into(),
+                session: None,
             },
         };
         let events = decide(&model, rewind, NOW).unwrap();
@@ -2158,7 +2736,9 @@ mod tests {
                 steer: false,
                 task_result: None,
                 pull_request_update: None,
+                resumed: None,
                 rewind: None,
+                dropped: false,
             },
         )
     }
@@ -2174,6 +2754,50 @@ mod tests {
                 error: None,
             },
         )
+    }
+
+    #[test]
+    fn a_dropped_message_stays_marked() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .append(
+                &[
+                    message_with("t", "m1", Vec::new()),
+                    message_with("t", "m2", Vec::new()),
+                    answer("t", "a"),
+                ],
+                NOW,
+            )
+            .unwrap();
+
+        store
+            .append(
+                &[Event::MessagesDropped {
+                    thread_id: "t".into(),
+                    message_ids: vec!["m2".into(), "a".into()],
+                }],
+                NOW,
+            )
+            .unwrap();
+
+        let dropped: Vec<_> = store
+            .thread_items("t")
+            .unwrap()
+            .into_iter()
+            .map(|item| match item.content {
+                ItemContent::UserMessage { dropped, .. } => (item.id, dropped),
+                ItemContent::AssistantMessage { .. } => (item.id, false),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            dropped,
+            [
+                ("m1".into(), false),
+                ("m2".into(), true),
+                ("a".into(), false)
+            ]
+        );
     }
 
     #[test]

@@ -1,10 +1,8 @@
 use crate::{CommandError, ForgeKind};
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct Project {
     pub id: String,
     pub title: String,
@@ -14,13 +12,61 @@ pub struct Project {
     pub updated_at: String,
     #[serde(default)]
     pub worktree_setup: Option<WorktreeSetup>,
+    #[serde(default)]
+    pub settings: ProjectSettings,
+}
+
+/// What the project sets for itself over the app's settings; each `None` inherits them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProjectSettings {
+    /// Over `general.continue_after_restart`.
+    pub continue_after_restart: Option<bool>,
+}
+
+impl ProjectSettings {
+    /// Whether the project's threads a restart cut short go on by themselves, given the
+    /// app's `general.continue_after_restart`.
+    pub fn continue_after_restart(&self, global: bool) -> EffectiveSetting<bool> {
+        EffectiveSetting::resolve(self.continue_after_restart, global)
+    }
+}
+
+/// Where a setting's value comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SettingSource {
+    Project,
+    Global,
+}
+
+/// A setting as it applies to a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectiveSetting<T> {
+    pub value: T,
+    pub source: SettingSource,
+}
+
+impl<T> EffectiveSetting<T> {
+    fn resolve(project: Option<T>, global: T) -> Self {
+        match project {
+            Some(value) => Self {
+                value,
+                source: SettingSource::Project,
+            },
+            None => Self {
+                value: global,
+                source: SettingSource::Global,
+            },
+        }
+    }
 }
 
 /// How hoshi prepares every worktree it makes for the project: files the repository
 /// doesn't track copied from its root, then a command such as `bun install`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct WorktreeSetup {
     /// Paths relative to the project root with `/` separators; `*` and `?` match within
     /// one segment.
@@ -75,9 +121,8 @@ pub fn setup_file_paths<S: AsRef<str>>(raw: &[S]) -> Result<Vec<String>, Command
 
 /// A worktree's setup, running or finished: its files copied, then its command in a
 /// terminal of its own.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct WorktreeSetupRun {
     pub thread_id: String,
     /// `None` until the command starts, and when there is none.
@@ -96,9 +141,8 @@ pub struct WorktreeSetupRun {
     pub held_messages: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub enum WorktreeSetupStatus {
     Running,
     Succeeded,
@@ -106,9 +150,8 @@ pub enum WorktreeSetupStatus {
 }
 
 /// The folders inside one folder, for choosing where a project lives.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct FolderListing {
     /// Absolute and normalized.
     pub path: String,
@@ -119,9 +162,8 @@ pub struct FolderListing {
 }
 
 /// A repository on a forge, found to be cloned as a project.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct RemoteRepository {
     pub forge: ForgeKind,
     /// `owner/name`.
@@ -131,4 +173,31 @@ pub struct RemoteRepository {
     pub web_url: String,
     pub clone_url: String,
     pub private: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_project_s_own_setting_wins_over_the_app_s() {
+        let inherits = ProjectSettings::default();
+        assert_eq!(
+            inherits.continue_after_restart(false),
+            EffectiveSetting {
+                value: false,
+                source: SettingSource::Global,
+            }
+        );
+        let overrides = ProjectSettings {
+            continue_after_restart: Some(true),
+        };
+        assert_eq!(
+            overrides.continue_after_restart(false),
+            EffectiveSetting {
+                value: true,
+                source: SettingSource::Project,
+            }
+        );
+    }
 }

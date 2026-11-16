@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=hoshi
+Comment=A desktop home for coding agents
+Exec=hoshi
+Icon=hoshi
+StartupWMClass=dev.hoshi.app
+Categories=Development;
+Terminal=false
