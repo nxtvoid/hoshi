@@ -5,7 +5,7 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const START_TIMEOUT: Duration = Duration::from_secs(20);
+const START_TIMEOUT: Duration = Duration::from_secs(45);
 const POLL: Duration = Duration::from_millis(50);
 /// How long a browser that was ended may take to let go of its profile.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);

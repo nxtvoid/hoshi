@@ -55,5 +55,10 @@ jobs:
       - name: Format and lint
         run: bun run check
 
+      # Chrome's first start on a fresh runner builds its caches; the browser tests start
+      # several at once and would wait on that.
+      - name: Warm up Chrome
+        run: timeout 120 google-chrome --headless=new --disable-gpu --dump-dom about:blank > /dev/null || true
+
       - name: Test
         run: bun run test
