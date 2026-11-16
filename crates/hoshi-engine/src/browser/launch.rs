@@ -144,6 +144,12 @@ fn start(executable: &Path, profile: &Path) -> Result<BrowserProcess, StartError
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
+        command
+            .args(["--enable-logging=stderr", "--v=0"])
+            .stderr(Stdio::inherit());
+        eprintln!("DEBUG launch: {executable:?}");
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

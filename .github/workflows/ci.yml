@@ -55,5 +55,10 @@ jobs:
       - name: Format and lint
         run: bun run check
 
+      - name: Debug the browser test
+        env:
+          HOSHI_BROWSER_LOG: "1"
+        run: cargo test -p hoshi-engine --lib a_page_that_waits_keeps -- --nocapture
+
       - name: Test
         run: bun run test

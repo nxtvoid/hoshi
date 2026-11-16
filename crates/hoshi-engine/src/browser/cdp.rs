@@ -179,11 +179,21 @@ fn run(
         }
         match socket.read() {
             Ok(Message::Text(text)) => dispatch(text.as_str(), pending, listeners),
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(frame)) => {
+                if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
+                    eprintln!("DEBUG cdp: close frame {frame:?}");
+                }
+                break;
+            }
             Ok(_) => {}
             Err(tungstenite::Error::Io(error))
                 if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-            Err(_) => break,
+            Err(error) => {
+                if std::env::var_os("HOSHI_BROWSER_LOG").is_some() {
+                    eprintln!("DEBUG cdp: read error {error:?}");
+                }
+                break;
+            }
         }
     }
 }
