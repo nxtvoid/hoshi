@@ -6,9 +6,14 @@ use crate::{Notification, State, Turn, delegation, now};
 use hoshi_core::{BackgroundTask, Event, ProviderOutput, ThreadBackgroundTasks, start_woken_turn};
 use hoshi_providers::RunningTurn;
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 pub(crate) const TOOL: &str = "await_background_tasks";
 const WAITING_NEXT: &str = "End your turn; it stays open until they finish.";
+/// How long a kept process may go without reporting anything,
+const IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
+/// and while commands it runs in the background have not ended.
+const BACKGROUND_IDLE_LIMIT: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// A process whose turn completed, kept for the commands it left running.
 pub(crate) struct Lingering {
@@ -21,6 +26,36 @@ pub(crate) struct Lingering {
     /// Its commands all ended, which shows once it wakes or ends: a task waiting on them
     /// would otherwise read as done for a moment.
     pub ended: bool,
+    /// When it last reported anything.
+    pub heard_at: Instant,
+}
+
+impl Lingering {
+    fn quiet_too_long(&self, now: Instant) -> bool {
+        let running = (!self.ended
+            && self
+                .background
+                .as_ref()
+                .is_some_and(|background| !background.tasks.is_empty()))
+            || self.running.awaits_work();
+        let limit = if running {
+            BACKGROUND_IDLE_LIMIT
+        } else {
+            IDLE_LIMIT
+        };
+        now.saturating_duration_since(self.heard_at) >= limit
+    }
+}
+
+impl Lingering {
+    /// Commands still run in it, which ending it would end too.
+    pub fn runs_background_work(&self) -> bool {
+        !self.ended
+            && self
+                .background
+                .as_ref()
+                .is_some_and(|background| !background.tasks.is_empty())
+    }
 }
 
 impl State {
@@ -36,7 +71,7 @@ impl State {
     }
 
     /// The commands the thread's agent still runs in the background.
-    fn background_commands(&self, thread_id: &str) -> &[BackgroundTask] {
+    pub(crate) fn background_commands(&self, thread_id: &str) -> &[BackgroundTask] {
         let background = match self.turns.get(thread_id) {
             Some(turn) => turn.background.as_ref(),
             None => self
@@ -91,12 +126,16 @@ impl State {
     }
 
     fn receive_between_turns(&mut self, thread_id: &str, output: ProviderOutput) {
+        if let Some(lingering) = self.lingering.get_mut(thread_id) {
+            lingering.heard_at = Instant::now();
+        }
         match output {
             ProviderOutput::BackgroundTasks { tasks, waiting } => {
                 if tasks.is_empty() {
                     if let Some(lingering) = self.lingering.get_mut(thread_id) {
                         lingering.ended = true;
                     }
+                    self.save_recovery(thread_id);
                     return;
                 }
                 let background = ThreadBackgroundTasks {
@@ -108,6 +147,7 @@ impl State {
                     lingering.background = Some(background.clone());
                 }
                 (self.notify)(Notification::BackgroundTasks(background));
+                self.save_recovery(thread_id);
             }
             ProviderOutput::Woke => self.wake(thread_id),
             ProviderOutput::ProcessEnded => {
@@ -159,6 +199,8 @@ impl State {
                 arrivals: 0,
                 cursor: None,
                 background,
+                compacting: false,
+                handoff: None,
             },
         );
     }
@@ -194,6 +236,7 @@ impl State {
                 background,
                 owes_answer,
                 ended: false,
+                heard_at: Instant::now(),
             },
         );
     }
@@ -227,6 +270,19 @@ impl State {
         }
     }
 
+    /// Ends the processes kept between turns that went quiet for longer than they may.
+    pub(crate) fn close_idle_lingering(&mut self, now: Instant) {
+        let quiet: Vec<String> = self
+            .lingering
+            .iter()
+            .filter(|(_, lingering)| lingering.quiet_too_long(now))
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in quiet {
+            self.close_lingering(&thread_id);
+        }
+    }
+
     pub(crate) fn close_all_lingering(&mut self) {
         let threads: Vec<String> = self.lingering.keys().cloned().collect();
         for thread_id in threads {
@@ -235,6 +291,7 @@ impl State {
     }
 
     fn clear_background(&self, thread_id: &str, background: Option<&ThreadBackgroundTasks>) {
+        self.save_recovery(thread_id);
         if background.is_some_and(|background| !background.tasks.is_empty()) {
             (self.notify)(Notification::BackgroundTasks(ThreadBackgroundTasks {
                 thread_id: thread_id.to_owned(),

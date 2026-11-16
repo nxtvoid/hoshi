@@ -1,9 +1,9 @@
 //! Where the Claude Code CLI comes from, its latest release and how to update it.
 
 use crate::Installation;
-use crate::claude_models::parse_version;
 use crate::process::hide_console;
 use crate::updater::{Updater, find_program};
+use crate::version::parse_version;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -121,7 +121,7 @@ fn updater_for(source: Source, path: PathBuf) -> Option<Updater> {
         }
         Source::Other => return None,
     };
-    Some(Updater { program, args })
+    Some(Updater::Command { program, args })
 }
 
 fn program_version(program: &Path) -> Option<(u32, u32, u32)> {
@@ -224,8 +224,13 @@ mod tests {
 
         let updater = updater_for(Source::Native, path.clone()).unwrap();
 
-        assert_eq!(updater.program, path);
-        assert_eq!(updater.args, ["update"]);
+        assert_eq!(
+            updater,
+            Updater::Command {
+                program: path.clone(),
+                args: vec!["update".into()],
+            }
+        );
         assert_eq!(updater_for(Source::Other, path), None);
     }
 }

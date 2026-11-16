@@ -22,6 +22,16 @@ use std::time::{Duration, Instant};
 pub const DEFAULT_SIZE: (u32, u32) = (1280, 800);
 const CONSOLE_KEPT: usize = 200;
 const READY_POLL: Duration = Duration::from_millis(100);
+const SCREENCAST_QUALITY: u8 = 85;
+/// The most device pixels per pixel a page paints at. The browser's own screen has it, as a
+/// screencast frame is never sharper than that screen.
+const MAX_SCALE: f64 = 3.0;
+
+/// `size` in device pixels at `scale`.
+fn device_pixels(size: (u32, u32), scale: f64) -> (u32, u32) {
+    let side = |side: u32| (f64::from(side) * scale).round().max(1.0) as u32;
+    (side(size.0), side(size.1))
+}
 
 pub struct Browser {
     connection: Arc<Connection>,
@@ -72,12 +82,20 @@ impl Browser {
             console,
             size,
             zoom: 1.0,
+            scale: 1.0,
         };
         for domain in ["Page.enable", "Runtime.enable", "DOM.enable"] {
             page.call(domain, json!({}))?;
         }
         page.resize(size)?;
         Ok(page)
+    }
+
+    /// Closes a page by its target, whatever it is busy with.
+    pub fn close_target(&self, target_id: &str) {
+        let _ = self
+            .connection
+            .call("Target.closeTarget", json!({ "targetId": target_id }), None);
     }
 
     /// `false` once the browser quit or crashed: nothing it had answers any more.
@@ -235,6 +253,8 @@ pub struct Page {
     size: (u32, u32),
     /// Page zoom: the page lays out at `size / zoom` CSS pixels and paints at `size`.
     zoom: f64,
+    /// Device pixels per pixel of `size` on the screen that shows it.
+    scale: f64,
 }
 
 impl Page {
@@ -268,9 +288,22 @@ impl Page {
         ))
     }
 
-    /// A PNG of what the page shows, base64.
+    /// A PNG of what the page shows, base64, at `size` whatever screen shows it.
     pub fn screenshot(&self) -> Result<String, String> {
-        let shot = self.call("Page.captureScreenshot", json!({ "format": "png" }))?;
+        let mut params = json!({ "format": "png" });
+        if self.scale != 1.0 {
+            let metrics = self.call("Page.getLayoutMetrics", json!({}))?;
+            let viewport = &metrics["cssVisualViewport"];
+            let side = |key: &str| viewport[key].as_f64().unwrap_or_default();
+            params["clip"] = json!({
+                "x": side("pageX"),
+                "y": side("pageY"),
+                "width": side("clientWidth"),
+                "height": side("clientHeight"),
+                "scale": 1.0 / self.scale,
+            });
+        }
+        let shot = self.call("Page.captureScreenshot", params)?;
         shot["data"]
             .as_str()
             .map(str::to_owned)
@@ -469,7 +502,7 @@ impl Page {
             json!({
                 "width": layout(size.0),
                 "height": layout(size.1),
-                "deviceScaleFactor": self.zoom,
+                "deviceScaleFactor": self.zoom * self.scale,
                 "mobile": false,
             }),
         )?;
@@ -481,6 +514,17 @@ impl Page {
     pub fn set_zoom(&mut self, zoom: f64) -> Result<(), String> {
         self.zoom = zoom.clamp(0.25, 5.0);
         self.resize(self.size)
+    }
+
+    /// Paints `scale` device pixels per pixel of its size, as the screen showing it has.
+    pub fn set_scale(&mut self, scale: f64) -> Result<(), String> {
+        self.scale = scale.clamp(1.0, MAX_SCALE);
+        self.resize(self.size)
+    }
+
+    /// Its size in the device pixels it paints.
+    pub fn device_size(&self) -> (u32, u32) {
+        device_pixels(self.size, self.scale)
     }
 
     /// `dark`, `light`, or `None` for the system's.
@@ -506,11 +550,12 @@ impl Page {
             .collect()
     }
 
-    /// Streams what the page paints to its observer, at most `max` pixels.
-    pub fn start_screencast(&self, max: (u32, u32)) -> Result<(), String> {
+    /// Streams what the page paints to its observer, one device pixel per pixel.
+    pub fn start_screencast(&self) -> Result<(), String> {
+        let (width, height) = self.device_size();
         self.call(
             "Page.startScreencast",
-            json!({ "format": "jpeg", "quality": 70, "maxWidth": max.0, "maxHeight": max.1, "everyNthFrame": 1 }),
+            json!({ "format": "jpeg", "quality": SCREENCAST_QUALITY, "maxWidth": width, "maxHeight": height, "everyNthFrame": 1 }),
         )
         .map(|_| ())
     }
@@ -813,5 +858,79 @@ mod tests {
         assert_eq!(laid_out, json!(800));
         assert_eq!(dark, json!(true));
         assert_eq!(page.size(), (1000, 600));
+    }
+
+    #[test]
+    fn a_page_s_device_pixels_follow_the_screen_s_scale() {
+        assert_eq!(device_pixels((800, 600), 1.0), (800, 600));
+        assert_eq!(device_pixels((800, 600), 1.5), (1200, 900));
+        assert_eq!(device_pixels((801, 333), 1.25), (1001, 416));
+        assert_eq!(device_pixels((0, 0), 2.0), (1, 1));
+    }
+
+    /// The width and height of a JPEG, from its frame header.
+    fn jpeg_size(jpeg: &[u8]) -> Option<(u32, u32)> {
+        let mut at = 2;
+        while at + 9 < jpeg.len() {
+            let marker = jpeg[at + 1];
+            let length = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+            if matches!(marker, 0xc0 | 0xc2) {
+                let side =
+                    |from: usize| u32::from(u16::from_be_bytes([jpeg[from], jpeg[from + 1]]));
+                return Some((side(at + 7), side(at + 5)));
+            }
+            at += 2 + length;
+        }
+        None
+    }
+
+    #[test]
+    fn a_scaled_page_streams_device_pixels_and_screenshots_at_its_size() {
+        let Some(executable) = find_browser() else {
+            eprintln!("no Chromium-based browser here; skipping");
+            return;
+        };
+        let profile = std::env::temp_dir().join(format!("hoshi-scale-{}", std::process::id()));
+        let browser = Browser::start(&executable, &profile).unwrap();
+        let (sender, frames) = std::sync::mpsc::channel();
+        let sender = Mutex::new(sender);
+        let mut page = browser
+            .open_page(
+                (400, 300),
+                Arc::new(move |event| {
+                    if let PageEvent::Frame {
+                        jpeg,
+                        width,
+                        height,
+                    } = event
+                    {
+                        let _ = lock(&sender).send((jpeg_size(&jpeg), width, height));
+                    }
+                }),
+            )
+            .unwrap();
+        page.navigate(
+            "data:text/html,<body style='height:3000px'>Sharp</body>",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+
+        page.set_scale(1.5).unwrap();
+        page.evaluate("scrollTo(0, 500)").unwrap();
+        let ratio = page.evaluate("devicePixelRatio").unwrap();
+        let laid_out = page.evaluate("innerWidth").unwrap();
+        let shot = STANDARD.decode(page.screenshot().unwrap()).unwrap();
+        page.start_screencast().unwrap();
+        let frame = frames.recv_timeout(Duration::from_secs(30)).unwrap();
+        page.close();
+        drop(browser);
+        let _ = std::fs::remove_dir_all(&profile);
+
+        assert!((ratio.as_f64().unwrap() - 1.5).abs() < 0.001);
+        assert_eq!(laid_out, json!(400));
+        let side = |from: usize| u32::from_be_bytes(shot[from..from + 4].try_into().unwrap());
+        assert_eq!((side(16), side(20)), (400, 300));
+        assert_eq!(page.device_size(), (600, 450));
+        assert_eq!(frame, (Some((600, 450)), 400, 300));
     }
 }

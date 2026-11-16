@@ -13,7 +13,7 @@ use tungstenite::{Message, WebSocket};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the socket thread waits for the browser before sending what is queued.
-const POLL: Duration = Duration::from_millis(15);
+const POLL: Duration = Duration::from_millis(4);
 
 type Reply = mpsc::Sender<Result<Value, String>>;
 
@@ -133,6 +133,19 @@ impl Connection {
         }
     }
 
+    /// A connection to a browser that takes every call and never answers.
+    pub fn unanswered() -> (Self, mpsc::Receiver<String>) {
+        let (outgoing, sent) = mpsc::channel();
+        let connection = Self {
+            outgoing,
+            pending: Arc::default(),
+            listeners: Arc::default(),
+            next_id: AtomicU64::new(1),
+            open: Arc::new(AtomicBool::new(true)),
+        };
+        (connection, sent)
+    }
+
     /// Hands `event` to every listener still there; returns how many took it.
     pub fn report(&self, event: &CdpEvent) -> usize {
         let mut listeners = lock(&self.listeners);
@@ -205,4 +218,41 @@ fn dispatch(
         session_id: value["sessionId"].as_str().map(str::to_owned),
     };
     lock(listeners).retain(|listener| listener.send(event.clone()).is_ok());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Connection;
+    use serde_json::json;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_call_the_browser_never_answers_gives_up_in_time() {
+        let (connection, sent) = Connection::unanswered();
+        let started = Instant::now();
+
+        let result = connection.call_within(
+            "Page.navigate",
+            json!({}),
+            Some("page"),
+            Duration::from_millis(200),
+        );
+
+        assert_eq!(
+            result,
+            Err("the browser didn't answer Page.navigate in time".into())
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(sent.try_recv().unwrap().contains("Page.navigate"));
+        assert!(connection.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_closed_browser_fails_calls_at_once() {
+        let connection = Connection::offline();
+        let started = Instant::now();
+        let result = connection.call("Page.navigate", json!({}), None);
+        assert_eq!(result, Err("the browser closed".into()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }

@@ -1,6 +1,6 @@
 {
-  "instructionsBytes": 2113,
+  "instructionsBytes": 2215,
   "subagentInstructionsBytes": 494,
-  "mcpToolListJsonBytes": 12442,
+  "mcpToolListJsonBytes": 13242,
   "alwaysLoadedToolsBytes": 790
 }

@@ -1,7 +1,8 @@
 //! Requests Claude Code makes mid-turn over its control protocol, started by
-//! `--permission-prompt-tool stdio`: tool approvals, `AskUserQuestion` and `ExitPlanMode`.
+//! `--permission-prompt-tool stdio`: tool approvals, `AskUserQuestion`, `ExitPlanMode`, and
+//! the questions MCP servers ask the user through it.
 
-use crate::{MCP_SERVER_NAME, truncate_json};
+use crate::{MCP_SERVER_NAME, truncate, truncate_json};
 use hoshi_core::{
     AccessMode, ApprovalDecision, ItemContent, ProviderOutput, Question, QuestionOption,
     RequestResponse, RequestStatus,
@@ -56,12 +57,24 @@ pub(crate) struct PendingRequest {
     input: Value,
     tool_use_id: Option<String>,
     suggestions: Vec<Value>,
+    /// Set when an MCP server asks rather than a tool call.
+    elicitation: Option<Elicitation>,
+}
+
+/// An MCP server's question, which the user answers as an approval.
+#[derive(Debug, Clone)]
+struct Elicitation {
+    /// What accepting it for the session records.
+    grant: Value,
+    /// The answer accepting it sends.
+    acceptance: Value,
 }
 
 #[derive(Debug, Default)]
 struct TurnState {
     session_id: Option<String>,
     pending: HashMap<String, PendingRequest>,
+    grants: Grants,
 }
 
 /// The turn's open requests, shared by the stdout reader and the running turn.
@@ -69,6 +82,14 @@ struct TurnState {
 pub(crate) struct Requests(Arc<Mutex<TurnState>>);
 
 impl Requests {
+    /// Requests that answer on their own what `grants` holds for the session.
+    pub fn new(grants: Grants) -> Self {
+        Self(Arc::new(Mutex::new(TurnState {
+            grants,
+            ..TurnState::default()
+        })))
+    }
+
     fn state(&self) -> std::sync::MutexGuard<'_, TurnState> {
         self.0
             .lock()
@@ -101,6 +122,14 @@ impl Grants {
             .entry(session_id.to_owned())
             .or_default()
             .extend(updates.iter().cloned());
+    }
+
+    fn holds(&self, session_id: &str, grant: &Value) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session_id)
+            .is_some_and(|grants| grants.contains(grant))
     }
 
     /// `--allowedTools` rules and `--add-dir` folders for a resumed session.
@@ -152,11 +181,15 @@ pub(crate) fn receive(
         return (Vec::new(), None);
     };
     let request = &value["request"];
-    if request["subtype"] != "can_use_tool" {
-        return (
-            Vec::new(),
-            Some(error_line(request_id, "unsupported request")),
-        );
+    match request["subtype"].as_str() {
+        Some("can_use_tool") => {}
+        Some("elicitation") => return elicitation(request_id, request, requests),
+        _ => {
+            return (
+                Vec::new(),
+                Some(error_line(request_id, "unsupported request")),
+            );
+        }
     }
     let tool_name = request["tool_name"].as_str().unwrap_or_default().to_owned();
     let input = request["input"].clone();
@@ -212,6 +245,7 @@ pub(crate) fn receive(
             input,
             tool_use_id,
             suggestions,
+            elicitation: None,
         },
     );
     let opened = ProviderOutput::RequestOpened {
@@ -219,6 +253,147 @@ pub(crate) fn receive(
         content,
     };
     (vec![opened], None)
+}
+
+/// An MCP server asks the user to confirm, as an approval: it is answered at once when the
+/// user accepted the same question for the session, and declined when its form can't be
+/// filled by consenting alone.
+fn elicitation(
+    request_id: &str,
+    request: &Value,
+    requests: &Requests,
+) -> (Vec<ProviderOutput>, Option<String>) {
+    let Some(acceptance) = elicitation_acceptance(request) else {
+        let decline = json!({ "action": "decline" });
+        return (Vec::new(), Some(success_line(request_id, decline)));
+    };
+    let server = request["mcp_server_name"].as_str().unwrap_or_default();
+    let message = request["message"].as_str().unwrap_or_default();
+    let grant = json!({ "type": "mcpElicitation", "server": server, "message": message });
+    let mut state = requests.state();
+    let granted = state
+        .session_id
+        .as_deref()
+        .is_some_and(|session_id| state.grants.holds(session_id, &grant));
+    if granted {
+        return (Vec::new(), Some(success_line(request_id, acceptance)));
+    }
+    let name = ["display_name", "title", "mcp_server_name"]
+        .iter()
+        .find_map(|key| request[key].as_str().filter(|name| !name.trim().is_empty()))
+        .unwrap_or("MCP")
+        .to_owned();
+    let content = ItemContent::Approval {
+        tool_call_id: None,
+        tool_name: name.clone(),
+        input: truncate(message, TOOL_INPUT_MAX_CHARS),
+        reason: request["description"]
+            .as_str()
+            .map(strip_ansi)
+            .filter(|reason| !reason.trim().is_empty()),
+        can_accept_for_session: true,
+        status: RequestStatus::Pending,
+        decision: None,
+        feedback: None,
+    };
+    state.pending.insert(
+        request_id.to_owned(),
+        PendingRequest {
+            tool_name: name,
+            input: Value::Null,
+            tool_use_id: None,
+            suggestions: Vec::new(),
+            elicitation: Some(Elicitation { grant, acceptance }),
+        },
+    );
+    let opened = ProviderOutput::RequestOpened {
+        request_id: request_id.to_owned(),
+        content,
+    };
+    (vec![opened], None)
+}
+
+/// The answer that accepts an elicitation: its form filled with the choices that consent
+/// once, never with the server's defaults, which could grant what the user did not see.
+/// `None` when consent alone can't fill it, as a URL to open or a required field with no
+/// such choice.
+fn elicitation_acceptance(request: &Value) -> Option<Value> {
+    if request["mode"] == "url" {
+        return None;
+    }
+    let schema = request["requested_schema"].as_object()?;
+    let properties = match schema.get("properties") {
+        None => serde_json::Map::new(),
+        Some(properties) => properties.as_object()?.clone(),
+    };
+    let mut content = serde_json::Map::new();
+    for (key, field) in &properties {
+        let field = field.as_object()?;
+        let text = |name: &str| field.get(name).and_then(Value::as_str).unwrap_or_default();
+        let options: Vec<&str> = match field.get("oneOf").and_then(Value::as_array) {
+            Some(choices) => choices
+                .iter()
+                .filter_map(|choice| choice["const"].as_str())
+                .collect(),
+            None => field
+                .get("enum")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect(),
+        };
+        if let Some(once) = options.into_iter().find(|option| consents_once(option)) {
+            content.insert(key.clone(), json!(once));
+        } else if text("type") == "boolean"
+            && (persists(key)
+                || key.eq_ignore_ascii_case("persist")
+                || persists(text("title"))
+                || persists(text("description")))
+        {
+            content.insert(key.clone(), json!(false));
+        }
+    }
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    for key in required {
+        if !content.contains_key(key) {
+            return None;
+        }
+    }
+    Some(json!({ "action": "accept", "content": content }))
+}
+
+/// Whether a choice keeps the consent beyond this once.
+fn persists(text: &str) -> bool {
+    let text = text.to_lowercase();
+    ["session", "always", "permanent", "forever", "persistent"]
+        .iter()
+        .any(|word| text.contains(word))
+}
+
+/// Whether a choice consents this once: `accept`, `allow once`, `approve this time`...
+fn consents_once(option: &str) -> bool {
+    let option = option.trim().to_lowercase();
+    let separator = |char: char| char == '_' || char == '-' || char.is_whitespace();
+    let Some(rest) = ["once", "accept", "approve", "allow"]
+        .iter()
+        .find_map(|verb| option.strip_prefix(verb))
+    else {
+        return false;
+    };
+    let suffix = rest.trim_start_matches(separator);
+    let qualified = match suffix.strip_prefix("once") {
+        Some(after) => after.is_empty() || after.trim_start_matches(separator) == "only",
+        None => suffix
+            .strip_prefix("this")
+            .is_some_and(|after| after.trim_start_matches(separator) == "time"),
+    };
+    (rest.is_empty() || qualified) && !persists(&option)
 }
 
 /// The agent withdrew a request, as when a hook answered it.
@@ -243,6 +418,29 @@ pub(crate) fn reply(
     access: Access,
     session: Option<(&str, &Grants)>,
 ) -> String {
+    if let Some(elicitation) = &pending.elicitation {
+        let answer = match response {
+            RequestResponse::Decision {
+                decision: ApprovalDecision::Accept,
+                ..
+            } => elicitation.acceptance.clone(),
+            RequestResponse::Decision {
+                decision: ApprovalDecision::AcceptForSession,
+                ..
+            } => {
+                if let Some((session_id, grants)) = session {
+                    grants.add(session_id, std::slice::from_ref(&elicitation.grant));
+                }
+                elicitation.acceptance.clone()
+            }
+            RequestResponse::Decision {
+                decision: ApprovalDecision::Cancel,
+                ..
+            } => json!({ "action": "cancel" }),
+            _ => json!({ "action": "decline" }),
+        };
+        return success_line(request_id, answer);
+    }
     let tool_use_id = &pending.tool_use_id;
     let result = match response {
         // Secrets are hoshi's own requests; none reaches the agent's.
@@ -685,6 +883,152 @@ mod tests {
             }]
         );
         assert!(withdraw(&cancel, &requests).is_empty());
+    }
+
+    fn elicitation(schema: Value) -> Value {
+        json!({
+            "type": "control_request",
+            "request_id": "r1",
+            "request": {
+                "subtype": "elicitation",
+                "mcp_server_name": "computer-use",
+                "message": "Allow Claude to control Finder?",
+                "mode": "form",
+                "requested_schema": schema,
+                "display_name": "Computer Use",
+            },
+        })
+    }
+
+    fn consent_schema() -> Value {
+        json!({ "type": "object", "required": ["choice"], "properties": {
+            "choice": { "type": "string", "enum": ["allow_once", "allow_session", "deny"],
+                        "default": "allow_session" },
+            "remember": { "type": "boolean", "title": "Always allow", "default": true },
+            "note": { "type": "string", "default": "granted" },
+        } })
+    }
+
+    fn decide(decision: ApprovalDecision) -> RequestResponse {
+        RequestResponse::Decision {
+            decision,
+            feedback: None,
+        }
+    }
+
+    #[test]
+    fn an_mcp_server_s_question_asks_as_an_approval() {
+        let requests = Requests::default();
+        requests.set_session("s1");
+        let (outputs, line) = receive(&elicitation(consent_schema()), ASK, &requests);
+
+        assert_eq!(line, None);
+        assert_eq!(
+            outputs,
+            vec![ProviderOutput::RequestOpened {
+                request_id: "r1".into(),
+                content: ItemContent::Approval {
+                    tool_call_id: None,
+                    tool_name: "Computer Use".into(),
+                    input: "Allow Claude to control Finder?".into(),
+                    reason: None,
+                    can_accept_for_session: true,
+                    status: RequestStatus::Pending,
+                    decision: None,
+                    feedback: None,
+                },
+            }]
+        );
+        let pending = requests.take("r1").unwrap();
+        assert_eq!(
+            response(&reply(
+                "r1",
+                &pending,
+                &decide(ApprovalDecision::Accept),
+                ASK,
+                None
+            )),
+            json!({ "action": "accept", "content": { "choice": "allow_once", "remember": false } })
+        );
+        assert_eq!(
+            response(&reply(
+                "r1",
+                &pending,
+                &decide(ApprovalDecision::Decline),
+                ASK,
+                None
+            )),
+            json!({ "action": "decline" })
+        );
+        assert_eq!(
+            response(&reply(
+                "r1",
+                &pending,
+                &decide(ApprovalDecision::Cancel),
+                ASK,
+                None
+            )),
+            json!({ "action": "cancel" })
+        );
+    }
+
+    #[test]
+    fn an_mcp_question_accepted_for_the_session_is_not_asked_again() {
+        let grants = Grants::default();
+        let requests = Requests::new(grants.clone());
+        requests.set_session("s1");
+        receive(&elicitation(consent_schema()), ASK, &requests);
+        let pending = requests.take("r1").unwrap();
+        reply(
+            "r1",
+            &pending,
+            &decide(ApprovalDecision::AcceptForSession),
+            ASK,
+            Some(("s1", &grants)),
+        );
+
+        let (outputs, line) = receive(&elicitation(consent_schema()), ASK, &requests);
+        assert!(outputs.is_empty());
+        assert_eq!(response(&line.unwrap())["action"], "accept");
+
+        let other = Requests::new(grants);
+        other.set_session("s2");
+        let (outputs, _) = receive(&elicitation(consent_schema()), ASK, &other);
+        assert_eq!(outputs.len(), 1, "another session still asks");
+    }
+
+    #[test]
+    fn an_mcp_question_consent_alone_cannot_answer_is_declined() {
+        let requests = Requests::default();
+        let url = json!({ "type": "control_request", "request_id": "r1", "request": {
+            "subtype": "elicitation", "mcp_server_name": "github", "message": "Sign in",
+            "mode": "url", "url": "https://example.com/login" } });
+        let required = elicitation(json!({ "type": "object", "required": ["token"],
+            "properties": { "token": { "type": "string", "default": "abc" } } }));
+        let schemaless = json!({ "type": "control_request", "request_id": "r1", "request": {
+            "subtype": "elicitation", "mcp_server_name": "x", "message": "Go on?" } });
+
+        for request in [url, required, schemaless] {
+            let (outputs, line) = receive(&request, ASK, &requests);
+            assert!(outputs.is_empty());
+            assert_eq!(response(&line.unwrap()), json!({ "action": "decline" }));
+        }
+    }
+
+    #[test]
+    fn only_choices_that_consent_once_fill_the_form() {
+        for (option, once) in [
+            ("allow", true),
+            ("Allow once", true),
+            ("approve-this-time", true),
+            ("accept_once_only", true),
+            ("allow_session", false),
+            ("allow_", false),
+            ("allowed", false),
+            ("always allow", false),
+        ] {
+            assert_eq!(consents_once(option), once, "{option}");
+        }
     }
 
     #[test]

@@ -1,12 +1,9 @@
-//! Commit messages and pull request texts from a short, tool-less Claude Code run.
+//! Commit messages and pull request texts: what a provider is asked, and the text in its
+//! answer.
 
-use crate::claude_titles::{answer, run_quick};
+use crate::titles::answer;
 use crate::{CommitMessage, CommitMessageRequest, PullRequestText, PullRequestTextRequest};
-use serde_json::{Value, json};
-use std::time::Duration;
 
-const TIMEOUT: Duration = Duration::from_secs(120);
-const MODEL: &str = "haiku";
 const MAX_SUBJECT_CHARS: usize = 72;
 const MAX_FILES_CHARS: usize = 6_000;
 const MAX_PATCH_CHARS: usize = 40_000;
@@ -32,36 +29,6 @@ Return JSON with keys title and body.
 - body: Markdown. Without a template, a \"## Summary\" section of short bullets on what changed and why, then a \"## Testing\" section saying what was run, or \"Not run\".
 - With a template, fill it in instead, keeping its headings.
 - Never add signatures or any attribution.";
-
-fn commit_schema(wants_branch: bool) -> Value {
-    let mut properties = json!({
-        "subject": { "type": "string" },
-        "body": { "type": "string" },
-    });
-    let mut required = vec!["subject", "body"];
-    if wants_branch {
-        properties["branch"] = json!({ "type": "string" });
-        required.push("branch");
-    }
-    json!({
-        "type": "object",
-        "properties": properties,
-        "required": required,
-        "additionalProperties": false,
-    })
-}
-
-fn pull_request_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "title": { "type": "string" },
-            "body": { "type": "string" },
-        },
-        "required": ["title", "body"],
-        "additionalProperties": false,
-    })
-}
 
 fn recent(subjects: &[String]) -> String {
     if subjects.is_empty() {
@@ -153,33 +120,10 @@ pub(crate) fn parse_pull_request(output: &str) -> Option<PullRequestText> {
     })
 }
 
-pub(crate) fn write_commit(binary: &str, request: &CommitMessageRequest) -> Option<CommitMessage> {
-    let schema = commit_schema(request.wants_branch);
-    parse_commit(&run_quick(
-        binary,
-        MODEL,
-        &schema,
-        &commit_prompt(request),
-        TIMEOUT,
-    )?)
-}
-
-pub(crate) fn write_pull_request(
-    binary: &str,
-    request: &PullRequestTextRequest,
-) -> Option<PullRequestText> {
-    parse_pull_request(&run_quick(
-        binary,
-        MODEL,
-        &pull_request_schema(),
-        &pull_request_prompt(request),
-        TIMEOUT,
-    )?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn commit_request(wants_branch: bool) -> CommitMessageRequest {
         CommitMessageRequest {

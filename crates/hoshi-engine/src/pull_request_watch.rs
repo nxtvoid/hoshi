@@ -456,7 +456,8 @@ impl State {
             .model
             .thread(thread_id)
             .is_some_and(|thread| thread.active_turn_id.is_some());
-        if busy {
+        if busy || self.limit_holds(thread_id) {
+            self.hold_wakes_if_held(thread_id);
             self.pending_wakes
                 .entry(thread_id.to_owned())
                 .or_default()
@@ -487,7 +488,7 @@ impl State {
             .model
             .thread(thread_id)
             .is_some_and(|thread| thread.active_turn_id.is_none());
-        if !idle {
+        if !idle || self.wakes_held(thread_id) {
             return;
         }
         let waiting = self.pending_wakes.remove(thread_id).unwrap_or_default();

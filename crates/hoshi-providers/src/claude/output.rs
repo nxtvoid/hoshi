@@ -1,8 +1,8 @@
 //! The turn's running tasks. A shell command's output: the CLI only sends it with the tool
 //! result, but answers `get_task_output` for a running task, so the turn asks for it now
-//! and then. And subagents, which `stop_task` stops one at a time.
+//! and then. And subagents and workflows, which `stop_task` stops one at a time.
 
-use crate::claude_requests::strip_ansi;
+use super::requests::strip_ansi;
 use crate::process::Stdin;
 use hoshi_core::ProviderOutput;
 use serde_json::{Value, json};
@@ -15,6 +15,15 @@ const POLL_EVERY: Duration = Duration::from_millis(400);
 const REQUEST_PREFIX: &str = "hoshi-output:";
 /// How much of a running command's output is sent each time it grows: its latest lines.
 const LIVE_TAIL_BYTES: usize = 32 * 1024;
+
+/// Whether a task of `task_type` runs agents: a subagent, a teammate, a remote agent or a
+/// workflow. Such a task holds the turn while it runs in the background.
+pub(crate) fn runs_agents(task_type: &str) -> bool {
+    matches!(
+        task_type,
+        "local_agent" | "remote_agent" | "in_process_teammate" | "local_workflow"
+    )
+}
 
 /// The output's last `LIVE_TAIL_BYTES`, from the start of a line when it was cut.
 fn tail(output: &str) -> &str {
@@ -43,7 +52,7 @@ struct Running {
 struct Tasks {
     /// Shell commands still running, by task id.
     commands: HashMap<String, Running>,
-    /// Subagents still running: their task id, by the call that started them.
+    /// Subagents and workflows still running: their task id, by the call that started them.
     agents: HashMap<String, String>,
 }
 
@@ -58,23 +67,24 @@ impl LiveOutput {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The task of the subagent that call `tool_use_id` started, while it runs.
+    /// The task of the subagent or workflow that call `tool_use_id` started, while it runs.
     pub fn agent_task(&self, tool_use_id: &str) -> Option<String> {
         self.tasks().agents.get(tool_use_id).cloned()
     }
 
-    /// Follows a command or subagent once its task starts; a command sent to the background
-    /// has no output to wait for in the turn.
-    pub fn started(&self, value: &Value) {
+    /// Follows a command, subagent or workflow once its task starts; a command sent to the
+    /// background has no output to wait for in the turn. `launch` is the call that first
+    /// started a subagent that runs again, as `SendMessage` resumes it.
+    pub fn started(&self, value: &Value, launch: Option<&str>) {
         let (Some(task_id), Some(tool_use_id)) =
             (value["task_id"].as_str(), value["tool_use_id"].as_str())
         else {
             return;
         };
-        if value["task_type"] == "local_agent" {
+        if value["task_type"].as_str().is_some_and(runs_agents) {
             self.tasks()
                 .agents
-                .insert(tool_use_id.to_owned(), task_id.to_owned());
+                .insert(launch.unwrap_or(tool_use_id).to_owned(), task_id.to_owned());
             return;
         }
         if value["task_type"] != "local_bash" || value["is_backgrounded"] == true {
@@ -160,8 +170,11 @@ mod tests {
     #[test]
     fn a_running_command_reports_its_output_when_it_grows() {
         let live = LiveOutput::default();
-        live.started(&json!({ "task_id": "b1", "tool_use_id": "toolu_1",
-            "task_type": "local_bash", "is_backgrounded": false }));
+        live.started(
+            &json!({ "task_id": "b1", "tool_use_id": "toolu_1",
+                "task_type": "local_bash", "is_backgrounded": false }),
+            None,
+        );
 
         assert_eq!(
             live.answer(&answer(7, "\u{1b}[32mtick 1\u{1b}[0m\r\n")),
@@ -189,8 +202,11 @@ mod tests {
     #[test]
     fn a_long_output_is_sent_as_its_latest_whole_lines() {
         let live = LiveOutput::default();
-        live.started(&json!({ "task_id": "b1", "tool_use_id": "toolu_1",
-            "task_type": "local_bash", "is_backgrounded": false }));
+        live.started(
+            &json!({ "task_id": "b1", "tool_use_id": "toolu_1",
+                "task_type": "local_bash", "is_backgrounded": false }),
+            None,
+        );
         let line = format!("{}\n", "é".repeat(99));
         let output = line.repeat(1000);
 
@@ -207,8 +223,11 @@ mod tests {
     #[test]
     fn a_running_subagent_is_known_by_the_call_that_started_it() {
         let live = LiveOutput::default();
-        live.started(&json!({ "task_id": "a1", "tool_use_id": "toolu_agent",
-            "task_type": "local_agent", "is_backgrounded": false }));
+        live.started(
+            &json!({ "task_id": "a1", "tool_use_id": "toolu_agent",
+                "task_type": "local_agent", "is_backgrounded": false }),
+            None,
+        );
         assert_eq!(live.agent_task("toolu_agent").as_deref(), Some("a1"));
 
         live.ended(&json!({ "task_id": "a1" }));
@@ -216,10 +235,32 @@ mod tests {
     }
 
     #[test]
+    fn a_workflow_is_known_by_its_call_and_a_resumed_subagent_by_its_first() {
+        let live = LiveOutput::default();
+        live.started(
+            &json!({ "task_id": "w1", "tool_use_id": "toolu_workflow",
+                "task_type": "local_workflow" }),
+            None,
+        );
+        live.started(
+            &json!({ "task_id": "a1", "tool_use_id": "toolu_send", "task_type": "local_agent",
+                "is_backgrounded": true }),
+            Some("toolu_agent"),
+        );
+
+        assert_eq!(live.agent_task("toolu_workflow").as_deref(), Some("w1"));
+        assert_eq!(live.agent_task("toolu_agent").as_deref(), Some("a1"));
+        assert_eq!(live.agent_task("toolu_send"), None);
+    }
+
+    #[test]
     fn background_commands_and_other_answers_are_left_alone() {
         let live = LiveOutput::default();
-        live.started(&json!({ "task_id": "b1", "tool_use_id": "toolu_1",
-            "task_type": "local_bash", "is_backgrounded": true }));
+        live.started(
+            &json!({ "task_id": "b1", "tool_use_id": "toolu_1",
+                "task_type": "local_bash", "is_backgrounded": true }),
+            None,
+        );
         assert_eq!(live.answer(&answer(7, "tick 1")), None);
 
         let other = json!({ "type": "control_response", "response": {

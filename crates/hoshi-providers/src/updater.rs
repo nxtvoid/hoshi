@@ -1,7 +1,8 @@
 //! Runs a CLI's updater and finds programs the way the system would.
 
+use crate::codex::install::CodexInstall;
 use crate::process::{hide_console, kill_tree};
-use hoshi_core::ProviderUpdateFailure;
+use hoshi_core::{ProviderUpdateFailure, UpdateStep};
 use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::Read;
@@ -17,26 +18,40 @@ const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const TAIL_LINES: usize = 12;
 const LINE_MAX_CHARS: usize = 200;
 
-/// A command that updates a provider's CLI.
+/// What updates a provider's CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Updater {
-    pub program: PathBuf,
-    pub args: Vec<String>,
+pub enum Updater {
+    /// A command that updates it in place.
+    Command { program: PathBuf, args: Vec<String> },
+    /// hoshi downloads the release into its own folder.
+    Managed(CodexInstall),
 }
 
 impl Updater {
-    /// As typed in a terminal.
+    /// As typed in a terminal; a managed install names the package it installs.
     pub fn display(&self) -> String {
-        let program = self
-            .program
+        let (program, args) = match self {
+            Self::Command { program, args } => (program, args),
+            Self::Managed(install) => return install.package().to_owned(),
+        };
+        let program = program
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
             .unwrap_or_default();
         std::iter::once(program)
-            .chain(self.args.iter().cloned())
+            .chain(args.iter().cloned())
             .collect::<Vec<_>>()
             .join(" ")
     }
+}
+
+/// What an updater reports as it goes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateProgress {
+    /// A line the updater command printed.
+    Line(String),
+    /// The step a managed install reached.
+    Step(UpdateStep),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,11 +61,29 @@ pub struct UpdateFailure {
     pub output: Option<String>,
 }
 
-/// Runs `updater` to its end, handing each line it prints to `progress`.
-pub fn run(updater: &Updater, mut progress: impl FnMut(String)) -> Result<(), UpdateFailure> {
-    let mut command = Command::new(&updater.program);
+/// Runs `updater` to its end, handing what it reports to `progress`.
+pub fn run(
+    updater: &Updater,
+    mut progress: impl FnMut(UpdateProgress),
+) -> Result<(), UpdateFailure> {
+    match updater {
+        Updater::Command { program, args } => {
+            run_command(program, args, |line| progress(UpdateProgress::Line(line)))
+        }
+        Updater::Managed(install) => install
+            .install(|step| progress(UpdateProgress::Step(step)))
+            .map(|_| ()),
+    }
+}
+
+fn run_command(
+    program: &Path,
+    args: &[String],
+    mut progress: impl FnMut(String),
+) -> Result<(), UpdateFailure> {
+    let mut command = Command::new(program);
     command
-        .args(&updater.args)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -247,7 +280,7 @@ mod tests {
 
     #[test]
     fn the_command_reads_as_typed() {
-        let updater = Updater {
+        let updater = Updater::Command {
             program: PathBuf::from("/home/me/.local/bin/claude.exe"),
             args: vec!["update".into()],
         };
@@ -270,13 +303,18 @@ mod tests {
         } else {
             script.split('|').map(str::to_owned).collect()
         };
-        let updater = Updater {
+        let updater = Updater::Command {
             program: find_program(program, false).unwrap(),
             args,
         };
         let mut seen = Vec::new();
 
-        let failure = run(&updater, |line| seen.push(line)).unwrap_err();
+        let failure = run(&updater, |progress| {
+            if let UpdateProgress::Line(line) = progress {
+                seen.push(line);
+            }
+        })
+        .unwrap_err();
 
         assert_eq!(
             failure.reason,
@@ -288,7 +326,7 @@ mod tests {
 
     #[test]
     fn a_missing_updater_fails_to_spawn() {
-        let updater = Updater {
+        let updater = Updater::Command {
             program: PathBuf::from("hoshi-no-such-updater"),
             args: Vec::new(),
         };

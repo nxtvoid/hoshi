@@ -20,7 +20,7 @@
 
 ## Data
 
-Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-dev` for debug builds (`bun run dev`) so they never touch the installed app's data. `HOSHI_HOME` overrides both. It holds `settings.json`, `state.sqlite`, `worktrees/`, `chats/`, `attachments/` and `webview/` (the webview's storage). Never write to Tauri's per-identifier folders (`app_data_dir` and the like); `apps/desktop/src-tauri/src/home.rs` moves what older versions left there on first start, except worktrees, whose paths git registered.
+Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-dev` for debug builds (`bun run dev`) so they never touch the installed app's data. `HOSHI_HOME` overrides both. It holds `settings.json`, `state.sqlite`, `worktrees/`, `chats/`, `attachments/`, `agent-processes/` (the agent processes each run started, so the next start ends what a crashed run left), `caches/` (what the provider CLIs last listed, shown at start before they answer) and `webview/` (the webview's storage). Never write to Tauri's per-identifier folders (`app_data_dir` and the like); `apps/desktop/src-tauri/src/home.rs` moves what older versions left there on first start, except worktrees, whose paths git registered.
 
 ## Commands
 

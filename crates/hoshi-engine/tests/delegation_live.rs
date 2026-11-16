@@ -40,6 +40,7 @@ fn an_agent_delegates_a_task_and_gets_its_answer_back() {
             project_id: Some("p".into()),
             title: "Parent".into(),
             workspace: ThreadWorkspace::Local,
+            provider: hoshi_core::default_provider(),
             model: None,
             effort: Some(hoshi_core::Effort::Low),
             fast_mode: false,

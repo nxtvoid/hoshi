@@ -1,10 +1,14 @@
 //! The model and effort each subagent of a turn runs at, and how the agent is told to choose
-//! them.
+//! them. And the calls that started subagents and workflows, which a subagent that runs
+//! again shows running again.
 
-use crate::claude_models::{manifest, parse_effort};
+use super::install;
+use super::models::{manifest, parse_effort};
+use crate::truncate_json;
 use hoshi_core::{Effort, ProviderOutput, SubagentEffort, ToolDetail};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 /// Subagents of a turn, by the id of the call that started each.
 #[derive(Default)]
@@ -12,6 +16,18 @@ pub(crate) struct Subagents {
     /// What the turn's own agent runs on, which its subagents inherit.
     turn: Option<Run>,
     started: HashMap<String, Subagent>,
+    launches: HashMap<String, Launch>,
+    /// Where Claude Code keeps its sessions; `None` for its own folder.
+    projects: Option<PathBuf>,
+}
+
+/// A call that started a subagent or a workflow.
+struct Launch {
+    /// The subagent whose call it is; `None` for the turn's own agent.
+    owner: Option<String>,
+    name: String,
+    /// As the call's `ToolCallStarted` reported it.
+    input: String,
 }
 
 #[derive(Clone)]
@@ -50,8 +66,86 @@ impl Subagents {
     pub(crate) fn for_turn(model: Option<&str>, effort: Option<Effort>) -> Self {
         Self {
             turn: Some(Run::resolve(model, effort)),
-            started: HashMap::new(),
+            ..Self::default()
         }
+    }
+
+    /// The turn's own agent switched to `model` at `effort`; the subagents it started stay.
+    pub(crate) fn retarget(&mut self, model: Option<&str>, effort: Option<Effort>) {
+        self.turn = Some(Run::resolve(model, effort));
+    }
+
+    /// Subagents of a turn whose sessions Claude Code keeps under `projects`.
+    #[cfg(test)]
+    pub(crate) fn kept_in(projects: &Path) -> Self {
+        Self {
+            projects: Some(projects.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// The call `id`, made by the turn's agent or by the subagent `owner`, starts a subagent or
+    /// a workflow.
+    pub(crate) fn launched(&mut self, owner: Option<&str>, id: &str, name: &str, input: String) {
+        self.launches.insert(
+            id.to_owned(),
+            Launch {
+                owner: owner.map(str::to_owned),
+                name: name.to_owned(),
+                input,
+            },
+        );
+    }
+
+    /// The call that first started subagent `task_id` of session `session_id`, which an
+    /// earlier process ran; known from then on, to show it running again when the session's
+    /// transcript still holds it.
+    pub(crate) fn launched_earlier(&mut self, session_id: &str, task_id: &str) -> Option<String> {
+        let projects = match &self.projects {
+            Some(projects) => projects.clone(),
+            None => install::config_dir()?.join("projects"),
+        };
+        let (launch, call) = launch_on_disk(&projects, session_id, task_id)?;
+        if let Some((name, input)) = call {
+            let input = truncate_json(&input, super::TOOL_INPUT_MAX_CHARS);
+            self.launched(None, &launch, &name, input);
+        }
+        Some(launch)
+    }
+
+    /// Whether call `id` started a subagent or a workflow; `Some(owner)` when it did, the
+    /// owner being the subagent that made the call.
+    pub(crate) fn owner(&self, id: &str) -> Option<Option<&str>> {
+        self.launches.get(id).map(|launch| launch.owner.as_deref())
+    }
+
+    /// Call `id` runs again, as its subagent was resumed: the call, started anew, with what it
+    /// runs on when known.
+    pub(crate) fn reopened(&self, id: &str) -> Vec<ProviderOutput> {
+        let Some(launch) = self.launches.get(id) else {
+            return Vec::new();
+        };
+        let started = ProviderOutput::ToolCallStarted {
+            item_id: id.to_owned(),
+            name: launch.name.clone(),
+            input: launch.input.clone(),
+        };
+        let detail = self
+            .detail(id)
+            .map(|detail| ProviderOutput::ToolCallDetail {
+                item_id: id.to_owned(),
+                detail,
+            });
+        std::iter::once(started)
+            .chain(detail)
+            .map(|output| match &launch.owner {
+                Some(owner) => ProviderOutput::Subagent {
+                    tool_use_id: owner.clone(),
+                    output: Box::new(output),
+                },
+                None => output,
+            })
+            .collect()
     }
 
     /// The `Agent` call `id`, made by the turn's agent or by the subagent `owner`, started a
@@ -118,6 +212,52 @@ impl Subagents {
     pub(crate) fn detail(&self, id: &str) -> Option<ToolDetail> {
         self.started.get(id).map(|subagent| subagent.run.detail())
     }
+}
+
+/// The call that first started a subagent of an earlier process, as Claude Code keeps it
+/// under `projects`: the call's id, and its name and input when the session's own
+/// transcript holds it.
+pub(crate) fn launch_on_disk(
+    projects: &Path,
+    session_id: &str,
+    task_id: &str,
+) -> Option<(String, Option<(String, Value)>)> {
+    let plain = |id: &str| {
+        !id.is_empty()
+            && id
+                .chars()
+                .all(|char| char.is_ascii_alphanumeric() || char == '-' || char == '_')
+    };
+    if !plain(session_id) || !plain(task_id) {
+        return None;
+    }
+    let meta = format!("agent-{task_id}.meta.json");
+    let (folder, launch) = std::fs::read_dir(projects)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find_map(|folder| {
+            let path = folder.join(session_id).join("subagents").join(&meta);
+            let meta: Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+            let launch = meta["toolUseId"].as_str()?.to_owned();
+            Some((folder, launch))
+        })?;
+    let transcript = std::fs::read_to_string(folder.join(format!("{session_id}.jsonl"))).ok();
+    let call = transcript.and_then(|transcript| {
+        transcript
+            .lines()
+            .filter(|line| line.contains(&launch))
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find_map(|record| {
+                record["message"]["content"]
+                    .as_array()?
+                    .iter()
+                    .find(|block| block["type"] == "tool_use" && block["id"] == launch.as_str())
+                    .and_then(|block| {
+                        Some((block["name"].as_str()?.to_owned(), block["input"].clone()))
+                    })
+            })
+    });
+    Some((launch, call))
 }
 
 /// What tells the agent how to choose its subagents' model and effort; `None` when they
@@ -272,6 +412,88 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_call_starts_again_in_its_owner_s_transcript_with_what_it_runs_on() {
+        let mut subagents = turn();
+        subagents.started(None, "toolu_1", &json!({}));
+        subagents.launched(None, "toolu_1", "Agent", "{}".into());
+        subagents.launched(Some("toolu_1"), "toolu_2", "Agent", "{\"a\":1}".into());
+
+        assert_eq!(subagents.owner("toolu_2"), Some(Some("toolu_1")));
+        assert_eq!(subagents.owner("toolu_3"), None);
+        assert_eq!(
+            subagents.reopened("toolu_1"),
+            [
+                ProviderOutput::ToolCallStarted {
+                    item_id: "toolu_1".into(),
+                    name: "Agent".into(),
+                    input: "{}".into(),
+                },
+                ProviderOutput::ToolCallDetail {
+                    item_id: "toolu_1".into(),
+                    detail: ToolDetail::Subagent {
+                        model: "claude-opus-5-5".into(),
+                        effort: Some(Effort::Max),
+                    },
+                },
+            ]
+        );
+        assert_eq!(
+            subagents.reopened("toolu_2"),
+            [ProviderOutput::Subagent {
+                tool_use_id: "toolu_1".into(),
+                output: Box::new(ProviderOutput::ToolCallStarted {
+                    item_id: "toolu_2".into(),
+                    name: "Agent".into(),
+                    input: "{\"a\":1}".into(),
+                }),
+            }]
+        );
+    }
+
+    #[test]
+    fn the_launch_of_a_subagent_from_an_earlier_process_is_read_from_its_session() {
+        let projects = std::env::temp_dir().join(format!("hoshi-launch-{}", std::process::id()));
+        let folder = projects.join("-repo");
+        let subagents = folder.join("s1").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        std::fs::create_dir_all(projects.join("-other")).unwrap();
+        std::fs::write(
+            subagents.join("agent-a1.meta.json"),
+            r#"{"agentType":"general-purpose","toolUseId":"toolu_agent","spawnDepth":1}"#,
+        )
+        .unwrap();
+        let call = json!({ "type": "assistant", "message": { "content": [
+            { "type": "tool_use", "id": "toolu_agent", "name": "Agent",
+              "input": { "description": "Audit", "prompt": "Look" } }] } });
+        std::fs::write(
+            folder.join("s1.jsonl"),
+            format!(
+                "{}\n{call}\n",
+                json!({ "type": "user", "message": { "content": "hi" } })
+            ),
+        )
+        .unwrap();
+
+        let found = launch_on_disk(&projects, "s1", "a1");
+        let missing = launch_on_disk(&projects, "s1", "a2");
+        let escaping = launch_on_disk(&projects, "s1", "../a1");
+        std::fs::remove_dir_all(&projects).unwrap();
+
+        assert_eq!(
+            found,
+            Some((
+                "toolu_agent".into(),
+                Some((
+                    "Agent".into(),
+                    json!({ "description": "Audit", "prompt": "Look" })
+                ))
+            ))
+        );
+        assert_eq!(missing, None);
+        assert_eq!(escaping, None);
+    }
+
+    #[test]
     fn without_a_turn_model_nothing_is_known() {
         let mut subagents = Subagents::default();
         assert_eq!(subagents.started(None, "toolu_1", &json!({})), None);
@@ -287,7 +509,7 @@ mod tests {
         )
         .unwrap();
         let budget: serde_json::Value =
-            serde_json::from_str(include_str!("../../../agent-context-budget.json")).unwrap();
+            serde_json::from_str(include_str!("../../../../agent-context-budget.json")).unwrap();
         assert_eq!(
             told.len() as u64,
             budget["subagentInstructionsBytes"],

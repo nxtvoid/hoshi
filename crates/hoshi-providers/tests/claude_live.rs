@@ -22,6 +22,8 @@ fn a_real_turn_streams_a_reply_and_resumes_its_session() {
             earlier_media: Vec::new(),
             resume_session_id: resume,
             resume_session_at: None,
+            fork_session: false,
+            handoff: None,
             model: None,
             effort: Some(hoshi_core::Effort::Low),
             fast_mode: false,
@@ -85,6 +87,8 @@ fn a_message_sent_as_the_turn_starts_doesnt_take_the_place_of_its_prompt() {
         earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -187,6 +191,8 @@ fn a_real_turn_sees_an_attached_image() {
         earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -310,6 +316,8 @@ fn a_real_turn_reads_an_attached_pdf_and_a_file_by_its_path() {
         earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -378,6 +386,8 @@ fn run_answering(
         earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -610,6 +620,8 @@ fn a_stopped_subagent_ends_and_the_turn_goes_on() {
         earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -725,6 +737,8 @@ fn run_acting(
         earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -834,6 +848,8 @@ fn a_message_is_answered_at_once_while_a_subagent_keeps_working() {
         earlier_media: Vec::new(),
         resume_session_id: None,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -954,6 +970,8 @@ fn watched_request(cwd: &std::path::Path, prompt: &str, session: Option<String>)
         earlier_media: Vec::new(),
         resume_session_id: session,
         resume_session_at: None,
+        fork_session: false,
+        handoff: None,
         model: None,
         effort: Some(hoshi_core::Effort::Low),
         fast_mode: false,
@@ -1229,6 +1247,67 @@ fn the_next_message_runs_in_the_process_a_command_kept() {
     assert!(completions(&outputs) >= 3, "{outputs:#?}");
 }
 
+#[test]
+#[ignore = "runs the real Claude Code CLI"]
+fn a_session_that_no_longer_exists_fails_to_resume() {
+    let cwd = scratch("resume-missing-session");
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let (sender, receiver) = mpsc::channel();
+    let sink = Box::new(move |output| {
+        let _ = sender.send(output);
+    });
+    let missing = Some("9b0c1d2e-3f40-4a5b-8c6d-7e8f9a0b1c2d".to_owned());
+    let _turn = adapter
+        .start_turn(watched_request(&cwd, "hi", missing), sink)
+        .unwrap();
+    let outputs: Vec<_> = receiver.iter().collect();
+
+    assert!(
+        outputs.iter().any(|output| matches!(
+            output,
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Failed {
+                    reason: hoshi_core::TurnFailure::ResumeFailed { .. }
+                }
+            }
+        )),
+        "{outputs:#?}"
+    );
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_turn_at_another_effort_runs_in_the_process_a_command_kept() {
+    let cwd = scratch("continue-at-another-effort");
+    let mut session = None;
+    let mut continued = false;
+    let outputs = run_watching(
+        &cwd,
+        "Run the shell command `sleep 15 && echo done` with the Bash tool using run_in_background: true. Then reply 'started' and end your turn. When it finishes, tell me what it printed.",
+        |output, turn| {
+            if let ProviderOutput::SessionStarted { session_id } = output {
+                session = Some(session_id.clone());
+            }
+            if matches!(output, ProviderOutput::TurnCompleted { .. }) && !continued {
+                let request = TurnRequest {
+                    effort: Some(hoshi_core::Effort::High),
+                    ..watched_request(&cwd, "While it runs, just say HOLA.", session.clone())
+                };
+                assert!(turn.continue_with(&request));
+                continued = true;
+            }
+        },
+    );
+
+    assert!(
+        outputs.iter().any(|output| {
+            matches!(output, ProviderOutput::AssistantMessage { text, .. } if text.contains("HOLA"))
+        }),
+        "{outputs:#?}"
+    );
+    assert!(completions(&outputs) >= 3, "{outputs:#?}");
+}
+
 /// As `run_watching`, but fails once the process is not done after `limit`, as a turn that
 /// waits forever would.
 fn run_watching_within(
@@ -1343,4 +1422,136 @@ fn last_output(outputs: &[ProviderOutput]) -> Option<&ProviderOutput> {
         .iter()
         .rev()
         .find(|output| !matches!(output, ProviderOutput::ProcessEnded))
+}
+
+/// Runs one haiku turn in a scratch folder, resuming `resume` at `at` and forking it when
+/// asked, with `handoff` ahead of the prompt; its outputs once it completed.
+fn run_haiku(
+    prompt: &str,
+    resume: Option<&str>,
+    at: Option<&str>,
+    fork: bool,
+    handoff: Option<hoshi_core::ContextHandoff>,
+) -> Vec<ProviderOutput> {
+    let adapter = ClaudeCodeAdapter::new(None, Some("haiku".into()));
+    let (sender, receiver) = mpsc::channel();
+    let request = TurnRequest {
+        resume_session_at: at.map(str::to_owned),
+        fork_session: fork,
+        handoff,
+        ..watched_request(&scratch("fork"), prompt, resume.map(str::to_owned))
+    };
+    let sink = Box::new(move |output| {
+        let _ = sender.send(output);
+    });
+    let _turn = adapter.start_turn(request, sink).unwrap();
+    receiver.iter().collect()
+}
+
+fn session_of(outputs: &[ProviderOutput]) -> String {
+    outputs
+        .iter()
+        .find_map(|output| match output {
+            ProviderOutput::SessionStarted { session_id } => Some(session_id.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn cursor_of(outputs: &[ProviderOutput]) -> String {
+    outputs
+        .iter()
+        .rev()
+        .find_map(|output| match output {
+            ProviderOutput::ConversationCursor { cursor } => Some(cursor.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn answer_of(outputs: &[ProviderOutput]) -> String {
+    outputs
+        .iter()
+        .rev()
+        .find_map(|output| match output {
+            ProviderOutput::AssistantMessage { text, .. } => Some(text.to_uppercase()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_fork_sees_the_conversation_only_up_to_its_turn_and_leaves_the_source_as_it_was() {
+    let first = run_haiku(
+        "Remember the code word APPLE. Reply only OK.",
+        None,
+        None,
+        false,
+        None,
+    );
+    let source = session_of(&first);
+    let boundary = cursor_of(&first);
+    run_haiku(
+        "Also remember the code word BANANA. Reply only OK.",
+        Some(&source),
+        None,
+        false,
+        None,
+    );
+    let ask = "List every code word I asked you to remember, comma separated, nothing else.";
+
+    let forked = run_haiku(ask, Some(&source), Some(&boundary), true, None);
+    let again = run_haiku(ask, Some(&source), None, false, None);
+
+    assert_ne!(session_of(&forked), source);
+    let fork_answer = answer_of(&forked);
+    assert!(
+        fork_answer.contains("APPLE") && !fork_answer.contains("BANANA"),
+        "{forked:#?}"
+    );
+    assert_eq!(session_of(&again), source);
+    let source_answer = answer_of(&again);
+    assert!(
+        source_answer.contains("APPLE") && source_answer.contains("BANANA"),
+        "{again:#?}"
+    );
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
+fn a_context_handoff_reaches_a_new_session_ahead_of_the_message() {
+    let items = vec![hoshi_core::ThreadItem {
+        id: "m1".into(),
+        thread_id: "t".into(),
+        created_at: "2026-11-15T10:00:00Z".into(),
+        content: ItemContent::UserMessage {
+            text: "Remember the code word MANGO.".into(),
+            attachments: Vec::new(),
+            steer: false,
+            task_result: None,
+            pull_request_update: None,
+            resumed: None,
+            rewind: None,
+            dropped: false,
+        },
+    }];
+    let section = hoshi_core::history_section(
+        hoshi_core::HandoffStrategy::FullThreadSummary,
+        "t",
+        &items,
+        0..1,
+    );
+    let handoff =
+        hoshi_core::assemble_handoff(section.into_iter().collect(), Vec::new(), 16_000).unwrap();
+
+    let outputs = run_haiku(
+        "Which code word did I ask you to remember? Answer with the word only.",
+        None,
+        None,
+        false,
+        handoff,
+    );
+
+    assert!(answer_of(&outputs).contains("MANGO"), "{outputs:#?}");
 }

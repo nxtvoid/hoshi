@@ -1,34 +1,41 @@
 //! Provider adapters. Each one drives an agent CLI (Claude Code first) and
 //! translates its native protocol into provider-neutral `ProviderOutput`.
 
+mod acp;
+pub mod agent_processes;
+mod attachments;
 mod claude;
-mod claude_account;
-mod claude_commands;
-mod claude_control;
-mod claude_install;
-mod claude_login;
-mod claude_models;
-mod claude_output;
-mod claude_prompt;
-mod claude_requests;
-mod claude_resets;
-mod claude_subagents;
-mod claude_titles;
-mod claude_tool_search;
-mod claude_tools;
-mod claude_usage;
-mod claude_writing;
+mod codex;
+mod copilot;
+mod history;
+mod jsonrpc;
 mod process;
+mod titles;
 mod updater;
+mod version;
+mod writing;
 
 pub use claude::{ClaudeCodeAdapter, ClaudeParser};
+pub use codex::CodexAdapter;
+pub use codex::install::{
+    CodexAdapterFactory, CodexBinary, CodexInstall, CodexSetup, ManagedCodex,
+    latest_version as codex_latest_version,
+};
+pub use codex::login::{
+    CodexSignIn, account as codex_account, codex_home, sign_out as codex_sign_out,
+    start_sign_in as start_codex_sign_in,
+};
+pub use copilot::CopilotAdapter;
+pub use history::SessionFolder;
 use hoshi_core::{
-    AccessMode, BankedResetSpend, Effort, MessageAttachment, ProviderAccountStatus, ProviderModels,
-    ProviderOutput, RequestResponse, SlashCommand, SubagentEffort, TurnFailure, UsageLimits,
+    AccessMode, BankedResetSpend, ContextHandoff, Effort, MessageAttachment, ProviderAccountStatus,
+    ProviderModels, ProviderOutput, RequestResponse, SlashCommand, SubagentEffort, TurnFailure,
+    UsageLimits,
 };
 use std::path::{Path, PathBuf};
-pub use updater::{UpdateFailure, Updater, run as run_update};
+pub use updater::{UpdateFailure, UpdateProgress, Updater, run as run_update};
 
+#[derive(Clone)]
 pub struct TurnRequest {
     /// The thread's working directory: its worktree, or the project root.
     pub cwd: String,
@@ -40,6 +47,11 @@ pub struct TurnRequest {
     pub resume_session_id: Option<String>,
     /// Resumes the session after this message of it, leaving out the rest, as a rewind asks.
     pub resume_session_at: Option<String>,
+    /// Resumes a copy of the session under a new id, leaving the session as it is: a fork.
+    pub fork_session: bool,
+    /// Context the agent takes in before the prompt, as one that did not see part of the
+    /// thread's conversation.
+    pub handoff: Option<ContextHandoff>,
     /// Overrides the adapter's default model.
     pub model: Option<String>,
     pub effort: Option<Effort>,
@@ -55,6 +67,17 @@ pub struct TurnRequest {
     pub subagent_effort: SubagentEffort,
     /// Set on the agent's process, so everything it starts inherits them.
     pub environment: Vec<(String, String)>,
+}
+
+impl TurnRequest {
+    /// The request with its context handoff written ahead of its prompt, for a provider that
+    /// takes it inline.
+    pub fn with_inline_handoff(mut self) -> Self {
+        if let Some(handoff) = self.handoff.take() {
+            self.prompt = handoff.inline_prompt(&self.prompt);
+        }
+        self
+    }
 }
 
 /// An MCP server reached over HTTP.
@@ -163,8 +186,7 @@ pub struct Installation {
 
 impl Installation {
     pub fn update_available(&self) -> bool {
-        let version =
-            |text: &Option<String>| text.as_deref().and_then(claude_models::parse_version);
+        let version = |text: &Option<String>| text.as_deref().and_then(version::parse_version);
         matches!(
             (version(&self.installed), version(&self.latest)),
             (Some(installed), Some(latest)) if installed < latest
@@ -179,12 +201,25 @@ impl Installation {
 pub type OutputSink = Box<dyn FnMut(ProviderOutput) + Send>;
 
 pub trait ProviderAdapter: Send + Sync {
+    /// The provider's id, as threads and model choices name it.
+    fn provider(&self) -> &'static str;
+
     /// Can run the CLI, so it may take a moment.
     fn models(&self) -> ProviderModels;
+
+    /// The models known without running the CLI, such as a catalog bundled with hoshi.
+    fn offline_models(&self) -> Option<ProviderModels> {
+        None
+    }
 
     /// The plan's rolling limits; `None` when they can't be read. Can run the CLI.
     fn usage_limits(&self) -> Option<UsageLimits> {
         None
+    }
+
+    /// Whether [`ProviderAdapter::usage_limits`] can read the plan's limits at all.
+    fn reports_usage_limits(&self) -> bool {
+        false
     }
 
     /// Spends the banked reset of grant `grant_id`, which [`UsageLimits`] named. Retrying with
@@ -209,6 +244,12 @@ pub trait ProviderAdapter: Send + Sync {
         ProviderAccountStatus::Unknown
     }
 
+    /// The account name the last [`ProviderAdapter::account_status`] found signed in, for
+    /// providers that report one that way.
+    fn signed_in_as(&self) -> Option<String> {
+        None
+    }
+
     /// What a prompt can start with in `cwd`, which may add its own; `None` when
     /// they can't be read. Can run the CLI.
     fn slash_commands(&self, _cwd: &Path) -> Option<Vec<SlashCommand>> {
@@ -228,6 +269,37 @@ pub trait ProviderAdapter: Send + Sync {
 
     /// Writes a pull request's title and description. `None` when the provider can't.
     fn write_pull_request(&self, _request: &PullRequestTextRequest) -> Option<PullRequestText> {
+        None
+    }
+
+    /// The folders the CLI ran sessions in, read from the files it keeps them in.
+    fn session_folders(&self) -> Vec<SessionFolder> {
+        Vec::new()
+    }
+
+    /// Whether an idle thread over [`hoshi_core::IDLE_COMPACTION_TOKENS`] is worth compacting
+    /// with `/compact` around when its prompt cache expires, which the provider reports in
+    /// its [`hoshi_core::ContextUsage`].
+    fn compacts_idle_threads(&self) -> bool {
+        false
+    }
+
+    /// Whether [`TurnRequest::fork_session`] resumes a copy of a session at
+    /// [`TurnRequest::resume_session_at`], leaving the session itself untouched.
+    fn forks_sessions(&self) -> bool {
+        false
+    }
+
+    /// Whether the adapter reports how it delivered a turn's
+    /// [`TurnRequest::handoff`] with `ProviderOutput::ContextHandoffDelivered`; one that does
+    /// not writes it ahead of the prompt.
+    fn injects_context(&self) -> bool {
+        false
+    }
+
+    /// The context window of `model`, `None` for the default one, when known before a turn
+    /// reports it.
+    fn context_window(&self, _model: Option<&str>) -> Option<u64> {
         None
     }
 
@@ -277,6 +349,12 @@ pub trait RunningTurn: Send {
     /// Whether the process stays once its turn completed, keeping the commands the turn left
     /// running in the background.
     fn lingers(&self) -> bool {
+        false
+    }
+
+    /// The kept process has work ahead besides its background commands, such as a run the
+    /// agent scheduled, so it may stay quiet as long as they may.
+    fn awaits_work(&self) -> bool {
         false
     }
 
@@ -366,6 +444,42 @@ mod tests {
         assert_eq!(parsed["description"], "List files");
         assert_eq!(parsed["subagent_type"], "Explore");
         assert!(parsed["prompt"].as_str().unwrap().ends_with('…'));
+    }
+
+    #[test]
+    fn an_inline_handoff_goes_ahead_of_the_user_s_message() {
+        let request = TurnRequest {
+            cwd: "/repo".into(),
+            prompt: "Go on.".into(),
+            attachments: Vec::new(),
+            earlier_media: Vec::new(),
+            resume_session_id: None,
+            resume_session_at: None,
+            fork_session: false,
+            handoff: Some(ContextHandoff {
+                context: "Context handoff (full_thread_summary):".into(),
+                messages: Vec::new(),
+                omitted_items: 0,
+            }),
+            model: None,
+            effort: None,
+            fast_mode: false,
+            ultracode: false,
+            access_mode: AccessMode::default(),
+            plan_mode: false,
+            mcp: None,
+            instructions: None,
+            subagent_effort: SubagentEffort::Thread,
+            environment: Vec::new(),
+        };
+
+        let inline = request.with_inline_handoff();
+
+        assert_eq!(
+            inline.prompt,
+            "Context handoff (full_thread_summary):\n\nUser message:\nGo on."
+        );
+        assert!(inline.handoff.is_none());
     }
 
     #[test]

@@ -109,7 +109,9 @@ mod tests {
             steer: false,
             task_result: None,
             pull_request_update: None,
+            resumed: None,
             rewind: None,
+            dropped: false,
         })
     }
 
@@ -124,6 +126,7 @@ mod tests {
                 steer: false,
                 task_result: None,
                 pull_request_update: None,
+                resumed: None,
                 rewind: None,
                 text: "why is this red?".into(),
                 attachments: vec![MessageAttachment::Image {
@@ -132,6 +135,7 @@ mod tests {
                     mime_type: "image/png".into(),
                     size: 1,
                 }],
+                dropped: false,
             }),
             item(ItemContent::Reasoning {
                 text: "thinking".into(),

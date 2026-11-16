@@ -1,7 +1,7 @@
 //! Whether Claude Code defers MCP tools behind its ToolSearch tool, as the user's settings
 //! and environment set `ENABLE_TOOL_SEARCH`.
 
-use crate::claude_install;
+use super::install;
 use serde_json::Value;
 use std::path::Path;
 
@@ -54,7 +54,7 @@ pub(crate) fn effective(cwd: &Path) -> ToolSearch {
     let files = [
         Some(project.join("settings.local.json")),
         Some(project.join("settings.json")),
-        claude_install::config_dir().map(|dir| dir.join("settings.json")),
+        install::config_dir().map(|dir| dir.join("settings.json")),
     ];
     let mut sources: Vec<Option<String>> = files
         .iter()

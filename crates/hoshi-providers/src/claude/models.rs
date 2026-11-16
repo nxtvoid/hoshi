@@ -1,6 +1,7 @@
 //! Claude's model manifest: which models exist, what each one supports, and
 //! which Claude Code release each needs.
 
+use crate::version::{Version, parse_version};
 use hoshi_core::{Effort, ModelInfo, ProviderModels};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -9,8 +10,6 @@ use std::sync::OnceLock;
 const MANIFEST: &str = include_str!("claude-models.json");
 const NEW_FOR_DAYS: i64 = 7;
 pub(crate) const PROVIDER: &str = "claudeCode";
-
-pub(crate) type Version = (u32, u32, u32);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -321,26 +320,13 @@ impl Manifest {
                 .find(&self.defaults.chat)
                 .map(|model| model.slug.clone()),
             models,
+            ..ProviderModels::default()
         }
     }
 }
 
 pub(crate) fn parse_effort(id: &str) -> Option<Effort> {
     serde_json::from_value(id.into()).ok()
-}
-
-/// The first `x.y.z` in `text`, as `claude --version` prints it.
-pub(crate) fn parse_version(text: &str) -> Option<Version> {
-    text.split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .find_map(|word| {
-            let mut parts = word.split('.').map(str::parse::<u32>);
-            match (parts.next(), parts.next(), parts.next(), parts.next()) {
-                (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => {
-                    Some((major, minor, patch))
-                }
-                _ => None,
-            }
-        })
 }
 
 /// Days since the Unix epoch for a `YYYY-MM-DD` date.
@@ -474,10 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_versions_and_dates() {
-        assert_eq!(parse_version("2.1.318 (Claude Code)"), Some(V));
-        assert_eq!(parse_version("claude v10.0.1"), Some((10, 0, 1)));
-        assert_eq!(parse_version("no version"), None);
+    fn reads_dates() {
         assert_eq!(days_since_epoch("1970-01-02"), Some(1));
         assert_eq!(days_since_epoch("2026-11-07"), Some(20_764));
     }

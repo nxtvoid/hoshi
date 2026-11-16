@@ -1,6 +1,6 @@
 //! Claude's plan limits: asked of the CLI on demand, and reported by it mid-turn.
 
-use crate::claude_control;
+use super::control;
 use chrono::{DateTime, SecondsFormat, Utc};
 use hoshi_core::{UsageLimits, UsageWindow, UsageWindowKind};
 use serde_json::{Value, json};
@@ -13,7 +13,7 @@ const REQUEST_ID: &str = "hoshi-usage";
 pub(crate) fn probe(binary: &str) -> Option<UsageLimits> {
     // Without it the CLI also scans every local transcript, which grows with history.
     let request = json!({ "subtype": "get_usage", "skip_behaviors": true });
-    let usage = claude_control::ask(binary, &std::env::temp_dir(), REQUEST_ID, request)?;
+    let usage = control::ask(binary, &std::env::temp_dir(), REQUEST_ID, request)?;
     Some(usage_limits(&usage))
 }
 
@@ -94,7 +94,10 @@ fn normalize_time(text: &str) -> Option<String> {
     )
 }
 
-fn epoch_time(seconds: i64) -> Option<String> {
+pub(super) fn epoch_time(seconds: i64) -> Option<String> {
+    if seconds <= 0 {
+        return None;
+    }
     let time = DateTime::<Utc>::from_timestamp(seconds, 0)?;
     Some(time.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
@@ -104,7 +107,7 @@ mod tests {
     use super::*;
 
     fn usage_response(line: &str) -> Option<UsageLimits> {
-        claude_control::response(line, REQUEST_ID).map(|usage| usage_limits(&usage))
+        control::response(line, REQUEST_ID).map(|usage| usage_limits(&usage))
     }
 
     const GET_USAGE: &str = r#"{"type":"control_response","response":{"subtype":"success","request_id":"hoshi-usage","response":{"subscription_type":"max","rate_limits_available":true,"rate_limits":{"five_hour":{"utilization":35,"resets_at":"2026-11-08T00:50:00.093246+00:00"},"seven_day":{"utilization":16.4,"resets_at":"2026-11-12T14:00:00.093266+00:00"},"seven_day_opus":null,"model_scoped":[{"display_name":"Fable","utilization":0,"resets_at":"2026-11-12T14:00:00+00:00"}]}}}}"#;

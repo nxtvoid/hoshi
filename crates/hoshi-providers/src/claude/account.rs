@@ -1,6 +1,6 @@
 //! Whether Claude Code is signed in, read from its `initialize` answer.
 
-use crate::claude_control;
+use super::control;
 use crate::updater::find_program;
 use hoshi_core::ProviderAccountStatus;
 use serde_json::{Value, json};
@@ -16,7 +16,7 @@ pub(crate) fn probe(binary: &str) -> ProviderAccountStatus {
     }
     let request = json!({ "subtype": "initialize" });
     let temp = std::env::temp_dir();
-    match claude_control::ask_within(binary, &temp, REQUEST_ID, request, TIMEOUT) {
+    match control::ask_within(binary, &temp, REQUEST_ID, request, TIMEOUT) {
         Some(init) => account_status(&init),
         None => ProviderAccountStatus::Unknown,
     }
@@ -54,7 +54,7 @@ mod tests {
         let line = format!(
             r#"{{"type":"control_response","response":{{"subtype":"success","request_id":"hoshi-account","response":{{"commands":[],"models":[]{account}}}}}}}"#
         );
-        let init = claude_control::response(&line, REQUEST_ID).unwrap();
+        let init = control::response(&line, REQUEST_ID).unwrap();
         account_status(&init)
     }
 

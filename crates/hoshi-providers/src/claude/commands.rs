@@ -1,6 +1,6 @@
 //! The slash commands and skills Claude Code offers in a folder.
 
-use crate::claude_control;
+use super::control;
 use hoshi_core::SlashCommand;
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -11,7 +11,7 @@ const REQUEST_ID: &str = "hoshi-commands";
 /// Asks a CLI started in `cwd`, so the project's own commands and skills are included.
 pub(crate) fn probe(binary: &str, cwd: &Path) -> Option<Vec<SlashCommand>> {
     let request = json!({ "subtype": "initialize" });
-    let init = claude_control::ask(binary, cwd, REQUEST_ID, request)?;
+    let init = control::ask(binary, cwd, REQUEST_ID, request)?;
     Some(commands(&init))
 }
 
@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn initialize_lists_the_commands_without_internal_or_duplicate_ones() {
-        let init = claude_control::response(INITIALIZE, REQUEST_ID).unwrap();
+        let init = control::response(INITIALIZE, REQUEST_ID).unwrap();
 
         assert_eq!(
             commands(&init),
@@ -92,6 +92,6 @@ mod tests {
     fn an_answer_to_another_request_is_ignored() {
         let other = INITIALIZE.replace("hoshi-commands", "hoshi-usage");
 
-        assert_eq!(claude_control::response(&other, REQUEST_ID), None);
+        assert_eq!(control::response(&other, REQUEST_ID), None);
     }
 }

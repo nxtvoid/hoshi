@@ -14,6 +14,58 @@ pub struct Project {
     pub updated_at: String,
     #[serde(default)]
     pub worktree_setup: Option<WorktreeSetup>,
+    #[serde(default)]
+    pub settings: ProjectSettings,
+}
+
+/// What the project sets for itself over the app's settings; each `None` inherits them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export)]
+pub struct ProjectSettings {
+    /// Over `general.continue_after_restart`.
+    pub continue_after_restart: Option<bool>,
+}
+
+impl ProjectSettings {
+    /// Whether the project's threads a restart cut short go on by themselves, given the
+    /// app's `general.continue_after_restart`.
+    pub fn continue_after_restart(&self, global: bool) -> EffectiveSetting<bool> {
+        EffectiveSetting::resolve(self.continue_after_restart, global)
+    }
+}
+
+/// Where a setting's value comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum SettingSource {
+    Project,
+    Global,
+}
+
+/// A setting as it applies to a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct EffectiveSetting<T> {
+    pub value: T,
+    pub source: SettingSource,
+}
+
+impl<T> EffectiveSetting<T> {
+    fn resolve(project: Option<T>, global: T) -> Self {
+        match project {
+            Some(value) => Self {
+                value,
+                source: SettingSource::Project,
+            },
+            None => Self {
+                value: global,
+                source: SettingSource::Global,
+            },
+        }
+    }
 }
 
 /// How hoshi prepares every worktree it makes for the project: files the repository
@@ -131,4 +183,31 @@ pub struct RemoteRepository {
     pub web_url: String,
     pub clone_url: String,
     pub private: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_project_s_own_setting_wins_over_the_app_s() {
+        let inherits = ProjectSettings::default();
+        assert_eq!(
+            inherits.continue_after_restart(false),
+            EffectiveSetting {
+                value: false,
+                source: SettingSource::Global,
+            }
+        );
+        let overrides = ProjectSettings {
+            continue_after_restart: Some(true),
+        };
+        assert_eq!(
+            overrides.continue_after_restart(false),
+            EffectiveSetting {
+                value: true,
+                source: SettingSource::Project,
+            }
+        );
+    }
 }

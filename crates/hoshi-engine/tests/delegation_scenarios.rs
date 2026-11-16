@@ -133,6 +133,7 @@ fn record(scenario: Scenario) {
             project_id: Some("p".into()),
             title: "Parent".into(),
             workspace: ThreadWorkspace::Local,
+            provider: hoshi_core::default_provider(),
             model: None,
             effort: Some(Effort::Low),
             fast_mode: false,

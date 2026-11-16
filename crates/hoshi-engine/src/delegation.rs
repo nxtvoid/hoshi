@@ -3,12 +3,13 @@
 
 use crate::{State, WorkspaceOp, WorktreePlan, lock, now};
 use hoshi_core::{
-    Command, CommandError, Effort, ModelInfo, ThreadStatus, ThreadWorkspace, TurnOutcome,
-    record_delegation, send_task_result,
+    Command, CommandError, Effort, ModelInfo, ProviderModels, ThreadStatus, ThreadWorkspace,
+    TurnOutcome, record_delegation, send_task_result,
 };
+use hoshi_providers::ProviderAdapter;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Mutex, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 
 /// What the agent reads with every running task: its answer comes on its own.
@@ -43,9 +44,109 @@ pub(crate) fn delegate_task(
     arguments: &Value,
 ) -> Result<Value, String> {
     let shared = state.upgrade().ok_or("hoshi is closing")?;
-    let mut delegating = lock(&shared).plan_delegation(caller, arguments)?;
+    let target = lock(&shared).delegation_target(caller, arguments)?;
+    let target = Target::read(target);
+    let mut delegating = lock(&shared).plan_delegation(caller, arguments, &target)?;
     let created = delegating.worktree.as_ref().map(|(plan, _)| plan.create());
     lock(&shared).finish_delegation(caller, &mut delegating, created)
+}
+
+/// The provider a task runs on, and its models when its adapter is on.
+struct Target {
+    provider: String,
+    catalog: Option<ProviderModels>,
+}
+
+impl Target {
+    /// Can run the provider's CLI.
+    fn read((provider, adapter): (String, Option<Arc<dyn ProviderAdapter>>)) -> Self {
+        Self {
+            provider,
+            catalog: adapter.map(|adapter| adapter.models()),
+        }
+    }
+}
+
+/// What a task's thread runs on.
+#[derive(Debug, PartialEq, Eq)]
+struct ChildModel {
+    model: Option<String>,
+    effort: Option<Effort>,
+    fast_mode: bool,
+    ultracode: bool,
+}
+
+/// What a task on `target` runs on: what the call names, checked against the provider's
+/// models, or what it inherits from `parent`, which only a task on the parent's provider does.
+fn child_model(
+    parent: &hoshi_core::Thread,
+    target: &Target,
+    arguments: &Value,
+) -> Result<ChildModel, String> {
+    let provider = target.provider.as_str();
+    let same = provider == parent.provider;
+    let models = target
+        .catalog
+        .as_ref()
+        .map(|catalog| catalog.models.as_slice())
+        .unwrap_or_default();
+    let unread = format!("{provider}'s models can't be read now");
+    let model = match arguments["model"]
+        .as_str()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        Some(_) if models.is_empty() && !same => {
+            return Err(format!("{unread}: leave out `model`"));
+        }
+        Some(wanted) => Some(pick_model(models, wanted)?),
+        None if same => parent.model.clone(),
+        None => None,
+    };
+    let slug = model.as_deref().or(target
+        .catalog
+        .as_ref()
+        .and_then(|catalog| catalog.default_model.as_deref()));
+    let info = slug.and_then(|slug| models.iter().find(|model| model.slug == slug));
+    let effort = match arguments.get("effort").filter(|effort| !effort.is_null()) {
+        Some(effort) => {
+            let effort = serde_json::from_value::<Effort>(effort.clone())
+                .map_err(|_| "`effort` is one of low, medium, high, xhigh, max")?;
+            match info {
+                Some(info) if info.efforts.is_empty() => {
+                    return Err(format!("{} takes no effort: leave out `effort`", info.slug));
+                }
+                Some(info) if !info.efforts.contains(&effort) => {
+                    let efforts: Vec<_> =
+                        info.efforts.iter().map(|effort| effort.as_str()).collect();
+                    return Err(format!("{} takes effort {}", info.slug, efforts.join(", ")));
+                }
+                None if !same && models.is_empty() => {
+                    return Err(format!("{unread}: leave out `effort`"));
+                }
+                None if !same => {
+                    return Err(format!("name a `model` of {provider} with `effort`"));
+                }
+                _ => Some(effort),
+            }
+        }
+        None if same && model == parent.model => parent.effort,
+        None => info.and_then(|info| info.default_effort),
+    };
+    let (fast_mode, ultracode) = match info {
+        _ if !same => (false, false),
+        Some(info) => (
+            parent.fast_mode && info.fast_mode,
+            parent.ultracode && info.ultracode,
+        ),
+        None => (parent.fast_mode, parent.ultracode),
+    };
+    Ok(ChildModel {
+        model,
+        effort,
+        fast_mode,
+        ultracode,
+    })
 }
 
 /// How many threads deep tasks can go: a thread delegates, and its tasks can delegate once
@@ -56,7 +157,7 @@ pub(crate) const MAX_DEPTH: usize = 2;
 pub(crate) const TASK_INSTRUCTIONS: &str = "You are a delegated task: do the work yourself; delegate only what it asks. Await or stop your background commands before your last message, unless told not to.";
 
 /// When to use each of hoshi's tools; their descriptions say how.
-const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. An agent or work in the background, however the user words it: delegate_task, never Agent with run_in_background. Work in a branch or checkout of its own, as each of several variants to compare: delegate_task with isolation \"worktree\", one per branch, however small; never git worktree or a second checkout yourself. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
+const TOOLS: &str = "- Subagents: your Agent tool, run_in_background false. An agent or work in the background, however the user words it: delegate_task, never Agent with run_in_background. Another provider's agent or model (Claude, Codex, Copilot): delegate_task with provider, never Agent. Work in a branch or checkout of its own, as each of several variants to compare: delegate_task with isolation \"worktree\", one per branch, however small; never git worktree or a second checkout yourself. Then end your turn; never poll task_status, sleep, Monitor or ScheduleWakeup.\n\
 - A credential only the user has: request_secret.\n\
 - The user's other hoshi threads: thread_list, thread_read (before you answer about one), thread_send. Not ListAgents or SendMessage.";
 
@@ -221,12 +322,35 @@ impl State {
             .collect()
     }
 
-    /// The slug of the model the agent named, by slug, name or family.
-    fn model_slug(&self, wanted: &str) -> Result<String, String> {
-        match &self.adapter {
-            Some(adapter) => pick_model(&adapter.models().models, wanted),
-            None => Ok(wanted.to_owned()),
+    /// The provider a `delegate_task` call names, or the caller's, and its adapter: `None`
+    /// only for the caller's own provider while it is off.
+    fn delegation_target(
+        &self,
+        caller: &str,
+        arguments: &Value,
+    ) -> Result<(String, Option<Arc<dyn ProviderAdapter>>), String> {
+        let parent = self
+            .model
+            .thread(caller)
+            .ok_or("this thread no longer exists")?;
+        let provider = arguments["provider"]
+            .as_str()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+            .unwrap_or(&parent.provider);
+        let adapter = self.adapter_for(provider);
+        if adapter.is_none() && provider != parent.provider {
+            let enabled: Vec<_> = self
+                .adapters
+                .iter()
+                .map(|adapter| adapter.provider())
+                .collect();
+            return Err(format!(
+                "{provider} is not an enabled provider; use one of {}",
+                enabled.join(", ")
+            ));
         }
+        Ok((provider.to_owned(), adapter))
     }
 
     /// Whether the agent of thread `caller` is offered a tool only some threads have.
@@ -257,9 +381,16 @@ impl State {
             "thread_list" => self.list_threads(caller, arguments),
             "thread_read" => self.read_thread(arguments),
             "thread_send" => self.send_to_thread(caller, arguments),
+            "thread_snooze" => self.snooze_thread(caller, arguments),
             "watch_pull_request" => self.watch_pull_request(caller),
             "unwatch_pull_request" => self.unwatch_pull_request(caller),
-            crate::background::TOOL => self.await_background_tasks(caller, arguments),
+            crate::background::TOOL => {
+                let answer = self.await_background_tasks(caller, arguments);
+                if let Ok(answer) = &answer {
+                    self.note_awaited(caller, answer);
+                }
+                answer
+            }
             _ => Err(format!("hoshi has no tool named {tool}")),
         }
     }
@@ -267,14 +398,20 @@ impl State {
     /// `delegate_task` under the lock throughout; [`delegate_task`] creates a task's own
     /// worktree outside it.
     fn delegate_task(&mut self, caller: &str, arguments: &Value) -> Result<Value, String> {
-        let mut delegating = self.plan_delegation(caller, arguments)?;
+        let target = Target::read(self.delegation_target(caller, arguments)?);
+        let mut delegating = self.plan_delegation(caller, arguments, &target)?;
         let created = delegating.worktree.as_ref().map(|(plan, _)| plan.create());
         self.finish_delegation(caller, &mut delegating, created)
     }
 
     /// Checks a `delegate_task` call and settles what its task is; a task in a worktree of
     /// its own also gets where that goes, reserved.
-    fn plan_delegation(&mut self, caller: &str, arguments: &Value) -> Result<Delegating, String> {
+    fn plan_delegation(
+        &mut self,
+        caller: &str,
+        arguments: &Value,
+        target: &Target,
+    ) -> Result<Delegating, String> {
         let parent = self
             .model
             .thread(caller)
@@ -286,21 +423,12 @@ impl State {
         if self.depth(caller) >= MAX_DEPTH {
             return Err("this task is too deep to delegate further: do the work yourself".into());
         }
-        let model = match arguments["model"]
-            .as_str()
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-        {
-            Some(wanted) => Some(self.model_slug(wanted)?),
-            None => parent.model.clone(),
-        };
-        let effort = match arguments.get("effort").filter(|effort| !effort.is_null()) {
-            Some(effort) => Some(
-                serde_json::from_value::<Effort>(effort.clone())
-                    .map_err(|_| "`effort` is one of low, medium, high, xhigh, max")?,
-            ),
-            None => parent.effort,
-        };
+        let ChildModel {
+            model,
+            effort,
+            fast_mode,
+            ultracode,
+        } = child_model(&parent, target, arguments)?;
         let task = arguments["task"]
             .as_str()
             .map(str::trim)
@@ -347,10 +475,11 @@ impl State {
             project_id: parent.project_id.clone(),
             title: title.clone(),
             workspace,
+            provider: target.provider.clone(),
             model,
             effort,
-            fast_mode: parent.fast_mode,
-            ultracode: parent.ultracode,
+            fast_mode,
+            ultracode,
             access_mode: parent.access_mode,
             plan_mode: arguments["plan"].as_bool().unwrap_or(false),
         };
@@ -548,10 +677,11 @@ impl State {
         );
         self.reopen_task(&parent);
         let now = now();
-        let Ok(events) = send_task_result(&self.model, &parent, child, &new_id(), &text, &now)
+        let Ok(mut events) = send_task_result(&self.model, &parent, child, &new_id(), &text, &now)
         else {
             return;
         };
+        self.queue_if_held(&parent, &mut events);
         if let Err(error) = self.commit(&events, &now) {
             eprintln!("hoshi: failed to tell of a stopped task: {error}");
             return;
@@ -693,6 +823,7 @@ impl State {
             return;
         };
         events.extend(hoshi_core::answer_task(&self.model, child));
+        self.queue_if_held(&delegation.parent, &mut events);
         if let Err(error) = self.commit(&events, &now) {
             eprintln!("hoshi: failed to hand back a task's answer: {error}");
             return;
@@ -763,6 +894,130 @@ mod tests {
         assert!(instructions(0, true, false, true).contains("preview_open"));
         assert!(!instructions(0, true, false, false).contains("preview_"));
         assert!(instructions(0, true, false, false).contains("html_render"));
+    }
+
+    /// A thread on Claude Code's opus at high effort, in fast mode and ultracode.
+    fn parent() -> hoshi_core::Thread {
+        serde_json::from_value(json!({
+            "id": "t", "title": "", "status": "working", "watchingPullRequest": false,
+            "provider": "claudeCode", "model": "claude-opus-5-5", "effort": "high",
+            "fastMode": true, "ultracode": true, "accessMode": "fullAccess", "planMode": false,
+            "archived": false, "pinned": false, "createdAt": "", "updatedAt": "",
+        }))
+        .unwrap()
+    }
+
+    fn target(provider: &str, models: Vec<ModelInfo>) -> Target {
+        Target {
+            provider: provider.into(),
+            catalog: Some(ProviderModels {
+                provider: provider.into(),
+                default_model: models.first().map(|model| model.slug.clone()),
+                models,
+                compacts_idle_threads: false,
+            }),
+        }
+    }
+
+    fn claude() -> Target {
+        let opus = ModelInfo {
+            efforts: vec![Effort::Low, Effort::High, Effort::Max],
+            default_effort: Some(Effort::High),
+            fast_mode: true,
+            ultracode: true,
+            ..model("claude-opus-5-5", "Opus 5.5", false)
+        };
+        let haiku = ModelInfo {
+            efforts: vec![Effort::Low, Effort::Medium],
+            default_effort: Some(Effort::Medium),
+            ..model("claude-haiku-5-5", "Haiku 5.5", false)
+        };
+        target("claudeCode", vec![opus, haiku])
+    }
+
+    fn codex() -> Target {
+        let gpt = ModelInfo {
+            efforts: vec![Effort::Low, Effort::Medium, Effort::Xhigh],
+            default_effort: Some(Effort::Medium),
+            fast_mode: true,
+            ..model("gpt-5.5", "GPT-5.5", false)
+        };
+        target("codex", vec![gpt])
+    }
+
+    #[test]
+    fn a_task_inherits_only_what_its_provider_and_model_share_with_its_parent() {
+        let parent = parent();
+        let child = |target: &Target, arguments: Value| child_model(&parent, target, &arguments);
+
+        assert_eq!(
+            child(&claude(), json!({ "task": "x" })).unwrap(),
+            ChildModel {
+                model: Some("claude-opus-5-5".into()),
+                effort: Some(Effort::High),
+                fast_mode: true,
+                ultracode: true,
+            }
+        );
+        assert_eq!(
+            child(&claude(), json!({ "model": "haiku" })).unwrap(),
+            ChildModel {
+                model: Some("claude-haiku-5-5".into()),
+                effort: Some(Effort::Medium),
+                fast_mode: false,
+                ultracode: false,
+            }
+        );
+        assert_eq!(
+            child(&codex(), json!({})).unwrap(),
+            ChildModel {
+                model: None,
+                effort: Some(Effort::Medium),
+                fast_mode: false,
+                ultracode: false,
+            }
+        );
+        assert_eq!(
+            child(&codex(), json!({ "model": "GPT-5.5", "effort": "xhigh" })).unwrap(),
+            ChildModel {
+                model: Some("gpt-5.5".into()),
+                effort: Some(Effort::Xhigh),
+                fast_mode: false,
+                ultracode: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_task_names_only_models_and_efforts_its_provider_offers() {
+        let parent = parent();
+        let child = |target: &Target, arguments: Value| child_model(&parent, target, &arguments);
+
+        let missing = child(&codex(), json!({ "model": "opus" })).unwrap_err();
+        assert!(missing.contains("gpt-5.5"), "{missing}");
+        let effort = child(&codex(), json!({ "effort": "max" })).unwrap_err();
+        assert_eq!(effort, "gpt-5.5 takes effort low, medium, xhigh");
+        let effort = child(&claude(), json!({ "model": "haiku", "effort": "high" })).unwrap_err();
+        assert_eq!(effort, "claude-haiku-5-5 takes effort low, medium");
+        let unread = Target {
+            provider: "codex".into(),
+            catalog: None,
+        };
+        assert!(child(&unread, json!({ "model": "gpt-5.5" })).is_err());
+        assert!(child(&unread, json!({ "effort": "low" })).is_err());
+        let own = Target {
+            provider: "claudeCode".into(),
+            catalog: None,
+        };
+        assert_eq!(
+            child(&own, json!({ "model": "sonnet", "effort": "max" })).unwrap(),
+            ChildModel {
+                model: Some("sonnet".into()),
+                effort: Some(Effort::Max),
+                fast_mode: true,
+                ultracode: true,
+            }
+        );
     }
 
     #[test]

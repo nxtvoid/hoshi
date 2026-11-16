@@ -2,9 +2,10 @@
 //! stand for, its images, and its files.
 
 use crate::TurnAttachment;
+use crate::attachments::with_context;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use hoshi_core::{MessageAttachment, PullRequestState};
+use hoshi_core::MessageAttachment;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -133,70 +134,6 @@ fn with_slash_skills(prompt: &str, skills: &HashSet<&str>) -> (String, Option<us
     }
     text.push_str(rest);
     (text, last)
-}
-
-/// Adds a line per image, file and pull request, so the agent knows where each image and
-/// file is saved, which one an `[Image #n]` or `[File #n]` in the prompt is, and what the
-/// `#123` mentions are. Images and files are each numbered in the order they are attached.
-fn with_context(mut text: String, attachments: &[TurnAttachment]) -> String {
-    let (mut images, mut files) = (0, 0);
-    for attachment in attachments {
-        let line = match (&attachment.attachment, &attachment.path) {
-            (MessageAttachment::Image { name, .. }, path) => {
-                images += 1;
-                let Some(path) = path else { continue };
-                format!(
-                    "[Image #{images} \"{name}\" is saved at: {}]",
-                    path.display()
-                )
-            }
-            (MessageAttachment::File { name, .. }, Some(path)) => {
-                files += 1;
-                let extracted = attachment
-                    .extracted_text
-                    .as_ref()
-                    .map(|text| format!(" (text extracted to: {})", text.display()))
-                    .unwrap_or_default();
-                format!(
-                    "[File #{files} \"{name}\" is saved at: {}{extracted}]",
-                    path.display()
-                )
-            }
-            (MessageAttachment::File { name, .. }, None) => {
-                files += 1;
-                format!("[File #{files} \"{name}\" is unavailable: it could not be found]")
-            }
-            (
-                MessageAttachment::PullRequest {
-                    number,
-                    title,
-                    url,
-                    head_branch,
-                    base_branch,
-                    state,
-                },
-                _,
-            ) => format!(
-                "[Pull request #{number} \"{title}\" ({}, {head_branch} into {base_branch}): {url}]",
-                state_name(*state)
-            ),
-            _ => continue,
-        };
-        if !text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&line);
-    }
-    text
-}
-
-fn state_name(state: PullRequestState) -> &'static str {
-    match state {
-        PullRequestState::Open => "open",
-        PullRequestState::Draft => "draft",
-        PullRequestState::Merged => "merged",
-        PullRequestState::Closed => "closed",
-    }
 }
 
 /// An image too large for what the conversation has left, or unreadable, is left out;
@@ -409,6 +346,7 @@ fn count_pdf_pages(bytes: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hoshi_core::PullRequestState;
 
     fn skill(name: &str) -> TurnAttachment {
         TurnAttachment {
