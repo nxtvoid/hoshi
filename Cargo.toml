@@ -9,6 +9,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+hoshi-app = { path = "crates/hoshi-app" }
 hoshi-core = { path = "crates/hoshi-core" }
 hoshi-engine = { path = "crates/hoshi-engine" }
 hoshi-forge = { path = "crates/hoshi-forge" }
