@@ -60,7 +60,7 @@ pub use resize_handle::{ResizeDrag, ResizeHandle, ResizeSide, resized};
 pub use rich_editor::{
     BlockData, BlockKind, BlockSnapshot, CODE_LANGUAGES, ChipData, CodeLanguage, LanguageLabels,
     RichEditor, RichEditorEvent, code_language_icon, code_language_id, code_language_label,
-    fence_language, from_markdown, search_code_languages, shortcut, to_markdown,
+    fence_language, file_path_icon, from_markdown, search_code_languages, shortcut, to_markdown,
 };
 pub use section_label::SectionLabel;
 pub use select::{Select, SelectOption};

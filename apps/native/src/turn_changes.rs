@@ -531,9 +531,7 @@ fn tree_rows(
                 }
             }
             Node::File { name, file } => {
-                let (icon, color) = code_language_icon(
-                    name.rsplit_once('.').map_or("", |(_, extension)| extension),
-                );
+                let (icon, color) = file_path_icon(name);
                 let foreground = colors.foreground;
                 rows.push(
                     tree_row(format!("turn-changes-file-{}", file.path), depth, colors)

@@ -6,6 +6,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::*;
 use hoshi_core::{CommandError, DiffFile, DiffFileStatus, DiffScope, FileDiff};
 use hoshi_engine::Engine;
+use hoshi_ui::assets::file_icon;
 use hoshi_ui::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -658,6 +659,7 @@ impl ChangedFiles {
             DiffFileStatus::Deleted => colors.status_error,
             DiffFileStatus::Modified | DiffFileStatus::Renamed => colors.foreground,
         };
+        let (icon, tint) = file_path_icon(&file.path);
         let path = file.path.clone();
         let selector = format!("changed-file-{}", file.path);
         let mono = cx.theme().mono_font_family.clone();
@@ -682,7 +684,13 @@ impl ChangedFiles {
                 .flex_none()
                 .text_color(colors.muted_foreground),
             )
-            .child(Icon::new(IconName::File).size_3p5().flex_none())
+            .child(
+                svg()
+                    .path(file_icon(icon))
+                    .size_3p5()
+                    .flex_none()
+                    .text_color(tint(colors)),
+            )
             .child(
                 div()
                     .flex()

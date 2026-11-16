@@ -35,13 +35,8 @@
   "snooze_custom": "Custom…",
   "snooze_in_minutes": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "In {count} minute",
         "countPlural=*": "In {count} minutes"
@@ -50,13 +45,8 @@
   ],
   "snooze_in_hours": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "In {count} hour",
         "countPlural=*": "In {count} hours"
@@ -65,13 +55,8 @@
   ],
   "snooze_in_days": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "In {count} day",
         "countPlural=*": "In {count} days"
@@ -223,13 +208,8 @@
   "worktree_setup_files_failed": "Worktree ready, some files couldn't be copied",
   "worktree_setup_copied": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "Copied {count} file",
         "countPlural=*": "Copied {count} files"
@@ -240,13 +220,8 @@
   "worktree_setup_copy_failed": "Couldn't copy: {paths}",
   "worktree_setup_held": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} message waits for it",
         "countPlural=*": "{count} messages wait for it"
@@ -302,13 +277,8 @@
   "browser_agent_using": "Agent is using this page",
   "browser_console_errors": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} console error",
         "countPlural=*": "{count} console errors"
@@ -425,13 +395,8 @@
   "diff_scope_turn": "Turn",
   "turn_changed_files": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} changed file",
         "countPlural=*": "{count} changed files"
@@ -503,13 +468,8 @@
   "pr_update_checks_passed": "checks passed",
   "pr_update_comments": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} new comment",
         "countPlural=*": "{count} new comments"
@@ -583,13 +543,8 @@
   "pr_turn_replied": "You replied {time}",
   "pr_turn_threads": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} unresolved thread",
         "countPlural=*": "{count} unresolved threads"
@@ -598,13 +553,8 @@
   ],
   "pr_turn_tasks": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} open task",
         "countPlural=*": "{count} open tasks"
@@ -821,6 +771,8 @@
   "terminal_font_description": "Terminal output, independent from code blocks and diffs.",
   "word_wrap": "Word wrap",
   "word_wrap_description": "Wrap long lines in code blocks, diffs and file previews by default.",
+  "font_smoothing": "Font smoothing",
+  "font_smoothing_description": "Draw text in grayscale, thinner. Off, text uses subpixel color and looks sharper and heavier.",
   "separate_fonts": "Separate fonts",
   "separate_fonts_description": "Set the prompt, code and terminal fonts separately instead of one monospace font.",
   "reset_setting": "Reset {name}",
@@ -911,13 +863,8 @@
   "tool_done_web": "Browsed",
   "tool_summary_command": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "ran {count} command",
         "countPlural=*": "ran {count} commands"
@@ -926,13 +873,8 @@
   ],
   "tool_summary_edit": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "changed {count} file",
         "countPlural=*": "changed {count} files"
@@ -941,13 +883,8 @@
   ],
   "tool_summary_read": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "read {count} file",
         "countPlural=*": "read {count} files"
@@ -956,13 +893,8 @@
   ],
   "tool_summary_search": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "searched code {count} time",
         "countPlural=*": "searched code {count} times"
@@ -971,13 +903,8 @@
   ],
   "tool_summary_web": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "used the web {count} time",
         "countPlural=*": "used the web {count} times"
@@ -986,13 +913,8 @@
   ],
   "tool_summary_other": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "used {count} tool",
         "countPlural=*": "used {count} tools"
@@ -1001,13 +923,8 @@
   ],
   "tool_summary_others": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "performed {count} other action",
         "countPlural=*": "performed {count} other actions"
@@ -1064,13 +981,8 @@
   "hoshi_tool_done_browser_close": "Closed the preview page",
   "hoshi_summary_html_preview": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "previewed {count} HTML page",
         "countPlural=*": "previewed {count} HTML pages"
@@ -1079,13 +991,8 @@
   ],
   "hoshi_summary_html_render": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "rendered {count} HTML page",
         "countPlural=*": "rendered {count} HTML pages"
@@ -1094,13 +1001,8 @@
   ],
   "hoshi_summary_delegate": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "delegated {count} task",
         "countPlural=*": "delegated {count} tasks"
@@ -1109,13 +1011,8 @@
   ],
   "hoshi_summary_task_status": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "checked task status {count} time",
         "countPlural=*": "checked task status {count} times"
@@ -1124,13 +1021,8 @@
   ],
   "hoshi_summary_task_cancel": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "requested cancellation of {count} task",
         "countPlural=*": "requested cancellation of {count} tasks"
@@ -1139,13 +1031,8 @@
   ],
   "hoshi_summary_thread_list": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "listed threads {count} time",
         "countPlural=*": "listed threads {count} times"
@@ -1154,13 +1041,8 @@
   ],
   "hoshi_summary_thread_read": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "read {count} thread",
         "countPlural=*": "read {count} threads"
@@ -1169,13 +1051,8 @@
   ],
   "hoshi_summary_thread_send": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "sent {count} message",
         "countPlural=*": "sent {count} messages"
@@ -1184,13 +1061,8 @@
   ],
   "hoshi_summary_thread_wait": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "waited on {count} thread",
         "countPlural=*": "waited on {count} threads"
@@ -1199,13 +1071,8 @@
   ],
   "hoshi_summary_thread_snooze": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "snoozed {count} thread",
         "countPlural=*": "snoozed {count} threads"
@@ -1214,13 +1081,8 @@
   ],
   "hoshi_summary_open_pull_request": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "opened {count} pull request",
         "countPlural=*": "opened {count} pull requests"
@@ -1229,13 +1091,8 @@
   ],
   "hoshi_summary_watch_pull_request": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "watching {count} pull request",
         "countPlural=*": "watching {count} pull requests"
@@ -1244,13 +1101,8 @@
   ],
   "hoshi_summary_unwatch_pull_request": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "stopped watching {count} pull request",
         "countPlural=*": "stopped watching {count} pull requests"
@@ -1259,13 +1111,8 @@
   ],
   "hoshi_summary_background_wait": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "updated background waits {count} time",
         "countPlural=*": "updated background waits {count} times"
@@ -1274,13 +1121,8 @@
   ],
   "hoshi_summary_browser": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "used the browser {count} time",
         "countPlural=*": "used the browser {count} times"
@@ -1289,13 +1131,8 @@
   ],
   "tool_output_more_lines": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} more line",
         "countPlural=*": "{count} more lines"
@@ -1430,13 +1267,8 @@
   "duration_minutes": "{minutes}m",
   "duration_days": [
     {
-      "declarations": [
-        "input days",
-        "local daysPlural = days: plural"
-      ],
-      "selectors": [
-        "daysPlural"
-      ],
+      "declarations": ["input days", "local daysPlural = days: plural"],
+      "selectors": ["daysPlural"],
       "match": {
         "daysPlural=one": "{days} day",
         "daysPlural=*": "{days} days"
@@ -1521,13 +1353,8 @@
   "view_on_github": "View on GitHub",
   "app_update_changes": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} change",
         "countPlural=*": "{count} changes"
@@ -1857,13 +1684,8 @@
   "server_age_hours": "{count} hr",
   "server_age_days": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "{count} day",
         "countPlural=*": "{count} days"
@@ -1914,13 +1736,8 @@
   "onboarding_folders_add_none": "Add recent folders",
   "onboarding_folders_add": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "Add {count} recent folder",
         "countPlural=*": "Add {count} recent folders"
@@ -1936,13 +1753,8 @@
   "onboarding_start": "Start",
   "onboarding_start_adding": [
     {
-      "declarations": [
-        "input count",
-        "local countPlural = count: plural"
-      ],
-      "selectors": [
-        "countPlural"
-      ],
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
       "match": {
         "countPlural=one": "Add {count} project and start",
         "countPlural=*": "Add {count} projects and start"

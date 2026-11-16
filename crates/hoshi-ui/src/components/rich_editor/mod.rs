@@ -15,7 +15,7 @@ pub use document::{
 };
 pub use languages::{
     CODE_LANGUAGES, CodeLanguage, code_language_icon, code_language_id, code_language_label,
-    search_code_languages,
+    file_path_icon, search_code_languages,
 };
 pub use marks::{Mark, mark_shortcut};
 

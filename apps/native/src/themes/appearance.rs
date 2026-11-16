@@ -129,8 +129,9 @@ pub struct Appearance {
     pub terminal_size: u32,
     /// Wraps long lines in code blocks and diffs.
     pub word_wrap: bool,
-    /// Thinner grayscale smoothing on macOS.
+    /// Grayscale text, thinner than subpixel.
     pub font_smoothing: bool,
+    /// Not used here: GPUI draws the fonts at their own weights. Kept so the saved value stays.
     pub lighter_text: bool,
 }
 

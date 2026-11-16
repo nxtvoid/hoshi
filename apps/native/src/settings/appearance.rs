@@ -20,6 +20,7 @@ use hoshi_ui::{DiffView, parse_unified_diff, theme};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+const PREVIEW_FILE: &str = "src/formatUser.ts";
 const PREVIEW_PATCH: &str = "@@ -1,3 +1,3 @@\n export function formatUser(user: User) {\n-  return user.name.toUpperCase();\n+  return user.name.trim() || user.email; // 0O 1lI\n }";
 
 /// What the Appearance page keeps between frames.
@@ -1256,6 +1257,32 @@ impl SettingsView {
                         }),
                 ),
         );
+        let smoothing_reset =
+            (look.font_smoothing != DEFAULT_APPEARANCE.font_smoothing).then(|| {
+                reset_button(
+                    "reset-font-smoothing",
+                    m::reset_setting(m::font_smoothing()),
+                    self.look_setter(cx, |look| {
+                        look.font_smoothing = DEFAULT_APPEARANCE.font_smoothing
+                    }),
+                )
+            });
+        let this = cx.weak_entity();
+        group = group.child(
+            SettingsRow::new(m::font_smoothing())
+                .description(m::font_smoothing_description())
+                .when_some(smoothing_reset, |row, reset| row.action(reset))
+                .control(
+                    Switch::new("settings-font-smoothing")
+                        .checked(look.font_smoothing)
+                        .on_change(move |on, _, cx| {
+                            this.update(cx, |this, cx| {
+                                this.change_look(cx, |look| look.font_smoothing = on)
+                            })
+                            .ok();
+                        }),
+                ),
+        );
         let this = cx.weak_entity();
         let advanced = self.advanced_group(
             "typography",
@@ -1713,14 +1740,21 @@ fn code_preview(cx: &App) -> impl IntoElement {
                 .border_b_1()
                 .border_color(colors.border)
                 .text_xs()
-                .child(Icon::new(IconName::File).size_3p5())
+                .child({
+                    let (icon, tint) = file_path_icon(PREVIEW_FILE);
+                    svg()
+                        .path(hoshi_ui::assets::file_icon(icon))
+                        .size_3p5()
+                        .flex_none()
+                        .text_color(tint(colors))
+                })
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
                         .truncate()
                         .font_family(mono)
-                        .child("src/formatUser.ts"),
+                        .child(PREVIEW_FILE),
                 )
                 .child(div().text_color(colors.pr_open).child("+1"))
                 .child(div().text_color(colors.status_error).child("−1")),

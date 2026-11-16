@@ -61,6 +61,7 @@ pub fn init(home: Option<&Path>, window: &mut Window, cx: &mut App) {
     });
     theme::set_painter(paint, cx);
     theme::set_fonts(fonts(&cx.global::<Look>().appearance, cx), cx);
+    cx.set_text_rendering_mode(text_rendering(&cx.global::<Look>().appearance));
     theme::follow_system(window, cx);
 }
 
@@ -79,6 +80,7 @@ pub fn update(cx: &mut App, change: impl FnOnce(&mut Appearance)) {
     let saved = (look.path.clone(), look.appearance.clone());
     let fonts = fonts(&saved.1, cx);
     theme::set_fonts(fonts, cx);
+    cx.set_text_rendering_mode(text_rendering(&saved.1));
     theme::refresh(cx);
     if let (Some(path), appearance) = saved {
         cx.background_spawn(async move { save(&path, &appearance) })
@@ -172,6 +174,15 @@ fn first_installed(families: &[&str], cx: &App) -> Option<SharedString> {
         .map(|family| SharedString::from(*family))
 }
 
+/// Font smoothing draws text in grayscale, thinner than the subpixel colors it uses off.
+fn text_rendering(appearance: &Appearance) -> TextRenderingMode {
+    if appearance.font_smoothing {
+        TextRenderingMode::Grayscale
+    } else {
+        TextRenderingMode::Subpixel
+    }
+}
+
 fn fonts(appearance: &Appearance, cx: &App) -> Fonts {
     let sans = family(&appearance.interface_font, false, cx);
     let composer = appearance.separate_fonts.then(|| {
@@ -210,6 +221,32 @@ fn fonts(appearance: &Appearance, cx: &App) -> Fonts {
 mod tests {
     use super::parse;
     use crate::themes::appearance::ThemePreference;
+    use gpui_kit::{
+        AppContext as _, Bounds, EmptyView, Point, TestAppContext, TextRenderingMode, WindowBounds,
+        WindowOptions, px, size,
+    };
+
+    #[gpui_kit::test]
+    fn font_smoothing_draws_text_in_grayscale_and_subpixel_without_it(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: size(px(400.), px(300.)),
+                })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                super::init(None, window, cx);
+                cx.new(|_| EmptyView)
+            })
+            .unwrap();
+            assert_eq!(cx.text_rendering_mode(), TextRenderingMode::Grayscale);
+            super::update(cx, |look| look.font_smoothing = false);
+            assert_eq!(cx.text_rendering_mode(), TextRenderingMode::Subpixel);
+        });
+    }
 
     #[test]
     fn the_first_spike_file_keeps_its_color_scheme() {

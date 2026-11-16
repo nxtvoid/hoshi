@@ -108,9 +108,19 @@ pub fn code_language_icon(id: &str) -> (&'static str, fn(&Colors) -> Hsla) {
     }
 }
 
+/// The file-type icon of a path, by its extension, or by its whole name when it has none,
+/// as `Dockerfile`.
+pub fn file_path_icon(path: &str) -> (&'static str, fn(&Colors) -> Hsla) {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    code_language_icon(
+        name.rsplit_once('.')
+            .map_or(name, |(_, extension)| extension),
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{code_language_icon, code_language_id, search_code_languages};
+    use super::{code_language_icon, code_language_id, file_path_icon, search_code_languages};
 
     #[test]
     fn languages_are_found_by_name_id_or_alias() {
@@ -128,5 +138,14 @@ mod tests {
         assert_eq!(code_language_id("weird"), "weird");
         assert_eq!(code_language_icon("tsx").0, "react");
         assert_eq!(code_language_icon("weird").0, "default");
+    }
+
+    #[test]
+    fn a_path_shows_the_icon_of_its_extension_or_its_name() {
+        assert_eq!(file_path_icon("src/app/main.rs").0, "rust");
+        assert_eq!(file_path_icon(r"web\Button.tsx").0, "react");
+        assert_eq!(file_path_icon("deploy/Dockerfile").0, "docker");
+        assert_eq!(file_path_icon("notes.v2.md").0, "markdown");
+        assert_eq!(file_path_icon("Makefile").0, "default");
     }
 }
