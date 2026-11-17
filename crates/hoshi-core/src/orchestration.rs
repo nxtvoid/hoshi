@@ -1,8 +1,8 @@
 use crate::snooze;
 use crate::{
     AccessMode, ApprovalDecision, CompactionStatus, DiffFile, Effort, ForkOrigin, HandoffStrategy,
-    ItemContent, MessageAttachment, ModelChoice, OpenToolCall, PendingHandoff, Project,
-    ProjectSettings, ProviderOutput, ProviderSession, PullRequestUpdate, RequestResponse,
+    ItemContent, MessageAttachment, ModelChoice, ModelSwitch, OpenToolCall, PendingHandoff,
+    Project, ProjectSettings, ProviderOutput, ProviderSession, PullRequestUpdate, RequestResponse,
     RequestStatus, Resumption, Rewind, Thread, ThreadBackgroundTasks, ThreadContextUsage,
     ThreadItem, ThreadPullRequest, ThreadStatus, ThreadWorkspace, ToolDetail, TurnFailure,
     TurnOutcome, TurnPoint, TurnRetry, TurnStatus, WorktreeSetup,
@@ -263,6 +263,9 @@ pub enum Event {
         thread_id: String,
         turn_id: String,
         at: String,
+        /// What the turn runs on; `None` in events from before hoshi recorded it.
+        #[serde(default)]
+        model: Option<ModelChoice>,
     },
     SessionAttached {
         thread_id: String,
@@ -348,6 +351,9 @@ pub enum Event {
         thread_id: String,
         message_id: String,
         resume_at: Option<String>,
+        /// What the last turn left before the message ran on; `None` when no turn recorded it.
+        #[serde(default)]
+        last_turn_model: Option<ModelChoice>,
     },
     /// The user picked another provider, which the next message moves the thread to; `None`
     /// once that no longer stands.
@@ -1005,11 +1011,15 @@ impl ReadModel {
                 thread_id,
                 turn_id,
                 at,
+                model,
             } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.status = ThreadStatus::Working;
                     thread.active_turn_id = Some(turn_id.clone());
                     thread.updated_at.clone_from(at);
+                    if let Some(model) = model {
+                        thread.last_turn_model = Some(Box::new(model.clone()));
+                    }
                 }
                 self.retries.remove(thread_id);
             }
@@ -1146,6 +1156,7 @@ impl ReadModel {
             Event::ThreadRewound {
                 thread_id,
                 resume_at,
+                last_turn_model,
                 ..
             } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
@@ -1155,6 +1166,7 @@ impl ReadModel {
                     }
                     thread.conversation_cursor.clone_from(resume_at);
                     thread.resume_at.clone_from(resume_at);
+                    thread.last_turn_model = last_turn_model.clone().map(Box::new);
                 }
                 self.requests
                     .retain(|_, item| root_thread(&item.thread_id) != thread_id);
@@ -1340,6 +1352,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     pending_handoffs: Vec::new(),
                     created_at: now.to_owned(),
                     updated_at: now.to_owned(),
+                    last_turn_model: None,
                 }),
             }])
         }
@@ -1402,6 +1415,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     thread_id,
                     message_id,
                     resume_at,
+                    last_turn_model: None,
                 },
             );
             Ok(events)
@@ -1624,12 +1638,12 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
+            if thread.provider != provider && thread.active_turn_id.is_some() {
+                return Err(CommandError::ThreadBusy { thread_id });
+            }
             let has_conversation =
                 thread.session_id.is_some() || !thread.provider_sessions.is_empty();
             if thread.provider != provider && has_conversation {
-                if thread.active_turn_id.is_some() {
-                    return Err(CommandError::ThreadBusy { thread_id });
-                }
                 let choice = Some(ModelChoice {
                     provider,
                     model: thread_model,
@@ -1910,6 +1924,11 @@ fn message_events(
         Some(_) => None,
         None => rewind_point(thread, !matches!(origin, Origin::User)),
     };
+    // Only a turn the transcript opens with the user's message records what it runs on, so a
+    // change shows over that message rather than over one hoshi sent unseen.
+    let shown = matches!(origin, Origin::User) && !crate::is_compact_command(&text);
+    let runs_on = (thread.active_turn_id.is_none() && shown).then(|| runs_on(thread));
+    let model_switch = runs_on.as_ref().and_then(|to| turn_switch(thread, to));
     events.extend(switch);
     events.push(Event::ItemAdded {
         item: ThreadItem {
@@ -1931,6 +1950,7 @@ fn message_events(
                 },
                 resumed: None,
                 dropped: false,
+                model_switch,
             },
         },
     });
@@ -1940,9 +1960,43 @@ fn message_events(
             thread_id,
             turn_id: message_id,
             at: now.to_owned(),
+            model: runs_on,
         });
     }
     Ok(events)
+}
+
+/// What a turn starting now runs on: the provider the user picked for the next message, else
+/// the thread's own.
+fn runs_on(thread: &Thread) -> ModelChoice {
+    thread
+        .pending_model
+        .as_deref()
+        .filter(|to| to.provider != thread.provider)
+        .cloned()
+        .unwrap_or_else(|| ModelChoice::of(thread))
+}
+
+/// The change a turn starting now on `to` shows: none when it also moves the thread to
+/// another provider, which shows as its handoff.
+fn turn_switch(thread: &Thread, to: &ModelChoice) -> Option<Box<ModelSwitch>> {
+    if to.provider != thread.provider {
+        return None;
+    }
+    model_switch(thread.last_turn_model.as_deref()?, to)
+}
+
+/// The change from what the last turn ran on to `to`, when it stays on the same provider and
+/// changes its model or effort. A provider switch shows as its handoff instead.
+fn model_switch(from: &ModelChoice, to: &ModelChoice) -> Option<Box<ModelSwitch>> {
+    (from.provider == to.provider && (from.model != to.model || from.effort != to.effort)).then(
+        || {
+            Box::new(ModelSwitch {
+                from: from.clone(),
+                to: to.clone(),
+            })
+        },
+    )
 }
 
 /// Where a message that starts a turn lets the conversation come back to.
@@ -2065,6 +2119,7 @@ fn forked(source: &Thread, id: String, turn: TurnPoint, now: &str) -> Thread {
         last_turn_ended_at: None,
         created_at: now.to_owned(),
         updated_at: now.to_owned(),
+        last_turn_model: None,
     }
 }
 
@@ -2807,14 +2862,60 @@ pub fn record_worktree_left(
 }
 
 /// Starts a turn for a message sent while the previous turn was ending, too late to join
-/// it. Nothing when the thread is gone or busy again.
+/// it; `message` is its item, as kept. When the turn runs on another model or effort, a line
+/// saying so goes where the turn starts, since the message stays where it was sent. Nothing
+/// when the thread is gone or busy again.
 pub fn start_queued_turn(
     model: &ReadModel,
     thread_id: &str,
     message_id: &str,
+    message: Option<&ThreadItem>,
     now: &str,
 ) -> Vec<Event> {
-    let mut events = start_idle_turn(model, thread_id, message_id, now);
+    let shown = match message.map(|message| &message.content) {
+        Some(ItemContent::UserMessage {
+            text,
+            task_result,
+            pull_request_update,
+            ..
+        }) => {
+            task_result.is_none()
+                && pull_request_update.is_none()
+                && !crate::is_compact_command(text)
+        }
+        Some(_) => false,
+        None => true,
+    };
+    let mut events = queued_turn(model, thread_id, message_id, shown, now);
+    let switch = model.threads.get(thread_id).and_then(|thread| {
+        let to = shown.then(|| runs_on(thread))?;
+        turn_switch(thread, &to)
+    });
+    if let (false, Some(switch)) = (events.is_empty(), switch) {
+        let ModelSwitch { from, to } = *switch;
+        let marked = Event::ItemAdded {
+            item: ThreadItem {
+                id: format!("{message_id}:model"),
+                thread_id: thread_id.to_owned(),
+                created_at: now.to_owned(),
+                content: ItemContent::ModelSwitched { from, to },
+            },
+        };
+        events.insert(events.len() - 1, marked);
+    }
+    events
+}
+
+/// A queued message's turn, which records what it runs on when `records` says the message
+/// shows as the user's.
+fn queued_turn(
+    model: &ReadModel,
+    thread_id: &str,
+    message_id: &str,
+    records: bool,
+    now: &str,
+) -> Vec<Event> {
+    let mut events = start_idle_turn(model, thread_id, message_id, records, now);
     if !events.is_empty()
         && let Some(switch) = model
             .threads
@@ -2836,7 +2937,7 @@ pub fn start_resumed_turn(
     resumed: Resumption,
     now: &str,
 ) -> Vec<Event> {
-    let mut events = start_queued_turn(model, thread_id, turn_id, now);
+    let mut events = queued_turn(model, thread_id, turn_id, false, now);
     if events.is_empty() {
         return events;
     }
@@ -2854,6 +2955,7 @@ pub fn start_resumed_turn(
                 resumed: Some(resumed),
                 rewind: None,
                 dropped: false,
+                model_switch: None,
             },
         },
     };
@@ -2869,15 +2971,24 @@ pub fn start_woken_turn(
     turn_id: &str,
     now: &str,
 ) -> Vec<Event> {
-    start_idle_turn(model, thread_id, turn_id, now)
+    start_idle_turn(model, thread_id, turn_id, false, now)
 }
 
-fn start_idle_turn(model: &ReadModel, thread_id: &str, message_id: &str, now: &str) -> Vec<Event> {
+/// A turn of the idle thread; it records what it runs on when `records`. A woken turn does
+/// not: it goes on in the process the last turn left, on what that one ran.
+fn start_idle_turn(
+    model: &ReadModel,
+    thread_id: &str,
+    message_id: &str,
+    records: bool,
+    now: &str,
+) -> Vec<Event> {
     match model.threads.get(thread_id) {
         Some(thread) if thread.active_turn_id.is_none() => vec![Event::TurnStarted {
             thread_id: thread_id.to_owned(),
             turn_id: message_id.to_owned(),
             at: now.to_owned(),
+            model: records.then(|| runs_on(thread)),
         }],
         _ => Vec::new(),
     }
@@ -3265,7 +3376,7 @@ const a = 1
             model.thread("t").unwrap().active_turn_id.as_deref(),
             Some("m1")
         );
-        assert!(start_queued_turn(&model, "t", "m2", NOW).is_empty());
+        assert!(start_queued_turn(&model, "t", "m2", None, NOW).is_empty());
 
         record(
             &mut model,
@@ -3275,7 +3386,7 @@ const a = 1
             },
         );
         assert!(matches!(
-            start_queued_turn(&model, "t", "m2", NOW).as_slice(),
+            start_queued_turn(&model, "t", "m2", None, NOW).as_slice(),
             [Event::TurnStarted { turn_id, .. }] if turn_id == "m2"
         ));
     }
@@ -3323,6 +3434,7 @@ const a = 1
                 resumed: None,
                 rewind: Some(Rewind::Start),
                 dropped: false,
+                model_switch: None,
             }
         )));
     }
@@ -3923,6 +4035,221 @@ const a = 1
         assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
         assert_eq!(thread.session_id.as_deref(), Some("s"));
         assert!(thread.pending_handoffs.is_empty());
+    }
+
+    #[test]
+    fn another_provider_is_refused_while_a_first_turn_runs_without_a_session() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "one")).unwrap();
+
+        assert_eq!(
+            run(&mut model, switch_to_copilot()).unwrap_err(),
+            CommandError::ThreadBusy {
+                thread_id: "t".into()
+            }
+        );
+    }
+
+    fn model_switch_of(events: &[Event]) -> Option<(Option<Effort>, Option<Effort>)> {
+        events.iter().find_map(|event| match event {
+            Event::ItemAdded {
+                item:
+                    ThreadItem {
+                        content: ItemContent::UserMessage { model_switch, .. },
+                        ..
+                    },
+            } => Some(
+                model_switch
+                    .as_deref()
+                    .map(|switch| (switch.from.effort, switch.to.effort)),
+            ),
+            _ => None,
+        })?
+    }
+
+    #[test]
+    fn a_turn_on_another_effort_or_model_of_the_provider_says_what_changed() {
+        let mut model = model_with_conversation();
+        let set = |provider: &str, slug: &str, effort| Command::ThreadModelSet {
+            thread_id: "t".into(),
+            provider: provider.into(),
+            model: Some(slug.into()),
+            effort,
+            fast_mode: false,
+            ultracode: false,
+        };
+        run(
+            &mut model,
+            set(crate::DEFAULT_PROVIDER, "opus", Some(Effort::Medium)),
+        )
+        .unwrap();
+        let first = run(&mut model, send("m2", "two")).unwrap();
+        assert_eq!(model_switch_of(&first), Some((None, Some(Effort::Medium))));
+
+        let steer = run(&mut model, send("m2b", "also")).unwrap();
+        assert_eq!(model_switch_of(&steer), None);
+        finish_turn(&mut model, "m2");
+
+        let same = run(&mut model, send("m3", "three")).unwrap();
+        assert_eq!(model_switch_of(&same), None);
+        finish_turn(&mut model, "m3");
+
+        run(
+            &mut model,
+            set(crate::DEFAULT_PROVIDER, "opus", Some(Effort::High)),
+        )
+        .unwrap();
+        let higher = run(&mut model, send("m4", "four")).unwrap();
+        assert_eq!(
+            model_switch_of(&higher),
+            Some((Some(Effort::Medium), Some(Effort::High)))
+        );
+        finish_turn(&mut model, "m4");
+
+        run(&mut model, switch_to_copilot()).unwrap();
+        let other_provider = run(&mut model, send("m5", "five")).unwrap();
+        assert_eq!(model_switch_of(&other_provider), None);
+    }
+
+    #[test]
+    fn only_a_turn_the_user_s_message_opens_records_what_it_runs_on() {
+        let mut model = model_with_conversation();
+        let apply = |model: &mut ReadModel, events: &[Event]| {
+            for event in events {
+                model.apply(event);
+            }
+        };
+        let last = |model: &ReadModel| model.threads["t"].last_turn_model.clone();
+        run(
+            &mut model,
+            Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: crate::DEFAULT_PROVIDER.into(),
+                model: Some("opus".into()),
+                effort: Some(Effort::High),
+                fast_mode: false,
+                ultracode: false,
+            },
+        )
+        .unwrap();
+        let before = last(&model);
+
+        let compact = run(&mut model, send("c1", "/compact")).unwrap();
+        assert_eq!(model_switch_of(&compact), None);
+        finish_turn(&mut model, "c1");
+        let resumed = start_resumed_turn(&model, "t", "r1", "go on", Resumption::Restart, NOW);
+        apply(&mut model, &resumed);
+        assert_eq!(model_switch_of(&resumed), None);
+        finish_turn(&mut model, "r1");
+        let woken = start_woken_turn(&model, "t", "w1", NOW);
+        apply(&mut model, &woken);
+        finish_turn(&mut model, "w1");
+        assert_eq!(last(&model), before, "none of them is the user's message");
+
+        let shown = run(&mut model, send("m2", "two")).unwrap();
+        assert_eq!(model_switch_of(&shown), Some((None, Some(Effort::High))));
+        finish_turn(&mut model, "m2");
+
+        run(
+            &mut model,
+            Command::ThreadRewind {
+                thread_id: "t".into(),
+                message_id: "m2".into(),
+                rewind: rewind_of(&shown).unwrap(),
+            },
+        )
+        .unwrap();
+        assert_eq!(last(&model), None);
+        let again = run(&mut model, send("m3", "two again")).unwrap();
+        assert_eq!(model_switch_of(&again), None);
+        finish_turn(&mut model, "m3");
+
+        run(&mut model, switch_to_copilot()).unwrap();
+        let queued = start_queued_turn(&model, "t", "q1", None, NOW);
+        apply(&mut model, &queued);
+        assert_eq!(last(&model).unwrap().provider, "copilot");
+        finish_turn(&mut model, "q1");
+
+        run(
+            &mut model,
+            Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: "copilot".into(),
+                model: Some("gpt-6.1-sol".into()),
+                effort: Some(Effort::High),
+                fast_mode: false,
+                ultracode: false,
+            },
+        )
+        .unwrap();
+        let kept = ThreadItem {
+            id: "q2".into(),
+            thread_id: "t".into(),
+            created_at: NOW.into(),
+            content: ItemContent::UserMessage {
+                text: "sent late".into(),
+                attachments: Vec::new(),
+                steer: true,
+                task_result: None,
+                pull_request_update: None,
+                resumed: None,
+                rewind: None,
+                dropped: false,
+                model_switch: None,
+            },
+        };
+        let late = start_queued_turn(&model, "t", "q2", Some(&kept), NOW);
+        let marked = late.iter().find_map(|event| match event {
+            Event::ItemAdded {
+                item:
+                    ThreadItem {
+                        id,
+                        content: ItemContent::ModelSwitched { from, to },
+                        ..
+                    },
+            } => Some((id.as_str(), from.effort, to.effort)),
+            _ => None,
+        });
+        assert_eq!(marked, Some(("q2:model", None, Some(Effort::High))));
+        assert!(matches!(late.last(), Some(Event::TurnStarted { .. })));
+    }
+
+    #[test]
+    fn a_message_that_moves_provider_shows_the_handoff_alone() {
+        let mut model = model_with_conversation();
+        let set = |provider: &str, slug: &str, effort| Command::ThreadModelSet {
+            thread_id: "t".into(),
+            provider: provider.into(),
+            model: Some(slug.into()),
+            effort,
+            fast_mode: false,
+            ultracode: false,
+        };
+        run(
+            &mut model,
+            set(crate::DEFAULT_PROVIDER, "opus", Some(Effort::Medium)),
+        )
+        .unwrap();
+        run(&mut model, send("m2", "two")).unwrap();
+        finish_turn(&mut model, "m2");
+        run(&mut model, switch_to_copilot()).unwrap();
+        for event in start_resumed_turn(&model, "t", "r1", "go on", Resumption::Restart, NOW) {
+            model.apply(&event);
+        }
+        finish_turn(&mut model, "r1");
+        assert_eq!(model.threads["t"].provider, "copilot");
+
+        run(
+            &mut model,
+            set(crate::DEFAULT_PROVIDER, "opus", Some(Effort::High)),
+        )
+        .unwrap();
+        let back = run(&mut model, send("m3", "back")).unwrap();
+        assert!(
+            back.iter()
+                .any(|event| matches!(event, Event::ProviderSwitched { .. }))
+        );
+        assert_eq!(model_switch_of(&back), None);
     }
 
     #[test]

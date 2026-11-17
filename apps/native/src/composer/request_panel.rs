@@ -381,18 +381,27 @@ impl Composer {
             .find(|option| option.preview.is_some() && progress.selected.contains(&option.label))
             .and_then(|option| option.preview.clone());
 
-        let title = div()
-            .flex()
-            .gap_2()
-            .child(
-                div()
-                    .flex_none()
-                    .text_xs()
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(colors.muted_foreground)
-                    .child(question.header.clone()),
-            )
-            .child(question.question.clone());
+        let topic = match question.header.trim() {
+            "" => m::request_question_title(),
+            header => header.to_owned(),
+        };
+        let title = div().truncate().child(topic);
+        let body = div()
+            .id(SharedString::from(format!(
+                "question-body-{}-{}",
+                request.id, progress.index
+            )))
+            .debug_selector(|| "question-text".into())
+            .max_h(px(192.))
+            .overflow_y_scroll()
+            .pl_6()
+            .text_sm()
+            .text_color(colors.foreground.opacity(0.85))
+            .child(crate::markdown::markdown(
+                SharedString::from(format!("question-text-{}-{}", request.id, progress.index)),
+                question.question.clone(),
+                &colors,
+            ));
         let count = (total > 1).then(|| m::request_question_count(progress.index + 1, total));
 
         let options = question.options.iter().enumerate().map(|(index, option)| {
@@ -450,6 +459,7 @@ impl Composer {
                 count,
                 &colors,
             ))
+            .child(body)
             .when(multi, |panel| {
                 panel.child(muted_note(m::request_question_multi(), &colors))
             })

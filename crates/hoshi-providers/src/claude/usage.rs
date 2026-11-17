@@ -2,7 +2,7 @@
 
 use super::control;
 use chrono::{DateTime, SecondsFormat, Utc};
-use hoshi_core::{UsageLimits, UsageWindow, UsageWindowKind};
+use hoshi_core::{ExtraUsage, SpendUnit, UsageLimits, UsageWindow, UsageWindowKind};
 use serde_json::{Value, json};
 
 const SESSION_MINUTES: u32 = 5 * 60;
@@ -53,7 +53,76 @@ fn usage_limits(usage: &Value) -> UsageLimits {
         windows,
         banked_resets: None,
         account: None,
+        extra_usage: extra_usage(limits),
     }
+}
+
+/// What the plan spends past its limits: its spend budget when it has one, which tells the
+/// exact amounts, else its extra usage, in cents. `None` unless one is turned on.
+fn extra_usage(limits: &Value) -> Option<ExtraUsage> {
+    spend_budget(&limits["spend"]).or_else(|| extra_credits(&limits["extra_usage"]))
+}
+
+fn spend_budget(spend: &Value) -> Option<ExtraUsage> {
+    if spend["enabled"] != true {
+        return None;
+    }
+    let money = |amount: &Value| {
+        Some((
+            amount["amount_minor"].as_u64()?,
+            currency(&amount["currency"])?,
+            u8::try_from(amount["exponent"].as_u64()?).ok()?,
+        ))
+    };
+    let (used, currency, exponent) = money(&spend["used"])?;
+    let (limit, limit_currency, limit_exponent) = money(&spend["limit"])?;
+    if (&limit_currency, limit_exponent) != (&currency, exponent) || exponent > MAX_EXPONENT {
+        return None;
+    }
+    Some(ExtraUsage {
+        unit: SpendUnit::Money {
+            currency: Some(currency),
+            exponent,
+        },
+        used: Some(used),
+        limit: Some(limit),
+        balance: None,
+        unlimited: false,
+        resets_at: None,
+    })
+}
+
+fn extra_credits(extra: &Value) -> Option<ExtraUsage> {
+    if extra["is_enabled"] != true {
+        return None;
+    }
+    let amount = |value: &Value| {
+        value
+            .as_f64()
+            .filter(|amount| amount.is_finite() && *amount >= 0.0)
+            .map(|amount| amount.round() as u64)
+    };
+    Some(ExtraUsage {
+        unit: SpendUnit::Money {
+            currency: currency(&extra["currency"]),
+            exponent: 2,
+        },
+        used: Some(amount(&extra["used_credits"]).unwrap_or(0)),
+        limit: amount(&extra["monthly_limit"]),
+        balance: None,
+        unlimited: false,
+        resets_at: None,
+    })
+}
+
+const MAX_EXPONENT: u8 = 6;
+
+/// An ISO 4217 code, upper case.
+fn currency(code: &Value) -> Option<String> {
+    code.as_str()
+        .map(str::trim)
+        .filter(|code| code.len() == 3 && code.bytes().all(|byte| byte.is_ascii_alphabetic()))
+        .map(str::to_ascii_uppercase)
 }
 
 /// A `rate_limit_event`'s windows. Its utilization runs from 0 to 1.
@@ -79,6 +148,7 @@ pub(crate) fn rate_limit_event(info: &Value) -> Option<UsageLimits> {
         windows,
         banked_resets: None,
         account: None,
+        extra_usage: None,
     })
 }
 
@@ -141,6 +211,72 @@ mod tests {
                     resets_at: Some("2026-11-12T14:00:00Z".into()),
                 },
             ]
+        );
+    }
+
+    fn with_limits(extra: &str) -> Option<ExtraUsage> {
+        let line = GET_USAGE.replace(
+            r#""seven_day_opus":null"#,
+            &format!(r#""seven_day_opus":null,{extra}"#),
+        );
+        usage_response(&line).unwrap().extra_usage
+    }
+
+    fn dollars(used: u64, limit: Option<u64>, currency: Option<&str>) -> ExtraUsage {
+        ExtraUsage {
+            unit: SpendUnit::Money {
+                currency: currency.map(str::to_owned),
+                exponent: 2,
+            },
+            used: Some(used),
+            limit,
+            balance: None,
+            unlimited: false,
+            resets_at: None,
+        }
+    }
+
+    #[test]
+    fn get_usage_reads_extra_usage_only_when_it_is_on() {
+        assert_eq!(
+            with_limits(
+                r#""extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":3812.4,"utilization":38.1,"currency":"usd"}"#
+            ),
+            Some(dollars(3812, Some(10_000), Some("USD")))
+        );
+        assert_eq!(
+            with_limits(
+                r#""extra_usage":{"is_enabled":true,"monthly_limit":null,"used_credits":500,"utilization":null}"#
+            ),
+            Some(dollars(500, None, None))
+        );
+        assert_eq!(
+            with_limits(
+                r#""extra_usage":{"is_enabled":false,"monthly_limit":10000,"used_credits":0,"utilization":0}"#
+            ),
+            None
+        );
+        assert_eq!(usage_response(GET_USAGE).unwrap().extra_usage, None);
+    }
+
+    #[test]
+    fn a_spend_budget_tells_the_exact_amounts_over_extra_usage() {
+        let money = |amount: u64, currency: &str| {
+            format!(r#"{{"amount_minor":{amount},"currency":"{currency}","exponent":2}}"#)
+        };
+        let budget = |used: &str, limit: &str| {
+            format!(
+                r#""spend":{{"enabled":true,"used":{used},"limit":{limit}}},"extra_usage":{{"is_enabled":true,"monthly_limit":1,"used_credits":1}}"#
+            )
+        };
+
+        assert_eq!(
+            with_limits(&budget(&money(2_550, "EUR"), &money(20_000, "EUR"))),
+            Some(dollars(2_550, Some(20_000), Some("EUR")))
+        );
+        assert_eq!(
+            with_limits(&budget(&money(2_550, "EUR"), &money(20_000, "USD"))),
+            Some(dollars(1, Some(1), None))
         );
     }
 

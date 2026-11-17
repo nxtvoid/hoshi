@@ -21,15 +21,7 @@ pub fn context_percent(usage: &ContextUsage) -> Option<f32> {
     Some((usage.used_tokens as f32 / max as f32 * 100.).min(100.))
 }
 
-pub fn is_compact_command(text: &str) -> bool {
-    let text = text.trim();
-    text.get(..COMPACT_COMMAND.len())
-        .is_some_and(|head| head.eq_ignore_ascii_case(COMPACT_COMMAND))
-        && text[COMPACT_COMMAND.len()..]
-            .chars()
-            .next()
-            .is_none_or(char::is_whitespace)
-}
+pub use hoshi_core::is_compact_command;
 
 fn now_millis() -> u64 {
     SystemTime::now()

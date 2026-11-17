@@ -248,6 +248,7 @@ mod tests {
             pending_handoffs: Vec::new(),
             created_at: String::new(),
             updated_at: String::new(),
+            last_turn_model: None,
         }
     }
 

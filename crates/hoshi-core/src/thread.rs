@@ -83,6 +83,9 @@ pub struct Thread {
     /// Another provider the user picked, which the next message moves the thread to.
     #[serde(default)]
     pub pending_model: Option<Box<ModelChoice>>,
+    /// What its last turn ran on, which the next tells a change of model or effort against.
+    #[serde(default)]
+    pub last_turn_model: Option<Box<ModelChoice>>,
     /// The sessions of the providers it ran on before, resumed on a switch back.
     #[serde(default)]
     pub provider_sessions: Vec<ProviderSession>,
@@ -239,6 +242,14 @@ pub enum Rewind {
         #[serde(default)]
         session: Option<String>,
     },
+}
+
+/// A change of model or effort between two turns of one provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSwitch {
+    pub from: ModelChoice,
+    pub to: ModelChoice,
 }
 
 /// A provider and model a thread runs on.
@@ -470,6 +481,10 @@ pub enum ItemContent {
         /// Sent to a running turn that ended before its agent read it.
         #[serde(default)]
         dropped: bool,
+        /// The turn it started runs on another model or effort of the same provider than the
+        /// turn before.
+        #[serde(default)]
+        model_switch: Option<Box<ModelSwitch>>,
     },
     AssistantMessage {
         text: String,
@@ -589,6 +604,12 @@ pub enum ItemContent {
         delivery: HandoffDelivery,
         included_items: u32,
         omitted_items: u32,
+    },
+    /// Where a turn that runs on another model or effort of the same provider than the turn
+    /// before starts, for a message that waited for its turn.
+    ModelSwitched {
+        from: ModelChoice,
+        to: ModelChoice,
     },
     /// A plan mode turn's plan, which the agent carries out once accepted.
     ProposedPlan {

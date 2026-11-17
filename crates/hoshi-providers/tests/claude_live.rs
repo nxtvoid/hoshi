@@ -1534,6 +1534,7 @@ fn a_context_handoff_reaches_a_new_session_ahead_of_the_message() {
             resumed: None,
             rewind: None,
             dropped: false,
+            model_switch: None,
         },
     }];
     let section = hoshi_core::history_section(

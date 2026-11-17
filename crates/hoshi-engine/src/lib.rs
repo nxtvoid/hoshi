@@ -50,7 +50,9 @@ use background::Lingering;
 use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
-use hoshi_core::{BankedResetFailure, BankedResetSpend, HeldMessage, ThreadHeldMessage};
+use hoshi_core::{
+    BankedResetFailure, BankedResetSpend, HeldMessage, ModelChoice, ThreadHeldMessage,
+};
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, BrowserSettings, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, ProviderVersionUpdate, TranscriptPage,
@@ -176,9 +178,9 @@ pub struct Engine {
     slash_commands: Refreshing<Vec<SlashCommand>>,
     /// Held while a provider is asked for its limits, so one ask serves everyone waiting.
     usage_probes: Arc<UsageProbes>,
-    /// Held while a banked reset is spent: by provider, the grant and the request id a retry
-    /// reuses until the provider answers.
-    reset_spend: Mutex<HashMap<String, (String, String)>>,
+    /// Held while a banked reset is spent: by provider and grant, the request id a retry of
+    /// that grant reuses until the provider answers.
+    reset_spend: Mutex<HashMap<(String, String), String>>,
     /// Held while the provider's CLI is checked against its releases or updated.
     maintenance: Arc<Mutex<()>>,
     servers: servers::Servers,
@@ -480,6 +482,28 @@ struct ParkedTurn {
     turn_id: String,
     prompt: String,
     attachments: Vec<MessageAttachment>,
+    /// What the turn was started on, which a choice made while it waits doesn't change.
+    runs_on: RunsOn,
+}
+
+/// The model and its options a turn runs on.
+#[derive(Debug, Clone)]
+struct RunsOn {
+    model: Option<String>,
+    effort: Option<hoshi_core::Effort>,
+    fast_mode: bool,
+    ultracode: bool,
+}
+
+impl RunsOn {
+    fn of(thread: &hoshi_core::Thread) -> Self {
+        Self {
+            model: thread.model.clone(),
+            effort: thread.effort,
+            fast_mode: thread.fast_mode,
+            ultracode: thread.ultracode,
+        }
+    }
 }
 
 struct PullRequestJob {
@@ -1964,6 +1988,12 @@ impl Engine {
     /// Spends provider `provider`'s next banked reset, then reads its limits again. Reaches
     /// the network.
     pub fn spend_banked_reset_of(&self, provider: &str) -> BankedResetSpend {
+        self.spend_banked_grant(provider, None)
+    }
+
+    /// Spends a banked reset of `provider`'s grant `grant_id`, one its limits list, or its
+    /// next one when `None`; then reads its limits again. Reaches the network.
+    pub fn spend_banked_grant(&self, provider: &str, grant_id: Option<&str>) -> BankedResetSpend {
         let mut pending = self
             .reset_spend
             .lock()
@@ -1975,19 +2005,24 @@ impl Engine {
                 .get(provider)
                 .and_then(|limits| limits.banked_resets.as_ref())
                 .filter(|banked| banked.count > 0)
-                .and_then(|banked| banked.next_grant_id.clone());
+                .and_then(|banked| match grant_id {
+                    Some(id) => banked
+                        .grants
+                        .iter()
+                        .any(|grant| grant.id == id && grant.resets > 0)
+                        .then(|| id.to_owned()),
+                    None => banked.next_grant_id.clone(),
+                });
             (state.adapter_for(provider), grant)
         };
         let (Some(adapter), Some(grant)) = (adapter, grant) else {
             return BankedResetSpend::NoneLeft;
         };
-        let request_id = match pending.remove(provider) {
-            Some((pending_grant, request_id)) if pending_grant == grant => request_id,
-            _ => delegation::new_id(),
-        };
-        let spend = adapter.spend_banked_reset(&grant, &request_id);
+        let key = (provider.to_owned(), grant);
+        let request_id = pending.remove(&key).unwrap_or_else(delegation::new_id);
+        let spend = adapter.spend_banked_reset(&key.1, &request_id);
         if !spend.settled() {
-            pending.insert(provider.to_owned(), (grant, request_id));
+            pending.insert(key, request_id);
             return spend;
         }
         if matches!(spend, BankedResetSpend::Failed { .. }) {
@@ -3227,6 +3262,8 @@ impl State {
         if events.is_empty() {
             return Ok(());
         }
+        let resolved = self.with_models_named(events);
+        let events = resolved.as_deref().unwrap_or(events);
         let sequences = self.store.append(events, now).map_err(internal)?;
         for (sequence, event) in sequences.into_iter().zip(events) {
             self.model.apply(event);
@@ -3239,6 +3276,116 @@ impl State {
         self.close_lingering_after(events);
         self.recovery_after(events);
         Ok(())
+    }
+
+    /// `events` with what each turn runs on as the provider's catalog names it where it stood
+    /// for its defaults, so a change of default later doesn't rewrite what a turn ran on; a
+    /// change that turns out to be none goes. A rewind and a fork get what the turn before
+    /// their point ran on. `None` when nothing needed it.
+    fn with_models_named(&self, events: &[Event]) -> Option<Vec<Event>> {
+        let concerned = events.iter().any(|event| match event {
+            Event::TurnStarted { model, .. } => model.is_some(),
+            Event::ThreadRewound { .. } => true,
+            Event::ThreadCreated { thread } => thread.forked_from.is_some(),
+            Event::ItemAdded { item } => matches!(
+                item.content,
+                ItemContent::UserMessage {
+                    model_switch: Some(_),
+                    ..
+                } | ItemContent::ModelSwitched { .. }
+            ),
+            _ => false,
+        });
+        if !concerned {
+            return None;
+        }
+        let mut catalogs: HashMap<String, Option<ProviderModels>> = HashMap::new();
+        // What a turn ran on is kept as recorded; only what it left to the defaults is named.
+        let mut name = |choice: &mut ModelChoice, recorded: bool| {
+            let catalog = catalogs
+                .entry(choice.provider.clone())
+                .or_insert_with(|| self.known_models(&choice.provider));
+            if let Some(catalog) = catalog {
+                name_choice(choice, catalog, recorded);
+            }
+        };
+        let same = |from: &ModelChoice, to: &ModelChoice| {
+            from.model == to.model && from.effort == to.effort
+        };
+        // A fork's history before its first own turn is its source's, up to the fork's turn.
+        let before = |thread_id: &str, item_id: &str| {
+            let (mut thread_id, mut item_id) = (thread_id.to_owned(), item_id.to_owned());
+            for _ in 0..MAX_FORK_DEPTH {
+                match self.store.turn_model_before(&thread_id, &item_id) {
+                    Ok(Some(model)) => return Some(model),
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("hoshi: could not read what a turn ran on: {error}");
+                        return None;
+                    }
+                }
+                let origin = self.model.thread(&thread_id)?.forked_from.as_deref()?;
+                thread_id.clone_from(&origin.thread_id);
+                item_id.clone_from(&origin.turn.through_item_id);
+            }
+            None
+        };
+        let mut events = events.to_vec();
+        for event in &mut events {
+            match event {
+                Event::TurnStarted {
+                    model: Some(model), ..
+                } => name(model, false),
+                Event::ThreadRewound {
+                    thread_id,
+                    message_id,
+                    last_turn_model,
+                    ..
+                } => *last_turn_model = before(thread_id, message_id),
+                Event::ThreadCreated { thread } => {
+                    if let Some(origin) = &thread.forked_from {
+                        thread.last_turn_model =
+                            before(&origin.thread_id, &origin.turn.through_item_id).map(Box::new);
+                    }
+                }
+                Event::ItemAdded { item } => match &mut item.content {
+                    ItemContent::UserMessage { model_switch, .. } => {
+                        if let Some(switch) = model_switch {
+                            name(&mut switch.from, true);
+                            name(&mut switch.to, false);
+                            if same(&switch.from, &switch.to) {
+                                *model_switch = None;
+                            }
+                        }
+                    }
+                    ItemContent::ModelSwitched { from, to } => {
+                        name(from, true);
+                        name(to, false);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        events.retain(|event| {
+            !matches!(
+                event,
+                Event::ItemAdded {
+                    item: ThreadItem {
+                        content: ItemContent::ModelSwitched { from, to },
+                        ..
+                    },
+                } if same(from, to)
+            )
+        });
+        Some(events)
+    }
+
+    /// The models `provider` offers as last listed, without asking its CLI.
+    fn known_models(&self, provider: &str) -> Option<ProviderModels> {
+        let adapter = self.adapter_for(provider)?;
+        let kept = provider_cache::read(&self.provider_cache_dir, provider);
+        provider_cache::hydrate(adapter.offline_models(), kept)
     }
 
     fn receive(&mut self, thread_id: &str, turn_id: &str, output: ProviderOutput) {
@@ -3805,7 +3952,7 @@ impl State {
                     let (prompt, attachments) = started
                         .map(|message| (message.text, message.attachments))
                         .unwrap_or_default();
-                    start_turn(self, thread_id, turn_id, prompt, attachments);
+                    start_turn(self, thread_id, turn_id, prompt, attachments, None);
                 }
                 Event::ThreadCreated { thread } if thread.worktree_path.is_none() => {
                     refresh_branches(self.this.clone(), vec![thread.id.clone()]);
@@ -3888,6 +4035,7 @@ impl State {
                 &turn.turn_id,
                 turn.prompt,
                 turn.attachments,
+                Some(turn.runs_on),
             );
         }
     }
@@ -4110,7 +4258,12 @@ impl State {
     /// Starts a turn of its own for a message taken out of the idle thread's queue.
     fn start_queued(&mut self, thread_id: &str, message: QueuedMessage) {
         let now = now();
-        let events = start_queued_turn(&self.model, thread_id, &message.id, &now);
+        let kept = self
+            .store
+            .thread_item(thread_id, &message.id)
+            .ok()
+            .flatten();
+        let events = start_queued_turn(&self.model, thread_id, &message.id, kept.as_ref(), &now);
         if events.is_empty() {
             return;
         }
@@ -4124,6 +4277,7 @@ impl State {
             &message.id,
             message.text,
             message.attachments,
+            None,
         );
     }
 
@@ -5003,12 +5157,14 @@ fn slug(title: &str) -> String {
     }
 }
 
+/// Starts a turn on `runs_on`, or on what its thread is set to.
 fn start_turn(
     state: &mut State,
     thread_id: &str,
     turn_id: &str,
     prompt: String,
     attachments: Vec<MessageAttachment>,
+    runs_on: Option<RunsOn>,
 ) {
     state.idle_compactions.remove(thread_id);
     let Some(provider) = state
@@ -5035,11 +5191,16 @@ fn start_turn(
     };
     let folder = git::normalize(&cwd);
     if state.folder_ops.contains(&folder) {
+        let runs_on = runs_on.or_else(|| state.model.thread(thread_id).map(RunsOn::of));
+        let Some(runs_on) = runs_on else {
+            return;
+        };
         state.parked.entry(folder).or_default().push(ParkedTurn {
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.to_owned(),
             prompt,
             attachments,
+            runs_on,
         });
         return;
     }
@@ -5053,14 +5214,23 @@ fn start_turn(
         return;
     }
     let prompt = state.carry_cut_work(thread_id, turn_id, prompt);
-    let prepared =
-        match state.prepare_handoff(thread_id, turn_id, &prompt, &attachments, adapter.as_ref()) {
-            Ok(prepared) => prepared,
-            Err(failure) => {
-                state.receive(thread_id, turn_id, turn_failed(failure));
-                return;
-            }
-        };
+    let Some(runs_on) = runs_on.or_else(|| state.model.thread(thread_id).map(RunsOn::of)) else {
+        return;
+    };
+    let prepared = match state.prepare_handoff(
+        thread_id,
+        turn_id,
+        &prompt,
+        &attachments,
+        runs_on.model.as_deref(),
+        adapter.as_ref(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            state.receive(thread_id, turn_id, turn_failed(failure));
+            return;
+        }
+    };
     let (fork_from, context, handoff) = match prepared {
         Some(prepared) => (prepared.fork_from, prepared.context, Some(prepared.handoff)),
         None => (None, None, None),
@@ -5099,10 +5269,14 @@ fn start_turn(
         resume_session_at: thread.resume_at.clone(),
         fork_session: false,
         handoff: context,
-        model: thread.model.clone(),
-        effort: thread.effort,
-        fast_mode: thread.fast_mode,
-        ultracode: thread.ultracode,
+        effort: state
+            .known_models(&provider)
+            .map_or(runs_on.effort, |catalog| {
+                taken_effort(&catalog, runs_on.model.as_deref(), runs_on.effort)
+            }),
+        model: runs_on.model,
+        fast_mode: runs_on.fast_mode,
+        ultracode: runs_on.ultracode,
         access_mode: thread.access_mode,
         plan_mode: thread.plan_mode,
         mcp,
@@ -5398,6 +5572,48 @@ fn check_usage_limits(
     Some(limits)
 }
 
+/// `effort` when the model `catalog` runs for `model` takes it, else that model's default, as
+/// a turn's history records it.
+fn taken_effort(
+    catalog: &ProviderModels,
+    model: Option<&str>,
+    effort: Option<hoshi_core::Effort>,
+) -> Option<hoshi_core::Effort> {
+    let effort = effort?;
+    let model = model.or(catalog.default_model.as_deref());
+    match catalog
+        .models
+        .iter()
+        .find(|known| Some(known.slug.as_str()) == model)
+    {
+        Some(known) if !known.efforts.contains(&effort) => known.default_effort,
+        _ => Some(effort),
+    }
+}
+
+/// How many forks back a fork's history is followed to find what a turn ran on.
+const MAX_FORK_DEPTH: usize = 8;
+
+/// `choice` with the model and effort `catalog` runs for its defaults: the catalog's default
+/// model, and the model's default effort when it was none or, unless `recorded` as what a
+/// turn ran on, one the model doesn't take.
+fn name_choice(choice: &mut ModelChoice, catalog: &ProviderModels, recorded: bool) {
+    if choice.model.is_none() {
+        choice.model.clone_from(&catalog.default_model);
+    }
+    let Some(model) = catalog
+        .models
+        .iter()
+        .find(|model| Some(&model.slug) == choice.model.as_ref())
+    else {
+        return;
+    };
+    let taken = |effort: hoshi_core::Effort| recorded || model.efforts.contains(&effort);
+    if !choice.effort.is_some_and(taken) {
+        choice.effort = model.default_effort;
+    }
+}
+
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     hold(state)
 }
@@ -5630,6 +5846,7 @@ mod tests {
                 }],
                 banked_resets: None,
                 account: None,
+                extra_usage: None,
             })
         }
 
@@ -5661,11 +5878,20 @@ mod tests {
             Some(UsageLimits {
                 windows: Vec::new(),
                 banked_resets: Some(hoshi_core::BankedResets {
-                    count: 1,
+                    count: 2,
                     next_grant_id: Some("grant_a".into()),
                     expires_at: Vec::new(),
+                    grants: ["grant_a", "grant_b"]
+                        .map(|id| hoshi_core::BankedGrant {
+                            id: id.into(),
+                            kind: hoshi_core::ResetKind::Session,
+                            resets: 1,
+                            expires_at: None,
+                        })
+                        .into(),
                 }),
                 account: None,
+                extra_usage: None,
             })
         }
 
@@ -6045,6 +6271,95 @@ mod tests {
         assert!(spends.iter().all(|(grant, _)| grant == "grant_a"));
         assert_eq!(spends[0].1, spends[1].1);
         assert_ne!(spends[1].1, spends[2].1);
+    }
+
+    #[test]
+    fn a_turn_s_defaults_are_named_by_the_catalog() {
+        let mut catalog = catalog_of(DEFAULT_PROVIDER, &["opus", "haiku"]);
+        catalog.models[0].efforts = vec![Effort::Medium, Effort::High];
+        catalog.models[0].default_effort = Some(Effort::Medium);
+        let choice = |model: Option<&str>, effort| ModelChoice {
+            provider: DEFAULT_PROVIDER.into(),
+            model: model.map(str::to_owned),
+            effort,
+            fast_mode: false,
+            ultracode: false,
+        };
+        let named_as = |mut choice: ModelChoice, recorded| {
+            name_choice(&mut choice, &catalog, recorded);
+            (choice.model, choice.effort)
+        };
+        let named = |choice| named_as(choice, false);
+        assert_eq!(
+            taken_effort(&catalog, Some("opus"), Some(Effort::Max)),
+            Some(Effort::Medium),
+            "a turn is sent the effort its history records"
+        );
+        assert_eq!(
+            taken_effort(&catalog, None, Some(Effort::High)),
+            Some(Effort::High)
+        );
+        assert_eq!(
+            taken_effort(&catalog, Some("gone"), Some(Effort::Max)),
+            Some(Effort::Max)
+        );
+        assert_eq!(taken_effort(&catalog, Some("opus"), None), None);
+
+        assert_eq!(
+            named(choice(None, None)),
+            (Some("opus".into()), Some(Effort::Medium))
+        );
+        assert_eq!(
+            named(choice(None, Some(Effort::High))),
+            (Some("opus".into()), Some(Effort::High))
+        );
+        assert_eq!(
+            named(choice(Some("opus"), Some(Effort::Max))),
+            (Some("opus".into()), Some(Effort::Medium)),
+            "an effort the model doesn't take is its default"
+        );
+        assert_eq!(
+            named_as(choice(Some("opus"), Some(Effort::Max)), true),
+            (Some("opus".into()), Some(Effort::Max)),
+            "what a turn ran on stays as it was, though the model no longer takes it"
+        );
+        assert_eq!(
+            named_as(choice(None, None), true),
+            (Some("opus".into()), Some(Effort::Medium))
+        );
+        assert_eq!(
+            named(choice(Some("haiku"), Some(Effort::High))),
+            (Some("haiku".into()), None)
+        );
+        assert_eq!(
+            named(choice(Some("gone"), Some(Effort::High))),
+            (Some("gone".into()), Some(Effort::High)),
+            "a model the catalog doesn't list stays as it was"
+        );
+    }
+
+    #[test]
+    fn a_spend_draws_from_the_grant_the_user_picked_when_it_is_listed() {
+        let data_dir = scratch_dir("banked-grant");
+        let engine = Engine::open(&data_dir, Arc::new(|_| {})).unwrap();
+        let adapter = Arc::new(ResetAdapter {
+            answers: Mutex::new(vec![BankedResetSpend::Reset]),
+            spends: Mutex::default(),
+        });
+        engine.set_adapter(Some(adapter.clone()));
+        engine.usage_limits(true).unwrap();
+
+        assert_eq!(
+            engine.spend_banked_grant(DEFAULT_PROVIDER, Some("unknown")),
+            BankedResetSpend::NoneLeft
+        );
+        assert_eq!(
+            engine.spend_banked_grant(DEFAULT_PROVIDER, Some("grant_b")),
+            BankedResetSpend::Reset
+        );
+        let spends = adapter.spends.lock().unwrap();
+        assert_eq!(spends.len(), 1);
+        assert_eq!(spends[0].0, "grant_b");
     }
 
     #[test]
@@ -6504,6 +6819,7 @@ mod tests {
                 windows,
                 banked_resets: None,
                 account: None,
+                extra_usage: None,
             })
         };
         let mut script = completed_turn();
@@ -10361,6 +10677,55 @@ Blue"
     }
 
     #[test]
+    fn a_rewind_goes_back_to_what_the_turn_before_ran_on() {
+        let mut script = completed_turn();
+        script.insert(
+            2,
+            ProviderOutput::ConversationCursor {
+                cursor: "u-answer".into(),
+            },
+        );
+        let harness = Harness::in_memory("rewind-model", script);
+        let effort = |effort| Command::ThreadModelSet {
+            thread_id: "t".into(),
+            provider: DEFAULT_PROVIDER.into(),
+            model: Some("opus".into()),
+            effort: Some(effort),
+            fast_mode: false,
+            ultracode: false,
+        };
+        harness.engine.dispatch(effort(Effort::Medium)).unwrap();
+        harness.send("t", "m1", "one");
+        harness.wait_for_turn_end();
+        harness.engine.dispatch(effort(Effort::High)).unwrap();
+        harness.send("t", "m2", "two");
+        harness.wait_for_turn_end();
+
+        harness.engine.rewind_thread("t", "m2", false).unwrap();
+        let last = harness
+            .thread("t")
+            .last_turn_model
+            .map(|model| model.effort);
+        assert_eq!(last, Some(Some(Effort::Medium)));
+
+        harness.send("t", "m3", "two again");
+        harness.wait_for_turn_end();
+        let switch = match harness
+            .engine
+            .thread_item("t", "m3")
+            .unwrap()
+            .unwrap()
+            .content
+        {
+            ItemContent::UserMessage { model_switch, .. } => {
+                model_switch.map(|switch| (switch.from.effort, switch.to.effort))
+            }
+            _ => None,
+        };
+        assert_eq!(switch, Some((Some(Effort::Medium), Some(Effort::High))));
+    }
+
+    #[test]
     fn rewinding_drops_the_message_and_resumes_the_conversation_before_it() {
         let mut script = completed_turn();
         script.insert(
@@ -10481,10 +10846,27 @@ Blue"
         harness.send("t", "m1", "go");
         assert!(harness.adapter.requests.lock().unwrap().is_empty());
         assert_eq!(harness.thread("t").status, ThreadStatus::Working);
+        let started_on = harness.thread("t").model.clone();
+        harness
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: harness.thread("t").provider.clone(),
+                model: Some("chosen-while-waiting".into()),
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap();
 
         lock(&harness.engine.state).end_op(op, None).unwrap();
         assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
-        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+        let requests = harness.adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].model, started_on,
+            "it runs on what it started on, as its history says"
+        );
     }
 
     #[test]

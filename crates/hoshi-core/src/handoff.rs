@@ -827,6 +827,7 @@ mod tests {
                 rewind,
                 dropped: false,
                 resumed: None,
+                model_switch: None,
             },
         )
     }
@@ -895,6 +896,7 @@ mod tests {
             last_turn_ended_at: None,
             created_at: "2026-11-15T10:00:00Z".into(),
             updated_at: "2026-11-15T10:00:00Z".into(),
+            last_turn_model: None,
         }
     }
 

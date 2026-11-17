@@ -634,6 +634,7 @@ mod tests {
             pending_handoffs: Vec::new(),
             created_at: "2026-11-15T09:00:00.000Z".into(),
             updated_at: "2026-11-15T09:00:00.000Z".into(),
+            last_turn_model: None,
         }
     }
 

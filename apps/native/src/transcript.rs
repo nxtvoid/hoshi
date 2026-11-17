@@ -620,7 +620,8 @@ fn shown(item: &ThreadItem) -> bool {
         | ItemContent::ProviderRecovered { .. }
         | ItemContent::McpServerFailed { .. }
         | ItemContent::HookStopped { .. }
-        | ItemContent::BackgroundTaskEnded { .. } => true,
+        | ItemContent::BackgroundTaskEnded { .. }
+        | ItemContent::ModelSwitched { .. } => true,
         ItemContent::ContextHandoff {
             sources, delivery, ..
         } => {
@@ -927,6 +928,33 @@ fn fold_label(fold: &Fold) -> String {
     }
 }
 
+/// `message` under the line that says its turn runs on another model or effort, when it does.
+fn with_model_switch(
+    item: &ThreadItem,
+    switch: Option<&hoshi_core::ModelSwitch>,
+    colors: &Colors,
+    cx: &App,
+    message: AnyElement,
+) -> AnyElement {
+    let workspace = crate::markdown::workspace(cx);
+    let text = switch.and_then(|switch| {
+        request_rows::model_switch_text(
+            switch,
+            workspace.as_ref().map(|workspace| workspace.read(cx)),
+        )
+    });
+    match text {
+        Some(text) => div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(request_rows::model_switch_divider(item, text, colors))
+            .child(message)
+            .into_any_element(),
+        None => message,
+    }
+}
+
 fn render_item(item: &ThreadItem, ctx: &WorkContext, cx: &App) -> AnyElement {
     let colors = ctx.colors;
     match &item.content {
@@ -952,41 +980,48 @@ fn render_item(item: &ThreadItem, ctx: &WorkContext, cx: &App) -> AnyElement {
             steer,
             rewind,
             dropped,
+            model_switch,
             ..
-        } => crate::user_message::user_message(
-            &item.id,
-            text,
-            attachments,
-            *steer,
-            &item.created_at,
-            rewind.as_ref().filter(|_| !ctx.read_only).map(|_| {
-                crate::rewind::rewind_button(
-                    crate::rewind::RewindTarget {
-                        thread_id: item.thread_id.clone(),
-                        message_id: item.id.clone(),
-                        text: text.clone(),
-                        attachments: attachments.clone(),
-                    },
-                    ctx.working,
-                    ctx.thread.engine.clone(),
-                    ctx.view.clone(),
-                    colors,
-                )
-            }),
-            (*dropped && !ctx.read_only).then(|| {
-                let view = ctx.view.clone();
-                let draft = crate::rewind::message_draft(text, attachments);
-                crate::user_message::not_sent_note(
-                    &item.id,
-                    move |cx| {
-                        let draft = draft.clone();
-                        view.update(cx, |_, cx| cx.emit(crate::rewind::Rewound(draft)))
-                            .ok();
-                    },
-                    cx,
-                )
-            }),
+        } => with_model_switch(
+            item,
+            model_switch.as_deref(),
+            colors,
             cx,
+            crate::user_message::user_message(
+                &item.id,
+                text,
+                attachments,
+                *steer,
+                &item.created_at,
+                rewind.as_ref().filter(|_| !ctx.read_only).map(|_| {
+                    crate::rewind::rewind_button(
+                        crate::rewind::RewindTarget {
+                            thread_id: item.thread_id.clone(),
+                            message_id: item.id.clone(),
+                            text: text.clone(),
+                            attachments: attachments.clone(),
+                        },
+                        ctx.working,
+                        ctx.thread.engine.clone(),
+                        ctx.view.clone(),
+                        colors,
+                    )
+                }),
+                (*dropped && !ctx.read_only).then(|| {
+                    let view = ctx.view.clone();
+                    let draft = crate::rewind::message_draft(text, attachments);
+                    crate::user_message::not_sent_note(
+                        &item.id,
+                        move |cx| {
+                            let draft = draft.clone();
+                            view.update(cx, |_, cx| cx.emit(crate::rewind::Rewound(draft)))
+                                .ok();
+                        },
+                        cx,
+                    )
+                }),
+                cx,
+            ),
         ),
         ItemContent::TaskList { tasks } => crate::task_list::task_list_row(
             &item.id,
@@ -1071,6 +1106,20 @@ fn render_item(item: &ThreadItem, ctx: &WorkContext, cx: &App) -> AnyElement {
         ItemContent::ContextHandoff {
             sources, delivery, ..
         } => request_rows::context_handoff(item, sources, *delivery, colors, cx),
+        ItemContent::ModelSwitched { from, to } => {
+            let workspace = crate::markdown::workspace(cx);
+            let switch = hoshi_core::ModelSwitch {
+                from: from.clone(),
+                to: to.clone(),
+            };
+            match request_rows::model_switch_text(
+                &switch,
+                workspace.as_ref().map(|workspace| workspace.read(cx)),
+            ) {
+                Some(text) => request_rows::model_switch_divider(item, text, colors),
+                None => div().into_any_element(),
+            }
+        }
         ItemContent::BackgroundTaskEnded {
             tool_call_id,
             failed,
@@ -1498,6 +1547,7 @@ mod tests {
                 resumed: None,
                 rewind: None,
                 dropped: false,
+                model_switch: None,
             },
         }
     }
@@ -1514,6 +1564,7 @@ mod tests {
                 resumed: None,
                 rewind: None,
                 dropped: false,
+                model_switch: None,
             },
             ..user("u1", "2026-11-12T10:00:00Z")
         };

@@ -6,14 +6,15 @@ use gpui_kit::{
     WindowOptions, px, size,
 };
 use hoshi_core::{
-    BankedResets, DEFAULT_PROVIDER, ProviderAccountStatus, UsageLimits, UsageWindow,
-    UsageWindowKind,
+    BankedGrant, BankedResets, DEFAULT_PROVIDER, ExtraUsage, ProviderAccountStatus, ResetKind,
+    SpendUnit, UsageLimits, UsageWindow, UsageWindowKind,
 };
 use std::sync::Arc;
 
 struct Harness {
     cx: VisualTestContext,
     workspace: Entity<Workspace>,
+    view: Entity<UsageView>,
 }
 
 fn harness(cx: &mut TestAppContext, name: &str) -> Harness {
@@ -28,6 +29,8 @@ fn harness(cx: &mut TestAppContext, name: &str) -> Harness {
         hoshi_ui::theme::apply(ThemeMode::Light, cx);
     });
     let workspace = cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)));
+    let opened = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = opened.clone();
     let window = cx.update(|cx| {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -38,14 +41,21 @@ fn harness(cx: &mut TestAppContext, name: &str) -> Harness {
         };
         let workspace = workspace.clone();
         gpui_kit::open_window(options, cx, move |_, cx| {
-            cx.new(|cx| UsageView::new(workspace, cx))
+            let view = cx.new(|cx| UsageView::new(workspace, cx));
+            *slot.borrow_mut() = Some(view.clone());
+            view
         })
         .unwrap()
         .0
     });
     let mut cx = VisualTestContext::from_window(window, cx);
     redraw(&mut cx);
-    Harness { cx, workspace }
+    let view = opened.borrow_mut().take().unwrap();
+    Harness {
+        cx,
+        workspace,
+        view,
+    }
 }
 
 fn redraw(cx: &mut VisualTestContext) {
@@ -74,6 +84,7 @@ fn limits(windows: Vec<UsageWindow>) -> UsageLimits {
         windows,
         banked_resets: None,
         account: None,
+        extra_usage: None,
     }
 }
 
@@ -100,6 +111,7 @@ fn each_provider_has_its_own_rows_and_a_used_up_window_stays(cx: &mut TestAppCon
                 count: 2,
                 next_grant_id: Some("grant".into()),
                 expires_at: Vec::new(),
+                grants: Vec::new(),
             }),
             ..limits(vec![
                 window(UsageWindowKind::Session, None, 95),
@@ -185,4 +197,73 @@ fn with_every_provider_off_the_page_points_to_settings(cx: &mut TestAppContext) 
     redraw(&mut h.cx);
     assert!(shows(&mut h, "usage-no-providers"));
     assert!(!shows(&mut h, "usage-not-reported-copilot"));
+}
+
+fn grant(id: &str, kind: ResetKind) -> BankedGrant {
+    BankedGrant {
+        id: id.into(),
+        kind,
+        resets: 1,
+        expires_at: None,
+    }
+}
+
+#[gpui_kit::test]
+fn a_session_card_lists_each_banked_grant_to_pick_from(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "usage-grants");
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        let claude = UsageLimits {
+            banked_resets: Some(BankedResets {
+                count: 2,
+                next_grant_id: Some("session".into()),
+                expires_at: Vec::new(),
+                grants: vec![
+                    grant("session", ResetKind::Session),
+                    grant("full", ResetKind::Full),
+                ],
+            }),
+            ..limits(vec![window(UsageWindowKind::Session, None, 100)])
+        };
+        workspace
+            .providers
+            .usage_limits
+            .insert(CLAUDE.into(), claude);
+        cx.notify();
+    });
+    h.view.update(&mut h.cx, |view, cx| {
+        view.card = Some((CLAUDE, 0));
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(shows(&mut h, "usage-grant-claudeCode-0"));
+    assert!(shows(&mut h, "usage-grant-claudeCode-1"));
+}
+
+#[gpui_kit::test]
+fn extra_usage_is_one_more_row_under_the_windows(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "usage-extra");
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        let claude = UsageLimits {
+            extra_usage: Some(ExtraUsage {
+                unit: SpendUnit::Money {
+                    currency: Some("USD".into()),
+                    exponent: 2,
+                },
+                used: Some(3_800),
+                limit: Some(10_000),
+                balance: None,
+                unlimited: false,
+                resets_at: None,
+            }),
+            ..limits(vec![window(UsageWindowKind::Session, None, 20)])
+        };
+        let codex = limits(vec![window(UsageWindowKind::Session, None, 20)]);
+        let known = &mut workspace.providers.usage_limits;
+        known.insert(CLAUDE.into(), claude);
+        known.insert(CODEX.into(), codex);
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(shows(&mut h, "usage-extra-claudeCode"));
+    assert!(!shows(&mut h, "usage-extra-codex"));
 }

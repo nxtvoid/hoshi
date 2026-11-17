@@ -2,7 +2,7 @@
 
 use super::login::{access_token, config_dir, organization_id};
 use chrono::{DateTime, SecondsFormat, Utc};
-use hoshi_core::{BankedResetFailure, BankedResetSpend, BankedResets};
+use hoshi_core::{BankedGrant, BankedResetFailure, BankedResetSpend, BankedResets, ResetKind};
 use serde_json::{Value, json};
 use std::time::Duration;
 
@@ -155,13 +155,75 @@ fn banked_resets(block: &Value, now: DateTime<Utc>) -> Option<BankedResets> {
         count: usable.iter().map(|grant| grant.resets).sum(),
         next_grant_id: Some(next.to_owned()),
         expires_at,
+        grants: by_kind(&usable, next),
     })
+}
+
+/// One entry per kind of reset left, as Claude Code groups them, spending the next grant when
+/// it is of that kind, else the one that expires first.
+fn by_kind(usable: &[Grant<'_>], next: &str) -> Vec<BankedGrant> {
+    [
+        ResetKind::Session,
+        ResetKind::Weekly,
+        ResetKind::Fable,
+        ResetKind::Full,
+    ]
+    .into_iter()
+    .filter_map(|kind| {
+        let mut grants: Vec<_> = usable
+            .iter()
+            .filter(|grant| grant.kind == kind && grant.resets > 0)
+            .collect();
+        grants.sort_by_key(|grant| {
+            (
+                grant.id != next,
+                grant.expires_at.is_none(),
+                grant.expires_at.clone(),
+            )
+        });
+        let target = grants.first()?;
+        Some(BankedGrant {
+            id: target.id.to_owned(),
+            kind,
+            resets: grants.iter().map(|grant| grant.resets).sum(),
+            expires_at: target.expires_at.clone(),
+        })
+    })
+    .collect()
 }
 
 struct Grant<'a> {
     id: &'a str,
+    kind: ResetKind,
     resets: u32,
     expires_at: Option<String>,
+}
+
+/// What a grant refills: a Fable reset when it gives back weekly usage, else its declared
+/// type, else what it clears.
+fn reset_kind(grant: &Value) -> ResetKind {
+    if grant["gives_back_weekly"] == true {
+        return ResetKind::Fable;
+    }
+    match grant["type"].as_str() {
+        Some("session") => return ResetKind::Session,
+        Some("weekly") => return ResetKind::Weekly,
+        Some("full") => return ResetKind::Full,
+        _ => {}
+    }
+    let clears: Vec<&str> = grant["clears"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let session = clears.contains(&"five_hour");
+    let other = clears.iter().any(|limit| *limit != "five_hour");
+    match (session, other) {
+        (true, false) => ResetKind::Session,
+        (false, true) => ResetKind::Weekly,
+        _ => ResetKind::Full,
+    }
 }
 
 fn usable_grant(grant: &Value, now: DateTime<Utc>) -> Option<Grant<'_>> {
@@ -177,6 +239,7 @@ fn usable_grant(grant: &Value, now: DateTime<Utc>) -> Option<Grant<'_>> {
     };
     Some(Grant {
         id,
+        kind: reset_kind(grant),
         resets,
         expires_at,
     })
@@ -292,7 +355,60 @@ mod tests {
                 count: 3,
                 next_grant_id: Some("grant_a".into()),
                 expires_at: vec!["2026-10-01T00:00:00Z".into(), "2026-11-30T22:00:00Z".into()],
+                grants: vec![BankedGrant {
+                    id: "grant_a".into(),
+                    kind: ResetKind::Full,
+                    resets: 3,
+                    expires_at: Some("2026-10-01T00:00:00Z".into()),
+                }],
             })
+        );
+    }
+
+    #[test]
+    fn groups_grants_by_what_they_refill_spending_the_next_one_of_each_kind() {
+        let block = json!({
+            "eligible": true,
+            "next_grant_id": "fable_late",
+            "grants": [
+                grant(json!({ "id": "full", "type": "full", "ends_at": "2026-10-01T00:00:00Z" })),
+                grant(json!({
+                    "id": "fable_soon",
+                    "type": "full",
+                    "gives_back_weekly": true,
+                    "ends_at": "2026-10-01T00:00:00Z",
+                })),
+                grant(json!({
+                    "id": "fable_late",
+                    "gives_back_weekly": true,
+                    "ends_at": "2026-12-01T00:00:00Z",
+                })),
+                grant(json!({ "id": "session", "clears": ["five_hour"] })),
+                grant(json!({ "id": "weekly", "clears": ["seven_day"] })),
+                grant(json!({ "id": "spent", "type": "session", "resets_left": 0 })),
+            ],
+        });
+
+        let banked = banked_resets(&block, now()).unwrap();
+        let kinds: Vec<_> = banked
+            .grants
+            .iter()
+            .map(|grant| (grant.kind, grant.id.as_str(), grant.resets))
+            .collect();
+
+        assert_eq!(
+            kinds,
+            [
+                (ResetKind::Session, "session", 1),
+                (ResetKind::Weekly, "weekly", 1),
+                (ResetKind::Fable, "fable_late", 2),
+                (ResetKind::Full, "full", 1),
+            ]
+        );
+        assert_eq!(banked.count, 5);
+        assert_eq!(
+            banked.grants[2].expires_at.as_deref(),
+            Some("2026-12-01T00:00:00Z")
         );
     }
 

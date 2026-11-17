@@ -112,6 +112,7 @@ mod tests {
             resumed: None,
             rewind: None,
             dropped: false,
+            model_switch: None,
         })
     }
 
@@ -136,6 +137,7 @@ mod tests {
                     size: 1,
                 }],
                 dropped: false,
+                model_switch: None,
             }),
             item(ItemContent::Reasoning {
                 text: "thinking".into(),
