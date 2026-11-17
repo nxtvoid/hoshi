@@ -53,6 +53,7 @@ pub fn subagent_items(
             resumed: None,
             rewind: None,
             dropped: false,
+            model_switch: None,
         },
     };
     let mut shown = vec![asked];

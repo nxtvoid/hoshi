@@ -420,6 +420,7 @@ mod tests {
                 resumed: None,
                 rewind: None,
                 dropped: false,
+                model_switch: None,
             },
         )
     }

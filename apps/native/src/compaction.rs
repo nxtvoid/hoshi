@@ -9,15 +9,7 @@ use hoshi_ui::assets::IconName;
 use hoshi_ui::prelude::Colors;
 use std::time::Duration;
 
-/// A message that only asks to compact, which the divider stands for.
-pub fn is_compact_command(text: &str) -> bool {
-    let text = text.trim();
-    let Some(prefix) = text.get(..8) else {
-        return false;
-    };
-    prefix.eq_ignore_ascii_case("/compact")
-        && text[8..].chars().next().is_none_or(char::is_whitespace)
-}
+pub use hoshi_core::is_compact_command;
 
 pub fn compaction_label(
     status: CompactionStatus,

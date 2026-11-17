@@ -1879,6 +1879,7 @@ mod ui_tests {
                 thread_id: "t".into(),
                 turn_id: "turn".into(),
                 at: "2026-11-16T10:00:00Z".into(),
+                model: None,
             });
             cx.notify();
         });
@@ -1898,6 +1899,7 @@ mod ui_tests {
                 thread_id: "t".into(),
                 turn_id: "turn".into(),
                 at: "2026-11-16T10:00:00Z".into(),
+                model: None,
             });
             workspace.mark_stopping("t", cx);
         });
@@ -1996,6 +1998,7 @@ mod ui_tests {
                 thread_id: "t".into(),
                 turn_id: "turn".into(),
                 at: "2026-11-15T10:00:00Z".into(),
+                model: None,
             });
             cx.notify();
         });

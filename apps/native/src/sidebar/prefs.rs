@@ -243,6 +243,7 @@ pub(super) fn sample_thread(id: &str) -> hoshi_core::Thread {
         pending_handoffs: Vec::new(),
         created_at: "2026-11-13T10:00:00Z".into(),
         updated_at: "2026-11-13T10:00:00Z".into(),
+        last_turn_model: None,
     }
 }
 

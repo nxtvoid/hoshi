@@ -250,6 +250,7 @@ mod tests {
             pending_handoffs: Vec::new(),
             created_at: "2026-11-08T10:00:00Z".into(),
             updated_at: "2026-11-08T10:00:00Z".into(),
+            last_turn_model: None,
         }
     }
 
@@ -405,6 +406,7 @@ mod tests {
                 resumed: None,
                 rewind: None,
                 dropped: false,
+                model_switch: None,
             },
             ..answer("r1")
         };

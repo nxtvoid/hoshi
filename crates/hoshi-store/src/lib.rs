@@ -255,6 +255,9 @@ const MIGRATIONS: &[&str] = &[
         cleanup_json TEXT NOT NULL
     );
     ",
+    r"
+    ALTER TABLE threads ADD COLUMN last_turn_model TEXT;
+    ",
 ];
 
 const JOURNAL_SIZE_LIMIT: i64 = 8 * 1024 * 1024;
@@ -465,7 +468,8 @@ impl Store {
                         conversation_cursor, resume_at, watching_pull_request, provider,
                         snoozed_until, snoozed_at, last_snooze_wake_at, last_visited_at,
                         last_turn_ended_at,
-                        forked_from, pending_model, provider_sessions, pending_handoffs
+                        forked_from, pending_model, provider_sessions, pending_handoffs,
+                        last_turn_model
                  FROM threads ORDER BY created_at, id",
             )?
             .query_map([], |row| {
@@ -506,6 +510,7 @@ impl Store {
                     pending_model: optional_json_document_column(row, 33)?,
                     provider_sessions: optional_json_document_column(row, 34)?.unwrap_or_default(),
                     pending_handoffs: optional_json_document_column(row, 35)?.unwrap_or_default(),
+                    last_turn_model: optional_json_document_column(row, 36)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1069,10 +1074,10 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                   conversation_cursor, resume_at, watching_pull_request, provider,
                   snoozed_until, snoozed_at, last_snooze_wake_at, last_visited_at,
                   last_turn_ended_at, forked_from, pending_model, provider_sessions,
-                  pending_handoffs)
+                  pending_handoffs, last_turn_model)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                          ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
-                         ?31, ?32, ?33, ?34, ?35, ?36)",
+                         ?31, ?32, ?33, ?34, ?35, ?36, ?37)",
                 params![
                     thread.id,
                     thread.project_id,
@@ -1109,7 +1114,8 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                     optional_json(thread.forked_from.as_ref())?,
                     optional_json(thread.pending_model.as_ref())?,
                     list_json(&thread.provider_sessions)?,
-                    list_json(&thread.pending_handoffs)?
+                    list_json(&thread.pending_handoffs)?,
+                    optional_json(thread.last_turn_model.as_ref())?
                 ],
             )?;
         }
@@ -1252,11 +1258,19 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
             thread_id,
             turn_id,
             at,
+            model,
         } => {
             execute(
                 tx,
-                "UPDATE threads SET status = ?2, active_turn_id = ?3, updated_at = ?4 WHERE id = ?1",
-                params![thread_id, enum_text(ThreadStatus::Working)?, turn_id, at],
+                "UPDATE threads SET status = ?2, active_turn_id = ?3, updated_at = ?4,
+                 last_turn_model = COALESCE(?5, last_turn_model) WHERE id = ?1",
+                params![
+                    thread_id,
+                    enum_text(ThreadStatus::Working)?,
+                    turn_id,
+                    at,
+                    optional_json(model.as_ref())?
+                ],
             )?;
         }
         Event::SessionAttached {
@@ -1363,6 +1377,20 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 )?;
             }
         }
+        Event::MessageModelSwitched {
+            thread_id,
+            message_id,
+            model_switch,
+        } => {
+            execute(
+                tx,
+                "UPDATE thread_items
+                 SET content_json = json_set(content_json, '$.modelSwitch', json(?3))
+                 WHERE thread_id = ?1 AND id = ?2
+                   AND json_extract(content_json, '$.kind') = 'userMessage'",
+                params![thread_id, message_id, serde_json::to_string(model_switch)?],
+            )?;
+        }
         Event::TurnRetrying { .. } => {}
         Event::ThreadDelegated {
             thread_id,
@@ -1431,7 +1459,8 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 tx,
                 "UPDATE threads SET conversation_cursor = ?2, resume_at = ?2,
                  session_id = CASE WHEN ?2 IS NULL THEN NULL ELSE session_id END,
-                 provider_sessions = CASE WHEN ?2 IS NULL THEN NULL ELSE provider_sessions END
+                 provider_sessions = CASE WHEN ?2 IS NULL THEN NULL ELSE provider_sessions END,
+                 last_turn_model = NULL
                  WHERE id = ?1",
                 params![thread_id, resume_at],
             )?;
@@ -1771,6 +1800,7 @@ mod tests {
                 pending_handoffs: Vec::new(),
                 created_at: NOW.into(),
                 updated_at: NOW.into(),
+                last_turn_model: None,
             }),
         }
     }
@@ -2741,6 +2771,7 @@ mod tests {
                 resumed: None,
                 rewind: None,
                 dropped: false,
+                model_switch: None,
             },
         )
     }
@@ -2756,6 +2787,47 @@ mod tests {
                 error: None,
             },
         )
+    }
+
+    #[test]
+    fn a_queued_message_keeps_the_model_switch_its_turn_started_with() {
+        let mut store = Store::open_in_memory().unwrap();
+        store
+            .append(
+                &[message_with("t", "m1", Vec::new()), answer("t", "a")],
+                NOW,
+            )
+            .unwrap();
+        let choice = |effort| hoshi_core::ModelChoice {
+            provider: "claudeCode".into(),
+            model: Some("opus".into()),
+            effort: Some(effort),
+            fast_mode: false,
+            ultracode: false,
+        };
+        let switch = hoshi_core::ModelSwitch {
+            from: choice(hoshi_core::Effort::Medium),
+            to: choice(hoshi_core::Effort::High),
+        };
+        let marked = |message_id: &str| Event::MessageModelSwitched {
+            thread_id: "t".into(),
+            message_id: message_id.into(),
+            model_switch: Box::new(switch.clone()),
+        };
+
+        store.append(&[marked("m1"), marked("a")], NOW).unwrap();
+
+        let switches: Vec<_> = store
+            .thread_items("t")
+            .unwrap()
+            .into_iter()
+            .map(|item| match item.content {
+                ItemContent::UserMessage { model_switch, .. } => model_switch.map(|kept| *kept),
+                ItemContent::AssistantMessage { .. } => None,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(switches, [Some(switch), None]);
     }
 
     #[test]

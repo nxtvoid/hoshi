@@ -35,7 +35,9 @@ pub use handoff::{
     HistoricalRole, MergeBackSummary, TranscriptTurn, assemble_handoff, handoff_token_cap,
     history_section, item_text, transcript_turns, turn_point,
 };
-pub use idle_compaction::{IDLE_COMPACTION_LEAD_MS, compaction_before_expiry, compacts_on_return};
+pub use idle_compaction::{
+    IDLE_COMPACTION_LEAD_MS, compaction_before_expiry, compacts_on_return, is_compact_command,
+};
 pub use model::{DEFAULT_PROVIDER, ModelInfo, ProviderModels, default_provider};
 pub use orchestration::{
     Command, CommandError, Event, EventEnvelope, HeldMessage, MessageSender, ProjectBranch,
@@ -88,10 +90,10 @@ pub use terminal::{TerminalAttach, TerminalEvent, TerminalExit};
 pub use theme_import::{ExtensionTheme, ThemeExtension, ThemeExtensionSort};
 pub use thread::{
     AccessMode, BackgroundTask, CompactionStatus, Effort, ForkOrigin, ForkPoint, HandoffDelivery,
-    HandoffSource, HandoffStrategy, ItemContent, ModelChoice, OpenToolCall, PendingHandoff,
-    ProviderSession, Resumption, Rewind, Task, TaskStatus, Thread, ThreadBackgroundTasks,
-    ThreadItem, ThreadStatus, ThreadWorkspace, ToolDetail, TranscriptPage, TurnFailure,
-    TurnOutcome, TurnPoint, TurnRetry, TurnStatus,
+    HandoffSource, HandoffStrategy, ItemContent, ModelChoice, ModelSwitch, OpenToolCall,
+    PendingHandoff, ProviderSession, Resumption, Rewind, Task, TaskStatus, Thread,
+    ThreadBackgroundTasks, ThreadItem, ThreadStatus, ThreadWorkspace, ToolDetail, TranscriptPage,
+    TurnFailure, TurnOutcome, TurnPoint, TurnRetry, TurnStatus,
 };
 pub use usage::{
     BankedGrant, BankedResetFailure, BankedResetSpend, BankedResets, ContextUsage, ExtraUsage,

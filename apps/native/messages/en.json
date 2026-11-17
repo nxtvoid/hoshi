@@ -1594,6 +1594,7 @@
   "request_waiting": "Waiting for your answer",
   "request_approval_placeholder": "Tell Claude what to do instead, then send to decline",
   "request_question_title": "Question",
+  "model_switch": "{from} → {to}",
   "request_question_count": "{current} of {total}",
   "request_question_next": "Next",
   "request_question_back": "Back",

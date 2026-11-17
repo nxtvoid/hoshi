@@ -5,6 +5,19 @@ use std::ops::Range;
 /// to resume and send the compaction while the history is still cached.
 pub const IDLE_COMPACTION_LEAD_MS: u64 = 2 * 60 * 1000;
 
+const COMPACT_COMMAND: &str = "/compact";
+
+/// Whether `text` is the `/compact` command, which hoshi sends without showing it.
+pub fn is_compact_command(text: &str) -> bool {
+    let text = text.trim();
+    text.get(..COMPACT_COMMAND.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(COMPACT_COMMAND))
+        && text[COMPACT_COMMAND.len()..]
+            .chars()
+            .next()
+            .is_none_or(char::is_whitespace)
+}
+
 /// Whether the next message to an idle thread compacts its conversation first, under `mode`:
 /// the context is large and its prompt cache ran out, so the message would pay to read all
 /// of it again. `now` is in Unix milliseconds.

@@ -30,6 +30,7 @@ fn user(id: &str, text: &str, task_result: Option<&str>) -> ThreadItem {
             resumed: None,
             rewind: Some(Rewind::Start),
             dropped: false,
+            model_switch: None,
         },
     )
 }
@@ -230,6 +231,7 @@ fn a_pull_request_update_is_one_line_that_opens_to_what_the_agent_was_told(
             resumed: None,
             rewind: Some(Rewind::Start),
             dropped: false,
+            model_switch: None,
         },
     );
     let (mut cx, view) = open(cx, vec![update, answer("a1")], false);
@@ -453,6 +455,7 @@ fn dropped_steer(id: &str, text: &str) -> ThreadItem {
             resumed: None,
             rewind: None,
             dropped: true,
+            model_switch: None,
         },
     )
 }
@@ -521,6 +524,47 @@ fn a_failed_sign_in_offers_to_sign_in_again_while_it_is_the_latest(cx: &mut Test
     redraw(&mut cx);
     assert!(shows(&mut cx, "turn-failed-f1"));
     assert!(!shows(&mut cx, "sign-in-f1"));
+}
+
+#[gpui_kit::test]
+fn a_turn_on_another_effort_reads_as_a_divider_over_its_message(cx: &mut TestAppContext) {
+    use hoshi_core::{Effort, ModelChoice, ModelSwitch};
+    let choice = |effort| ModelChoice {
+        provider: "claudeCode".into(),
+        model: Some("claude-opus-5-5".into()),
+        effort: Some(effort),
+        fast_mode: false,
+        ultracode: false,
+    };
+    let switched = |id: &str, from, to| {
+        let mut message = user(id, id, None);
+        if let ItemContent::UserMessage { model_switch, .. } = &mut message.content {
+            *model_switch = Some(Box::new(ModelSwitch {
+                from: choice(from),
+                to: choice(to),
+            }));
+        }
+        message
+    };
+    let (mut cx, _) = open(
+        cx,
+        vec![
+            switched("u1", Effort::Medium, Effort::High),
+            answer("a1"),
+            switched("u2", Effort::High, Effort::High),
+        ],
+        false,
+    );
+    assert!(shows(&mut cx, "model-switch-u1"));
+    assert!(!shows(&mut cx, "model-switch-u2"));
+    let text = crate::request_rows::model_switch_text(
+        &ModelSwitch {
+            from: choice(Effort::Medium),
+            to: choice(Effort::High),
+        },
+        None,
+    );
+    assert_eq!(text.as_deref(), Some("Medium → High"));
 }
 
 #[gpui_kit::test]
@@ -664,6 +708,7 @@ fn a_turn_hoshi_resumed_opens_with_a_notice_and_a_recovered_provider_leaves_one(
             resumed: Some(hoshi_core::Resumption::Restart),
             rewind: None,
             dropped: false,
+            model_switch: None,
         },
     );
     let items = vec![

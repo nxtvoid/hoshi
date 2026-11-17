@@ -8,8 +8,8 @@ use chrono::{DateTime, Local, TimeZone};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::*;
 use hoshi_core::{
-    ApprovalDecision, Command, HandoffDelivery, HandoffSource, ItemContent, RequestStatus,
-    Resumption, ThreadItem, TurnFailure,
+    ApprovalDecision, Command, HandoffDelivery, HandoffSource, ItemContent, ModelChoice,
+    ModelSwitch, RequestStatus, Resumption, ThreadItem, TurnFailure,
 };
 use hoshi_ui::prelude::*;
 use std::collections::HashMap;
@@ -606,6 +606,66 @@ pub fn context_handoff(
                 .child(Icon::new(icon).size_3p5().flex_none())
                 .child(div().min_w_0().truncate().child(text)),
         )
+        .child(rule())
+        .into_any_element()
+}
+
+/// What a change of model or effort between two turns says, as `Opus 5.5 → Sonnet 5.5` or
+/// `Medium → High`: only what changed once each side's defaults are known from `workspace`'s
+/// catalogs, or as recorded without them. `None` when nothing did.
+pub fn model_switch_text(
+    switch: &ModelSwitch,
+    workspace: Option<&crate::state::Workspace>,
+) -> Option<String> {
+    let resolve = |choice: &ModelChoice| {
+        let model = workspace.and_then(|workspace| {
+            workspace.chosen_model(&choice.provider, choice.model.as_deref())
+        });
+        let slug = model
+            .map(|model| model.slug.clone())
+            .or_else(|| choice.model.clone());
+        let name = model
+            .map(|model| model.short_name.clone())
+            .or_else(|| choice.model.clone())
+            .unwrap_or_else(|| provider_name(&choice.provider));
+        let effort = match model {
+            Some(_) => crate::composer::effective_effort(model, choice.effort),
+            None => choice.effort,
+        };
+        (slug, name, effort)
+    };
+    let (from, to) = (resolve(&switch.from), resolve(&switch.to));
+    let model_changed = from.0 != to.0;
+    let effort_changed = from.2.is_some() && to.2.is_some() && from.2 != to.2;
+    if !model_changed && !effort_changed {
+        return None;
+    }
+    let side = |(_, name, effort): &(Option<String>, String, Option<hoshi_core::Effort>)| {
+        let effort = effort
+            .filter(|_| effort_changed)
+            .map(crate::composer::effort_label);
+        [model_changed.then(|| name.clone()), effort]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    Some(m::model_switch(side(&from), side(&to)))
+}
+
+/// A line across the transcript over the message whose turn changed model or effort.
+pub fn model_switch_divider(item: &ThreadItem, text: String, colors: &Colors) -> AnyElement {
+    let rule = || div().h_px().flex_1().bg(colors.border);
+    let selector = format!("model-switch-{}", item.id);
+    div()
+        .debug_selector(move || selector.clone())
+        .flex()
+        .items_center()
+        .gap_3()
+        .text_xs()
+        .text_color(colors.muted_foreground)
+        .child(rule())
+        .child(div().min_w_0().truncate().child(text))
         .child(rule())
         .into_any_element()
 }

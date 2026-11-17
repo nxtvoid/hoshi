@@ -560,6 +560,7 @@ mod tests {
                 resumed: None,
                 rewind: None,
                 dropped: false,
+                model_switch: None,
             },
         )
     }
@@ -827,6 +828,7 @@ mod ui_tests {
                 resumed: None,
                 rewind: Some(Rewind::Start),
                 dropped: false,
+                model_switch: None,
             },
         }
     }

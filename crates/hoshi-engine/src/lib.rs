@@ -50,7 +50,9 @@ use background::Lingering;
 use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
-use hoshi_core::{BankedResetFailure, BankedResetSpend, HeldMessage, ThreadHeldMessage};
+use hoshi_core::{
+    BankedResetFailure, BankedResetSpend, HeldMessage, ModelChoice, ModelSwitch, ThreadHeldMessage,
+};
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, BrowserSettings, GitActionProgress, ProviderUpdate,
     ProviderUpdateFailure, ProviderVersion, ProviderVersionUpdate, TranscriptPage,
@@ -3240,6 +3242,8 @@ impl State {
         if events.is_empty() {
             return Ok(());
         }
+        let resolved = self.with_models_named(events);
+        let events = resolved.as_deref().unwrap_or(events);
         let sequences = self.store.append(events, now).map_err(internal)?;
         for (sequence, event) in sequences.into_iter().zip(events) {
             self.model.apply(event);
@@ -3252,6 +3256,80 @@ impl State {
         self.close_lingering_after(events);
         self.recovery_after(events);
         Ok(())
+    }
+
+    /// `events` with each turn's model and effort as the provider's catalog names them where
+    /// they stood for its defaults, so a change of default later doesn't rewrite what a turn
+    /// ran on; a change that turns out to be none goes. `None` when nothing needed it.
+    fn with_models_named(&self, events: &[Event]) -> Option<Vec<Event>> {
+        let named = |events: &[Event]| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::TurnStarted { model: Some(_), .. } | Event::MessageModelSwitched { .. }
+                ) || matches!(
+                    event,
+                    Event::ItemAdded {
+                        item: ThreadItem {
+                            content: ItemContent::UserMessage {
+                                model_switch: Some(_),
+                                ..
+                            },
+                            ..
+                        },
+                    }
+                )
+            })
+        };
+        if !named(events) {
+            return None;
+        }
+        let mut catalogs: HashMap<String, Option<ProviderModels>> = HashMap::new();
+        let mut name = |choice: &mut ModelChoice| {
+            let catalog = catalogs.entry(choice.provider.clone()).or_insert_with(|| {
+                let adapter = self.adapter_for(&choice.provider)?;
+                let kept = provider_cache::read(&self.provider_cache_dir, &choice.provider);
+                provider_cache::hydrate(adapter.offline_models(), kept)
+            });
+            if let Some(catalog) = catalog {
+                name_choice(choice, catalog);
+            }
+        };
+        let same = |switch: &ModelSwitch| {
+            switch.from.model == switch.to.model && switch.from.effort == switch.to.effort
+        };
+        let mut events = events.to_vec();
+        for event in &mut events {
+            match event {
+                Event::MessageModelSwitched { model_switch, .. } => {
+                    name(&mut model_switch.from);
+                    name(&mut model_switch.to);
+                }
+                Event::TurnStarted {
+                    model: Some(model), ..
+                } => name(model),
+                Event::ItemAdded {
+                    item:
+                        ThreadItem {
+                            content: ItemContent::UserMessage { model_switch, .. },
+                            ..
+                        },
+                } => {
+                    if let Some(switch) = model_switch {
+                        name(&mut switch.from);
+                        name(&mut switch.to);
+                        if same(switch) {
+                            *model_switch = None;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        events.retain(|event| {
+            !matches!(event, Event::MessageModelSwitched { model_switch, .. } if same(model_switch))
+        });
+        Some(events)
     }
 
     fn receive(&mut self, thread_id: &str, turn_id: &str, output: ProviderOutput) {
@@ -4123,7 +4201,12 @@ impl State {
     /// Starts a turn of its own for a message taken out of the idle thread's queue.
     fn start_queued(&mut self, thread_id: &str, message: QueuedMessage) {
         let now = now();
-        let events = start_queued_turn(&self.model, thread_id, &message.id, &now);
+        let kept = self
+            .store
+            .thread_item(thread_id, &message.id)
+            .ok()
+            .flatten();
+        let events = start_queued_turn(&self.model, thread_id, &message.id, kept.as_ref(), &now);
         if events.is_empty() {
             return;
         }
@@ -5411,6 +5494,27 @@ fn check_usage_limits(
     Some(limits)
 }
 
+/// `choice` with the model and effort `catalog` runs for its defaults: the catalog's default
+/// model, and the model's default effort when it was none or one the model doesn't take.
+fn name_choice(choice: &mut ModelChoice, catalog: &ProviderModels) {
+    if choice.model.is_none() {
+        choice.model.clone_from(&catalog.default_model);
+    }
+    let Some(model) = catalog
+        .models
+        .iter()
+        .find(|model| Some(&model.slug) == choice.model.as_ref())
+    else {
+        return;
+    };
+    if !choice
+        .effort
+        .is_some_and(|effort| model.efforts.contains(&effort))
+    {
+        choice.effort = model.default_effort;
+    }
+}
+
 fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
     hold(state)
 }
@@ -6068,6 +6172,47 @@ mod tests {
         assert!(spends.iter().all(|(grant, _)| grant == "grant_a"));
         assert_eq!(spends[0].1, spends[1].1);
         assert_ne!(spends[1].1, spends[2].1);
+    }
+
+    #[test]
+    fn a_turn_s_defaults_are_named_by_the_catalog() {
+        let mut catalog = catalog_of(DEFAULT_PROVIDER, &["opus", "haiku"]);
+        catalog.models[0].efforts = vec![Effort::Medium, Effort::High];
+        catalog.models[0].default_effort = Some(Effort::Medium);
+        let choice = |model: Option<&str>, effort| ModelChoice {
+            provider: DEFAULT_PROVIDER.into(),
+            model: model.map(str::to_owned),
+            effort,
+            fast_mode: false,
+            ultracode: false,
+        };
+        let named = |mut choice: ModelChoice| {
+            name_choice(&mut choice, &catalog);
+            (choice.model, choice.effort)
+        };
+
+        assert_eq!(
+            named(choice(None, None)),
+            (Some("opus".into()), Some(Effort::Medium))
+        );
+        assert_eq!(
+            named(choice(None, Some(Effort::High))),
+            (Some("opus".into()), Some(Effort::High))
+        );
+        assert_eq!(
+            named(choice(Some("opus"), Some(Effort::Max))),
+            (Some("opus".into()), Some(Effort::Medium)),
+            "an effort the model doesn't take is its default"
+        );
+        assert_eq!(
+            named(choice(Some("haiku"), Some(Effort::High))),
+            (Some("haiku".into()), None)
+        );
+        assert_eq!(
+            named(choice(Some("gone"), Some(Effort::High))),
+            (Some("gone".into()), Some(Effort::High)),
+            "a model the catalog doesn't list stays as it was"
+        );
     }
 
     #[test]
