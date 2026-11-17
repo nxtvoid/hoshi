@@ -138,6 +138,7 @@ impl DiffView {
 
 /// A patch's lines: plain at first, then with their syntax.
 struct HighlightedPatch {
+    path: SharedString,
     patch: SharedString,
     lines: Rc<Vec<DiffLine>>,
     _task: Task<()>,
@@ -147,11 +148,12 @@ impl HighlightedPatch {
     fn new(path: SharedString, patch: SharedString, cx: &mut Context<Self>) -> Self {
         let lines = Rc::new(parse_unified_diff(&patch));
         let text = patch.clone();
+        let read_path = path.clone();
         let task = cx.spawn(async move |this, cx| {
             let lines = cx
                 .background_spawn(async move {
                     let mut lines = parse_unified_diff(&text);
-                    highlight_diff(&path, &mut lines);
+                    highlight_diff(&read_path, &mut lines);
                     lines
                 })
                 .await;
@@ -162,6 +164,7 @@ impl HighlightedPatch {
             .ok();
         });
         Self {
+            path,
             patch,
             lines,
             _task: task,
@@ -183,7 +186,11 @@ impl RenderOnce for DiffView {
                 let state = window.use_keyed_state(key, cx, |_, cx| {
                     HighlightedPatch::new(path.clone(), patch.clone(), cx)
                 });
-                if state.read(cx).patch != patch {
+                let stale = {
+                    let current = state.read(cx);
+                    current.path != path || current.patch != patch
+                };
+                if stale {
                     state.update(cx, |state, cx| {
                         *state = HighlightedPatch::new(path, patch, cx)
                     });

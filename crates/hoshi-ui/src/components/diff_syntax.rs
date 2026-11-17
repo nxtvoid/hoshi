@@ -55,6 +55,8 @@ fn syntax_for(path: &str) -> Option<&'static SyntaxReference> {
 struct Side {
     parser: ParseState,
     scopes: ScopeStack,
+    /// Past a line too long to read, the parser's state is unknown: the side stays plain.
+    lost: bool,
 }
 
 impl Side {
@@ -62,12 +64,16 @@ impl Side {
         Self {
             parser: ParseState::new(syntax),
             scopes: ScopeStack::new(),
+            lost: false,
         }
     }
 
     fn line(&mut self, text: &str, names: &mut HashMap<Scope, Option<&'static str>>) -> LineSyntax {
         let mut spans = LineSyntax::new();
         if text.len() > MAX_LINE_BYTES {
+            self.lost = true;
+        }
+        if self.lost {
             return spans;
         }
         let line = format!("{text}\n");
@@ -78,6 +84,7 @@ impl Side {
         for (index, operation) in operations {
             push(
                 &mut spans,
+                text,
                 cursor..index.min(text.len()),
                 &self.scopes,
                 names,
@@ -85,13 +92,37 @@ impl Side {
             let _ = self.scopes.apply(&operation);
             cursor = index;
         }
-        push(&mut spans, cursor..text.len(), &self.scopes, names);
+        push(&mut spans, text, cursor..text.len(), &self.scopes, names);
         spans
     }
 }
 
+/// What a bare `storage.type` scope names: the grammar uses it for both `int` and `let`.
+const STORAGE_TYPE: &str = "storage.type";
+
+const DECLARATIONS: [&str; 13] = [
+    "class",
+    "enum",
+    "function",
+    "impl",
+    "interface",
+    "module",
+    "namespace",
+    "struct",
+    "trait",
+    "type",
+    "let",
+    "var",
+    "const",
+];
+
+fn declares(word: &str) -> bool {
+    DECLARATIONS.contains(&word)
+}
+
 fn push(
     spans: &mut LineSyntax,
+    text: &str,
     range: Range<usize>,
     scopes: &ScopeStack,
     names: &mut HashMap<Scope, Option<&'static str>>,
@@ -104,8 +135,11 @@ fn push(
         .iter()
         .rev()
         .find_map(|scope| *names.entry(*scope).or_insert_with(|| semantic_name(*scope)));
-    let Some(name) = name else {
-        return;
+    let name = match name {
+        None => return,
+        Some(STORAGE_TYPE) if declares(text.get(range.clone()).unwrap_or_default()) => "keyword",
+        Some(STORAGE_TYPE) => "type",
+        Some(name) => name,
     };
     match spans.last_mut() {
         Some((last, last_name)) if last.end == range.start && *last_name == name => {
@@ -155,28 +189,11 @@ fn semantic_name(scope: Scope) -> Option<&'static str> {
         "preproc"
     } else if is("keyword") || is("storage.modifier") {
         "keyword"
-    } else if is("storage.type") {
-        if [
-            "class",
-            "enum",
-            "function",
-            "impl",
-            "interface",
-            "module",
-            "namespace",
-            "struct",
-            "trait",
-            "type",
-            "let",
-            "var",
-            "const",
-        ]
-        .iter()
-        .any(|word| scope.contains(word))
-        {
+    } else if is(STORAGE_TYPE) {
+        if scope[STORAGE_TYPE.len()..].split('.').any(declares) {
             "keyword"
         } else {
-            "type"
+            STORAGE_TYPE
         }
     } else if is("entity.name.function")
         || is("support.function")
@@ -274,6 +291,28 @@ mod tests {
         );
         let removed = named(&lines[4].text, &lines[4].syntax);
         assert!(removed.contains(&("let", "keyword")), "{removed:?}");
+    }
+
+    #[test]
+    fn a_side_stays_plain_after_a_line_too_long_to_read() {
+        let long = format!("x */ {}", "a".repeat(super::MAX_LINE_BYTES));
+        let mut lines =
+            parse_unified_diff(&format!("@@ -1,3 +1,3 @@\n /* open\n {long}\n let y = 2;"));
+        highlight_diff("src/main.rs", &mut lines);
+
+        assert!(lines[2].syntax.is_empty());
+        assert!(lines[3].syntax.is_empty());
+    }
+
+    #[test]
+    fn a_storage_type_names_a_type_unless_it_declares() {
+        let mut lines = parse_unified_diff("@@ -1 +1 @@\n-int count = 1;\n+let count = 1;");
+        highlight_diff("src/count.c", &mut lines);
+        let removed = named(&lines[1].text, &lines[1].syntax);
+        assert!(removed.contains(&("int", "type")), "{removed:?}");
+
+        let scope = syntect::parsing::Scope::new("storage.type.function.rust").unwrap();
+        assert_eq!(super::semantic_name(scope), Some("keyword"));
     }
 
     #[test]
