@@ -1,0 +1,94 @@
+name: Bug report
+description: Something is broken, crashes, regressed or got slow.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One problem per issue. Feature requests go to [Discussions](https://github.com/nxtvoid/hoshi/discussions/categories/ideas).
+        Redact tokens, private paths and repository names from anything you paste.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and found no duplicate.
+          required: true
+        - label: It still happens on the latest release.
+          required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Threads and chat
+        - Claude Code
+        - Codex
+        - GitHub Copilot
+        - Pull requests (GitHub, Bitbucket)
+        - Worktrees and git
+        - Terminal
+        - Settings and themes
+        - Install and updates
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a project
+        2. Start a Claude Code thread on a worktree
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: hoshi version
+      placeholder: 1.0.1
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS and version, and the agent CLI version if the bug involves one.
+      placeholder: Windows 11 24H2, claude 2.1.0
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Errors or output
+      description: The most relevant lines only.
+      render: shell
+
+  - type: upload
+    id: attachments
+    attributes:
+      label: Screenshots or recordings
+    validations:
+      required: false
