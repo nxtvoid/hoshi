@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Feature request
+    url: https://github.com/nxtvoid/hoshi/discussions/categories/ideas
+    about: Suggest an improvement or a new capability in Discussions.
+  - name: Question
+    url: https://github.com/nxtvoid/hoshi/discussions/categories/q-a
+    about: Ask how something works in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/nxtvoid/hoshi/security/advisories/new
+    about: Report it privately, never in a public issue.

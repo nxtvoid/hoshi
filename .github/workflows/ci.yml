@@ -17,8 +17,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # "Check" is a required status, so it has to report on every pull request. When only docs
+  # change it is skipped instead, which counts as passing; when that can't be told, it runs.
+  changes:
+    name: Changes
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ steps.files.outputs.code }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PULL: ${{ github.event.pull_request.number }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ -n "$PULL" ]; then
+            files=$(gh api "repos/$REPO/pulls/$PULL/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')
+          elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
+            files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[] | .filename, (.previous_filename // empty)')
+          else
+            files=unknown
+          fi
+          if [ "$(printf '%s\n' "$files" | wc -l)" -ge 300 ] ||
+            printf '%s\n' "$files" | grep -qvE '\.md$|^LICENSE$|^\.github/ISSUE_TEMPLATE/'; then
+            echo code=true >> "$GITHUB_OUTPUT"
+          else
+            echo code=false >> "$GITHUB_OUTPUT"
+          fi
+
   check:
     name: Check
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     permissions:
