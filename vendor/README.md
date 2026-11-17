@@ -3,7 +3,11 @@
 ## gpui-base 0.9.1
 
 From crates.io (Apache-2.0, https://github.com/longbridge/gpui-kit), patched in through
-`[patch.crates-io]` in the root `Cargo.toml`. One change: a textarea (`TextareaState`) takes text
+`[patch.crates-io]` in the root `Cargo.toml`. Two changes.
+
+### Textarea decorations
+
+A textarea (`TextareaState`) takes text
 decorations, as the code editor already does, and its tokens can be swapped in place, so the
 composer can show bold, italic, inline code and strikethrough without their markers.
 
@@ -21,5 +25,10 @@ composer can show bold, italic, inline code and strikethrough without their mark
   keeps restored carets out of tokens.
 
 Upstream PRs: longbridge/gpui-kit#3970 (decorations) and #3971 (`set_tokens`).
+
+### Highlighted selectable text
+
+- `src/selectable_text.rs`: `SelectableText::highlights` styles ranges of its text, so the
+  changes panel's diff lines show their syntax colors and stay selectable.
 
 Drop this copy and the patch once an upstream release offers the same.

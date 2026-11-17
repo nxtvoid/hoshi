@@ -474,24 +474,25 @@ fn call_body(
         CodeBlock::new(SharedString::from(format!("{id}:input")), text).max_height(px(160.))
     });
     let diff = match detail {
-        Some(ToolDetail::FileChange { diff, .. }) if !is_error => Some(diff),
+        Some(ToolDetail::FileChange { diff, path, .. }) if !is_error => Some((diff, path)),
         _ => None,
     };
     let rest = match (diff, output) {
-        (Some(Some(diff)), _) => Some(
+        (Some((Some(diff), path)), _) => Some(
             div()
                 .when(has_input, |block| {
                     block
                         .border_t_1()
                         .border_color(ctx.colors.border.opacity(0.6))
                 })
-                .child(DiffView::new(
+                .child(DiffView::patch(
                     SharedString::from(format!("{id}:diff")),
-                    parse_unified_diff(diff),
+                    path.clone(),
+                    diff.clone(),
                 ))
                 .into_any_element(),
         ),
-        (Some(None), _) => None,
+        (Some((None, _)), _) => None,
         (None, Some(output)) if output.trim().is_empty() => None,
         (None, Some(output)) => {
             let (shown, hidden) = head_lines(output, OUTPUT_MAX_LINES, OUTPUT_MAX_CHARS);

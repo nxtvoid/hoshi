@@ -1,5 +1,9 @@
+use std::rc::Rc;
+
+use super::diff_syntax::{LineSyntax, highlight_diff};
 use crate::theme::{ActiveTheme, Colors};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::highlighter::HighlightTheme;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -20,6 +24,8 @@ pub struct DiffLine {
     pub old_line: Option<u32>,
     /// In the new file; `None` for removed lines and hunk headers.
     pub new_line: Option<u32>,
+    /// Syntax highlight names over `text`; empty until [`highlight_diff`] fills them in.
+    pub syntax: LineSyntax,
 }
 
 /// One file's `git diff` output as numbered lines, without the file headers.
@@ -36,6 +42,7 @@ pub fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
                 text: raw.to_owned(),
                 old_line: None,
                 new_line: None,
+                syntax: Vec::new(),
             });
             continue;
         }
@@ -47,6 +54,7 @@ pub fn parse_unified_diff(text: &str) -> Vec<DiffLine> {
             text: text.to_owned(),
             old_line,
             new_line,
+            syntax: Vec::new(),
         };
         if let Some(text) = raw.strip_prefix('+') {
             lines.push(line(DiffLineKind::Added, text, None, Some(new_line)));
@@ -85,15 +93,39 @@ fn hunk_start(line: &str) -> Option<(u32, u32)> {
 #[derive(IntoElement)]
 pub struct DiffView {
     id: ElementId,
-    lines: Vec<DiffLine>,
+    lines: Lines,
     max_height: Pixels,
+}
+
+enum Lines {
+    Parsed(Vec<DiffLine>),
+    Patch {
+        path: SharedString,
+        patch: SharedString,
+    },
 }
 
 impl DiffView {
     pub fn new(id: impl Into<ElementId>, lines: Vec<DiffLine>) -> Self {
         Self {
             id: id.into(),
-            lines,
+            lines: Lines::Parsed(lines),
+            max_height: px(384.),
+        }
+    }
+
+    /// `path`'s `git diff` hunks, in its language's colors once read in the background.
+    pub fn patch(
+        id: impl Into<ElementId>,
+        path: impl Into<SharedString>,
+        patch: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            lines: Lines::Patch {
+                path: path.into(),
+                patch: patch.into(),
+            },
             max_height: px(384.),
         }
     }
@@ -104,16 +136,65 @@ impl DiffView {
     }
 }
 
+/// A patch's lines: plain at first, then with their syntax.
+struct HighlightedPatch {
+    patch: SharedString,
+    lines: Rc<Vec<DiffLine>>,
+    _task: Task<()>,
+}
+
+impl HighlightedPatch {
+    fn new(path: SharedString, patch: SharedString, cx: &mut Context<Self>) -> Self {
+        let lines = Rc::new(parse_unified_diff(&patch));
+        let text = patch.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let lines = cx
+                .background_spawn(async move {
+                    let mut lines = parse_unified_diff(&text);
+                    highlight_diff(&path, &mut lines);
+                    lines
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.lines = Rc::new(lines);
+                cx.notify();
+            })
+            .ok();
+        });
+        Self {
+            patch,
+            lines,
+            _task: task,
+        }
+    }
+}
+
 impl RenderOnce for DiffView {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let mono = cx.theme().mono_font_family.clone();
         let size = cx.theme().mono_font_size;
         let wrap = crate::theme::fonts(cx).word_wrap;
         let colors = cx.hoshi().clone();
-        let lines = self
-            .lines
-            .into_iter()
-            .map(|line| render_line(line, wrap, None, &colors));
+        let syntax = cx.theme().highlight_theme.clone();
+        let lines = match self.lines {
+            Lines::Parsed(lines) => Rc::new(lines),
+            Lines::Patch { path, patch } => {
+                let key = ElementId::from((self.id.clone(), "syntax"));
+                let state = window.use_keyed_state(key, cx, |_, cx| {
+                    HighlightedPatch::new(path.clone(), patch.clone(), cx)
+                });
+                if state.read(cx).patch != patch {
+                    state.update(cx, |state, cx| {
+                        *state = HighlightedPatch::new(path, patch, cx)
+                    });
+                }
+                state.read(cx).lines.clone()
+            }
+        };
+        let lines = lines
+            .iter()
+            .map(|line| render_line(line, wrap, None, &colors, &syntax))
+            .collect::<Vec<_>>();
         div()
             .id(self.id)
             .debug_selector(|| "diff-view".into())
@@ -162,7 +243,8 @@ impl RenderOnce for DiffLineRow {
         let size = cx.theme().mono_font_size;
         let wrap = crate::theme::fonts(cx).word_wrap;
         let colors = cx.hoshi().clone();
-        render_line(self.line, wrap, self.selectable, &colors)
+        let syntax = cx.theme().highlight_theme.clone();
+        render_line(&self.line, wrap, self.selectable, &colors, &syntax)
             .font_family(mono)
             .text_size(size)
             .when(!wrap, |row| row.min_w_full())
@@ -170,10 +252,11 @@ impl RenderOnce for DiffLineRow {
 }
 
 fn render_line(
-    line: DiffLine,
+    line: &DiffLine,
     wrap: bool,
     selectable: Option<(ElementId, u64)>,
     colors: &Colors,
+    syntax: &HighlightTheme,
 ) -> Div {
     let number = |number: Option<u32>| {
         div()
@@ -188,12 +271,21 @@ fn render_line(
         DiffLineKind::Removed => ("−", colors.status_error),
         _ => ("", colors.muted_foreground),
     };
+    let highlights = line
+        .syntax
+        .iter()
+        .filter_map(|(range, name)| Some((range.clone(), syntax.style(name)?)))
+        .collect::<Vec<_>>();
+    let text = SharedString::from(line.text.clone());
     let text = match selectable {
-        Some((id, order)) => gpui_kit::base::SelectableText::new(id, line.text)
+        Some((id, order)) => gpui_kit::base::SelectableText::new(id, text)
+            .highlights(highlights)
             .document_order(order)
             .into_any_element(),
-        None if line.text.is_empty() => " ".into_any_element(),
-        None => line.text.into_any_element(),
+        None if text.is_empty() => " ".into_any_element(),
+        None => StyledText::new(text)
+            .with_highlights(highlights)
+            .into_any_element(),
     };
     div()
         .flex()
@@ -253,6 +345,7 @@ mod tests {
                 text: "old".into(),
                 old_line: Some(4),
                 new_line: None,
+                syntax: Vec::new(),
             }
         );
     }
