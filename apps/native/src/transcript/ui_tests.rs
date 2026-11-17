@@ -552,11 +552,20 @@ fn a_turn_on_another_effort_reads_as_a_divider_over_its_message(cx: &mut TestApp
             switched("u1", Effort::Medium, Effort::High),
             answer("a1"),
             switched("u2", Effort::High, Effort::High),
+            answer("a2"),
+            item(
+                "q1:model",
+                ItemContent::ModelSwitched {
+                    from: choice(Effort::High),
+                    to: choice(Effort::Medium),
+                },
+            ),
         ],
         false,
     );
     assert!(shows(&mut cx, "model-switch-u1"));
     assert!(!shows(&mut cx, "model-switch-u2"));
+    assert!(shows(&mut cx, "model-switch-q1:model"));
     let text = crate::request_rows::model_switch_text(
         &ModelSwitch {
             from: choice(Effort::Medium),

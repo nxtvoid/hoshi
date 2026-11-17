@@ -1166,20 +1166,6 @@ impl ThreadState {
                     }
                 }
             }
-            Event::MessageModelSwitched {
-                thread_id,
-                message_id,
-                model_switch: switch,
-            } if *thread_id == self.thread_id => {
-                if let Some(ItemContent::UserMessage { model_switch, .. }) = self
-                    .items
-                    .iter_mut()
-                    .find(|item| &item.id == message_id)
-                    .map(|item| &mut item.content)
-                {
-                    *model_switch = Some(switch.clone());
-                }
-            }
             _ => return,
         }
         cx.notify();

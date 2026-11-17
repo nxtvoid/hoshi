@@ -605,6 +605,12 @@ pub enum ItemContent {
         included_items: u32,
         omitted_items: u32,
     },
+    /// Where a turn that runs on another model or effort of the same provider than the turn
+    /// before starts, for a message that waited for its turn.
+    ModelSwitched {
+        from: ModelChoice,
+        to: ModelChoice,
+    },
     /// A plan mode turn's plan, which the agent carries out once accepted.
     ProposedPlan {
         /// Markdown.

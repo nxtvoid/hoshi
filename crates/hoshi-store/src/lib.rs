@@ -5,9 +5,9 @@
 //! thread projection must match `ReadModel::apply`; a test checks that.
 
 use hoshi_core::{
-    ContextUsage, Effort, Event, MessageAttachment, OpenToolCall, Project, PullRequestDetail,
-    PullRequestWatch, Snapshot, TaskPreview, Thread, ThreadContextUsage, ThreadItem,
-    ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits, task_preview,
+    ContextUsage, Effort, Event, MessageAttachment, ModelChoice, OpenToolCall, Project,
+    PullRequestDetail, PullRequestWatch, Snapshot, TaskPreview, Thread, ThreadContextUsage,
+    ThreadItem, ThreadPullRequest, ThreadStatus, TurnOutcome, UsageLimits, task_preview,
 };
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, types::Type};
 use std::collections::HashMap;
@@ -758,6 +758,53 @@ impl Store {
         Ok(())
     }
 
+    /// What the last turn of thread `thread_id` that recorded it ran on, among those started
+    /// before item `item_id` came and not taken away by a rewind since; in the order the turns
+    /// ran, which a message that waited its turn doesn't follow. `None` when none did.
+    pub fn turn_model_before(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+    ) -> Result<Option<ModelChoice>, StoreError> {
+        let model: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json_extract(e.payload_json, '$.model')
+                 FROM events e
+                 JOIN thread_items i
+                   ON i.thread_id = e.thread_id
+                  AND i.id = json_extract(e.payload_json, '$.turnId')
+                 WHERE e.thread_id = ?1
+                   AND e.event_type = 'turnStarted'
+                   AND json_extract(e.payload_json, '$.model') IS NOT NULL
+                   AND e.sequence < (SELECT sequence FROM events
+                                     WHERE thread_id = ?1 AND event_type = 'itemAdded'
+                                       AND json_extract(payload_json, '$.item.id') = ?2
+                                     ORDER BY sequence DESC LIMIT 1)
+                   AND i.ordinal <= coalesce((SELECT ordinal FROM thread_items
+                                              WHERE thread_id = ?1 AND id = ?2), i.ordinal)
+                   AND NOT EXISTS (
+                       SELECT 1 FROM events r
+                       WHERE r.thread_id = ?1 AND r.event_type = 'threadRewound'
+                         AND r.sequence > e.sequence
+                         AND (SELECT a.sequence FROM events a
+                              WHERE a.thread_id = ?1 AND a.event_type = 'itemAdded'
+                                AND a.sequence < r.sequence
+                                AND json_extract(a.payload_json, '$.item.id')
+                                    = json_extract(r.payload_json, '$.messageId')
+                              ORDER BY a.sequence DESC LIMIT 1) < e.sequence)
+                 ORDER BY e.sequence DESC
+                 LIMIT 1",
+                params![thread_id, item_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        model
+            .map(|model| serde_json::from_str(&model))
+            .transpose()
+            .map_err(Into::into)
+    }
+
     /// One item of a thread's transcript, whole.
     pub fn thread_item(
         &self,
@@ -1377,20 +1424,6 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
                 )?;
             }
         }
-        Event::MessageModelSwitched {
-            thread_id,
-            message_id,
-            model_switch,
-        } => {
-            execute(
-                tx,
-                "UPDATE thread_items
-                 SET content_json = json_set(content_json, '$.modelSwitch', json(?3))
-                 WHERE thread_id = ?1 AND id = ?2
-                   AND json_extract(content_json, '$.kind') = 'userMessage'",
-                params![thread_id, message_id, serde_json::to_string(model_switch)?],
-            )?;
-        }
         Event::TurnRetrying { .. } => {}
         Event::ThreadDelegated {
             thread_id,
@@ -1453,14 +1486,19 @@ fn project(tx: &Transaction, event: &Event, sequence: i64) -> Result<(), StoreEr
             thread_id,
             message_id,
             resume_at,
+            last_turn_model,
         } => {
             execute(tx, REWIND_ITEMS, params![thread_id, message_id])?;
             execute(
                 tx,
+                "UPDATE threads SET last_turn_model = ?2 WHERE id = ?1",
+                params![thread_id, optional_json(last_turn_model.as_ref())?],
+            )?;
+            execute(
+                tx,
                 "UPDATE threads SET conversation_cursor = ?2, resume_at = ?2,
                  session_id = CASE WHEN ?2 IS NULL THEN NULL ELSE session_id END,
-                 provider_sessions = CASE WHEN ?2 IS NULL THEN NULL ELSE provider_sessions END,
-                 last_turn_model = NULL
+                 provider_sessions = CASE WHEN ?2 IS NULL THEN NULL ELSE provider_sessions END
                  WHERE id = ?1",
                 params![thread_id, resume_at],
             )?;
@@ -2790,14 +2828,8 @@ mod tests {
     }
 
     #[test]
-    fn a_queued_message_keeps_the_model_switch_its_turn_started_with() {
+    fn what_a_turn_ran_on_is_read_back_in_the_order_turns_ran() {
         let mut store = Store::open_in_memory().unwrap();
-        store
-            .append(
-                &[message_with("t", "m1", Vec::new()), answer("t", "a")],
-                NOW,
-            )
-            .unwrap();
         let choice = |effort| hoshi_core::ModelChoice {
             provider: "claudeCode".into(),
             model: Some("opus".into()),
@@ -2805,29 +2837,120 @@ mod tests {
             fast_mode: false,
             ultracode: false,
         };
-        let switch = hoshi_core::ModelSwitch {
-            from: choice(hoshi_core::Effort::Medium),
-            to: choice(hoshi_core::Effort::High),
-        };
-        let marked = |message_id: &str| Event::MessageModelSwitched {
+        let started = |turn_id: &str, effort: Option<hoshi_core::Effort>| Event::TurnStarted {
             thread_id: "t".into(),
-            message_id: message_id.into(),
-            model_switch: Box::new(switch.clone()),
+            turn_id: turn_id.into(),
+            at: NOW.into(),
+            model: effort.map(choice),
+        };
+        use hoshi_core::Effort::{High, Low, Medium};
+        store
+            .append(
+                &[
+                    message_with("t", "m1", Vec::new()),
+                    started("m1", Some(Medium)),
+                    answer("t", "a1"),
+                    message_with("t", "q", Vec::new()),
+                    message_with("t", "m2", Vec::new()),
+                    started("m2", Some(High)),
+                    answer("t", "a2"),
+                    started("q", Some(Low)),
+                    answer("t", "aq"),
+                    message_with("t", "r1", Vec::new()),
+                    started("r1", None),
+                    message_with("t", "m3", Vec::new()),
+                ],
+                NOW,
+            )
+            .unwrap();
+        let before = |store: &Store, item_id: &str| {
+            store
+                .turn_model_before("t", item_id)
+                .unwrap()
+                .and_then(|model| model.effort)
         };
 
-        store.append(&[marked("m1"), marked("a")], NOW).unwrap();
+        assert_eq!(before(&store, "m1"), None);
+        assert_eq!(
+            before(&store, "a1"),
+            Some(Medium),
+            "its own turn, for a fork"
+        );
+        assert_eq!(
+            before(&store, "m2"),
+            Some(Medium),
+            "a message queued earlier ran after it"
+        );
+        assert_eq!(before(&store, "aq"), Some(Low));
+        assert_eq!(before(&store, "m3"), Some(Low));
+        assert_eq!(before(&store, "gone"), None);
+        store.append(&[answer("t", "a1")], NOW).unwrap();
+        assert_eq!(
+            before(&store, "a1"),
+            Some(Medium),
+            "an item kept again after later turns started still bounds its own turn"
+        );
 
-        let switches: Vec<_> = store
-            .thread_items("t")
-            .unwrap()
-            .into_iter()
-            .map(|item| match item.content {
-                ItemContent::UserMessage { model_switch, .. } => model_switch.map(|kept| *kept),
-                ItemContent::AssistantMessage { .. } => None,
-                _ => unreachable!(),
-            })
-            .collect();
-        assert_eq!(switches, [Some(switch), None]);
+        store
+            .append(
+                &[Event::ThreadRewound {
+                    thread_id: "t".into(),
+                    message_id: "q".into(),
+                    resume_at: None,
+                    last_turn_model: Some(choice(Medium)),
+                }],
+                NOW,
+            )
+            .unwrap();
+        store
+            .append(&[message_with("t", "m4", Vec::new())], NOW)
+            .unwrap();
+        assert_eq!(
+            before(&store, "m4"),
+            Some(Medium),
+            "the turns the rewind took away don't count"
+        );
+
+        let in_u = |event: Event| match event {
+            Event::TurnStarted {
+                turn_id, at, model, ..
+            } => Event::TurnStarted {
+                thread_id: "u".into(),
+                turn_id,
+                at,
+                model,
+            },
+            other => other,
+        };
+        store
+            .append(
+                &[
+                    message_with("u", "n1", Vec::new()),
+                    in_u(started("n1", Some(Medium))),
+                    message_with("u", "held", Vec::new()),
+                    message_with("u", "n2", Vec::new()),
+                    in_u(started("n2", Some(High))),
+                    in_u(started("held", Some(High))),
+                    answer("u", "a-held"),
+                    Event::ThreadRewound {
+                        thread_id: "u".into(),
+                        message_id: "n2".into(),
+                        resume_at: None,
+                        last_turn_model: Some(choice(Medium)),
+                    },
+                    message_with("u", "n3", Vec::new()),
+                ],
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .turn_model_before("u", "n3")
+                .unwrap()
+                .and_then(|model| model.effort),
+            Some(Medium),
+            "a held message's turn the rewind took away doesn't count, though the message stays"
+        );
     }
 
     #[test]
@@ -2950,6 +3073,7 @@ mod tests {
                     thread_id: "t".into(),
                     message_id: "m1".into(),
                     resume_at: None,
+                    last_turn_model: None,
                 }],
                 NOW,
             )

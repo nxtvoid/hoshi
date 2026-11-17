@@ -620,7 +620,8 @@ fn shown(item: &ThreadItem) -> bool {
         | ItemContent::ProviderRecovered { .. }
         | ItemContent::McpServerFailed { .. }
         | ItemContent::HookStopped { .. }
-        | ItemContent::BackgroundTaskEnded { .. } => true,
+        | ItemContent::BackgroundTaskEnded { .. }
+        | ItemContent::ModelSwitched { .. } => true,
         ItemContent::ContextHandoff {
             sources, delivery, ..
         } => {
@@ -1105,6 +1106,20 @@ fn render_item(item: &ThreadItem, ctx: &WorkContext, cx: &App) -> AnyElement {
         ItemContent::ContextHandoff {
             sources, delivery, ..
         } => request_rows::context_handoff(item, sources, *delivery, colors, cx),
+        ItemContent::ModelSwitched { from, to } => {
+            let workspace = crate::markdown::workspace(cx);
+            let switch = hoshi_core::ModelSwitch {
+                from: from.clone(),
+                to: to.clone(),
+            };
+            match request_rows::model_switch_text(
+                &switch,
+                workspace.as_ref().map(|workspace| workspace.read(cx)),
+            ) {
+                Some(text) => request_rows::model_switch_divider(item, text, colors),
+                None => div().into_any_element(),
+            }
+        }
         ItemContent::BackgroundTaskEnded {
             tool_call_id,
             failed,

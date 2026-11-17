@@ -51,7 +51,7 @@ use browser::tools::Browsing;
 use checkpoint::{Checkpointer, Moment};
 use chrono::{SecondsFormat, Utc};
 use hoshi_core::{
-    BankedResetFailure, BankedResetSpend, HeldMessage, ModelChoice, ModelSwitch, ThreadHeldMessage,
+    BankedResetFailure, BankedResetSpend, HeldMessage, ModelChoice, ThreadHeldMessage,
 };
 use hoshi_core::{
     BrowserFrame, BrowserInput, BrowserPage, BrowserSettings, GitActionProgress, ProviderUpdate,
@@ -3258,30 +3258,25 @@ impl State {
         Ok(())
     }
 
-    /// `events` with each turn's model and effort as the provider's catalog names them where
-    /// they stood for its defaults, so a change of default later doesn't rewrite what a turn
-    /// ran on; a change that turns out to be none goes. `None` when nothing needed it.
+    /// `events` with what each turn runs on as the provider's catalog names it where it stood
+    /// for its defaults, so a change of default later doesn't rewrite what a turn ran on; a
+    /// change that turns out to be none goes. A rewind and a fork get what the turn before
+    /// their point ran on. `None` when nothing needed it.
     fn with_models_named(&self, events: &[Event]) -> Option<Vec<Event>> {
-        let named = |events: &[Event]| {
-            events.iter().any(|event| {
-                matches!(
-                    event,
-                    Event::TurnStarted { model: Some(_), .. } | Event::MessageModelSwitched { .. }
-                ) || matches!(
-                    event,
-                    Event::ItemAdded {
-                        item: ThreadItem {
-                            content: ItemContent::UserMessage {
-                                model_switch: Some(_),
-                                ..
-                            },
-                            ..
-                        },
-                    }
-                )
-            })
-        };
-        if !named(events) {
+        let concerned = events.iter().any(|event| match event {
+            Event::TurnStarted { model, .. } => model.is_some(),
+            Event::ThreadRewound { .. } => true,
+            Event::ThreadCreated { thread } => thread.forked_from.is_some(),
+            Event::ItemAdded { item } => matches!(
+                item.content,
+                ItemContent::UserMessage {
+                    model_switch: Some(_),
+                    ..
+                } | ItemContent::ModelSwitched { .. }
+            ),
+            _ => false,
+        });
+        if !concerned {
             return None;
         }
         let mut catalogs: HashMap<String, Option<ProviderModels>> = HashMap::new();
@@ -3295,39 +3290,74 @@ impl State {
                 name_choice(choice, catalog);
             }
         };
-        let same = |switch: &ModelSwitch| {
-            switch.from.model == switch.to.model && switch.from.effort == switch.to.effort
+        let same = |from: &ModelChoice, to: &ModelChoice| {
+            from.model == to.model && from.effort == to.effort
+        };
+        // A fork's history before its first own turn is its source's, up to the fork's turn.
+        let before = |thread_id: &str, item_id: &str| {
+            let (mut thread_id, mut item_id) = (thread_id.to_owned(), item_id.to_owned());
+            for _ in 0..MAX_FORK_DEPTH {
+                match self.store.turn_model_before(&thread_id, &item_id) {
+                    Ok(Some(model)) => return Some(model),
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("hoshi: could not read what a turn ran on: {error}");
+                        return None;
+                    }
+                }
+                let origin = self.model.thread(&thread_id)?.forked_from.as_deref()?;
+                thread_id.clone_from(&origin.thread_id);
+                item_id.clone_from(&origin.turn.through_item_id);
+            }
+            None
         };
         let mut events = events.to_vec();
         for event in &mut events {
             match event {
-                Event::MessageModelSwitched { model_switch, .. } => {
-                    name(&mut model_switch.from);
-                    name(&mut model_switch.to);
-                }
                 Event::TurnStarted {
                     model: Some(model), ..
                 } => name(model),
-                Event::ItemAdded {
-                    item:
-                        ThreadItem {
-                            content: ItemContent::UserMessage { model_switch, .. },
-                            ..
-                        },
-                } => {
-                    if let Some(switch) = model_switch {
-                        name(&mut switch.from);
-                        name(&mut switch.to);
-                        if same(switch) {
-                            *model_switch = None;
-                        }
+                Event::ThreadRewound {
+                    thread_id,
+                    message_id,
+                    last_turn_model,
+                    ..
+                } => *last_turn_model = before(thread_id, message_id),
+                Event::ThreadCreated { thread } => {
+                    if let Some(origin) = &thread.forked_from {
+                        thread.last_turn_model =
+                            before(&origin.thread_id, &origin.turn.through_item_id).map(Box::new);
                     }
                 }
+                Event::ItemAdded { item } => match &mut item.content {
+                    ItemContent::UserMessage { model_switch, .. } => {
+                        if let Some(switch) = model_switch {
+                            name(&mut switch.from);
+                            name(&mut switch.to);
+                            if same(&switch.from, &switch.to) {
+                                *model_switch = None;
+                            }
+                        }
+                    }
+                    ItemContent::ModelSwitched { from, to } => {
+                        name(from);
+                        name(to);
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
         events.retain(|event| {
-            !matches!(event, Event::MessageModelSwitched { model_switch, .. } if same(model_switch))
+            !matches!(
+                event,
+                Event::ItemAdded {
+                    item: ThreadItem {
+                        content: ItemContent::ModelSwitched { from, to },
+                        ..
+                    },
+                } if same(from, to)
+            )
         });
         Some(events)
     }
@@ -5493,6 +5523,9 @@ fn check_usage_limits(
     state.keep_usage_limits(provider, limits.clone());
     Some(limits)
 }
+
+/// How many forks back a fork's history is followed to find what a turn ran on.
+const MAX_FORK_DEPTH: usize = 8;
 
 /// `choice` with the model and effort `catalog` runs for its defaults: the catalog's default
 /// model, and the model's default effort when it was none or one the model doesn't take.
@@ -10551,6 +10584,55 @@ Blue"
         assert_eq!(harness.engine.turn_diff_files("t", "m1").unwrap(), files);
         let diff = harness.engine.turn_file_diff("t", "m1", &files[0]).unwrap();
         assert!(diff.text.contains("+two"));
+    }
+
+    #[test]
+    fn a_rewind_goes_back_to_what_the_turn_before_ran_on() {
+        let mut script = completed_turn();
+        script.insert(
+            2,
+            ProviderOutput::ConversationCursor {
+                cursor: "u-answer".into(),
+            },
+        );
+        let harness = Harness::in_memory("rewind-model", script);
+        let effort = |effort| Command::ThreadModelSet {
+            thread_id: "t".into(),
+            provider: DEFAULT_PROVIDER.into(),
+            model: Some("opus".into()),
+            effort: Some(effort),
+            fast_mode: false,
+            ultracode: false,
+        };
+        harness.engine.dispatch(effort(Effort::Medium)).unwrap();
+        harness.send("t", "m1", "one");
+        harness.wait_for_turn_end();
+        harness.engine.dispatch(effort(Effort::High)).unwrap();
+        harness.send("t", "m2", "two");
+        harness.wait_for_turn_end();
+
+        harness.engine.rewind_thread("t", "m2", false).unwrap();
+        let last = harness
+            .thread("t")
+            .last_turn_model
+            .map(|model| model.effort);
+        assert_eq!(last, Some(Some(Effort::Medium)));
+
+        harness.send("t", "m3", "two again");
+        harness.wait_for_turn_end();
+        let switch = match harness
+            .engine
+            .thread_item("t", "m3")
+            .unwrap()
+            .unwrap()
+            .content
+        {
+            ItemContent::UserMessage { model_switch, .. } => {
+                model_switch.map(|switch| (switch.from.effort, switch.to.effort))
+            }
+            _ => None,
+        };
+        assert_eq!(switch, Some((Some(Effort::Medium), Some(Effort::High))));
     }
 
     #[test]

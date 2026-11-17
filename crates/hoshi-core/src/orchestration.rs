@@ -309,13 +309,6 @@ pub enum Event {
         thread_id: String,
         message_ids: Vec<String>,
     },
-    /// A queued message's turn started on another model or effort than the turn before, which
-    /// shows over the message.
-    MessageModelSwitched {
-        thread_id: String,
-        message_id: String,
-        model_switch: Box<ModelSwitch>,
-    },
     /// The thread works on a task another thread's agent delegated to it.
     ThreadDelegated {
         thread_id: String,
@@ -358,6 +351,9 @@ pub enum Event {
         thread_id: String,
         message_id: String,
         resume_at: Option<String>,
+        /// What the last turn left before the message ran on; `None` when no turn recorded it.
+        #[serde(default)]
+        last_turn_model: Option<ModelChoice>,
     },
     /// The user picked another provider, which the next message moves the thread to; `None`
     /// once that no longer stands.
@@ -1087,9 +1083,7 @@ impl ReadModel {
                     item_id: item_id.clone(),
                 });
             }
-            Event::ToolCallDetailSet { .. }
-            | Event::MessagesDropped { .. }
-            | Event::MessageModelSwitched { .. } => {}
+            Event::ToolCallDetailSet { .. } | Event::MessagesDropped { .. } => {}
             Event::TurnRetrying { thread_id, retry } => match retry {
                 Some(retry) => {
                     self.retries.insert(thread_id.clone(), retry.clone());
@@ -1162,6 +1156,7 @@ impl ReadModel {
             Event::ThreadRewound {
                 thread_id,
                 resume_at,
+                last_turn_model,
                 ..
             } => {
                 if let Some(thread) = self.threads.get_mut(thread_id) {
@@ -1171,7 +1166,7 @@ impl ReadModel {
                     }
                     thread.conversation_cursor.clone_from(resume_at);
                     thread.resume_at.clone_from(resume_at);
-                    thread.last_turn_model = None;
+                    thread.last_turn_model = last_turn_model.clone().map(Box::new);
                 }
                 self.requests
                     .retain(|_, item| root_thread(&item.thread_id) != thread_id);
@@ -1420,6 +1415,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                     thread_id,
                     message_id,
                     resume_at,
+                    last_turn_model: None,
                 },
             );
             Ok(events)
@@ -2866,9 +2862,9 @@ pub fn record_worktree_left(
 }
 
 /// Starts a turn for a message sent while the previous turn was ending, too late to join
-/// it; `message` is its item, as kept. When the turn runs on another model or effort, the
-/// message is marked with the change, which shows over it. Nothing when the thread is gone
-/// or busy again.
+/// it; `message` is its item, as kept. When the turn runs on another model or effort, a line
+/// saying so goes where the turn starts, since the message stays where it was sent. Nothing
+/// when the thread is gone or busy again.
 pub fn start_queued_turn(
     model: &ReadModel,
     thread_id: &str,
@@ -2895,11 +2891,15 @@ pub fn start_queued_turn(
         let to = shown.then(|| runs_on(thread))?;
         turn_switch(thread, &to)
     });
-    if let (false, Some(model_switch)) = (events.is_empty(), switch) {
-        let marked = Event::MessageModelSwitched {
-            thread_id: thread_id.to_owned(),
-            message_id: message_id.to_owned(),
-            model_switch,
+    if let (false, Some(switch)) = (events.is_empty(), switch) {
+        let ModelSwitch { from, to } = *switch;
+        let marked = Event::ItemAdded {
+            item: ThreadItem {
+                id: format!("{message_id}:model"),
+                thread_id: thread_id.to_owned(),
+                created_at: now.to_owned(),
+                content: ItemContent::ModelSwitched { from, to },
+            },
         };
         events.insert(events.len() - 1, marked);
     }
@@ -4187,18 +4187,17 @@ const a = 1
         };
         let late = start_queued_turn(&model, "t", "q2", Some(&kept), NOW);
         let marked = late.iter().find_map(|event| match event {
-            Event::MessageModelSwitched {
-                message_id,
-                model_switch,
-                ..
-            } => Some((
-                message_id.as_str(),
-                model_switch.from.effort,
-                model_switch.to.effort,
-            )),
+            Event::ItemAdded {
+                item:
+                    ThreadItem {
+                        id,
+                        content: ItemContent::ModelSwitched { from, to },
+                        ..
+                    },
+            } => Some((id.as_str(), from.effort, to.effort)),
             _ => None,
         });
-        assert_eq!(marked, Some(("q2", None, Some(Effort::High))));
+        assert_eq!(marked, Some(("q2:model", None, Some(Effort::High))));
         assert!(matches!(late.last(), Some(Event::TurnStarted { .. })));
     }
 

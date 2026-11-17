@@ -850,6 +850,55 @@ mod tests {
     }
 
     #[test]
+    fn a_fork_knows_what_its_turn_ran_on() {
+        let setup = local("fork-model", Scripted::new(CLAUDE));
+        let effort_of = |thread_id: &str, effort| hoshi_core::Command::ThreadModelSet {
+            thread_id: thread_id.into(),
+            provider: CLAUDE.into(),
+            model: Some("opus".into()),
+            effort: Some(effort),
+            fast_mode: false,
+            ultracode: false,
+        };
+        let effort = |effort| effort_of("t", effort);
+        setup
+            .engine
+            .dispatch(effort(hoshi_core::Effort::Medium))
+            .unwrap();
+        setup.send("t", "m1", "Remember APPLE.");
+        setup
+            .engine
+            .dispatch(effort(hoshi_core::Effort::High))
+            .unwrap();
+        setup.send("t", "m2", "Remember BANANA.");
+
+        setup
+            .engine
+            .fork_thread(
+                "t",
+                "f",
+                &ForkPoint::Turn {
+                    item_id: "m1".into(),
+                },
+            )
+            .unwrap();
+
+        let last = |setup: &Setup| setup.thread("f").last_turn_model.map(|model| model.effort);
+        assert_eq!(last(&setup), Some(Some(hoshi_core::Effort::Medium)));
+
+        let fork_effort = effort_of("f", hoshi_core::Effort::High);
+        setup.engine.dispatch(fork_effort).unwrap();
+        setup.send("f", "f1", "Which words?");
+        assert_eq!(last(&setup), Some(Some(hoshi_core::Effort::High)));
+        setup.engine.rewind_thread("f", "f1", false).unwrap();
+        assert_eq!(
+            last(&setup),
+            Some(Some(hoshi_core::Effort::Medium)),
+            "before its first own turn, a fork ran what its source did"
+        );
+    }
+
+    #[test]
     fn a_fork_on_another_provider_gets_its_source_history_as_a_transcript() {
         let setup = local("portable-fork", Scripted::new(CLAUDE));
         setup.send("t", "m1", "Remember APPLE.");

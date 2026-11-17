@@ -168,9 +168,14 @@ impl<'a> Folder<'a> {
         (self.live)(row)
     }
 
+    /// A line that opens the turn rather than being its work: it stays out of the fold.
     fn is_handoff(&self, row: &Row) -> bool {
-        self.item(row)
-            .is_some_and(|item| matches!(item.content, ItemContent::ContextHandoff { .. }))
+        self.item(row).is_some_and(|item| {
+            matches!(
+                item.content,
+                ItemContent::ContextHandoff { .. } | ItemContent::ModelSwitched { .. }
+            )
+        })
     }
 
     fn is_answer(&self, row: &Row) -> bool {
