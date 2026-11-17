@@ -55,7 +55,7 @@ fn syntax_for(path: &str) -> Option<&'static SyntaxReference> {
 struct Side {
     parser: ParseState,
     scopes: ScopeStack,
-    /// Past a line too long to read, the parser's state is unknown: the side stays plain.
+    /// Past a line too long or failing to read, the parser's state is unknown: the side stays plain.
     lost: bool,
 }
 
@@ -78,6 +78,7 @@ impl Side {
         }
         let line = format!("{text}\n");
         let Ok(operations) = self.parser.parse_line(&line, &SYNTAXES) else {
+            self.lost = true;
             return spans;
         };
         let mut cursor = 0;
