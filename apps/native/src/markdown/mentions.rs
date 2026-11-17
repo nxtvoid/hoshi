@@ -90,7 +90,7 @@ fn file_mention(text: &str, at: usize) -> Option<usize> {
 }
 
 /// Files projects keep at their root without an extension.
-const BARE_FILES: [&str; 14] = [
+const BARE_FILES: [&str; 19] = [
     "Makefile",
     "makefile",
     "Dockerfile",
@@ -105,6 +105,11 @@ const BARE_FILES: [&str; 14] = [
     "LICENSE",
     "README",
     "CODEOWNERS",
+    "CHANGELOG",
+    "AUTHORS",
+    "NOTICE",
+    "COPYING",
+    "VERSION",
 ];
 
 /// A path the composer could have written: in a folder, with an extension, or a file projects
@@ -517,12 +522,13 @@ mod tests {
         assert_eq!(kinds("a/b and email@x.com", true), []);
         assert_eq!(
             kinds(
-                "@Test User, @nxtvoid, @Override and @Injectable() with @.env @Makefile @docs/",
+                "@Test User, @nxtvoid, @Override and @Injectable() with @.env @Makefile @CHANGELOG @docs/",
                 false
             ),
             [
                 (MentionKind::File, "@.env"),
                 (MentionKind::File, "@Makefile"),
+                (MentionKind::File, "@CHANGELOG"),
                 (MentionKind::File, "@docs/"),
             ]
         );
