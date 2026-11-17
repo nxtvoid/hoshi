@@ -52,7 +52,8 @@ opt-level = 3
 panic = "abort"
 strip = true
 
-# gpui-base 0.9.1 with one change: textareas take text decorations (`set_decorations`), for the
-# composer's inline marks. See vendor/README.md.
+# gpui-base 0.9.1 with two changes: textareas take text decorations (`set_decorations`), for the
+# composer's inline marks, and selectable text takes highlights, for diff syntax colors.
+# See vendor/README.md.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }

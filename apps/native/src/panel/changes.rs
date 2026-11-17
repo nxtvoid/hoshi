@@ -344,7 +344,11 @@ impl ChangedFiles {
             let diff = cx
                 .background_spawn(async move {
                     source.diff(&engine, &thread_id, &file).map(|diff| {
-                        diff.map(|diff| (parse_unified_diff(&diff.text), diff.truncated))
+                        diff.map(|diff| {
+                            let mut lines = parse_unified_diff(&diff.text);
+                            highlight_diff(&file.path, &mut lines);
+                            (lines, diff.truncated)
+                        })
                     })
                 })
                 .await;
@@ -788,6 +792,7 @@ mod tests {
                     text: index.to_string(),
                     old_line: Some(index as u32),
                     new_line: Some(index as u32),
+                    syntax: Vec::new(),
                 })
                 .collect(),
         )

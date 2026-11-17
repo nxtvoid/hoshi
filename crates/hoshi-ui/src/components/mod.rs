@@ -6,6 +6,7 @@ mod color_picker;
 mod context_menu;
 mod dialog;
 mod diff_stat;
+mod diff_syntax;
 mod diff_view;
 mod disclosure;
 mod fold_row;
@@ -43,6 +44,7 @@ pub use dialog::{
     InitialFocus, OpenChange, OpenChangeReason,
 };
 pub use diff_stat::DiffStat;
+pub use diff_syntax::{LineSyntax, highlight_diff};
 pub use diff_view::{DiffLine, DiffLineKind, DiffLineRow, DiffView, parse_unified_diff};
 pub use disclosure::Disclosure;
 pub use fold_row::FoldRow;

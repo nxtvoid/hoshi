@@ -16,7 +16,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hoshi_core::SystemFont;
 use hoshi_ui::prelude::*;
-use hoshi_ui::{DiffView, parse_unified_diff, theme};
+use hoshi_ui::{DiffView, theme};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -1759,9 +1759,10 @@ fn code_preview(cx: &App) -> impl IntoElement {
                 .child(div().text_color(colors.pr_open).child("+1"))
                 .child(div().text_color(colors.status_error).child("−1")),
         )
-        .child(DiffView::new(
+        .child(DiffView::patch(
             "code-font-preview",
-            parse_unified_diff(PREVIEW_PATCH),
+            PREVIEW_FILE,
+            PREVIEW_PATCH,
         ))
 }
 

@@ -3640,6 +3640,8 @@ version = "1.0.1"
 dependencies = [
  "futures",
  "gpui-kit",
+ "syntect",
+ "two-face",
 ]
 
 [[package]]

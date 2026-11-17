@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use gpui::{
-    App, BorderStyle, Bounds, Corners, Edges, Element, ElementId, GlobalElementId, Hitbox,
-    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point,
+    App, BorderStyle, Bounds, Corners, Edges, Element, ElementId, GlobalElementId, HighlightStyle,
+    Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point,
     SharedString, StyledText, TextStyleRefinement, Window, transparent_black,
 };
 
@@ -56,6 +56,15 @@ impl SelectableText {
     /// Places this run in reading order among the others sharing its handle.
     pub fn document_order(mut self, order: u64) -> Self {
         self.document_order = order;
+        self
+    }
+
+    /// Styles ranges of the text, such as syntax colors, over the run's text style.
+    pub fn highlights(
+        mut self,
+        highlights: impl IntoIterator<Item = (Range<usize>, HighlightStyle)>,
+    ) -> Self {
+        self.styled_text = StyledText::new(self.text.clone()).with_highlights(highlights);
         self
     }
 
