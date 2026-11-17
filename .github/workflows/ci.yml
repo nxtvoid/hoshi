@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   # "Check" is a required status, so it has to report on every pull request. When only docs
-  # change it is skipped instead, which counts as passing.
+  # change it is skipped instead, which counts as passing; when that can't be told, it runs.
   changes:
     name: Changes
     runs-on: ubuntu-22.04
@@ -38,9 +38,9 @@ jobs:
           AFTER: ${{ github.sha }}
         run: |
           if [ -n "$PULL" ]; then
-            files=$(gh api "repos/$REPO/pulls/$PULL/files" --paginate --jq '.[].filename')
+            files=$(gh api "repos/$REPO/pulls/$PULL/files" --paginate --jq '.[] | .filename, (.previous_filename // empty)')
           elif [ -n "$BEFORE" ] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ]; then
-            files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[].filename')
+            files=$(gh api "repos/$REPO/compare/$BEFORE...$AFTER" --jq '.files[] | .filename, (.previous_filename // empty)')
           else
             files=unknown
           fi
@@ -54,7 +54,7 @@ jobs:
   check:
     name: Check
     needs: changes
-    if: needs.changes.outputs.code == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.code == 'true') }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     permissions:
