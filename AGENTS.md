@@ -50,6 +50,7 @@ The repo is indexed by [CodeGraph](https://github.com/colbymchenry/codegraph). O
 ## Code conventions
 
 - **Identifiers in English:** types, functions, variables, enum values, file names.
+- **No real personal data:** never copy names, usernames, emails, paths, repositories, branches, ticket ids or text from the developer's screenshots, threads or machine into code, tests, fixtures, commits or pull requests, not even to reproduce a bug. Invent them (`Test User`, `acme/shop`, `/home/dev/project`) or use `nxtvoid`.
 - **No narrating comments:** do not write comments that explain why the code does something or restate a rule. Keep a short comment only for genuinely non-obvious intent.
 - **Rust** follows rustfmt and clippy; `bun run check` fails on any clippy warning. **TypeScript** (the scripts) follows `biome.json` (single quotes, no semicolons).
 
