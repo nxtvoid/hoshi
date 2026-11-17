@@ -515,7 +515,7 @@ impl State {
             let excess = continuations.len().saturating_sub(MAX_CONTINUATION_CHAIN);
             continuations.drain(..excess);
             self.save_recovery(&thread_id);
-            start_turn(self, &thread_id, &turn_id, text, Vec::new());
+            start_turn(self, &thread_id, &turn_id, text, Vec::new(), None);
         }
     }
 
@@ -1121,6 +1121,7 @@ impl State {
                 &turn_id,
                 LIMIT_RESET_PROMPT.to_owned(),
                 Vec::new(),
+                None,
             );
         }
     }

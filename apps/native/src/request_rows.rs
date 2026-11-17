@@ -628,10 +628,9 @@ pub fn model_switch_text(
             .map(|model| model.short_name.clone())
             .or_else(|| choice.model.clone())
             .unwrap_or_else(|| provider_name(&choice.provider));
-        let effort = match model {
-            Some(_) => crate::composer::effective_effort(model, choice.effort),
-            None => choice.effort,
-        };
+        let effort = choice
+            .effort
+            .or_else(|| model.and_then(|model| model.default_effort));
         (slug, name, effort)
     };
     let (from, to) = (resolve(&switch.from), resolve(&switch.to));

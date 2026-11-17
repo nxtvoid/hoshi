@@ -299,7 +299,9 @@ pub fn section_state(
     match (account, limits) {
         (Some(ProviderAccountStatus::NotInstalled), _) => SectionState::NotInstalled,
         (Some(ProviderAccountStatus::SignedOut), _) => SectionState::SignedOut,
-        (_, Some(limits)) if limits.windows.is_empty() => SectionState::NoLimits,
+        (_, Some(limits)) if limits.windows.is_empty() && limits.extra_usage.is_none() => {
+            SectionState::NoLimits
+        }
         (_, Some(_)) => SectionState::Limits,
         (_, None) if failed && !checking => SectionState::Unavailable,
         (_, None) => SectionState::Checking,
@@ -563,6 +565,22 @@ mod tests {
         assert_eq!(
             section_state(None, Some(&UsageLimits::default()), false, true),
             SectionState::NoLimits
+        );
+        let credits_only = UsageLimits {
+            extra_usage: Some(ExtraUsage {
+                unit: SpendUnit::Credits { exponent: 2 },
+                used: None,
+                limit: None,
+                balance: Some(500),
+                unlimited: false,
+                resets_at: None,
+            }),
+            ..UsageLimits::default()
+        };
+        assert_eq!(
+            section_state(ready, Some(&credits_only), false, false),
+            SectionState::Limits,
+            "a credit balance alone is still shown"
         );
         assert_eq!(
             section_state(

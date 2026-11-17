@@ -178,9 +178,9 @@ pub struct Engine {
     slash_commands: Refreshing<Vec<SlashCommand>>,
     /// Held while a provider is asked for its limits, so one ask serves everyone waiting.
     usage_probes: Arc<UsageProbes>,
-    /// Held while a banked reset is spent: by provider, the grant and the request id a retry
-    /// reuses until the provider answers.
-    reset_spend: Mutex<HashMap<String, (String, String)>>,
+    /// Held while a banked reset is spent: by provider and grant, the request id a retry of
+    /// that grant reuses until the provider answers.
+    reset_spend: Mutex<HashMap<(String, String), String>>,
     /// Held while the provider's CLI is checked against its releases or updated.
     maintenance: Arc<Mutex<()>>,
     servers: servers::Servers,
@@ -482,6 +482,28 @@ struct ParkedTurn {
     turn_id: String,
     prompt: String,
     attachments: Vec<MessageAttachment>,
+    /// What the turn was started on, which a choice made while it waits doesn't change.
+    runs_on: RunsOn,
+}
+
+/// The model and its options a turn runs on.
+#[derive(Debug, Clone)]
+struct RunsOn {
+    model: Option<String>,
+    effort: Option<hoshi_core::Effort>,
+    fast_mode: bool,
+    ultracode: bool,
+}
+
+impl RunsOn {
+    fn of(thread: &hoshi_core::Thread) -> Self {
+        Self {
+            model: thread.model.clone(),
+            effort: thread.effort,
+            fast_mode: thread.fast_mode,
+            ultracode: thread.ultracode,
+        }
+    }
 }
 
 struct PullRequestJob {
@@ -1996,13 +2018,11 @@ impl Engine {
         let (Some(adapter), Some(grant)) = (adapter, grant) else {
             return BankedResetSpend::NoneLeft;
         };
-        let request_id = match pending.remove(provider) {
-            Some((pending_grant, request_id)) if pending_grant == grant => request_id,
-            _ => delegation::new_id(),
-        };
-        let spend = adapter.spend_banked_reset(&grant, &request_id);
+        let key = (provider.to_owned(), grant);
+        let request_id = pending.remove(&key).unwrap_or_else(delegation::new_id);
+        let spend = adapter.spend_banked_reset(&key.1, &request_id);
         if !spend.settled() {
-            pending.insert(provider.to_owned(), (grant, request_id));
+            pending.insert(key, request_id);
             return spend;
         }
         if matches!(spend, BankedResetSpend::Failed { .. }) {
@@ -3280,14 +3300,15 @@ impl State {
             return None;
         }
         let mut catalogs: HashMap<String, Option<ProviderModels>> = HashMap::new();
-        let mut name = |choice: &mut ModelChoice| {
+        // What a turn ran on is kept as recorded; only what it left to the defaults is named.
+        let mut name = |choice: &mut ModelChoice, recorded: bool| {
             let catalog = catalogs.entry(choice.provider.clone()).or_insert_with(|| {
                 let adapter = self.adapter_for(&choice.provider)?;
                 let kept = provider_cache::read(&self.provider_cache_dir, &choice.provider);
                 provider_cache::hydrate(adapter.offline_models(), kept)
             });
             if let Some(catalog) = catalog {
-                name_choice(choice, catalog);
+                name_choice(choice, catalog, recorded);
             }
         };
         let same = |from: &ModelChoice, to: &ModelChoice| {
@@ -3316,7 +3337,7 @@ impl State {
             match event {
                 Event::TurnStarted {
                     model: Some(model), ..
-                } => name(model),
+                } => name(model, false),
                 Event::ThreadRewound {
                     thread_id,
                     message_id,
@@ -3332,16 +3353,16 @@ impl State {
                 Event::ItemAdded { item } => match &mut item.content {
                     ItemContent::UserMessage { model_switch, .. } => {
                         if let Some(switch) = model_switch {
-                            name(&mut switch.from);
-                            name(&mut switch.to);
+                            name(&mut switch.from, true);
+                            name(&mut switch.to, false);
                             if same(&switch.from, &switch.to) {
                                 *model_switch = None;
                             }
                         }
                     }
                     ItemContent::ModelSwitched { from, to } => {
-                        name(from);
-                        name(to);
+                        name(from, true);
+                        name(to, false);
                     }
                     _ => {}
                 },
@@ -3926,7 +3947,7 @@ impl State {
                     let (prompt, attachments) = started
                         .map(|message| (message.text, message.attachments))
                         .unwrap_or_default();
-                    start_turn(self, thread_id, turn_id, prompt, attachments);
+                    start_turn(self, thread_id, turn_id, prompt, attachments, None);
                 }
                 Event::ThreadCreated { thread } if thread.worktree_path.is_none() => {
                     refresh_branches(self.this.clone(), vec![thread.id.clone()]);
@@ -4009,6 +4030,7 @@ impl State {
                 &turn.turn_id,
                 turn.prompt,
                 turn.attachments,
+                Some(turn.runs_on),
             );
         }
     }
@@ -4250,6 +4272,7 @@ impl State {
             &message.id,
             message.text,
             message.attachments,
+            None,
         );
     }
 
@@ -5129,12 +5152,14 @@ fn slug(title: &str) -> String {
     }
 }
 
+/// Starts a turn on `runs_on`, or on what its thread is set to.
 fn start_turn(
     state: &mut State,
     thread_id: &str,
     turn_id: &str,
     prompt: String,
     attachments: Vec<MessageAttachment>,
+    runs_on: Option<RunsOn>,
 ) {
     state.idle_compactions.remove(thread_id);
     let Some(provider) = state
@@ -5161,11 +5186,16 @@ fn start_turn(
     };
     let folder = git::normalize(&cwd);
     if state.folder_ops.contains(&folder) {
+        let runs_on = runs_on.or_else(|| state.model.thread(thread_id).map(RunsOn::of));
+        let Some(runs_on) = runs_on else {
+            return;
+        };
         state.parked.entry(folder).or_default().push(ParkedTurn {
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.to_owned(),
             prompt,
             attachments,
+            runs_on,
         });
         return;
     }
@@ -5194,6 +5224,7 @@ fn start_turn(
     let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
+    let runs_on = runs_on.unwrap_or_else(|| RunsOn::of(thread));
     let attachments = state.turn_attachments(attachments);
     let earlier_media = state.earlier_media(thread_id, &attachments);
     let depth = state.depth(thread_id);
@@ -5225,10 +5256,10 @@ fn start_turn(
         resume_session_at: thread.resume_at.clone(),
         fork_session: false,
         handoff: context,
-        model: thread.model.clone(),
-        effort: thread.effort,
-        fast_mode: thread.fast_mode,
-        ultracode: thread.ultracode,
+        model: runs_on.model,
+        effort: runs_on.effort,
+        fast_mode: runs_on.fast_mode,
+        ultracode: runs_on.ultracode,
         access_mode: thread.access_mode,
         plan_mode: thread.plan_mode,
         mcp,
@@ -5528,8 +5559,9 @@ fn check_usage_limits(
 const MAX_FORK_DEPTH: usize = 8;
 
 /// `choice` with the model and effort `catalog` runs for its defaults: the catalog's default
-/// model, and the model's default effort when it was none or one the model doesn't take.
-fn name_choice(choice: &mut ModelChoice, catalog: &ProviderModels) {
+/// model, and the model's default effort when it was none or, unless `recorded` as what a
+/// turn ran on, one the model doesn't take.
+fn name_choice(choice: &mut ModelChoice, catalog: &ProviderModels, recorded: bool) {
     if choice.model.is_none() {
         choice.model.clone_from(&catalog.default_model);
     }
@@ -5540,10 +5572,8 @@ fn name_choice(choice: &mut ModelChoice, catalog: &ProviderModels) {
     else {
         return;
     };
-    if !choice
-        .effort
-        .is_some_and(|effort| model.efforts.contains(&effort))
-    {
+    let taken = |effort: hoshi_core::Effort| recorded || model.efforts.contains(&effort);
+    if !choice.effort.is_some_and(taken) {
         choice.effort = model.default_effort;
     }
 }
@@ -6219,10 +6249,11 @@ mod tests {
             fast_mode: false,
             ultracode: false,
         };
-        let named = |mut choice: ModelChoice| {
-            name_choice(&mut choice, &catalog);
+        let named_as = |mut choice: ModelChoice, recorded| {
+            name_choice(&mut choice, &catalog, recorded);
             (choice.model, choice.effort)
         };
+        let named = |choice| named_as(choice, false);
 
         assert_eq!(
             named(choice(None, None)),
@@ -6236,6 +6267,15 @@ mod tests {
             named(choice(Some("opus"), Some(Effort::Max))),
             (Some("opus".into()), Some(Effort::Medium)),
             "an effort the model doesn't take is its default"
+        );
+        assert_eq!(
+            named_as(choice(Some("opus"), Some(Effort::Max)), true),
+            (Some("opus".into()), Some(Effort::Max)),
+            "what a turn ran on stays as it was, though the model no longer takes it"
+        );
+        assert_eq!(
+            named_as(choice(None, None), true),
+            (Some("opus".into()), Some(Effort::Medium))
         );
         assert_eq!(
             named(choice(Some("haiku"), Some(Effort::High))),
@@ -10756,10 +10796,27 @@ Blue"
         harness.send("t", "m1", "go");
         assert!(harness.adapter.requests.lock().unwrap().is_empty());
         assert_eq!(harness.thread("t").status, ThreadStatus::Working);
+        let started_on = harness.thread("t").model.clone();
+        harness
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: harness.thread("t").provider.clone(),
+                model: Some("chosen-while-waiting".into()),
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap();
 
         lock(&harness.engine.state).end_op(op, None).unwrap();
         assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
-        assert_eq!(harness.adapter.requests.lock().unwrap().len(), 1);
+        let requests = harness.adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].model, started_on,
+            "it runs on what it started on, as its history says"
+        );
     }
 
     #[test]

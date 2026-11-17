@@ -387,7 +387,13 @@ impl Composer {
         };
         let title = div().truncate().child(topic);
         let body = div()
+            .id(SharedString::from(format!(
+                "question-body-{}-{}",
+                request.id, progress.index
+            )))
             .debug_selector(|| "question-text".into())
+            .max_h(px(192.))
+            .overflow_y_scroll()
             .pl_6()
             .text_sm()
             .text_color(colors.foreground.opacity(0.85))

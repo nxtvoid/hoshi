@@ -102,6 +102,7 @@ fn extra_row(
     let unit = &extra.unit;
     let left = extra_left_percent(extra);
     let (shown, note, detail) = match (extra.limit, extra.used, extra.balance) {
+        _ if extra.unlimited => (m::usage_extra_unlimited(), None, String::new()),
         (Some(limit), Some(used), _) => (
             amount(limit.saturating_sub(used), unit),
             Some(m::usage_left()),
@@ -112,7 +113,6 @@ fn extra_row(
             Some(m::usage_left()),
             m::usage_credits_balance(),
         ),
-        _ if extra.unlimited => (m::usage_extra_unlimited(), None, String::new()),
         (_, used, _) => (
             amount(used.unwrap_or(0), unit),
             Some(m::usage_extra_spent()),
