@@ -1638,12 +1638,12 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
+            if thread.provider != provider && thread.active_turn_id.is_some() {
+                return Err(CommandError::ThreadBusy { thread_id });
+            }
             let has_conversation =
                 thread.session_id.is_some() || !thread.provider_sessions.is_empty();
             if thread.provider != provider && has_conversation {
-                if thread.active_turn_id.is_some() {
-                    return Err(CommandError::ThreadBusy { thread_id });
-                }
                 let choice = Some(ModelChoice {
                     provider,
                     model: thread_model,
@@ -4035,6 +4035,19 @@ const a = 1
         assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
         assert_eq!(thread.session_id.as_deref(), Some("s"));
         assert!(thread.pending_handoffs.is_empty());
+    }
+
+    #[test]
+    fn another_provider_is_refused_while_a_first_turn_runs_without_a_session() {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "one")).unwrap();
+
+        assert_eq!(
+            run(&mut model, switch_to_copilot()).unwrap_err(),
+            CommandError::ThreadBusy {
+                thread_id: "t".into()
+            }
+        );
     }
 
     fn model_switch_of(events: &[Event]) -> Option<(Option<Effort>, Option<Effort>)> {

@@ -332,11 +332,19 @@ fn locate(editor: Editor, places: &Places) -> Option<Launcher> {
                 .map(Launcher::Program)
         })
         .or_else(|| {
+            let mut launched = std::collections::HashSet::new();
             places
                 .desktop_entries
                 .get_or_init(|| read_desktop_entries(&places.applications))
                 .iter()
-                .filter_map(|entry| entry.launcher(&product, places))
+                .filter_map(|entry| {
+                    if launched.contains(entry.id.as_str()) {
+                        return None;
+                    }
+                    let found = entry.launcher(&product, places)?;
+                    launched.insert(entry.id.as_str());
+                    Some(found)
+                })
                 .min_by_key(|(rank, _)| *rank)
                 .map(|(_, launcher)| launcher)
         })
@@ -990,6 +998,41 @@ mod tests {
             locate(Editor::Phpstorm, &places),
             None,
             "another class that starts the same"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_user_s_desktop_entry_overrides_the_system_s_of_the_same_name() {
+        let dir = scratch("desktop-override");
+        let bin = dir.join("bin");
+        let flatpak = bin.join(format!("flatpak{}", EXTENSIONS[0]));
+        touch(&flatpak);
+        let write = |path: PathBuf, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            dir.join("user/idea.desktop"),
+            "[Desktop Entry]\nExec=flatpak run mine %f\nStartupWMClass=jetbrains-idea-ce\n",
+        );
+        write(
+            dir.join("system/idea.desktop"),
+            "[Desktop Entry]\nExec=flatpak run theirs %f\nStartupWMClass=jetbrains-idea\n",
+        );
+        let places = Places {
+            path: vec![bin],
+            applications: vec![dir.join("user"), dir.join("system")],
+            ..Places::default()
+        };
+
+        assert_eq!(
+            locate(Editor::Idea, &places),
+            Some(Launcher::Exec {
+                program: flatpak,
+                before: words(&["run", "mine"]),
+                after: Vec::new(),
+            })
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

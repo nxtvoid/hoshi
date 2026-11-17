@@ -3302,11 +3302,9 @@ impl State {
         let mut catalogs: HashMap<String, Option<ProviderModels>> = HashMap::new();
         // What a turn ran on is kept as recorded; only what it left to the defaults is named.
         let mut name = |choice: &mut ModelChoice, recorded: bool| {
-            let catalog = catalogs.entry(choice.provider.clone()).or_insert_with(|| {
-                let adapter = self.adapter_for(&choice.provider)?;
-                let kept = provider_cache::read(&self.provider_cache_dir, &choice.provider);
-                provider_cache::hydrate(adapter.offline_models(), kept)
-            });
+            let catalog = catalogs
+                .entry(choice.provider.clone())
+                .or_insert_with(|| self.known_models(&choice.provider));
             if let Some(catalog) = catalog {
                 name_choice(choice, catalog, recorded);
             }
@@ -3381,6 +3379,13 @@ impl State {
             )
         });
         Some(events)
+    }
+
+    /// The models `provider` offers as last listed, without asking its CLI.
+    fn known_models(&self, provider: &str) -> Option<ProviderModels> {
+        let adapter = self.adapter_for(provider)?;
+        let kept = provider_cache::read(&self.provider_cache_dir, provider);
+        provider_cache::hydrate(adapter.offline_models(), kept)
     }
 
     fn receive(&mut self, thread_id: &str, turn_id: &str, output: ProviderOutput) {
@@ -5209,14 +5214,23 @@ fn start_turn(
         return;
     }
     let prompt = state.carry_cut_work(thread_id, turn_id, prompt);
-    let prepared =
-        match state.prepare_handoff(thread_id, turn_id, &prompt, &attachments, adapter.as_ref()) {
-            Ok(prepared) => prepared,
-            Err(failure) => {
-                state.receive(thread_id, turn_id, turn_failed(failure));
-                return;
-            }
-        };
+    let Some(runs_on) = runs_on.or_else(|| state.model.thread(thread_id).map(RunsOn::of)) else {
+        return;
+    };
+    let prepared = match state.prepare_handoff(
+        thread_id,
+        turn_id,
+        &prompt,
+        &attachments,
+        runs_on.model.as_deref(),
+        adapter.as_ref(),
+    ) {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            state.receive(thread_id, turn_id, turn_failed(failure));
+            return;
+        }
+    };
     let (fork_from, context, handoff) = match prepared {
         Some(prepared) => (prepared.fork_from, prepared.context, Some(prepared.handoff)),
         None => (None, None, None),
@@ -5224,7 +5238,6 @@ fn start_turn(
     let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
-    let runs_on = runs_on.unwrap_or_else(|| RunsOn::of(thread));
     let attachments = state.turn_attachments(attachments);
     let earlier_media = state.earlier_media(thread_id, &attachments);
     let depth = state.depth(thread_id);
@@ -5256,8 +5269,12 @@ fn start_turn(
         resume_session_at: thread.resume_at.clone(),
         fork_session: false,
         handoff: context,
+        effort: state
+            .known_models(&provider)
+            .map_or(runs_on.effort, |catalog| {
+                taken_effort(&catalog, runs_on.model.as_deref(), runs_on.effort)
+            }),
         model: runs_on.model,
-        effort: runs_on.effort,
         fast_mode: runs_on.fast_mode,
         ultracode: runs_on.ultracode,
         access_mode: thread.access_mode,
@@ -5553,6 +5570,25 @@ fn check_usage_limits(
         .insert(provider.to_owned(), Instant::now());
     state.keep_usage_limits(provider, limits.clone());
     Some(limits)
+}
+
+/// `effort` when the model `catalog` runs for `model` takes it, else that model's default, as
+/// a turn's history records it.
+fn taken_effort(
+    catalog: &ProviderModels,
+    model: Option<&str>,
+    effort: Option<hoshi_core::Effort>,
+) -> Option<hoshi_core::Effort> {
+    let effort = effort?;
+    let model = model.or(catalog.default_model.as_deref());
+    match catalog
+        .models
+        .iter()
+        .find(|known| Some(known.slug.as_str()) == model)
+    {
+        Some(known) if !known.efforts.contains(&effort) => known.default_effort,
+        _ => Some(effort),
+    }
 }
 
 /// How many forks back a fork's history is followed to find what a turn ran on.
@@ -6254,6 +6290,20 @@ mod tests {
             (choice.model, choice.effort)
         };
         let named = |choice| named_as(choice, false);
+        assert_eq!(
+            taken_effort(&catalog, Some("opus"), Some(Effort::Max)),
+            Some(Effort::Medium),
+            "a turn is sent the effort its history records"
+        );
+        assert_eq!(
+            taken_effort(&catalog, None, Some(Effort::High)),
+            Some(Effort::High)
+        );
+        assert_eq!(
+            taken_effort(&catalog, Some("gone"), Some(Effort::Max)),
+            Some(Effort::Max)
+        );
+        assert_eq!(taken_effort(&catalog, Some("opus"), None), None);
 
         assert_eq!(
             named(choice(None, None)),

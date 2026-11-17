@@ -39,13 +39,14 @@ pub(crate) struct Prepared {
 impl State {
     /// What the thread's turn `turn_id` hands its agent first, recorded as its transcript
     /// item. `None` when nothing waits, or a `/compact` turn could not carry it. Fails when
-    /// it leaves the message too little room.
+    /// it leaves the message too little room in the window of `model`, the one the turn runs on.
     pub(crate) fn prepare_handoff(
         &mut self,
         thread_id: &str,
         turn_id: &str,
         prompt: &str,
         attachments: &[MessageAttachment],
+        model: Option<&str>,
         adapter: &dyn ProviderAdapter,
     ) -> Result<Option<Prepared>, TurnFailure> {
         let Some(thread) = self.model.thread(thread_id).cloned() else {
@@ -145,7 +146,7 @@ impl State {
             .and_then(|cap| cap.trim().parse().ok());
         let budget = HandoffBudget {
             token_cap: handoff_token_cap(configured),
-            model_window: adapter.context_window(thread.model.as_deref()),
+            model_window: adapter.context_window(model),
             usage,
             user_text: prompt,
             attachments,

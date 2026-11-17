@@ -759,8 +759,9 @@ impl Store {
     }
 
     /// What the last turn of thread `thread_id` that recorded it ran on, among those started
-    /// before item `item_id` came and not taken away by a rewind since; in the order the turns
-    /// ran, which a message that waited its turn doesn't follow. `None` when none did.
+    /// before item `item_id` first came, since the last rewind before it last did, and not
+    /// taken away by a rewind since; in the order the turns ran, which a message that waited
+    /// its turn doesn't follow. `None` when none did.
     pub fn turn_model_before(
         &self,
         thread_id: &str,
@@ -769,7 +770,22 @@ impl Store {
         let model: Option<String> = self
             .conn
             .query_row(
-                "SELECT json_extract(e.payload_json, '$.model')
+                "WITH latest AS (
+                     SELECT sequence FROM events
+                     WHERE thread_id = ?1 AND event_type = 'itemAdded'
+                       AND json_extract(payload_json, '$.item.id') = ?2
+                     ORDER BY sequence DESC LIMIT 1),
+                 rewound AS (
+                     SELECT coalesce(max(sequence), 0) AS sequence FROM events
+                     WHERE thread_id = ?1 AND event_type = 'threadRewound'
+                       AND sequence < (SELECT sequence FROM latest)),
+                 came AS (
+                     SELECT sequence FROM events
+                     WHERE thread_id = ?1 AND event_type = 'itemAdded'
+                       AND sequence > (SELECT sequence FROM rewound)
+                       AND json_extract(payload_json, '$.item.id') = ?2
+                     ORDER BY sequence LIMIT 1)
+                 SELECT json_extract(e.payload_json, '$.model')
                  FROM events e
                  JOIN thread_items i
                    ON i.thread_id = e.thread_id
@@ -777,10 +793,7 @@ impl Store {
                  WHERE e.thread_id = ?1
                    AND e.event_type = 'turnStarted'
                    AND json_extract(e.payload_json, '$.model') IS NOT NULL
-                   AND e.sequence < (SELECT sequence FROM events
-                                     WHERE thread_id = ?1 AND event_type = 'itemAdded'
-                                       AND json_extract(payload_json, '$.item.id') = ?2
-                                     ORDER BY sequence DESC LIMIT 1)
+                   AND e.sequence < (SELECT sequence FROM came)
                    AND i.ordinal <= coalesce((SELECT ordinal FROM thread_items
                                               WHERE thread_id = ?1 AND id = ?2), i.ordinal)
                    AND NOT EXISTS (
@@ -2950,6 +2963,44 @@ mod tests {
                 .and_then(|model| model.effort),
             Some(Medium),
             "a held message's turn the rewind took away doesn't count, though the message stays"
+        );
+
+        let in_v = |event: Event| match event {
+            Event::TurnStarted {
+                turn_id, at, model, ..
+            } => Event::TurnStarted {
+                thread_id: "v".into(),
+                turn_id,
+                at,
+                model,
+            },
+            other => other,
+        };
+        store
+            .append(
+                &[
+                    message_with("v", "o1", Vec::new()),
+                    in_v(started("o1", Some(Medium))),
+                    message_with("v", "waits", Vec::new()),
+                    answer("v", "b1"),
+                    message_with("v", "o2", Vec::new()),
+                    in_v(started("o2", Some(High))),
+                    answer("v", "b2"),
+                    in_v(started("waits", Some(Low))),
+                    answer("v", "b-waits"),
+                    answer("v", "b1"),
+                ],
+                NOW,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .turn_model_before("v", "b1")
+                .unwrap()
+                .and_then(|model| model.effort),
+            Some(Medium),
+            "an item kept again bounds history where it first came, before a message queued \
+             ahead of it ran"
         );
     }
 
