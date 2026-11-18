@@ -1225,6 +1225,9 @@ impl ThreadState {
     fn apply(&mut self, event: &Event, cx: &mut Context<Self>) {
         match event {
             Event::ItemAdded { item } if item.thread_id == self.thread_id => {
+                if item.content == ItemContent::RunEnded {
+                    self.drop_unfinished_replies();
+                }
                 self.streaming
                     .retain(|streaming| streaming.item_id != item.id);
                 match self.items.iter_mut().find(|known| known.id == item.id) {
@@ -1283,9 +1286,17 @@ impl ThreadState {
                     }
                 }
             }
+            Event::TurnCompleted { thread_id, .. } if *thread_id == self.thread_id => {
+                self.drop_unfinished_replies();
+            }
             _ => return,
         }
         cx.notify();
+    }
+
+    fn drop_unfinished_replies(&mut self) {
+        self.streaming
+            .retain(|streaming| streaming.kind == StreamKind::ToolOutput);
     }
 
     fn call_mut(&mut self, item_id: &str) -> Option<&mut ItemContent> {
@@ -1347,7 +1358,7 @@ pub fn left_out(content: &ItemContent) -> bool {
 mod tests {
     use super::ThreadState;
     use gpui_kit::{AppContext as _, TestAppContext};
-    use hoshi_core::{Event, ItemContent, ThreadItem};
+    use hoshi_core::{Event, ItemContent, StreamDelta, StreamKind, ThreadItem, TurnOutcome};
 
     fn message(id: &str) -> ThreadItem {
         ThreadItem {
@@ -1396,6 +1407,72 @@ mod tests {
                 .collect()
         });
         assert_eq!(dropped, [false, true]);
+    }
+
+    fn delta(item_id: &str, kind: StreamKind, text: &str) -> StreamDelta {
+        StreamDelta {
+            thread_id: "t".into(),
+            item_id: item_id.into(),
+            kind,
+            delta: text.into(),
+        }
+    }
+
+    fn streams(thread: &gpui_kit::Entity<ThreadState>, cx: &mut TestAppContext) -> Vec<String> {
+        thread.read_with(cx, |thread, _| {
+            thread
+                .streaming
+                .iter()
+                .map(|streaming| streaming.item_id.clone())
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn a_reply_cut_in_the_middle_goes_once_its_run_or_turn_ends(cx: &mut TestAppContext) {
+        let thread = cx.update(|cx| cx.new(|_| ThreadState::new("t", Vec::new())));
+        let stream_all = |thread: &gpui_kit::Entity<ThreadState>, cx: &mut TestAppContext| {
+            thread.update(cx, |thread, cx| {
+                thread.stream(
+                    vec![
+                        delta("m1:0", StreamKind::Reasoning, "Let me check"),
+                        delta("m1:1", StreamKind::Text, "So far"),
+                        delta("call", StreamKind::ToolOutput, "line 1\n"),
+                    ],
+                    cx,
+                );
+            });
+        };
+
+        stream_all(&thread, cx);
+        thread.update(cx, |thread, cx| {
+            thread.apply(
+                &Event::ItemAdded {
+                    item: ThreadItem {
+                        id: "turn:run1".into(),
+                        thread_id: "t".into(),
+                        created_at: "2026-11-15T10:00:01Z".into(),
+                        content: ItemContent::RunEnded,
+                    },
+                },
+                cx,
+            );
+        });
+        assert_eq!(streams(&thread, cx), ["call"]);
+
+        stream_all(&thread, cx);
+        thread.update(cx, |thread, cx| {
+            thread.apply(
+                &Event::TurnCompleted {
+                    thread_id: "t".into(),
+                    turn_id: "turn".into(),
+                    outcome: TurnOutcome::Completed,
+                    at: "2026-11-15T10:00:02Z".into(),
+                },
+                cx,
+            );
+        });
+        assert_eq!(streams(&thread, cx), ["call"]);
     }
 }
 

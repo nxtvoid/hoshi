@@ -1117,12 +1117,20 @@ fn session_settings(model: &TurnModel, tool_search: ToolSearch) -> Option<Value>
     Some(settings)
 }
 
+struct Unlanded {
+    item_id: String,
+    reasoning: bool,
+    text: String,
+}
+
 /// Translates Claude Code's `stream-json` output, one line at a time.
 #[derive(Default)]
 pub struct ClaudeParser {
     /// Content blocks seen so far per API message, to number assistant items
     /// the same way the stream numbers its deltas.
     blocks_seen: HashMap<String, usize>,
+    /// Blocks the stream wrote whose assistant message has not come yet, in order.
+    unlanded: Vec<Unlanded>,
     /// The window of the turn's model, until the turn's result reports the real one.
     context_window: Option<u64>,
     /// The model of the agent's latest call, whose window the result reports.
@@ -1353,7 +1361,10 @@ impl ClaudeParser {
                 Some("task_progress") => {
                     return self.subagent_progress(&value).into_iter().collect();
                 }
-                Some("api_retry") => return vec![outcome::retrying(&value)],
+                Some("api_retry") => {
+                    self.unlanded.clear();
+                    return vec![outcome::retrying(&value)];
+                }
                 Some("status") if value["status"] == "compacting" => {
                     return vec![ProviderOutput::CompactionStarted];
                 }
@@ -1395,10 +1406,12 @@ impl ClaudeParser {
             && value["origin"]["kind"] == "task-notification"
             && value["origin"]["runId"].is_null()
         {
+            self.unlanded.clear();
             return Vec::new();
         }
         self.wakeup_fired(&value);
         if self.another_run_ended(&value) {
+            self.unlanded.clear();
             return self.answered(&value);
         }
         let run_going = match value["type"].as_str() {
@@ -1532,7 +1545,8 @@ impl ClaudeParser {
                     .collect()
             }
             Some("result") => {
-                let mut outputs: Vec<_> = self.reported_window(value).into_iter().collect();
+                let mut outputs = self.cut_off_blocks();
+                outputs.extend(self.reported_window(value));
                 outputs.extend(self.answered(value));
                 let outcome = self.parse_result(value);
                 outputs.extend(self.reply_from_result(value, &outcome));
@@ -1581,6 +1595,7 @@ impl ClaudeParser {
         let event = &value["event"];
         match event["type"].as_str() {
             Some("message_start") => {
+                self.unlanded.clear();
                 let message = &event["message"];
                 if let Some(model) = message["model"].as_str() {
                     self.model = Some(model.to_owned());
@@ -1609,21 +1624,55 @@ impl ClaudeParser {
         };
         let item_id = format!("{message_id}:{index}");
         let delta = &event["delta"];
-        match (
+        let (reasoning, text) = match (
             delta["type"].as_str(),
             delta["text"].as_str(),
             delta["thinking"].as_str(),
         ) {
-            (Some("text_delta"), Some(text), _) => vec![ProviderOutput::TextDelta {
-                item_id,
-                delta: text.to_owned(),
-            }],
-            (Some("thinking_delta"), _, Some(thinking)) => vec![ProviderOutput::ReasoningDelta {
-                item_id,
-                delta: thinking.to_owned(),
-            }],
-            _ => Vec::new(),
+            (Some("text_delta"), Some(text), _) => (false, text),
+            (Some("thinking_delta"), _, Some(thinking)) => (true, thinking),
+            _ => return Vec::new(),
+        };
+        match self
+            .unlanded
+            .iter_mut()
+            .find(|block| block.item_id == item_id)
+        {
+            Some(block) => block.text.push_str(text),
+            None => self.unlanded.push(Unlanded {
+                item_id: item_id.clone(),
+                reasoning,
+                text: text.to_owned(),
+            }),
         }
+        let delta = text.to_owned();
+        vec![if reasoning {
+            ProviderOutput::ReasoningDelta { item_id, delta }
+        } else {
+            ProviderOutput::TextDelta { item_id, delta }
+        }]
+    }
+
+    /// What the stream wrote of blocks a run ended in the middle of, as Claude Code sends no
+    /// message for them: a message sent at once, or a stop, cut them.
+    fn cut_off_blocks(&mut self) -> Vec<ProviderOutput> {
+        std::mem::take(&mut self.unlanded)
+            .into_iter()
+            .filter(|block| !block.text.trim().is_empty())
+            .map(|block| {
+                if block.reasoning {
+                    ProviderOutput::Reasoning {
+                        item_id: block.item_id,
+                        text: block.text,
+                    }
+                } else {
+                    ProviderOutput::AssistantMessage {
+                        item_id: block.item_id,
+                        text: block.text,
+                    }
+                }
+            })
+            .collect()
     }
 
     /// A message of the turn's agent, or of the subagent the call `owner` started.
@@ -1639,6 +1688,7 @@ impl ClaudeParser {
             let index = self.blocks_seen.entry(message_id.to_owned()).or_default();
             let item_id = format!("{message_id}:{index}");
             *index += 1;
+            self.unlanded.retain(|block| block.item_id != item_id);
             match block["type"].as_str() {
                 Some("text") => {
                     let text = block["text"].as_str().unwrap_or_default();
@@ -1990,6 +2040,7 @@ impl ClaudeParser {
         self.run_text = false;
         self.local_output = None;
         self.cut_short = false;
+        self.unlanded.clear();
         self.signals.turn_ended();
         let mut outputs = Vec::new();
         if lingers && !self.background_commands.is_empty() {
@@ -3954,6 +4005,148 @@ mod tests {
     }
 
     #[test]
+    fn what_a_cut_run_streamed_lands_as_items_before_the_run_ends() {
+        let mut parser = steered_parser();
+        let delta = |index: u64, delta: Value| stream_delta("msg1", index, delta);
+        let landed = json!({ "type": "assistant", "message": { "id": "msg1",
+            "content": [{ "type": "thinking", "thinking": "Plan first." }] } });
+        let cut = json!({ "type": "result", "subtype": "success", "is_error": false,
+            "terminal_reason": "aborted_streaming", "result": "",
+            "user_message_uuids": ["m1"] });
+        let outputs = feed(
+            &mut parser,
+            &[
+                lifecycle("m1", "started"),
+                delta(
+                    0,
+                    json!({ "type": "thinking_delta", "thinking": "Plan first." }),
+                ),
+                landed,
+                delta(
+                    1,
+                    json!({ "type": "thinking_delta", "thinking": "The connection " }),
+                ),
+                delta(
+                    1,
+                    json!({ "type": "thinking_delta", "thinking": "stays local." }),
+                ),
+                delta(2, json!({ "type": "text_delta", "text": "So far" })),
+                lifecycle("m2", "queued"),
+                lifecycle("m2", "started"),
+                cut,
+            ],
+        );
+        let items: Vec<_> = outputs
+            .iter()
+            .filter_map(|output| match output {
+                ProviderOutput::Reasoning { item_id, text }
+                | ProviderOutput::AssistantMessage { item_id, text } => {
+                    Some((item_id.as_str(), text.as_str()))
+                }
+                ProviderOutput::RunEnded { .. } => Some(("run ended", "")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("msg1:0", "Plan first."),
+                ("msg1:1", "The connection stays local."),
+                ("msg1:2", "So far"),
+                ("run ended", ""),
+            ]
+        );
+    }
+
+    fn stream_delta(message_id: &str, index: u64, delta: Value) -> Value {
+        json!({ "type": "stream_event", "api_message_id": message_id,
+            "event": { "type": "content_block_delta", "index": index, "delta": delta } })
+    }
+
+    fn landed(outputs: &[ProviderOutput]) -> Vec<(&str, &str)> {
+        outputs
+            .iter()
+            .filter_map(|output| match output {
+                ProviderOutput::Reasoning { item_id, text }
+                | ProviderOutput::AssistantMessage { item_id, text } => {
+                    Some((item_id.as_str(), text.as_str()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn what_a_failed_api_call_streamed_is_not_kept() {
+        let mut parser = steered_parser();
+        let start = |id: &str| {
+            json!({ "type": "stream_event", "event": { "type": "message_start",
+                "message": { "id": id } } })
+        };
+        let retry = json!({ "type": "system", "subtype": "api_retry", "attempt": 1,
+            "max_retries": 10, "retry_delay_ms": 500, "error_status": 529, "error": "overloaded" });
+        let done = json!({ "type": "result", "subtype": "success", "is_error": false,
+            "terminal_reason": "completed", "result": "Here is the plan.",
+            "user_message_uuids": ["m1"] });
+        let outputs = feed(
+            &mut parser,
+            &[
+                lifecycle("m1", "started"),
+                start("msgA"),
+                stream_delta(
+                    "msgA",
+                    0,
+                    json!({ "type": "text_delta", "text": "Here is" }),
+                ),
+                retry,
+                stream_delta("msgB", 0, json!({ "type": "text_delta", "text": "Draft" })),
+                start("msgC"),
+                stream_delta(
+                    "msgC",
+                    0,
+                    json!({ "type": "text_delta", "text": "Here is" }),
+                ),
+                stream_delta("msgC", 1, json!({ "type": "text_delta", "text": "  " })),
+                json!({ "type": "assistant", "message": { "id": "msgC",
+                    "content": [{ "type": "text", "text": "Here is the plan." }] } }),
+                done,
+            ],
+        );
+        assert_eq!(landed(&outputs), [("msgC:0", "Here is the plan.")]);
+    }
+
+    #[test]
+    fn a_stop_keeps_what_the_stream_wrote_and_then_ends_the_turn() {
+        let mut parser = steered_parser();
+        feed(
+            &mut parser,
+            &[
+                lifecycle("m1", "started"),
+                stream_delta(
+                    "msg1",
+                    0,
+                    json!({ "type": "thinking_delta", "thinking": "Checking" }),
+                ),
+            ],
+        );
+        parser.queue.state().interrupted = true;
+        let stopped = feed(
+            &mut parser,
+            &[
+                json!({ "type": "result", "subtype": "error_during_execution",
+                "is_error": true }),
+            ],
+        );
+        assert_eq!(landed(&stopped), [("msg1:0", "Checking")]);
+        assert!(matches!(
+            stopped.last(),
+            Some(ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted
+            })
+        ));
+    }
+
+    #[test]
     fn a_run_a_message_cut_short_is_not_the_end_of_the_turn() {
         let mut parser = steered_parser();
         let cut = json!({ "type": "result", "subtype": "success", "is_error": false,
@@ -3970,6 +4163,12 @@ mod tests {
             ],
         );
         assert!(completions(&outputs).is_empty(), "{outputs:#?}");
+        assert!(
+            outputs
+                .iter()
+                .any(|output| matches!(output, ProviderOutput::RunEnded { .. })),
+            "{outputs:#?}"
+        );
 
         let answered = json!({ "type": "result", "subtype": "success", "is_error": false,
             "terminal_reason": "completed", "result": "ok", "user_message_uuids": ["m2"] });
