@@ -10,7 +10,8 @@ const MINUTE: i64 = 60_000;
 const HOUR: i64 = 60 * MINUTE;
 const DAY: i64 = 24 * HOUR;
 
-pub const LOW_PERCENT: u8 = 10;
+const LOW_PERCENT: u8 = 10;
+const WARN_PERCENT: u8 = 20;
 /// The shortest window that reads as monthly rather than weekly.
 const MONTH_MINUTES: u32 = 28 * 24 * 60;
 
@@ -33,6 +34,24 @@ impl Span {
 
 pub fn remaining_percent(window: &UsageWindow) -> u8 {
     100 - window.used_percent.min(100)
+}
+
+/// How close a window is to running out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LimitTone {
+    Normal,
+    Warning,
+    Low,
+}
+
+pub fn limit_tone(left: u8) -> LimitTone {
+    if left <= LOW_PERCENT {
+        LimitTone::Low
+    } else if left <= WARN_PERCENT {
+        LimitTone::Warning
+    } else {
+        LimitTone::Normal
+    }
 }
 
 pub fn restored_percent(window: &UsageWindow) -> u8 {
@@ -360,10 +379,11 @@ pub fn masked_email(email: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ExtraTexts, ResetDay, SectionState, Span, amount, banked_resets_for, even_pace_left,
-        extra_left_percent, extra_texts, format_expiry, format_span, masked_email,
-        remaining_percent, reset_moment, restored_percent, section_state, session_spent,
-        spendable_resets, time_left_percent, time_to_expiry, time_to_reset, window_label,
+        ExtraTexts, LimitTone, ResetDay, SectionState, Span, amount, banked_resets_for,
+        even_pace_left, extra_left_percent, extra_texts, format_expiry, format_span, limit_tone,
+        masked_email, remaining_percent, reset_moment, restored_percent, section_state,
+        session_spent, spendable_resets, time_left_percent, time_to_expiry, time_to_reset,
+        window_label,
     };
     use chrono::{DateTime, FixedOffset, TimeZone, Utc};
     use hoshi_core::{
@@ -434,6 +454,16 @@ mod tests {
         );
         extra.resets_at = Some("2026-11-25T16:00:00Z".into());
         assert_eq!(extra_texts(&extra, now()).detail, "$100 · 12d 4h");
+    }
+
+    #[test]
+    fn a_window_warns_at_a_fifth_left_and_runs_low_at_a_tenth() {
+        assert_eq!(limit_tone(100), LimitTone::Normal);
+        assert_eq!(limit_tone(21), LimitTone::Normal);
+        assert_eq!(limit_tone(20), LimitTone::Warning);
+        assert_eq!(limit_tone(11), LimitTone::Warning);
+        assert_eq!(limit_tone(10), LimitTone::Low);
+        assert_eq!(limit_tone(0), LimitTone::Low);
     }
 
     fn now() -> DateTime<Utc> {

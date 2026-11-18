@@ -921,7 +921,7 @@ impl SettingsView {
                 .await;
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.providers = status;
+                    workspace.set_providers(status);
                     cx.notify();
                 })
                 .ok();

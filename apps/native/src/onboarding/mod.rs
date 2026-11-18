@@ -59,7 +59,7 @@ pub fn complete(workspace: &Entity<Workspace>, cx: &mut App) {
             workspace.engine.clone(),
             workspace.settings_path.clone(),
             previous,
-            workspace.settings.clone(),
+            hoshi_app::settings::Snapshot::of(&workspace.settings),
         )
     });
     if let Some(path) = path {

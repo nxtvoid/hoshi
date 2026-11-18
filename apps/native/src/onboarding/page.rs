@@ -148,7 +148,7 @@ impl Onboarding {
                 workspace.engine.clone(),
                 workspace.settings_path.clone(),
                 previous,
-                workspace.settings.clone(),
+                hoshi_app::settings::Snapshot::of(&workspace.settings),
             )
         });
         cx.spawn(async move |this, cx| {
@@ -166,7 +166,7 @@ impl Onboarding {
             this.update(cx, |this, cx| {
                 this.workspace.update(cx, |workspace, cx| {
                     workspace.models = models;
-                    workspace.providers = status;
+                    workspace.set_providers(status);
                     cx.notify();
                 });
                 this.rechecking.remove(provider);
@@ -463,8 +463,7 @@ fn receive_providers(
             && workspace.providers.accounts.get(provider)
                 == Some(&ProviderAccountStatus::NotInstalled)
     });
-    workspace.providers = status;
-    if installed {
+    if workspace.set_providers(status) && installed {
         workspace.reload_models(cx);
     }
     cx.notify();

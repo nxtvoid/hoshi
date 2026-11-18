@@ -346,3 +346,156 @@ fn a_subagent_row_asks_to_show_its_call_in_the_transcript(cx: &mut TestAppContex
         }]
     );
 }
+
+#[gpui_kit::test]
+fn the_card_shows_the_threads_usage_limits_only_once_the_user_turns_them_on(
+    cx: &mut TestAppContext,
+) {
+    use hoshi_core::{UsageLimits, UsageWindow, UsageWindowKind};
+    let mut h = harness(cx, "details-usage", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.toggle(cx));
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+    let window = |kind, used_percent| UsageWindow {
+        kind,
+        model: None,
+        used_percent,
+        window_minutes: 300,
+        resets_at: None,
+    };
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.providers.usage_limits.insert(
+            hoshi_core::DEFAULT_PROVIDER.to_owned(),
+            UsageLimits {
+                windows: vec![
+                    window(UsageWindowKind::Session, 18),
+                    window(UsageWindowKind::Weekly, 83),
+                ],
+                banked_resets: None,
+                account: None,
+                extra_usage: None,
+            },
+        );
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_none());
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.set_usage_limits_in_details(true, cx)
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_some());
+    assert!(h.cx.debug_bounds("details-usage-1").is_some());
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.providers.accounts.insert(
+            hoshi_core::DEFAULT_PROVIDER.to_owned(),
+            hoshi_core::ProviderAccountStatus::SignedOut,
+        );
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_none());
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.providers.accounts.clear();
+        workspace.settings.providers.claude_code.enabled = false;
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_none());
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.settings.providers.claude_code.enabled = true;
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_some());
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.providers.accounts.insert(
+            hoshi_core::DEFAULT_PROVIDER.to_owned(),
+            hoshi_core::ProviderAccountStatus::NotInstalled,
+        );
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_none());
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.providers.accounts.clear();
+        workspace.settings.providers.codex.added = true;
+        workspace.settings.providers.codex.enabled = true;
+        workspace.providers.usage_limits.insert(
+            "codex".to_owned(),
+            UsageLimits {
+                windows: vec![window(UsageWindowKind::Weekly, 10)],
+                banked_resets: None,
+                account: None,
+                extra_usage: None,
+            },
+        );
+        let pending = |choice| hoshi_core::Event::ThreadModelPending {
+            thread_id: "t".into(),
+            choice,
+        };
+        workspace
+            .model
+            .apply(&pending(Some(hoshi_core::ModelChoice {
+                provider: "codex".into(),
+                model: None,
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })));
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_some());
+    assert!(
+        h.cx.debug_bounds("details-usage-1").is_none(),
+        "the pending provider's one window"
+    );
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace
+            .model
+            .apply(&hoshi_core::Event::ThreadModelPending {
+                thread_id: "t".into(),
+                choice: None,
+            });
+        workspace
+            .providers
+            .usage_limits
+            .get_mut(hoshi_core::DEFAULT_PROVIDER)
+            .unwrap()
+            .windows
+            .clear();
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(
+        h.cx.debug_bounds("details-usage-0").is_none(),
+        "no windows, no section"
+    );
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.providers.usage_limits.clear();
+        workspace.providers.usage_limits.insert(
+            "codex".to_owned(),
+            UsageLimits {
+                windows: vec![window(UsageWindowKind::Weekly, 10)],
+                banked_resets: None,
+                account: None,
+                extra_usage: None,
+            },
+        );
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_none());
+}

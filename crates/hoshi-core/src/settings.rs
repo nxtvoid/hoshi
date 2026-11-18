@@ -13,6 +13,8 @@ pub struct AppSettings {
     pub new_threads: NewThreadSettings,
     pub general: GeneralSettings,
     pub browser: BrowserSettings,
+    /// The thread's card shows its provider's usage limits.
+    pub usage_limits_in_details: bool,
     /// When the first-run setup was finished or skipped; `None` until then.
     pub onboarding_completed_at: Option<String>,
 }

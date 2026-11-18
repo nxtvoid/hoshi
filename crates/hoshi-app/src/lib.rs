@@ -26,25 +26,27 @@ pub fn open_engine(home: &Path, notify: Notify) -> Result<Engine, StoreError> {
     Ok(engine)
 }
 
-/// Saves `settings` to `path`, the settings file in hoshi's home, and hands the engine what
-/// changed from `previous`.
+/// Saves `next` to `path`, the settings file in hoshi's home, and hands the engine what changed
+/// from what the file held, or from `previous` when that isn't known. A snapshot older than one
+/// already saved changes nothing. Whether it saved.
 pub fn apply_settings(
     engine: &Engine,
     path: &Path,
     previous: &AppSettings,
-    settings: &AppSettings,
-) -> std::io::Result<()> {
-    settings::save(path, settings)?;
+    next: &settings::Snapshot,
+) -> std::io::Result<bool> {
     let home = path.parent().unwrap_or(Path::new(""));
-    let (before, after) = (&previous.providers, &settings.providers);
-    if before.claude_code != after.claude_code
-        || before.copilot != after.copilot
-        || before.codex != after.codex
-    {
-        engine.set_adapters(adapters_for(settings, home));
-    }
-    configure(engine, settings, home);
-    Ok(())
+    settings::save_latest(path, next, |written| {
+        let settings = &next.settings;
+        let (before, after) = (&written.unwrap_or(previous).providers, &settings.providers);
+        if before.claude_code != after.claude_code
+            || before.copilot != after.copilot
+            || before.codex != after.codex
+        {
+            engine.set_adapters(adapters_for(settings, home));
+        }
+        configure(engine, settings, home);
+    })
 }
 
 fn configure(engine: &Engine, settings: &AppSettings, home: &Path) {

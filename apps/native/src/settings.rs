@@ -282,13 +282,13 @@ impl SettingsView {
                 workspace.engine.clone(),
                 workspace.settings_path.clone(),
                 previous,
-                workspace.settings.clone(),
+                hoshi_app::settings::Snapshot::of(&workspace.settings),
             )
         });
-        if previous == next {
+        if previous == next.settings {
             return;
         }
-        let providers_changed = previous.providers != next.providers;
+        let providers_changed = previous.providers != next.settings.providers;
         let workspace = self.workspace.downgrade();
         cx.spawn(async move |this, cx| {
             if let Some(path) = path {
@@ -301,11 +301,13 @@ impl SettingsView {
                 if let Err(error) = &saved {
                     eprintln!("hoshi: could not save settings: {error}");
                 }
-                this.update(cx, |this, cx| {
-                    this.save_failed = saved.is_err();
-                    cx.notify();
-                })
-                .ok();
+                if !matches!(saved, Ok(false)) {
+                    this.update(cx, |this, cx| {
+                        this.save_failed = saved.is_err();
+                        cx.notify();
+                    })
+                    .ok();
+                }
             }
             if providers_changed {
                 let models = cx
