@@ -1122,6 +1122,9 @@ impl Engine {
             .ok_or_else(|| CommandError::ProjectNotFound {
                 project_id: project_id.to_owned(),
             })?;
+        if !Path::new(&root).is_dir() {
+            return Err(CommandError::WorkspaceRootNotFound { path: root });
+        }
         editors::open(editor, &root).map_err(|detail| CommandError::Internal { detail })
     }
 

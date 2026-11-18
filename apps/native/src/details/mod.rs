@@ -105,6 +105,9 @@ pub struct ThreadDetails {
     next_tick: Option<Instant>,
     shown_thread: Option<String>,
     shown_subject: Option<Subject>,
+    /// Grows each time the card turns to another subject, so a late result of the last one
+    /// is dropped.
+    subject_changes: u64,
     previous_agents_open: bool,
     subagent_calls: Option<SubagentCalls>,
     servers_expanded: bool,
@@ -158,6 +161,7 @@ impl ThreadDetails {
             let subject = this.subject(cx);
             if subject != this.shown_subject {
                 this.shown_subject = subject;
+                this.subject_changes += 1;
                 this.popover_open = false;
                 this.error = None;
             }
@@ -184,6 +188,7 @@ impl ThreadDetails {
             next_tick: None,
             shown_thread: None,
             shown_subject: None,
+            subject_changes: 0,
             previous_agents_open: false,
             subagent_calls: None,
             servers_expanded: false,
@@ -436,10 +441,14 @@ impl ThreadDetails {
     ) {
         self.error = None;
         cx.notify();
+        let subject = self.subject_changes;
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { call() }).await;
             if let Err(error) = result {
                 this.update(cx, |this, cx| {
+                    if this.subject_changes != subject {
+                        return;
+                    }
                     this.error = Some(error_message(&error));
                     cx.notify();
                 })

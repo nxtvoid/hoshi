@@ -639,3 +639,46 @@ fn a_narrow_new_thread_shows_the_details_from_a_popover(cx: &mut TestAppContext)
     assert!(h.cx.debug_bounds("popover-popup").is_some());
     assert!(h.cx.debug_bounds("details-editor-row").is_some());
 }
+
+#[gpui_kit::test]
+fn a_late_failure_stays_off_the_next_new_thread(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-draft-late", 1200.);
+    let workspace = draft_workspace(&mut h);
+    redraw(&mut h.cx);
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        )
+    });
+    workspace.update(&mut h.cx, |workspace, cx| workspace.start_draft(None, cx));
+    redraw(&mut h.cx);
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_none())
+    );
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.start_draft(Some("p".into()), cx)
+    });
+    redraw(&mut h.cx);
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        )
+    });
+    redraw(&mut h.cx);
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_some())
+    );
+}
