@@ -94,8 +94,36 @@ fn control(control: Control, maximized: bool, cx: &App) -> impl IntoElement {
 /// first control area under the mouse, and a parent's comes before its children's.
 pub trait DragRegion: InteractiveElement + Sized {
     fn drag_region(self) -> Self {
-        self.window_control_area(WindowControlArea::Drag)
+        let this = self.window_control_area(WindowControlArea::Drag);
+        if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            return this;
+        }
+        // Linux backends ignore control areas, so the move is asked of the compositor here.
+        this.on_mouse_down(MouseButton::Left, |event, window, cx| {
+            cx.stop_propagation();
+            if event.click_count == 2 {
+                DRAG_PRESSED.set(false);
+                window.zoom_window();
+            } else {
+                DRAG_PRESSED.set(true);
+            }
+        })
+        .on_mouse_move(|event, window, _| {
+            if DRAG_PRESSED.replace(false) && event.pressed_button == Some(MouseButton::Left) {
+                window.start_window_move();
+            }
+        })
+        .on_mouse_up(MouseButton::Left, |_, _, _| DRAG_PRESSED.set(false))
+        .on_mouse_up_out(MouseButton::Left, |_, _, _| DRAG_PRESSED.set(false))
+        .on_mouse_down(MouseButton::Right, |event, window, cx| {
+            cx.stop_propagation();
+            window.show_window_menu(event.position)
+        })
     }
+}
+
+thread_local! {
+    static DRAG_PRESSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl<E: InteractiveElement> DragRegion for E {}
