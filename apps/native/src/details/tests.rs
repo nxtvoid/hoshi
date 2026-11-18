@@ -682,3 +682,25 @@ fn a_late_failure_stays_off_the_next_new_thread(cx: &mut TestAppContext) {
             .read_with(&h.cx, |details, _| details.error.is_some())
     );
 }
+
+#[gpui_kit::test]
+fn a_failure_from_the_shortcut_opens_the_card_to_tell_it(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-shortcut-failure", 1200.);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        )
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_some());
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_some())
+    );
+}

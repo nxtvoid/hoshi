@@ -433,7 +433,7 @@ impl ThreadDetails {
         self.run(move || engine.switch_branch(&thread_id, &branch), cx);
     }
 
-    /// Runs an engine call in the background, telling its failure under the card.
+    /// Runs an engine call in the background, telling its failure under the card, opened for it.
     fn run(
         &mut self,
         call: impl FnOnce() -> Result<(), CommandError> + Send + 'static,
@@ -450,6 +450,13 @@ impl ThreadDetails {
                         return;
                     }
                     this.error = Some(error_message(&error));
+                    if !this.shown() {
+                        if this.inline {
+                            this.open = true;
+                        } else {
+                            this.popover_open = true;
+                        }
+                    }
                     cx.notify();
                 })
                 .ok();
