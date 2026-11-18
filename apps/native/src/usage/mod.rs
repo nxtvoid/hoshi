@@ -17,11 +17,11 @@ use hoshi_core::{
 };
 use hoshi_ui::prelude::*;
 use limits::{
-    LOW_PERCENT, SectionState, amount, banked_resets_for, even_pace_left, extra_left_percent,
-    format_expiry, format_span, grant_expiry, masked_email, plan_label, remaining_percent,
-    reset_kind_description, reset_kind_label, reset_moment, reset_when, restored_percent,
-    section_state, spend_message, spendable_resets, time_left_percent, time_to_expiry,
-    time_to_reset, window_label,
+    ExtraTexts, LOW_PERCENT, SectionState, banked_resets_for, even_pace_left, extra_left_percent,
+    extra_texts, format_expiry, format_span, grant_expiry, masked_email, plan_label,
+    remaining_percent, reset_kind_description, reset_kind_label, reset_moment, reset_when,
+    restored_percent, section_state, spend_message, spendable_resets, time_left_percent,
+    time_to_expiry, time_to_reset, window_label,
 };
 use std::collections::HashMap;
 use std::time::Duration;
@@ -96,30 +96,17 @@ fn extra_row(
     provider: &'static KnownProvider,
     extra: &ExtraUsage,
     below_windows: bool,
+    now: DateTime<Utc>,
     colors: &Colors,
 ) -> impl IntoElement {
     let id = provider.id;
-    let unit = &extra.unit;
     let left = extra_left_percent(extra);
-    let (shown, note, detail) = match (extra.limit, extra.used, extra.balance) {
-        _ if extra.unlimited => (m::usage_extra_unlimited(), None, String::new()),
-        (Some(limit), Some(used), _) => (
-            amount(limit.saturating_sub(used), unit),
-            Some(m::usage_left()),
-            m::usage_extra_of(amount(used, unit), amount(limit, unit)),
-        ),
-        (_, _, Some(balance)) => (
-            amount(balance, unit),
-            Some(m::usage_left()),
-            m::usage_credits_balance(),
-        ),
-        (_, used, _) => (
-            amount(used.unwrap_or(0), unit),
-            Some(m::usage_extra_spent()),
-            m::usage_extra_no_cap(),
-        ),
-    };
-    let label = match unit {
+    let ExtraTexts {
+        shown,
+        note,
+        detail,
+    } = extra_texts(extra, now);
+    let label = match extra.unit {
         SpendUnit::Money { .. } => m::usage_extra(),
         SpendUnit::Credits { .. } => m::usage_credits(),
     };
@@ -758,6 +745,7 @@ impl UsageView {
                     provider,
                     extra,
                     !limits.windows.is_empty(),
+                    self.now,
                     colors,
                 ))
             })
