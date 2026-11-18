@@ -91,7 +91,7 @@ fn usage_row(index: usize, window: &UsageWindow, colors: &Colors) -> impl IntoEl
                 .justify_end()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(tone)
-                .child(format!("{left}%")),
+                .child(m::usage_percent(left)),
         )
         .with_tooltip(
             Tooltip::element(move |_, _| {

@@ -17,6 +17,15 @@ struct Harness {
     view: Entity<UsageView>,
 }
 
+/// Removed once the test ends, even when it fails.
+struct TempFolder(std::path::PathBuf);
+
+impl Drop for TempFolder {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 fn harness(cx: &mut TestAppContext, name: &str) -> Harness {
     cx.executor().allow_parking();
     let home = std::env::temp_dir().join(format!("hoshi-native-{name}-{}", uuid::Uuid::new_v4()));
@@ -203,12 +212,11 @@ fn with_every_provider_off_the_page_points_to_settings(cx: &mut TestAppContext) 
 #[gpui_kit::test]
 fn the_switch_for_the_threads_card_shows_under_the_providers_with_limits(cx: &mut TestAppContext) {
     let mut h = harness(cx, "usage-in-details");
-    let file = std::env::temp_dir()
-        .join(format!(
-            "hoshi-native-usage-switch-{}",
-            uuid::Uuid::new_v4()
-        ))
-        .join("settings.json");
+    let folder = TempFolder(std::env::temp_dir().join(format!(
+        "hoshi-native-usage-switch-{}",
+        uuid::Uuid::new_v4()
+    )));
+    let file = folder.0.join("settings.json");
     h.workspace.update(&mut h.cx, |workspace, _| {
         workspace.settings_path = Some(file.clone())
     });

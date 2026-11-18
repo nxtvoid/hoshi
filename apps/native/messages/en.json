@@ -1262,6 +1262,7 @@
   "usage_reset_tomorrow": "tomorrow at {time}",
   "usage_reset_when": "{when} · in {time}",
   "usage_left": "left",
+  "usage_percent": "{percent}%",
   "usage_in_details": "Show in thread details",
   "usage_in_details_description": "The limits of the thread's provider, at the bottom of its card. They refresh during turns and with the providers' health check.",
   "usage_tooltip_left": "{window}: {percent}% left",

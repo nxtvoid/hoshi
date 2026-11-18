@@ -80,13 +80,7 @@ fn limits_to_refresh(
         .filter(|provider| matches!(provider.usage, crate::providers::UsageReport::Limits))
         .filter(|provider| provider.enabled(&settings.providers))
         .filter(|provider| {
-            accounts.get(provider.id).is_some_and(|account| {
-                !matches!(
-                    account,
-                    hoshi_core::ProviderAccountStatus::SignedOut
-                        | hoshi_core::ProviderAccountStatus::NotInstalled
-                )
-            })
+            accounts.get(provider.id) == Some(&hoshi_core::ProviderAccountStatus::Ready)
         })
         .map(|provider| provider.id)
         .collect()
@@ -717,7 +711,10 @@ impl Workspace {
     /// reads them. A failed read is tried once more soon, unless it was that try.
     fn read_usage_limits(&mut self, retry: bool, cx: &mut Context<Self>) -> Task<()> {
         let providers = limits_to_refresh(&self.settings, &self.providers.accounts);
-        if providers.is_empty() || self.reading_limits {
+        if providers.is_empty()
+            || self.reading_limits
+            || self.settings.providers.health_check_interval_secs == 0
+        {
             return Task::ready(());
         }
         self.limits_retry_at = None;
@@ -1637,6 +1634,8 @@ mod limits_tests {
         assert_eq!(read, ["claudeCode", "codex"]);
 
         accounts.insert("codex".to_owned(), ProviderAccountStatus::SignedOut);
+        assert_eq!(limits_to_refresh(&settings, &accounts), ["claudeCode"]);
+        accounts.insert("codex".to_owned(), ProviderAccountStatus::Unknown);
         assert_eq!(limits_to_refresh(&settings, &accounts), ["claudeCode"]);
         settings.providers.claude_code.enabled = false;
         assert!(limits_to_refresh(&settings, &accounts).is_empty());

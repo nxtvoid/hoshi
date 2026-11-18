@@ -867,7 +867,7 @@ impl UsageView {
                             .debug_selector(move || format!("usage-left-{id}-{index}"))
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{left}%")),
+                            .child(m::usage_percent(left)),
                     )
                     .child(
                         div()
