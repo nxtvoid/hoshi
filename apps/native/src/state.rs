@@ -179,6 +179,8 @@ pub struct Workspace {
     pub queues: HashMap<String, hoshi_core::ThreadQueue>,
     drafts_home: Option<PathBuf>,
     drafts_saving: Option<Task<()>>,
+    /// The last save of `last_used`; each save waits for the one before it.
+    choices_saving: Option<Task<()>>,
 }
 
 impl Workspace {
@@ -356,6 +358,7 @@ impl Workspace {
             queues: HashMap::new(),
             drafts_home: None,
             drafts_saving: None,
+            choices_saving: None,
         }
     }
 
@@ -848,8 +851,13 @@ impl Workspace {
             return;
         };
         let choices = self.last_used.clone();
-        cx.background_spawn(async move { crate::choices::save(&home, &choices) })
-            .detach_and_log_err(cx);
+        let previous = self.choices_saving.take();
+        self.choices_saving = Some(cx.background_spawn(async move {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            crate::choices::save(&home, &choices).ok();
+        }));
     }
 
     fn save_drafts(&mut self, cx: &mut Context<Self>) {
