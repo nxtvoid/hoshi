@@ -55,6 +55,47 @@ pub fn time_to_reset(window: &UsageWindow, now: DateTime<Utc>) -> Option<Span> {
     millis_until(window.resets_at.as_deref(), now).map(Span::of)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExtraTexts {
+    pub shown: String,
+    pub note: Option<String>,
+    pub detail: String,
+}
+
+/// The extra usage row's amount, its note, and the detail beside them: the cap and when it
+/// resets, else the cap alone as a monthly one.
+pub fn extra_texts(extra: &ExtraUsage, now: DateTime<Utc>) -> ExtraTexts {
+    let unit = &extra.unit;
+    let texts = |shown, note: Option<String>, detail| ExtraTexts {
+        shown,
+        note,
+        detail,
+    };
+    match (extra.limit, extra.used, extra.balance) {
+        _ if extra.unlimited => texts(m::usage_extra_unlimited(), None, String::new()),
+        (Some(limit), Some(used), _) => texts(
+            amount(limit.saturating_sub(used), unit),
+            Some(m::usage_left()),
+            match millis_until(extra.resets_at.as_deref(), now) {
+                Some(millis) => {
+                    m::usage_extra_cap_resets(amount(limit, unit), format_span(Span::of(millis)))
+                }
+                None => m::usage_extra_monthly_cap(amount(limit, unit)),
+            },
+        ),
+        (_, _, Some(balance)) => texts(
+            amount(balance, unit),
+            Some(m::usage_left()),
+            m::usage_credits_balance(),
+        ),
+        (_, used, _) => texts(
+            amount(used.unwrap_or(0), unit),
+            Some(m::usage_extra_spent()),
+            m::usage_extra_no_cap(),
+        ),
+    }
+}
+
 /// Where even spending would leave the quota by now, rounded.
 pub fn even_pace_left(window: &UsageWindow, now: DateTime<Utc>) -> Option<u32> {
     time_left_percent(window, now).map(|left| left.round() as u32)
@@ -319,10 +360,10 @@ pub fn masked_email(email: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResetDay, SectionState, Span, amount, banked_resets_for, even_pace_left,
-        extra_left_percent, format_expiry, format_span, masked_email, remaining_percent,
-        reset_moment, restored_percent, section_state, session_spent, spendable_resets,
-        time_left_percent, time_to_expiry, time_to_reset, window_label,
+        ExtraTexts, ResetDay, SectionState, Span, amount, banked_resets_for, even_pace_left,
+        extra_left_percent, extra_texts, format_expiry, format_span, masked_email,
+        remaining_percent, reset_moment, restored_percent, section_state, session_spent,
+        spendable_resets, time_left_percent, time_to_expiry, time_to_reset, window_label,
     };
     use chrono::{DateTime, FixedOffset, TimeZone, Utc};
     use hoshi_core::{
@@ -368,6 +409,31 @@ mod tests {
         assert_eq!(extra_left_percent(&extra(Some(0), Some(0))), Some(0));
         assert_eq!(extra_left_percent(&extra(Some(500), None)), None);
         assert_eq!(extra_left_percent(&extra(None, Some(500))), None);
+    }
+
+    #[test]
+    fn a_capped_extra_usage_tells_what_is_left_beside_its_cap() {
+        let mut extra = ExtraUsage {
+            unit: SpendUnit::Money {
+                currency: Some("USD".into()),
+                exponent: 2,
+            },
+            used: Some(4_888),
+            limit: Some(10_000),
+            balance: None,
+            unlimited: false,
+            resets_at: None,
+        };
+        assert_eq!(
+            extra_texts(&extra, now()),
+            ExtraTexts {
+                shown: "$51.12".into(),
+                note: Some("left".into()),
+                detail: "$100 / month".into(),
+            }
+        );
+        extra.resets_at = Some("2026-11-25T16:00:00Z".into());
+        assert_eq!(extra_texts(&extra, now()).detail, "$100 · 12d 4h");
     }
 
     fn now() -> DateTime<Utc> {
