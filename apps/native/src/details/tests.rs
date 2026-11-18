@@ -499,3 +499,230 @@ fn the_card_shows_the_threads_usage_limits_only_once_the_user_turns_them_on(
     redraw(&mut h.cx);
     assert!(h.cx.debug_bounds("details-usage-0").is_none());
 }
+
+fn draft_workspace(h: &mut Harness) -> Entity<Workspace> {
+    use hoshi_core::{UsageLimits, UsageWindow, UsageWindowKind};
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    h.details.update(&mut h.cx, |details, cx| {
+        details.editors = Some(vec![Editor::Vscode]);
+        details.toggle(cx);
+    });
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.settings.usage_limits_in_details = true;
+        workspace.settings.providers.codex.added = true;
+        workspace.settings.providers.codex.enabled = true;
+        workspace.providers.usage_limits.insert(
+            crate::providers::CODEX.to_owned(),
+            UsageLimits {
+                windows: vec![UsageWindow {
+                    kind: UsageWindowKind::Session,
+                    model: None,
+                    used_percent: 40,
+                    window_minutes: 300,
+                    resets_at: None,
+                }],
+                banked_resets: None,
+                account: None,
+                extra_usage: None,
+            },
+        );
+        workspace.start_draft(Some("p".into()), cx);
+        workspace.choices.model.provider = crate::providers::CODEX.to_owned();
+        cx.notify();
+    });
+    workspace
+}
+
+fn wait_for_workspace(h: &mut Harness, what: &str, done: impl Fn(&Workspace) -> bool) {
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        redraw(&mut h.cx);
+        if workspace.read_with(&h.cx, |workspace, _| done(workspace)) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[gpui_kit::test]
+fn a_new_thread_in_a_project_shows_the_card_without_a_thread(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-draft", 1200.);
+    let workspace = draft_workspace(&mut h);
+    wait_for_workspace(&mut h, "the project's branch", |workspace| {
+        workspace
+            .project_branches
+            .get("p")
+            .cloned()
+            .flatten()
+            .as_deref()
+            == Some("feature")
+    });
+
+    assert!(h.cx.debug_bounds("thread-details-card").is_some());
+    assert!(h.cx.debug_bounds("details-editor-row").is_some());
+    assert!(h.cx.debug_bounds("details-draft-branch").is_some());
+    assert!(h.cx.debug_bounds("details-git-arrow").is_none());
+    assert!(h.cx.debug_bounds("details-usage-0").is_some());
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.choices.model.provider = hoshi_core::DEFAULT_PROVIDER.to_owned();
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage-0").is_none());
+
+    workspace.update(&mut h.cx, |workspace, cx| workspace.start_draft(None, cx));
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+}
+
+#[gpui_kit::test]
+fn a_new_threads_card_goes_with_its_project(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-draft-removed", 1200.);
+    let workspace = draft_workspace(&mut h);
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_some());
+
+    let engine = workspace.read_with(&h.cx, |workspace, _| workspace.engine.clone());
+    engine
+        .dispatch(Command::ProjectRemove {
+            project_id: "p".into(),
+        })
+        .unwrap();
+    wait_for_workspace(&mut h, "the removal", |workspace| {
+        workspace.model.project("p").is_none()
+    });
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+    h.details.update(&mut h.cx, |details, cx| {
+        assert!(!details.open_in_target(cx));
+    });
+}
+
+#[gpui_kit::test]
+fn an_error_stays_with_the_new_thread_it_happened_in(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-draft-error", 1200.);
+    let workspace = draft_workspace(&mut h);
+    h.details.update(&mut h.cx, |details, cx| {
+        details.error = Some("failed".into());
+        cx.notify();
+    });
+    workspace.update(&mut h.cx, |workspace, cx| workspace.start_draft(None, cx));
+    redraw(&mut h.cx);
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.start_draft(Some("p".into()), cx)
+    });
+    redraw(&mut h.cx);
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_none())
+    );
+}
+
+#[gpui_kit::test]
+fn a_narrow_new_thread_shows_the_details_from_a_popover(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-draft-narrow", 700.);
+    draft_workspace(&mut h);
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+
+    h.details.update(&mut h.cx, |details, cx| {
+        details.popover_open = true;
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("popover-popup").is_some());
+    assert!(h.cx.debug_bounds("details-editor-row").is_some());
+}
+
+#[gpui_kit::test]
+fn a_late_failure_stays_off_the_next_new_thread(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-draft-late", 1200.);
+    let workspace = draft_workspace(&mut h);
+    redraw(&mut h.cx);
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        )
+    });
+    workspace.update(&mut h.cx, |workspace, cx| workspace.start_draft(None, cx));
+    redraw(&mut h.cx);
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_none())
+    );
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.start_draft(Some("p".into()), cx)
+    });
+    redraw(&mut h.cx);
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        )
+    });
+    redraw(&mut h.cx);
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_some())
+    );
+}
+
+#[gpui_kit::test]
+fn a_failure_from_the_shortcut_opens_the_card_to_tell_it(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-shortcut-failure", 1200.);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        )
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_some());
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_some())
+    );
+}
+
+#[gpui_kit::test]
+fn only_the_latest_launch_tells_its_failure(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-superseded", 1200.);
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        );
+        details.run(|| Ok(()), cx);
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_none())
+    );
+}

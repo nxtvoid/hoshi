@@ -44,6 +44,13 @@ pub enum Surface {
     PullRequest,
 }
 
+/// What the card is about: the open thread, or the project a new thread will start in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Subject {
+    Thread(String),
+    Draft(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetailsEvent {
     ShowSurface {
@@ -97,6 +104,12 @@ pub struct ThreadDetails {
     refresh_pending: bool,
     next_tick: Option<Instant>,
     shown_thread: Option<String>,
+    shown_subject: Option<Subject>,
+    /// Grows each time the card turns to another subject, so a late result of the last one
+    /// is dropped.
+    subject_changes: u64,
+    /// Grows with each engine call the card runs, so only the latest one tells its failure.
+    runs: u64,
     previous_agents_open: bool,
     subagent_calls: Option<SubagentCalls>,
     servers_expanded: bool,
@@ -147,6 +160,13 @@ impl ThreadDetails {
             if thread != this.shown_thread {
                 this.show_thread(thread, cx);
             }
+            let subject = this.subject(cx);
+            if subject != this.shown_subject {
+                this.shown_subject = subject;
+                this.subject_changes += 1;
+                this.popover_open = false;
+                this.error = None;
+            }
             cx.notify();
         });
         Self {
@@ -169,6 +189,9 @@ impl ThreadDetails {
             refresh_pending: false,
             next_tick: None,
             shown_thread: None,
+            shown_subject: None,
+            subject_changes: 0,
+            runs: 0,
             previous_agents_open: false,
             subagent_calls: None,
             servers_expanded: false,
@@ -200,7 +223,7 @@ impl ThreadDetails {
 
     /// What the floating card takes from the chat's lanes while it shows.
     pub fn lane_room(&self, cx: &App) -> LaneRoom {
-        let card = self.open && self.inline && self.workspace.read(cx).open_thread_id(cx).is_some();
+        let card = self.open && self.inline && self.subject(cx).is_some();
         if card {
             LaneRoom {
                 right: px(CARD_WIDTH + CARD_GAP + CARD_CLEARANCE),
@@ -218,6 +241,19 @@ impl ThreadDetails {
         } else {
             self.popover_open
         }
+    }
+
+    fn subject(&self, cx: &App) -> Option<Subject> {
+        let workspace = self.workspace.read(cx);
+        if let Some(thread_id) = workspace.open_thread_id(cx) {
+            return Some(Subject::Thread(thread_id));
+        }
+        workspace
+            .draft
+            .as_ref()
+            .and_then(|draft| draft.project_id.clone())
+            .filter(|project_id| workspace.model.project(project_id).is_some())
+            .map(Subject::Draft)
     }
 
     fn engine(&self, cx: &App) -> std::sync::Arc<hoshi_engine::Engine> {
@@ -362,12 +398,12 @@ impl ThreadDetails {
         open_target(self.editors.as_deref()?, self.prefs.preferred_editor)
     }
 
-    /// Ctrl+O: opens the thread's folder where "Open in" would.
+    /// Ctrl+O: opens the card's folder where "Open in" would.
     fn open_in_target(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(editor) = self.open_target() else {
             return false;
         };
-        if self.workspace.read(cx).open_thread_id(cx).is_none() {
+        if self.subject(cx).is_none() {
             return false;
         }
         self.open_in(editor, cx);
@@ -375,7 +411,7 @@ impl ThreadDetails {
     }
 
     fn open_in(&mut self, editor: Editor, cx: &mut Context<Self>) {
-        let Some(thread_id) = self.shown_thread.clone() else {
+        let Some(subject) = self.subject(cx) else {
             return;
         };
         if self.prefs.preferred_editor != Some(editor) {
@@ -383,7 +419,13 @@ impl ThreadDetails {
             self.save_prefs(cx);
         }
         let engine = self.engine(cx);
-        self.run(move || engine.open_in_editor(&thread_id, editor), cx);
+        self.run(
+            move || match subject {
+                Subject::Thread(thread_id) => engine.open_in_editor(&thread_id, editor),
+                Subject::Draft(project_id) => engine.open_project_in_editor(&project_id, editor),
+            },
+            cx,
+        );
     }
 
     fn switch_branch(&mut self, branch: String, cx: &mut Context<Self>) {
@@ -394,7 +436,7 @@ impl ThreadDetails {
         self.run(move || engine.switch_branch(&thread_id, &branch), cx);
     }
 
-    /// Runs an engine call in the background, telling its failure under the card.
+    /// Runs an engine call in the background, telling its failure under the card, opened for it.
     fn run(
         &mut self,
         call: impl FnOnce() -> Result<(), CommandError> + Send + 'static,
@@ -402,11 +444,23 @@ impl ThreadDetails {
     ) {
         self.error = None;
         cx.notify();
+        self.runs += 1;
+        let run = (self.subject_changes, self.runs);
         cx.spawn(async move |this, cx| {
             let result = cx.background_spawn(async move { call() }).await;
             if let Err(error) = result {
                 this.update(cx, |this, cx| {
+                    if (this.subject_changes, this.runs) != run {
+                        return;
+                    }
                     this.error = Some(error_message(&error));
+                    if !this.shown() {
+                        if this.inline {
+                            this.open = true;
+                        } else {
+                            this.popover_open = true;
+                        }
+                    }
                     cx.notify();
                 })
                 .ok();
@@ -679,16 +733,19 @@ impl ThreadDetails {
     /// The header's part: how many servers run while the details are out of sight, and the
     /// button that shows them.
     pub fn header_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(thread_id) = self.workspace.read(cx).open_thread_id(cx) else {
+        let Some(subject) = self.subject(cx) else {
             return div().into_any_element();
         };
         let colors = cx.hoshi().clone();
-        let count = self
-            .workspace
-            .read(cx)
-            .servers
-            .get(&thread_id)
-            .map_or(0, Vec::len);
+        let count = match &subject {
+            Subject::Thread(thread_id) => self
+                .workspace
+                .read(cx)
+                .servers
+                .get(thread_id)
+                .map_or(0, Vec::len),
+            Subject::Draft(_) => 0,
+        };
         let notice = (!self.shown() && count > 0).then(|| {
             servers_notice(count, &colors).on_click(cx.listener(|this, _, _, cx| {
                 if this.inline {
@@ -728,7 +785,7 @@ impl ThreadDetails {
                 }))
                 .trigger(toggle)
                 .content(move |_, window, cx| {
-                    this.update(cx, |this, cx| this.content(&thread_id, window, cx))
+                    this.update(cx, |this, cx| this.subject_content(&subject, window, cx))
                         .unwrap_or_else(|_| div().into_any_element())
                 })
                 .into_any_element()
@@ -740,6 +797,71 @@ impl ThreadDetails {
             .gap_1()
             .children(notice)
             .child(button)
+            .into_any_element()
+    }
+
+    fn subject_content(
+        &mut self,
+        subject: &Subject,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match subject {
+            Subject::Thread(thread_id) => self.content(thread_id, window, cx),
+            Subject::Draft(project_id) => self.draft_content(project_id, cx),
+        }
+    }
+
+    fn draft_content(&mut self, project_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.hoshi().clone();
+        let workspace = self.workspace.read(cx);
+        let Some(root) = workspace
+            .model
+            .project(project_id)
+            .map(|project| project.workspace_root.clone())
+        else {
+            return div().into_any_element();
+        };
+        let branch = workspace
+            .project_branches
+            .get(project_id)
+            .cloned()
+            .flatten();
+        let provider = workspace.choices.model.provider.clone();
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .child(self.folder_row(&root, None, &colors));
+        if let Some(editor) = self.open_target() {
+            column = column.child(self.editor_row(editor, &colors, cx));
+        }
+        if let Some(branch) = branch {
+            let mono = cx.theme().mono_font_family.clone();
+            column = column.child(separator(&colors)).child(
+                row_static("details-branch", &colors)
+                    .debug_selector(|| "details-draft-branch".into())
+                    .child(icon(IconName::GitBranch, &colors))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(mono)
+                            .text_xs()
+                            .child(branch),
+                    ),
+            );
+        }
+        if let Some(limits) = self.usage_limits(&provider, cx) {
+            column = column
+                .child(separator(&colors))
+                .child(usage::section(&limits, &colors));
+        }
+        column
+            .when_some(self.error.clone(), |this, error| {
+                this.child(error_line(error, &colors))
+            })
             .into_any_element()
     }
 
@@ -788,11 +910,11 @@ impl ThreadDetails {
             self.tick_in(servers::age_tick(&servers, servers::now_millis()), cx);
         }
 
-        let mut column = div()
-            .flex()
-            .flex_col()
-            .gap(px(2.))
-            .child(self.folder_row(&path, &thread, &colors));
+        let mut column = div().flex().flex_col().gap(px(2.)).child(self.folder_row(
+            &path,
+            worktree_badge(&thread),
+            &colors,
+        ));
         if let Some(editor) = self.open_target() {
             column = column.child(self.editor_row(editor, &colors, cx));
         }
@@ -842,7 +964,7 @@ impl ThreadDetails {
         }
         column = self.agents_section(column, agents, parent, &colors, cx);
         column = self.servers_section(column, servers, commands_running, &colors, cx);
-        if let Some(limits) = self.usage_limits(&thread, cx) {
+        if let Some(limits) = self.usage_limits(usage::provider_of(&thread), cx) {
             column = column
                 .child(separator(&colors))
                 .child(usage::section(&limits, &colors));
@@ -854,13 +976,12 @@ impl ThreadDetails {
             .into_any_element()
     }
 
-    /// The limits of the thread's provider when the card shows them, as last read.
-    fn usage_limits(&self, thread: &Thread, cx: &App) -> Option<UsageLimits> {
+    /// The limits of `provider` when the card shows them, as last read.
+    fn usage_limits(&self, provider: &str, cx: &App) -> Option<UsageLimits> {
         let workspace = self.workspace.read(cx);
         if !workspace.settings.usage_limits_in_details {
             return None;
         }
-        let provider = usage::provider_of(thread);
         let known = crate::providers::known(provider)?;
         if !known.enabled(&workspace.settings.providers) {
             return None;
@@ -877,7 +998,7 @@ impl ThreadDetails {
             .cloned()
     }
 
-    fn folder_row(&self, path: &str, thread: &Thread, colors: &Colors) -> impl IntoElement {
+    fn folder_row(&self, path: &str, badge: Option<String>, colors: &Colors) -> impl IntoElement {
         let folder = path
             .split(['\\', '/'])
             .rfind(|part| !part.is_empty())
@@ -908,7 +1029,7 @@ impl ThreadDetails {
                     .child(folder)
                     .with_tooltip(Tooltip::new(path.to_owned())),
             )
-            .when(thread.worktree_path.is_some(), |this| {
+            .when_some(badge, |this, badge| {
                 this.child(
                     div()
                         .flex_none()
@@ -919,11 +1040,7 @@ impl ThreadDetails {
                         .text_size(px(10.))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(colors.muted_foreground)
-                        .child(if thread.worktree_released {
-                            m::worktree_released_badge()
-                        } else {
-                            m::worktree_badge()
-                        }),
+                        .child(badge),
                 )
             })
             .child(
@@ -1599,10 +1716,10 @@ impl Render for ThreadDetails {
         )
         .absolute()
         .size_full();
-        let thread_id = self.workspace.read(cx).open_thread_id(cx);
-        let card = thread_id.filter(|_| self.open && self.inline).map(|id| {
+        let subject = self.subject(cx);
+        let card = subject.filter(|_| self.open && self.inline).map(|subject| {
             let colors = cx.hoshi().clone();
-            let content = self.content(&id, window, cx);
+            let content = self.subject_content(&subject, window, cx);
             div()
                 .absolute()
                 .size_full()
@@ -1636,6 +1753,15 @@ impl Render for ThreadDetails {
             .child(measure)
             .children(card)
     }
+}
+
+fn worktree_badge(thread: &Thread) -> Option<String> {
+    thread.worktree_path.as_ref()?;
+    Some(if thread.worktree_released {
+        m::worktree_released_badge()
+    } else {
+        m::worktree_badge()
+    })
 }
 
 fn servers_notice(count: usize, colors: &Colors) -> Stateful<Div> {
