@@ -70,7 +70,7 @@ pub fn load_version(workspace: &Entity<Workspace>, cx: &mut App) {
         workspace
             .update(cx, |workspace, cx| {
                 if unknown(&workspace.providers) {
-                    workspace.providers = status;
+                    workspace.set_providers(status);
                     cx.notify();
                 }
             })

@@ -95,7 +95,7 @@ use secrets::SecretKey;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -137,7 +137,7 @@ pub enum Notification {
     Servers(hoshi_core::ThreadServers),
     /// The branch a project's root folder is on, when it changes.
     ProjectBranch(hoshi_core::ProjectBranch),
-    /// The providers as now known, after a sign-in changed or an install put a CLI in place.
+    /// The providers as now known, after any change to them.
     Providers(ProvidersStatus),
     /// What a sweep of merged worktrees just did.
     MergedCleanup(MergedCleanup),
@@ -161,6 +161,8 @@ pub struct ProvidersStatus {
     /// Each provider plan's limits as last read or reported, possibly in an earlier run, by
     /// provider id.
     pub usage_limits: HashMap<String, UsageLimits>,
+    /// Grows with each status taken, so an older one never replaces a newer one.
+    pub revision: u64,
 }
 
 /// Shared by every thread that talks to the engine: the app and the reader threads of
@@ -280,6 +282,8 @@ struct State {
     provider_accounts: HashMap<String, ProviderAccountStatus>,
     /// When the providers were last checked, as an RFC 3339 time.
     providers_checked_at: Option<String>,
+    /// The revision the next providers status takes.
+    providers_revision: AtomicU64,
     /// Where Codex is found and keeps its sign-in; `None` while it isn't enabled.
     codex: Option<CodexSetup>,
     provider_sign_ins: HashMap<String, ProviderSignIn>,
@@ -610,6 +614,7 @@ impl Engine {
             provider_version_checked_at: None,
             provider_accounts: HashMap::new(),
             providers_checked_at: None,
+            providers_revision: AtomicU64::new(1),
             codex: None,
             provider_sign_ins: HashMap::new(),
             provider_logins: HashMap::new(),
@@ -4468,13 +4473,16 @@ impl State {
             provider,
             version: None,
         }));
+        self.notify_providers();
     }
 
+    /// Also sends the whole status, so a status taken before this change can't undo it.
     fn notify_provider_version(&self, provider: &str) {
         (self.notify)(Notification::ProviderVersion(ProviderVersionUpdate {
             provider: provider.to_owned(),
             version: self.provider_versions.get(provider).cloned(),
         }));
+        self.notify_providers();
     }
 
     fn providers_status(&self) -> ProvidersStatus {
@@ -4486,6 +4494,7 @@ impl State {
             logins: self.provider_logins.clone(),
             codex_account: self.codex_account.clone(),
             usage_limits: self.usage_limits.clone(),
+            revision: self.providers_revision.fetch_add(1, Ordering::Relaxed),
         }
     }
 
@@ -6032,7 +6041,19 @@ mod tests {
         assert!(!checked.update_available);
 
         engine.update_provider();
-        let status = notifications.recv_timeout(Duration::from_secs(30)).unwrap();
+        let mut revisions = Vec::new();
+        let status = loop {
+            let status = notifications.recv_timeout(Duration::from_secs(30)).unwrap();
+            revisions.push(status.revision);
+            if status.accounts.contains_key(DEFAULT_PROVIDER) {
+                break status;
+            }
+        };
+        assert!(
+            revisions.len() > 1,
+            "the update's progress sends the status too"
+        );
+        assert!(revisions.is_sorted_by(|a, b| a < b), "{revisions:?}");
 
         let version = &status.versions[DEFAULT_PROVIDER];
         assert_eq!(version.update, ProviderUpdate::Succeeded);
@@ -6143,7 +6164,15 @@ mod tests {
             engine.provider_version().unwrap().installed.as_deref(),
             Some("2.1.325")
         );
-        assert_eq!(engine.providers_status(), status);
+        let again = engine.providers_status();
+        assert!(again.revision > status.revision);
+        assert_eq!(
+            ProvidersStatus {
+                revision: status.revision,
+                ..again
+            },
+            status
+        );
     }
 
     #[test]

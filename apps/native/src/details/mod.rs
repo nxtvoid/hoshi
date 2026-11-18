@@ -6,10 +6,12 @@ mod rows;
 mod servers;
 #[cfg(test)]
 mod tests;
+mod usage;
 
 use crate::m;
 use crate::sections::relative_time;
 use crate::state::Workspace;
+use crate::usage::limits::{SectionState, section_state};
 pub use agents::track_pending_tasks;
 use agents::{AgentKind, AgentState, ThreadAgent, busy_threads, subagent_calls, thread_agents};
 use chrono::Utc;
@@ -18,7 +20,7 @@ use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
 use gpui_kit::*;
 use hoshi_core::{
     ChangesSummary, CommandError, Editor, GitAction, GitActionRequest, GitActionResult, GitStatus,
-    LocalServer, PullRequestState, Thread, ThreadItem, ThreadStatus,
+    LocalServer, PullRequestState, Thread, ThreadItem, ThreadStatus, UsageLimits,
 };
 use hoshi_ui::prelude::*;
 use prefs::{Prefs, editor_label, open_shortcut, open_target};
@@ -840,11 +842,39 @@ impl ThreadDetails {
         }
         column = self.agents_section(column, agents, parent, &colors, cx);
         column = self.servers_section(column, servers, commands_running, &colors, cx);
+        if let Some(limits) = self.usage_limits(&thread, cx) {
+            column = column
+                .child(separator(&colors))
+                .child(usage::section(&limits, &colors));
+        }
         column
             .when_some(self.error.clone(), |this, error| {
                 this.child(error_line(error, &colors))
             })
             .into_any_element()
+    }
+
+    /// The limits of the thread's provider when the card shows them, as last read.
+    fn usage_limits(&self, thread: &Thread, cx: &App) -> Option<UsageLimits> {
+        let workspace = self.workspace.read(cx);
+        if !workspace.settings.usage_limits_in_details {
+            return None;
+        }
+        let provider = usage::provider_of(thread);
+        let known = crate::providers::known(provider)?;
+        if !known.enabled(&workspace.settings.providers) {
+            return None;
+        }
+        let limits = workspace.usage_limits(provider);
+        let state = section_state(
+            workspace.providers.accounts.get(provider).copied(),
+            limits,
+            false,
+            false,
+        );
+        limits
+            .filter(|limits| state == SectionState::Limits && !limits.windows.is_empty())
+            .cloned()
     }
 
     fn folder_row(&self, path: &str, thread: &Thread, colors: &Colors) -> impl IntoElement {

@@ -1,11 +1,14 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use hoshi_core::AppSettings;
 
 pub fn load(path: &Path) -> AppSettings {
-    match fs::read_to_string(path) {
+    let settings = match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
             eprintln!(
                 "using default settings, {} is invalid: {error}",
@@ -27,10 +30,97 @@ pub fn load(path: &Path) -> AppSettings {
             );
             AppSettings::default()
         }
+    };
+    with_written(|written| {
+        written
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Written {
+                order: 0,
+                settings: Some(settings.clone()),
+            });
+    });
+    settings
+}
+
+/// Settings as they were when a change was made, ordered against every other snapshot by when
+/// it was taken, so a save that runs late never replaces a newer one.
+pub struct Snapshot {
+    pub settings: AppSettings,
+    order: u64,
+}
+
+impl Snapshot {
+    pub fn of(settings: &AppSettings) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            settings: settings.clone(),
+            order: NEXT.fetch_add(1, Ordering::Relaxed),
+        }
     }
 }
 
+/// A settings file as this run knows it.
+struct Written {
+    /// The newest snapshot a save was tried with, written or not.
+    order: u64,
+    /// What the file holds, loaded or last written; `None` when not known.
+    settings: Option<AppSettings>,
+}
+
+/// Every settings file this run loaded or saved. One lock for all of them: there is one file.
+static WRITTEN: Mutex<Option<HashMap<PathBuf, Written>>> = Mutex::new(None);
+
+fn with_written<T>(run: impl FnOnce(&mut HashMap<PathBuf, Written>) -> T) -> T {
+    let mut written = WRITTEN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    run(written.get_or_insert_with(HashMap::new))
+}
+
+/// Writes `settings` now; the snapshot is taken by this call, on the caller's thread.
 pub fn save(path: &Path, settings: &AppSettings) -> io::Result<()> {
+    save_latest(path, &Snapshot::of(settings), |_| ()).map(|_| ())
+}
+
+/// Writes `next` unless a save with a newer snapshot was tried already, then runs `then` with
+/// what the file held before, when known. Whether it wrote: a skipped save is `Ok(false)`.
+/// Saves run one at a time, `then` included: it must not load or save settings itself.
+pub fn save_latest(
+    path: &Path,
+    next: &Snapshot,
+    then: impl FnOnce(Option<&AppSettings>),
+) -> io::Result<bool> {
+    with_written(|written| {
+        if written
+            .get(path)
+            .is_some_and(|known| known.order > next.order)
+        {
+            return Ok(false);
+        }
+        let saved = write(path, &next.settings);
+        if let Err(error) = saved {
+            written
+                .entry(path.to_path_buf())
+                .or_insert(Written {
+                    order: 0,
+                    settings: None,
+                })
+                .order = next.order;
+            return Err(error);
+        }
+        let before = written.insert(
+            path.to_path_buf(),
+            Written {
+                order: next.order,
+                settings: Some(next.settings.clone()),
+            },
+        );
+        then(before.as_ref().and_then(|before| before.settings.as_ref()));
+        Ok(true)
+    })
+}
+
+fn write(path: &Path, settings: &AppSettings) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
@@ -50,6 +140,61 @@ mod tests {
         SearchEngine, SnoozeDay, SnoozePreset, StartupView, SubagentEffort, ThreadTitleSettings,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn a_save_that_runs_late_keeps_the_newer_settings_on_disk() {
+        let path = settings_file("late-save");
+        let older = Snapshot::of(&AppSettings::default());
+        let newer = Snapshot::of(&AppSettings {
+            usage_limits_in_details: true,
+            ..AppSettings::default()
+        });
+        let mut before = None;
+        assert!(save_latest(&path, &newer, |written| before = Some(written.cloned())).unwrap());
+        assert_eq!(before, Some(None));
+        let mut ran = false;
+        assert!(!save_latest(&path, &older, |_| ran = true).unwrap());
+        assert!(!ran, "the older save is skipped");
+        assert!(load(&path).usage_limits_in_details);
+
+        let latest = Snapshot::of(&AppSettings::default());
+        let mut before = None;
+        save_latest(&path, &latest, |written| before = written.cloned()).unwrap();
+        assert!(before.is_some_and(|before| before.usage_limits_in_details));
+        assert!(!load(&path).usage_limits_in_details);
+    }
+
+    #[test]
+    fn a_loaded_file_is_what_the_first_save_tells_its_changes_against() {
+        let path = settings_file("loaded-baseline");
+        save(
+            &path,
+            &AppSettings {
+                plan_mode_enabled: true,
+                ..AppSettings::default()
+            },
+        )
+        .unwrap();
+        assert!(load(&path).plan_mode_enabled);
+        let mut before = None;
+        save_latest(&path, &Snapshot::of(&AppSettings::default()), |written| {
+            before = written.cloned()
+        })
+        .unwrap();
+        assert!(before.is_some_and(|before| before.plan_mode_enabled));
+    }
+
+    #[test]
+    fn a_failed_save_still_turns_away_older_snapshots() {
+        let dir =
+            std::env::temp_dir().join(format!("hoshi-settings-failed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("settings.json.tmp")).unwrap();
+        let path = dir.join("settings.json");
+        let older = Snapshot::of(&AppSettings::default());
+        save(&path, &AppSettings::default()).unwrap_err();
+        assert!(!save_latest(&path, &older, |_| ()).unwrap_or(true));
+    }
 
     fn settings_file(name: &str) -> PathBuf {
         let dir =
@@ -184,6 +329,7 @@ mod tests {
                 zoom: 125,
                 color_scheme: PageColorScheme::Dark,
             },
+            usage_limits_in_details: true,
             onboarding_completed_at: Some("2026-11-09T08:00:00.000Z".into()),
         };
 

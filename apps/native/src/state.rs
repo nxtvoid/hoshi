@@ -63,8 +63,62 @@ pub struct Draft {
 /// How many transcripts stay loaded: the open one and those open just before it.
 const KEPT_TRANSCRIPTS: usize = 4;
 
+/// A failed read of the usage limits is tried again this soon, not at the next check.
+const LIMITS_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The providers whose usage limits the health check reads: only while the thread's card shows
+/// them, and only the enabled ones that report limits and are known to be signed in.
+fn limits_to_refresh(
+    settings: &hoshi_core::AppSettings,
+    accounts: &HashMap<String, hoshi_core::ProviderAccountStatus>,
+) -> Vec<&'static str> {
+    if !settings.usage_limits_in_details {
+        return Vec::new();
+    }
+    crate::providers::KNOWN_PROVIDERS
+        .iter()
+        .filter(|provider| matches!(provider.usage, crate::providers::UsageReport::Limits))
+        .filter(|provider| provider.enabled(&settings.providers))
+        .filter(|provider| {
+            accounts.get(provider.id) == Some(&hoshi_core::ProviderAccountStatus::Ready)
+        })
+        .map(|provider| provider.id)
+        .collect()
+}
+
+/// What one pass of the health-check loop does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HealthPass {
+    check: bool,
+    read_limits: bool,
+}
+
+/// With the check off (`interval_secs` 0) nothing runs; otherwise the limits are read on the
+/// first pass, with each check, and when a retry is due.
+fn health_pass(
+    interval_secs: u32,
+    since_check: std::time::Duration,
+    retry_due: bool,
+    first: bool,
+) -> HealthPass {
+    let on = interval_secs > 0;
+    let check = on && since_check.as_secs() >= u64::from(interval_secs);
+    HealthPass {
+        check,
+        read_limits: on && (check || retry_due || first),
+    }
+}
+
+fn limits_retry(failed: bool, retry: bool, now: std::time::Instant) -> Option<std::time::Instant> {
+    (failed && !retry).then(|| now + LIMITS_RETRY)
+}
+
 pub struct Workspace {
     pub engine: Arc<Engine>,
+    /// When a failed read of the usage limits is tried once more.
+    limits_retry_at: Option<std::time::Instant>,
+    /// A read of the usage limits is running.
+    reading_limits: bool,
     pub model: ReadModel,
     pub settings: AppSettings,
     /// Where `settings` is saved; `None` keeps changes in memory.
@@ -145,23 +199,6 @@ impl Workspace {
         self.providers.versions.get(hoshi_core::DEFAULT_PROVIDER)
     }
 
-    /// `None` forgets the provider, as when it is disabled.
-    pub fn set_provider_version(
-        &mut self,
-        provider: String,
-        version: Option<hoshi_core::ProviderVersion>,
-    ) {
-        match version {
-            Some(version) => {
-                self.providers.versions.insert(provider, version);
-            }
-            None => {
-                self.providers.versions.remove(&provider);
-                self.providers.accounts.remove(&provider);
-            }
-        }
-    }
-
     /// The model a choice runs on: the one it names, or its provider's default.
     pub fn chosen_model(&self, provider: &str, slug: Option<&str>) -> Option<&ModelInfo> {
         let catalog = self.catalog(provider)?;
@@ -221,36 +258,50 @@ impl Workspace {
         .detach();
         cx.spawn(async move |this, cx| {
             let mut checked = std::time::Instant::now();
+            let mut first = true;
             loop {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(5))
                     .await;
-                let Ok(interval) = this.update(cx, |this, _| {
-                    this.settings.providers.health_check_interval_secs
+                let Ok((interval, retry_due)) = this.update(cx, |this, _| {
+                    (
+                        this.settings.providers.health_check_interval_secs,
+                        this.limits_retry_at
+                            .is_some_and(|at| at <= std::time::Instant::now()),
+                    )
                 }) else {
                     break;
                 };
-                if interval == 0 || checked.elapsed().as_secs() < u64::from(interval) {
-                    continue;
+                let pass = health_pass(interval, checked.elapsed(), retry_due, first);
+                first = false;
+                if pass.check {
+                    checked = std::time::Instant::now();
+                    let Ok(engine) = this.update(cx, |this, _| this.engine.clone()) else {
+                        break;
+                    };
+                    let (status, models) = cx
+                        .background_spawn(async move {
+                            (engine.check_providers(), engine.provider_models())
+                        })
+                        .await;
+                    if this
+                        .update(cx, |this, cx| {
+                            this.set_providers(status);
+                            this.models = models;
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-                checked = std::time::Instant::now();
-                let Ok(engine) = this.update(cx, |this, _| this.engine.clone()) else {
-                    break;
-                };
-                let (status, models) = cx
-                    .background_spawn(async move {
-                        (engine.check_providers(), engine.provider_models())
-                    })
-                    .await;
-                if this
-                    .update(cx, |this, cx| {
-                        this.providers = status;
-                        this.models = models;
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
+                if pass.read_limits {
+                    let retry = retry_due && !pass.check;
+                    let Ok(reading) = this.update(cx, |this, cx| this.read_usage_limits(retry, cx))
+                    else {
+                        break;
+                    };
+                    reading.await;
                 }
             }
         })
@@ -270,6 +321,8 @@ impl Workspace {
         let models = engine.known_provider_models();
         let merged_cleanup = engine.merged_cleanup();
         Self {
+            limits_retry_at: None,
+            reading_limits: false,
             engine,
             model,
             settings: AppSettings::default(),
@@ -395,18 +448,14 @@ impl Workspace {
                 }
                 cx.notify();
             }
-            Notification::ProviderVersion(update) => {
-                self.set_provider_version(update.provider, update.version);
-                cx.notify();
-            }
+            Notification::ProviderVersion(_) | Notification::UsageLimits(_) => {}
             Notification::Providers(status) => {
                 let installed = status.accounts.iter().any(|(provider, account)| {
                     *account != hoshi_core::ProviderAccountStatus::NotInstalled
                         && self.providers.accounts.get(provider)
                             == Some(&hoshi_core::ProviderAccountStatus::NotInstalled)
                 });
-                self.providers = status;
-                if installed {
+                if self.set_providers(status) && installed {
                     self.reload_models(cx);
                 }
                 cx.notify();
@@ -436,12 +485,6 @@ impl Workspace {
             }
             Notification::MergedCleanup(cleanup) => {
                 self.merged_cleanup = Some(cleanup);
-                cx.notify();
-            }
-            Notification::UsageLimits(limits) => {
-                self.providers
-                    .usage_limits
-                    .insert(hoshi_core::DEFAULT_PROVIDER.to_owned(), limits);
                 cx.notify();
             }
             Notification::ContextUsage(update) => {
@@ -640,10 +683,72 @@ impl Workspace {
             }
             None => favorites.push(favorite),
         }
+        self.save_settings(cx);
+    }
+
+    /// Takes a providers status unless a newer one already arrived; whether it was newer.
+    pub fn set_providers(&mut self, status: ProvidersStatus) -> bool {
+        if status.revision < self.providers.revision {
+            return false;
+        }
+        self.providers = status;
+        true
+    }
+
+    /// Shows the usage limits in the thread's card, or hides them, and saves the settings.
+    pub fn set_usage_limits_in_details(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.settings.usage_limits_in_details == on {
+            return;
+        }
+        self.settings.usage_limits_in_details = on;
+        self.save_settings(cx);
+        if on && self.settings.providers.health_check_interval_secs > 0 {
+            self.read_usage_limits(false, cx).detach();
+        }
+    }
+
+    /// Reads the usage limits the thread's card shows again; the engine hands them over as it
+    /// reads them. A failed read is tried once more soon, unless it was that try.
+    fn read_usage_limits(&mut self, retry: bool, cx: &mut Context<Self>) -> Task<()> {
+        let providers = limits_to_refresh(&self.settings, &self.providers.accounts);
+        if providers.is_empty()
+            || self.reading_limits
+            || self.settings.providers.health_check_interval_secs == 0
+        {
+            return Task::ready(());
+        }
+        self.limits_retry_at = None;
+        self.reading_limits = true;
+        let engine = self.engine.clone();
+        cx.spawn(async move |this, cx| {
+            let failed = cx
+                .background_spawn(async move {
+                    let reporting = engine.usage_limit_providers();
+                    providers
+                        .into_iter()
+                        .filter(|provider| reporting.iter().any(|id| id == provider))
+                        .filter(|provider| engine.usage_limits_of(provider, false).is_none())
+                        .count()
+                        > 0
+                })
+                .await;
+            this.update(cx, |this, _| {
+                this.reading_limits = false;
+                this.limits_retry_at = limits_retry(failed, retry, std::time::Instant::now());
+            })
+            .ok();
+        })
+    }
+
+    /// Saves the settings and hands the engine what changed.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.settings_path.clone() {
-            let settings = self.settings.clone();
-            cx.background_spawn(async move { hoshi_app::settings::save(&path, &settings) })
-                .detach_and_log_err(cx);
+            let snapshot = hoshi_app::settings::Snapshot::of(&self.settings);
+            let (engine, previous) = (self.engine.clone(), self.settings.clone());
+            cx.background_spawn(async move {
+                hoshi_app::apply_settings(&engine, &path, &previous, &snapshot)
+            })
+            .detach_and_log_err(cx);
         }
         cx.notify();
     }
@@ -1283,6 +1388,33 @@ mod tests {
 }
 
 #[cfg(test)]
+mod providers_tests {
+    use super::{Workspace, channel};
+    use gpui_kit::{AppContext as _, TestAppContext};
+    use std::sync::Arc;
+
+    #[gpui_kit::test]
+    fn a_providers_status_taken_before_the_one_held_is_ignored(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(gpui_kit::init);
+        let home =
+            std::env::temp_dir().join(format!("hoshi-native-providers-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let (notify, notifications) = channel();
+        let engine = Arc::new(hoshi_engine::Engine::open(&home, notify).unwrap());
+        let workspace = cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)));
+        workspace.update(cx, |workspace, _| {
+            let older = workspace.engine.providers_status();
+            let mut newer = workspace.engine.providers_status();
+            newer.checked_at = Some("2026-11-17T12:00:00Z".into());
+            assert!(workspace.set_providers(newer.clone()));
+            assert!(!workspace.set_providers(older));
+            assert_eq!(workspace.providers, newer);
+        });
+    }
+}
+
+#[cfg(test)]
 mod queue_tests {
     use super::{Workspace, channel};
     use gpui_kit::{AppContext as _, TestAppContext};
@@ -1451,5 +1583,61 @@ mod recent_tests {
             "the oldest of more than {KEPT_TRANSCRIPTS} transcripts goes"
         );
         assert_ne!(open(&workspace, "t0", cx), first);
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::{HealthPass, LIMITS_RETRY, health_pass, limits_retry, limits_to_refresh};
+    use hoshi_core::{AppSettings, ProviderAccountStatus};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_limits_are_read_at_start_with_each_check_and_on_a_due_retry_while_checks_run() {
+        let pass = |check, read_limits| HealthPass { check, read_limits };
+        let early = Duration::from_secs(10);
+        let late = Duration::from_secs(300);
+        assert_eq!(health_pass(300, early, false, true), pass(false, true));
+        assert_eq!(health_pass(300, early, false, false), pass(false, false));
+        assert_eq!(health_pass(300, early, true, false), pass(false, true));
+        assert_eq!(health_pass(300, late, false, false), pass(true, true));
+        assert_eq!(health_pass(0, late, true, true), pass(false, false));
+    }
+
+    #[test]
+    fn a_failed_read_is_tried_once_more_then_waits_for_the_next_check() {
+        let now = Instant::now();
+        assert_eq!(limits_retry(false, false, now), None);
+        assert_eq!(limits_retry(true, false, now), Some(now + LIMITS_RETRY));
+        assert_eq!(limits_retry(true, true, now), None);
+    }
+
+    #[test]
+    fn the_health_check_reads_the_limits_the_card_can_show_and_only_while_it_shows_them() {
+        let mut settings = AppSettings::default();
+        settings.providers.codex.added = true;
+        settings.providers.codex.enabled = true;
+        let mut accounts = HashMap::from([
+            ("claudeCode".to_owned(), ProviderAccountStatus::Ready),
+            ("codex".to_owned(), ProviderAccountStatus::Ready),
+        ]);
+        assert!(limits_to_refresh(&settings, &accounts).is_empty());
+
+        settings.usage_limits_in_details = true;
+        assert!(
+            limits_to_refresh(&settings, &HashMap::new()).is_empty(),
+            "not before the accounts are known"
+        );
+        let mut read = limits_to_refresh(&settings, &accounts);
+        read.sort_unstable();
+        assert_eq!(read, ["claudeCode", "codex"]);
+
+        accounts.insert("codex".to_owned(), ProviderAccountStatus::SignedOut);
+        assert_eq!(limits_to_refresh(&settings, &accounts), ["claudeCode"]);
+        accounts.insert("codex".to_owned(), ProviderAccountStatus::Unknown);
+        assert_eq!(limits_to_refresh(&settings, &accounts), ["claudeCode"]);
+        settings.providers.claude_code.enabled = false;
+        assert!(limits_to_refresh(&settings, &accounts).is_empty());
     }
 }

@@ -17,8 +17,8 @@ use hoshi_core::{
 };
 use hoshi_ui::prelude::*;
 use limits::{
-    ExtraTexts, LOW_PERCENT, SectionState, banked_resets_for, even_pace_left, extra_left_percent,
-    extra_texts, format_expiry, format_span, grant_expiry, masked_email, plan_label,
+    ExtraTexts, LimitTone, SectionState, banked_resets_for, even_pace_left, extra_left_percent,
+    extra_texts, format_expiry, format_span, grant_expiry, limit_tone, masked_email, plan_label,
     remaining_percent, reset_kind_description, reset_kind_label, reset_moment, reset_when,
     restored_percent, section_state, spend_message, spendable_resets, time_left_percent,
     time_to_expiry, time_to_reset, window_label,
@@ -110,8 +110,9 @@ fn extra_row(
         SpendUnit::Money { .. } => m::usage_extra(),
         SpendUnit::Credits { .. } => m::usage_credits(),
     };
-    let fill = match left {
-        Some(left) if left <= LOW_PERCENT => colors.status_error.opacity(0.6),
+    let fill = match left.map(limit_tone) {
+        Some(LimitTone::Low) => colors.status_error.opacity(0.6),
+        Some(LimitTone::Warning) => colors.warning.opacity(0.6),
         _ => (provider.tint)(colors).opacity(0.45),
     };
     div()
@@ -346,7 +347,7 @@ impl UsageView {
                 .await;
             workspace
                 .update(cx, |workspace, cx| {
-                    workspace.providers = status;
+                    workspace.set_providers(status);
                     cx.notify();
                 })
                 .ok();
@@ -766,10 +767,10 @@ impl UsageView {
         let reset = time_to_reset(window, self.now);
         let pinned = banked.is_some() && (self.confirming == Some(id) || self.busy(id));
         let open = self.card == Some((id, index)) || pinned;
-        let fill = if left <= LOW_PERCENT {
-            colors.status_error.opacity(0.6)
-        } else {
-            (provider.tint)(colors).opacity(0.45)
+        let fill = match limit_tone(left) {
+            LimitTone::Low => colors.status_error.opacity(0.6),
+            LimitTone::Warning => colors.warning.opacity(0.6),
+            LimitTone::Normal => (provider.tint)(colors).opacity(0.45),
         };
         let hover_bg = colors.muted.opacity(0.5);
         let bar = div()
@@ -866,7 +867,7 @@ impl UsageView {
                             .debug_selector(move || format!("usage-left-{id}-{index}"))
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child(format!("{left}%")),
+                            .child(m::usage_percent(left)),
                     )
                     .child(
                         div()
@@ -1083,6 +1084,34 @@ impl UsageView {
             )
             .children(grants)
             .into_any_element()
+    }
+
+    /// The switch that shows the limits in the thread's card.
+    fn in_details(&self, colors: &Colors, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let on = self.workspace.read(cx).settings.usage_limits_in_details;
+        let workspace = self.workspace.downgrade();
+        div()
+            .debug_selector(|| "usage-in-details".into())
+            .pt_5()
+            .border_t_1()
+            .border_color(colors.border)
+            .child(
+                SettingsRow::new(m::usage_in_details())
+                    .description(m::usage_in_details_description())
+                    .control(
+                        div()
+                            .debug_selector(|| "usage-in-details-switch".into())
+                            .child(Switch::new("usage-in-details").checked(on).on_change(
+                                move |on, _, cx| {
+                                    workspace
+                                        .update(cx, |workspace, cx| {
+                                            workspace.set_usage_limits_in_details(on, cx)
+                                        })
+                                        .ok();
+                                },
+                            )),
+                    ),
+            )
     }
 
     /// A provider whose limits only its own page shows.
@@ -1307,6 +1336,9 @@ impl Render for UsageView {
                 })
                 .map(IntoElement::into_any_element),
         );
+        if !limited.is_empty() {
+            content.push(self.in_details(&colors, cx).into_any_element());
+        }
         if content.is_empty() {
             content.push(
                 empty(

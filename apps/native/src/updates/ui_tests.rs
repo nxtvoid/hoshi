@@ -77,15 +77,15 @@ fn redraw(cx: &mut VisualTestContext) {
 
 fn set_version(h: &mut Harness, update: ProviderUpdate, update_available: bool) {
     h.workspace.update(&mut h.cx, |workspace, cx| {
-        workspace.set_provider_version(
+        workspace.providers.versions.insert(
             hoshi_core::default_provider(),
-            Some(ProviderVersion {
+            ProviderVersion {
                 installed: Some("2.0.0".into()),
                 latest: Some("2.1.0".into()),
                 update_available,
                 update_command: Some("claude update".into()),
                 update,
-            }),
+            },
         );
         cx.notify();
     });
