@@ -646,11 +646,12 @@ impl Render for HoshiWindow {
                                                 .flex_1()
                                                 .flex()
                                                 .items_end()
-                                                .justify_center()
                                                 .pb_8()
                                                 .text_3xl()
                                                 .font_weight(FontWeight::NORMAL)
-                                                .child(prompt),
+                                                .child(hoshi_ui::Lane::new().child(
+                                                    div().w_full().text_center().child(prompt),
+                                                )),
                                         )
                                     })
                                     .when(thread_open, |this| this.child(self.setup_bar.clone()))
@@ -666,7 +667,9 @@ impl Render for HoshiWindow {
                                     })
                                     .when(draft.is_some(), |this| this.child(div().flex_1()))
                                     .when(thread_open, |this| this.child(self.terminal.clone()))
-                                    .when(thread_open, |this| this.child(self.details.clone()))
+                                    .when(thread_open || draft.is_some(), |this| {
+                                        this.child(self.details.clone())
+                                    })
                                     .when(!composer_shown || draft.is_some(), |this| {
                                         this.child(
                                             div()

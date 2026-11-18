@@ -1109,6 +1109,22 @@ impl Engine {
         editors::open(editor, &cwd).map_err(|detail| CommandError::Internal { detail })
     }
 
+    /// Opens a project's folder, for a thread not started yet.
+    pub fn open_project_in_editor(
+        &self,
+        project_id: &str,
+        editor: Editor,
+    ) -> Result<(), CommandError> {
+        let root = lock(&self.state)
+            .model
+            .project(project_id)
+            .map(|project| project.workspace_root.clone())
+            .ok_or_else(|| CommandError::ProjectNotFound {
+                project_id: project_id.to_owned(),
+            })?;
+        editors::open(editor, &root).map_err(|detail| CommandError::Internal { detail })
+    }
+
     /// Checks out another local branch in the thread's folder. Refused while a turn runs,
     /// so the agent never finds its branch changed under it.
     pub fn switch_branch(&self, thread_id: &str, branch: &str) -> Result<(), CommandError> {
