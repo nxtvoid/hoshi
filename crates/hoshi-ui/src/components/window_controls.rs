@@ -92,10 +92,39 @@ fn control(control: Control, maximized: bool, cx: &App) -> impl IntoElement {
 /// Makes an element a handle that moves the window, as a title bar does: drag to move,
 /// double-click to maximize. Nothing clickable may sit inside it: the window asks for the
 /// first control area under the mouse, and a parent's comes before its children's.
-pub trait DragRegion: InteractiveElement + Sized {
+pub trait DragRegion: StatefulInteractiveElement + Sized {
     fn drag_region(self) -> Self {
-        self.window_control_area(WindowControlArea::Drag)
+        let this = self.window_control_area(WindowControlArea::Drag);
+        if !cfg!(any(target_os = "linux", target_os = "freebsd")) {
+            return this;
+        }
+        // Linux backends ignore control areas, so the move is asked of the compositor here.
+        this.on_mouse_down(MouseButton::Left, |event, window, cx| {
+            cx.stop_propagation();
+            if event.click_count == 2 {
+                window.zoom_window();
+            }
+        })
+        .on_drag(WindowMove, |_, _, window, cx| {
+            window.start_window_move();
+            window.defer(cx, |window, cx| {
+                cx.stop_active_drag(window);
+            });
+            cx.new(|_| WindowMove)
+        })
+        .on_mouse_down(MouseButton::Right, |event, window, cx| {
+            cx.stop_propagation();
+            window.show_window_menu(event.position)
+        })
     }
 }
 
-impl<E: InteractiveElement> DragRegion for E {}
+impl<E: StatefulInteractiveElement> DragRegion for E {}
+
+struct WindowMove;
+
+impl Render for WindowMove {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}

@@ -85,6 +85,7 @@ impl HoshiWindow {
             })
             .child(
                 div()
+                    .id("thread-title-drag")
                     .drag_region()
                     .h_full()
                     .min_w_0()
@@ -279,7 +280,12 @@ impl HoshiWindow {
 }
 
 fn drag_space() -> impl IntoElement {
-    div().drag_region().flex_1().min_w_4().h_full()
+    div()
+        .id("header-drag-space")
+        .drag_region()
+        .flex_1()
+        .min_w_4()
+        .h_full()
 }
 
 fn slash(colors: &Colors) -> impl IntoElement {
