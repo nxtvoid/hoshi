@@ -704,3 +704,25 @@ fn a_failure_from_the_shortcut_opens_the_card_to_tell_it(cx: &mut TestAppContext
             .read_with(&h.cx, |details, _| details.error.is_some())
     );
 }
+
+#[gpui_kit::test]
+fn only_the_latest_launch_tells_its_failure(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-superseded", 1200.);
+    h.details.update(&mut h.cx, |details, cx| {
+        details.run(
+            || {
+                Err(hoshi_core::CommandError::Internal {
+                    detail: "failed".into(),
+                })
+            },
+            cx,
+        );
+        details.run(|| Ok(()), cx);
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.error.is_none())
+    );
+}
