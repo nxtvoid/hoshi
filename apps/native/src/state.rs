@@ -180,7 +180,7 @@ pub struct Workspace {
     drafts_home: Option<PathBuf>,
     drafts_saving: Option<Task<()>>,
     /// The last save of `last_used`; each save waits for the one before it.
-    choices_saving: Option<Task<()>>,
+    choices_saving: Option<futures::future::Shared<Task<()>>>,
 }
 
 impl Workspace {
@@ -852,12 +852,16 @@ impl Workspace {
         };
         let choices = self.last_used.clone();
         let previous = self.choices_saving.take();
-        self.choices_saving = Some(cx.background_spawn(async move {
+        let saving = futures::FutureExt::shared(cx.background_spawn(async move {
             if let Some(previous) = previous {
                 previous.await;
             }
-            crate::choices::save(&home, &choices).ok();
+            if let Err(error) = crate::choices::save(&home, &choices) {
+                eprintln!("hoshi: could not save the new thread choices: {error}");
+            }
         }));
+        cx.background_spawn(saving.clone()).detach();
+        self.choices_saving = Some(saving);
     }
 
     fn save_drafts(&mut self, cx: &mut Context<Self>) {
