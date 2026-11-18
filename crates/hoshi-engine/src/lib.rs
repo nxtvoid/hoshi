@@ -4595,6 +4595,27 @@ impl State {
         follow_session_move(self.this.clone(), thread_id.to_owned(), path, check);
     }
 
+    /// Records the branch read in `cwd` off the lock. `false` when the thread moved to
+    /// another folder meanwhile, so the read says nothing about where it is now.
+    fn record_branch_read(&mut self, thread_id: &str, cwd: &str, branch: Option<String>) -> bool {
+        if self.model.thread_cwd(thread_id) != Some(cwd) {
+            return false;
+        }
+        // What git does there may have removed the folder this read found no branch in.
+        if self.thread_ops.contains_key(thread_id) || self.folder_ops.contains(&git::normalize(cwd))
+        {
+            return true;
+        }
+        let events = record_branch(&self.model, thread_id, branch);
+        if !events.is_empty() {
+            self.pull_requests.check_soon(thread_id);
+        }
+        if let Err(error) = self.commit(&events, &now()) {
+            eprintln!("hoshi: failed to record a branch: {error}");
+        }
+        true
+    }
+
     fn worktree_check(
         &self,
         thread_id: &str,
@@ -4944,22 +4965,13 @@ fn read_branches(state: &Weak<Mutex<State>>, thread_ids: &[String]) {
         let Some(shared) = state.upgrade() else {
             return;
         };
-        let cwd = lock(&shared).model.thread_cwd(thread_id).map(str::to_owned);
-        let Some(cwd) = cwd else { continue };
-        let branch = git::current_branch(&cwd);
-        let mut state = lock(&shared);
-        // What git does there may have removed the folder this read found no branch in.
-        if state.thread_ops.contains_key(thread_id)
-            || state.folder_ops.contains(&git::normalize(&cwd))
-        {
-            continue;
-        }
-        let events = record_branch(&state.model, thread_id, branch);
-        if !events.is_empty() {
-            state.pull_requests.check_soon(thread_id);
-        }
-        if let Err(error) = state.commit(&events, &now()) {
-            eprintln!("hoshi: failed to record a branch: {error}");
+        loop {
+            let cwd = lock(&shared).model.thread_cwd(thread_id).map(str::to_owned);
+            let Some(cwd) = cwd else { break };
+            let branch = git::current_branch(&cwd);
+            if lock(&shared).record_branch_read(thread_id, &cwd, branch) {
+                break;
+            }
         }
     }
 }
@@ -11170,6 +11182,33 @@ Blue"
             })
             .unwrap();
         assert!(worktree.is_dir());
+        let _ = git::remove_worktree(&harness.root, &path);
+    }
+
+    #[test]
+    fn a_branch_read_in_the_folder_a_thread_left_is_not_recorded() {
+        let repo = git::tests::temp_repository("engine-stale-branch");
+        let worktree = repo.with_extension("stale-wt");
+        let _ = std::fs::remove_dir_all(&worktree);
+        git::add_worktree(&repo.to_string_lossy(), &worktree, "feat/mine").unwrap();
+        let path = git::normalize(&worktree.to_string_lossy());
+        let script = vec![
+            ProviderOutput::WorkingDirectory { path: path.clone() },
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        ];
+        let store = Store::open_in_memory().unwrap();
+        let harness = Harness::new("stale-branch", repo, store, script);
+        harness.send("t", "m1", "work in my worktree");
+        harness.wait_for_turn_end();
+        wait_until(|| harness.thread("t").worktree_path.is_some());
+
+        let recorded =
+            lock(&harness.engine.state).record_branch_read("t", &harness.root, Some("main".into()));
+
+        assert!(!recorded);
+        assert_eq!(harness.thread("t").branch.as_deref(), Some("feat/mine"));
         let _ = git::remove_worktree(&harness.root, &path);
     }
 
