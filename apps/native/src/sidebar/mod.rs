@@ -322,19 +322,23 @@ impl Sidebar {
         cx.notify();
     }
 
-    fn ring(&mut self, id: impl Into<SharedString>, signal: Signal, cx: &mut App) -> AnyElement {
-        let id = id.into();
-        let ring = self
-            .rings
-            .entry(id.clone())
-            .or_insert_with(|| cx.new(|_| SignalRing { id, signal }))
-            .clone();
-        if ring.read(cx).signal != signal {
-            ring.update(cx, |ring, cx| {
-                ring.signal = signal;
-                cx.notify();
-            });
-        }
+    /// The ring with this id, kept from the rail's last draw in `before` when it had one.
+    fn ring(
+        &mut self,
+        before: &mut HashMap<SharedString, Entity<SignalRing>>,
+        id: impl Into<SharedString>,
+        signal: Signal,
+        cx: &mut App,
+    ) -> AnyElement {
+        let id: SharedString = id.into();
+        let ring = before.remove(&id).unwrap_or_else(|| {
+            cx.new(|_| SignalRing {
+                id: id.clone(),
+                signal,
+            })
+        });
+        ring.update(cx, |ring, _| ring.signal = signal);
+        self.rings.insert(id, ring.clone());
         ring.into_any_element()
     }
 
@@ -914,6 +918,7 @@ impl Sidebar {
     }
 
     fn rail(&mut self, colors: &Colors, cx: &mut Context<Self>) -> AnyElement {
+        let mut rings = std::mem::take(&mut self.rings);
         let projects = self.ordered_projects(cx);
         let workspace = self.workspace.read(cx);
         let threads: Vec<Thread> = workspace.model.threads().cloned().collect();
@@ -956,7 +961,8 @@ impl Sidebar {
         } else {
             Signal::Done
         });
-        let inbox_ring = inbox_signal.map(|signal| self.ring("signal-inbox", signal, cx));
+        let inbox_ring =
+            inbox_signal.map(|signal| self.ring(&mut rings, "signal-inbox", signal, cx));
         let inbox_button = rail_button("rail-inbox", colors)
             .when(view == View::Inbox, |this| selected(this, colors))
             .when_some(inbox_signal, |this, signal| {
@@ -978,7 +984,8 @@ impl Sidebar {
             .with_tooltip(rail_tooltip(Tooltip::new(inbox_label)));
 
         let chats_signal = project_signal(&awake, None, &unseen);
-        let chats_ring = chats_signal.map(|signal| self.ring("signal-chats", signal, cx));
+        let chats_ring =
+            chats_signal.map(|signal| self.ring(&mut rings, "signal-chats", signal, cx));
         let chats_button = rail_button("rail-chats", colors)
             .when(view == View::Chats, |this| selected(this, colors))
             .when_some(chats_signal, |this, signal| {
@@ -1000,8 +1007,9 @@ impl Sidebar {
             .into_iter()
             .map(|project| {
                 let signal = project_signal(&awake, Some(&project.id), &unseen);
-                let ring =
-                    signal.map(|signal| self.ring(format!("signal-{}", project.id), signal, cx));
+                let ring = signal.map(|signal| {
+                    self.ring(&mut rings, format!("signal-{}", project.id), signal, cx)
+                });
                 let icon = self.icon(&project.id, cx);
                 let chosen = in_project && self.project_id.as_deref() == Some(project.id.as_str());
                 let holds_open =
@@ -2592,9 +2600,11 @@ impl Render for Part {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.hoshi().clone();
         let draw = self.draw;
-        self.sidebar
+        let drawn = self
+            .sidebar
             .update(cx, |sidebar, cx| draw(sidebar, &colors, cx))
-            .unwrap_or_else(|_| div().into_any_element())
+            .ok();
+        div().size_full().flex().children(drawn)
     }
 }
 

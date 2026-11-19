@@ -302,6 +302,42 @@ fn a_folded_section_is_remembered(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_rail_and_the_list_fill_the_sidebar_and_scroll_what_overflows(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "sidebar-overflow");
+    let engine = h
+        .workspace
+        .read_with(&h.cx, |workspace, _| workspace.engine.clone());
+    for index in 0..40 {
+        engine
+            .dispatch(thread(&format!("x{index}"), &format!("t{index}")))
+            .unwrap();
+        let root = h.home.parent().unwrap().join(format!("project-{index}"));
+        std::fs::create_dir_all(&root).unwrap();
+        engine
+            .dispatch(Command::ProjectCreate {
+                project_id: format!("q{index}"),
+                title: format!("project {index}"),
+                workspace_root: root.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+    }
+    wait_for(&mut h, "the threads and projects", |h| {
+        h.cx.debug_bounds("thread-x39").is_some() && h.cx.debug_bounds("rail-q39").is_some()
+    });
+    let (list, rail) = h.sidebar.read_with(&h.cx, |sidebar, _| {
+        (
+            sidebar.list_scroll.max_offset().y,
+            sidebar.rail_scroll.max_offset().y,
+        )
+    });
+    assert!(list > px(0.), "the list scrolls");
+    assert!(rail > px(0.), "the rail scrolls");
+    let width = h.sidebar.read_with(&h.cx, |sidebar, _| sidebar.prefs.width);
+    let row = h.cx.debug_bounds("thread-a").unwrap().size.width;
+    assert!(row > px(width / 2.), "a short row spans the list: {row:?}");
+}
+
+#[gpui_kit::test]
 fn dragging_a_project_onto_another_reorders_the_rail(cx: &mut TestAppContext) {
     let mut h = harness(cx, "sidebar-drag");
     let engine = h
