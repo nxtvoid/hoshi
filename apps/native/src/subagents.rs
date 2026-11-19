@@ -174,7 +174,7 @@ pub fn status(
         AgentState::Running => icon
             .with_animation(
                 SharedString::from(format!("agent-spin-{id}")),
-                Animation::new(Duration::from_secs(1)).repeat(),
+                hoshi_ui::looping(Duration::from_secs(1)),
                 |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
             )
             .into_any_element(),

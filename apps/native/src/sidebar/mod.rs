@@ -323,16 +323,11 @@ impl Sidebar {
     }
 
     fn ring(&mut self, id: impl Into<SharedString>, signal: Signal, cx: &mut App) -> AnyElement {
+        let id = id.into();
         let ring = self
             .rings
-            .entry(id.into())
-            .or_insert_with(|| {
-                cx.new(|_| SignalRing {
-                    signal,
-                    started: std::time::Instant::now(),
-                    next_frame: None,
-                })
-            })
+            .entry(id.clone())
+            .or_insert_with(|| cx.new(|_| SignalRing { id, signal }))
             .clone();
         if ring.read(cx).signal != signal {
             ring.update(cx, |ring, cx| {
@@ -2603,55 +2598,50 @@ impl Render for Part {
     }
 }
 
-/// A rail button's signal ring: a ring in the signal's color that grows from the button and
-/// fades, again and again, as the web's `animate-signal`; still when the system asks for less
-/// motion. A view of its own, so that its frames redraw only itself and what holds it, at
-/// `RING_FRAME` rather than at the display's rate.
+/// A rail button's signal ring, a view of its own so that its animation redraws only itself
+/// and what holds it.
 struct SignalRing {
+    id: SharedString,
     signal: Signal,
-    started: std::time::Instant,
-    next_frame: Option<Task<()>>,
 }
-
-const RING_PERIOD: Duration = Duration::from_millis(2400);
-const RING_FRAME: Duration = Duration::from_millis(33);
 
 impl Render for SignalRing {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.hoshi().clone();
-        let ring = div()
-            .absolute()
-            .top(px(-1.))
-            .left(px(-1.))
-            .right(px(-1.))
-            .bottom(px(-1.))
-            .rounded_lg()
-            .border_2()
-            .border_color(signal_color(self.signal, &colors));
-        if cx.reduce_motion() {
-            return ring.opacity(0.);
-        }
-        if self.next_frame.is_none() {
-            self.next_frame = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(RING_FRAME).await;
-                this.update(cx, |this, cx| {
-                    this.next_frame = None;
-                    cx.notify();
-                })
-                .ok();
-            }));
-        }
-        let delta = (self.started.elapsed().as_secs_f32() % RING_PERIOD.as_secs_f32())
-            / RING_PERIOD.as_secs_f32();
-        let progress = (delta / 0.7).min(1.);
-        let eased = 1. - (1. - progress).powi(2);
-        let grow = px(-1. - 4.8 * eased);
-        ring.top(grow)
-            .left(grow)
-            .right(grow)
-            .bottom(grow)
-            .opacity(0.6 * (1. - eased))
+        signal_ring(self.id.clone(), self.signal, &colors, cx)
     }
+}
+
+/// A ring in the signal's color that grows from a rail button and fades, again and again, as the
+/// web's `animate-signal`. Still when the system asks for less motion.
+fn signal_ring(id: impl Into<ElementId>, signal: Signal, colors: &Colors, cx: &App) -> AnyElement {
+    let ring = div()
+        .absolute()
+        .top(px(-1.))
+        .left(px(-1.))
+        .right(px(-1.))
+        .bottom(px(-1.))
+        .rounded_lg()
+        .border_2()
+        .border_color(signal_color(signal, colors));
+    if cx.reduce_motion() {
+        return ring.opacity(0.).into_any_element();
+    }
+    ring.with_animation(
+        id,
+        hoshi_ui::looping(Duration::from_millis(2400)),
+        |ring, delta| {
+            let progress = (delta / 0.7).min(1.);
+            let eased = 1. - (1. - progress).powi(2);
+            let grow = px(-1. - 4.8 * eased);
+            ring.top(grow)
+                .left(grow)
+                .right(grow)
+                .bottom(grow)
+                .opacity(0.6 * (1. - eased))
+        },
+    )
+    .into_any_element()
 }
 
 fn count_badge(count: usize, colors: &Colors) -> impl IntoElement {

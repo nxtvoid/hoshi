@@ -207,8 +207,7 @@ fn shimmer(id: SharedString, line: Vec<AnyElement>) -> AnyElement {
         .children(line)
         .with_animation(
             id,
-            Animation::new(std::time::Duration::from_millis(1600))
-                .repeat()
+            hoshi_ui::looping(std::time::Duration::from_millis(1600))
                 .with_easing(bounce(ease_in_out)),
             |line, delta| line.opacity(0.55 + 0.45 * delta),
         )

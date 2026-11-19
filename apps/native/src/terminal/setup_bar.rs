@@ -130,7 +130,7 @@ impl Render for WorktreeSetupBar {
                 .text_color(colors.muted_foreground)
                 .with_animation(
                     "worktree-setup-spin",
-                    Animation::new(Duration::from_secs(1)).repeat(),
+                    hoshi_ui::looping(Duration::from_secs(1)),
                     |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
                 )
                 .into_any_element(),
