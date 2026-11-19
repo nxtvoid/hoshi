@@ -33,6 +33,8 @@ mod m {
 }
 mod palette;
 mod panel;
+#[cfg(test)]
+mod perf_tests;
 mod provider_switch;
 mod providers;
 mod pull_request_update;
