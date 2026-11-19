@@ -247,6 +247,21 @@ fn perf_idle_window_with_an_unseen_thread(cx: &mut TestAppContext) {
     });
     redraw(&mut h.cx);
     animation_frames(&mut h, "unseen thread");
+    timed_frames(&mut h, "unseen thread");
+}
+
+/// A second of frames that timers ask for, as the clock moves on.
+fn timed_frames(h: &mut Harness, name: &str) {
+    const STEP: Duration = Duration::from_millis(1);
+    let start = Instant::now();
+    for _ in 0..1000 {
+        h.cx.executor().advance_clock(STEP);
+        h.cx.run_until_parked();
+    }
+    eprintln!(
+        "{name}: a second of timed frames cost {:?}",
+        start.elapsed()
+    );
 }
 
 #[gpui_kit::test]
