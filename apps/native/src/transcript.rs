@@ -95,6 +95,8 @@ pub struct TranscriptView {
     tasks: Vec<(String, AgentState)>,
     /// Redraws every second while a clock shows.
     _ticker: Option<Task<()>>,
+    /// Redraws what reads the time of day, as a usage limit's reset passing.
+    _clock: Task<()>,
     _workspace: Option<Subscription>,
     minimap: crate::minimap::MinimapState,
     /// The forks and sources the transcript links to.
@@ -103,6 +105,8 @@ pub struct TranscriptView {
     forkable: crate::fork::Forkable,
     _subscriptions: [Subscription; 3],
 }
+
+const CLOCK_EVERY: Duration = Duration::from_secs(30);
 
 /// Rows left above the viewport when the page before them starts loading.
 const LOAD_OLDER_WITHIN: usize = 5;
@@ -164,6 +168,14 @@ impl TranscriptView {
             stopping: None,
             tasks: Vec::new(),
             _ticker: None,
+            _clock: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(CLOCK_EVERY).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }),
             _workspace: observe_workspace,
             minimap: Default::default(),
             fork_marks: Rc::new(fork_marks),

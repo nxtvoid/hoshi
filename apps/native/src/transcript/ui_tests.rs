@@ -674,6 +674,104 @@ fn a_usage_limit_offers_to_resume_and_snooze_until_its_reset_while_it_is_the_lat
     assert!(!shows(&mut cx, "limit-snooze-f2"));
 }
 
+struct CachedShell {
+    transcript: Entity<TranscriptView>,
+    room: hoshi_ui::LaneRoom,
+}
+
+impl gpui_kit::Render for CachedShell {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::{ParentElement as _, Styled as _};
+        let room_changed = hoshi_ui::LaneRoom::set(self.room, cx);
+        gpui_kit::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(super::element(self.transcript.clone(), room_changed))
+    }
+}
+
+#[gpui_kit::test]
+fn the_cached_transcript_follows_the_lanes_room_and_a_limits_reset_passing(
+    cx: &mut TestAppContext,
+) {
+    use crate::panel::RightPanel;
+    use crate::state::{self, Workspace};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    cx.executor().allow_parking();
+    let home = std::env::temp_dir().join(format!("hoshi-native-cached-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let (notify, notifications) = state::channel();
+    let engine = Arc::new(hoshi_engine::Engine::open(&home, notify).unwrap());
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        hoshi_ui::theme::apply(ThemeMode::Dark, cx);
+        crate::markdown::init(engine.clone(), home.clone(), cx);
+    });
+    let workspace = cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)));
+    let resets_at = chrono::Utc::now() + chrono::Duration::seconds(3);
+    let items = vec![
+        user("u1", "Go", None),
+        item(
+            "f1",
+            ItemContent::TurnFailed {
+                reason: TurnFailure::UsageLimited {
+                    detail: "limit".into(),
+                    resets_at: Some(resets_at.to_rfc3339()),
+                },
+            },
+        ),
+    ];
+    let (window, shell) = cx
+        .update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: size(px(800.), px(600.)),
+                })),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                let panel = cx.new(|cx| RightPanel::new(workspace.clone(), window, cx));
+                crate::markdown::attach(&workspace, &panel, cx);
+                let thread = cx.new(|_| ThreadState::new("t", items));
+                let transcript = cx.new(|cx| TranscriptView::new(thread, false, cx));
+                cx.new(|_| CachedShell {
+                    transcript,
+                    room: hoshi_ui::LaneRoom::default(),
+                })
+            })
+        })
+        .unwrap();
+    let mut cx = VisualTestContext::from_window(window, cx);
+    redraw(&mut cx);
+    assert!(shows(&mut cx, "limit-resume-f1"));
+
+    let left = |cx: &mut VisualTestContext| cx.debug_bounds("turn-failed-f1").unwrap().left();
+    let before = left(&mut cx);
+    shell.update(&mut cx, |shell, cx| {
+        shell.room.gutter = px(200.);
+        cx.notify();
+    });
+    redraw(&mut cx);
+    assert!(left(&mut cx) > before + px(100.), "the lane moves right");
+
+    let wait = (resets_at - chrono::Utc::now())
+        .to_std()
+        .unwrap_or_default();
+    std::thread::sleep(wait + Duration::from_millis(200));
+    cx.executor().advance_clock(Duration::from_secs(30));
+    redraw(&mut cx);
+    assert!(shows(&mut cx, "turn-failed-f1"));
+    assert!(!shows(&mut cx, "limit-resume-f1"));
+}
+
 #[gpui_kit::test]
 fn a_rerouted_model_and_a_failed_mcp_server_show_in_the_turn(cx: &mut TestAppContext) {
     let items = vec![
