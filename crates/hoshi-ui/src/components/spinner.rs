@@ -3,11 +3,13 @@ use gpui_kit::component::Icon;
 use gpui_kit::*;
 use std::time::Duration;
 
-/// The frame rate of animations that loop, such as spinners and shimmers: they redraw what holds
-/// them on a timer at this rate rather than on every frame of the display.
-pub const LOOP_FPS: f32 = 30.;
+/// The rate of the timer that redraws animations that loop, such as spinners and shimmers,
+/// rather than every frame of the display. The redraw waits for the display's next frame after
+/// the timer, so this draws them about 30 times a second on a 60 or 120 Hz display; a timer at
+/// 30 would draw them at 20 on a 60 Hz one.
+pub const LOOP_FPS: f32 = 40.;
 
-/// An animation that loops, at [`LOOP_FPS`].
+/// An animation that loops, on a [`LOOP_FPS`] timer.
 pub fn looping(duration: Duration) -> Animation {
     Animation::new(duration).repeat().with_max_fps(LOOP_FPS)
 }
