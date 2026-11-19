@@ -2531,6 +2531,7 @@ impl ClaudeParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_processes::tests::noting;
     use hoshi_core::{SubagentEffort, ToolDetail};
 
     #[test]
@@ -4438,6 +4439,7 @@ mod tests {
 
     #[test]
     fn a_cli_that_prints_nothing_in_time_fails_to_start() {
+        let _noting = noting();
         let deadlines = Deadlines {
             boot: Duration::from_millis(300),
             mcp: Duration::from_secs(10),
@@ -4458,6 +4460,7 @@ mod tests {
 
     #[test]
     fn a_cli_that_never_connects_hoshi_s_server_fails_to_start() {
+        let _noting = noting();
         let deadlines = Deadlines {
             boot: Duration::from_secs(10),
             mcp: Duration::from_millis(300),
@@ -4478,6 +4481,7 @@ mod tests {
 
     #[test]
     fn a_resumed_session_that_does_not_start_gets_a_second_try() {
+        let _noting = noting();
         let deadlines = Deadlines {
             boot: Duration::from_millis(1500),
             mcp: Duration::from_secs(10),
@@ -4510,6 +4514,7 @@ mod tests {
 
     #[test]
     fn a_stopped_turn_s_process_is_killed_once_its_grace_ends_even_with_stdin_closed() {
+        let _noting = noting();
         let (sink, outputs) = collecting_sink();
         let (silent_windows, silent_unix) = SILENT;
         let process = spawn_turn(

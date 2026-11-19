@@ -432,6 +432,7 @@ pub(crate) fn noted() -> Vec<Identity> {
 pub(crate) mod tests {
     use super::*;
     use std::process::{Child, Command, Stdio};
+    use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
     /// A process that runs for a minute unless ended.
     pub(crate) fn long_running() -> Command {
@@ -490,11 +491,19 @@ pub(crate) mod tests {
         }
     }
 
+    static NOTED_PROCESSES: RwLock<()> = RwLock::new(());
+
     /// Held by tests that start noted processes, which [`end_all`] would end.
-    pub(crate) fn exclusive() -> MutexGuard<'static, ()> {
-        static EXCLUSIVE: Mutex<()> = Mutex::new(());
-        EXCLUSIVE
-            .lock()
+    pub(crate) fn noting() -> RwLockReadGuard<'static, ()> {
+        NOTED_PROCESSES
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Held by tests that end every noted process.
+    pub(crate) fn exclusive() -> RwLockWriteGuard<'static, ()> {
+        NOTED_PROCESSES
+            .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 

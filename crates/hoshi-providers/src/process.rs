@@ -233,7 +233,7 @@ pub(crate) fn kill_tree(pid: u32, child: &Mutex<Child>) {
 mod tests {
     use super::*;
     use crate::agent_processes::tests::{
-        children_of, exclusive, leaves_a_child_running, long_running, runs, shell_running_a_child,
+        children_of, leaves_a_child_running, long_running, noting, runs, shell_running_a_child,
         tree_runs, wait_until,
     };
     use std::sync::mpsc;
@@ -243,6 +243,7 @@ mod tests {
     }
 
     fn run_in_turn(command: Command, in_turn: bool) -> Vec<ProviderOutput> {
+        let _noting = noting();
         let (sender, receiver) = mpsc::channel();
         let sink: OutputSink = Box::new(move |output| {
             let _ = sender.send(output);
@@ -335,7 +336,7 @@ mod tests {
 
     #[test]
     fn a_process_still_running_once_its_stdin_closed_is_ended() {
-        let _exclusive = exclusive();
+        let _noting = noting();
         let (turn, receiver) = start(long_running(), false);
 
         turn.stdin().close();
@@ -345,7 +346,7 @@ mod tests {
 
     #[test]
     fn interrupting_ends_what_the_agent_started() {
-        let _exclusive = exclusive();
+        let _noting = noting();
         let (turn, receiver) = start(shell_running_a_child(), true);
         let children = children_of(turn.process.pid);
 
@@ -364,7 +365,7 @@ mod tests {
 
     #[test]
     fn what_an_agent_leaves_running_ends_as_it_exits() {
-        let _exclusive = exclusive();
+        let _noting = noting();
         let (turn, receiver) = start(leaves_a_child_running(), false);
         let root = turn.process.identity.unwrap();
         let children = children_of(turn.process.pid);
@@ -376,7 +377,7 @@ mod tests {
 
     #[test]
     fn an_agent_process_is_noted_while_it_runs() {
-        let _exclusive = exclusive();
+        let _noting = noting();
         let (turn, receiver) = start(long_running(), true);
         let identity = turn.process.identity.unwrap();
         assert!(agent_processes::noted().contains(&identity));
