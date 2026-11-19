@@ -24,8 +24,9 @@ pub struct Prepared {
 struct Parsed {
     prepared: Prepared,
     found: Found,
-    /// Where the line of the second to last top-level block starts: the blocks before it
-    /// stay as they are whatever text comes after.
+    /// Where the line of a top-level block before the last starts, one that parses alone as
+    /// it does in the whole text: the blocks before it stay as they are whatever text comes
+    /// after.
     reparse_from: usize,
 }
 
@@ -67,12 +68,9 @@ pub fn prepare(text: &str) -> Prepared {
     prepared
 }
 
-/// Whether a line may define a link reference or footnote, which links before it can use.
+/// Whether the text may define a link reference or footnote, which links before it can use.
 fn has_definitions(text: &str) -> bool {
-    text.lines().any(|line| {
-        let line = line.trim_start_matches([' ', '\t', '>']);
-        line.starts_with('[') && line.contains("]:")
-    })
+    text.contains("]:")
 }
 
 /// `text`, which extends the text `before` was parsed from.
@@ -202,12 +200,11 @@ fn parse_from(text: &str, mut found: Found, start: usize) -> Parsed {
             .map(|(from, to)| (shift(from), shift(to))),
     );
     let blocks = tree.children().map_or(&[][..], Vec::as_slice);
-    let reparse_from = blocks
-        .len()
-        .checked_sub(2)
-        .and_then(|second_to_last| blocks[second_to_last].position())
-        .map_or(start, |position| {
-            let at = shift(position.start.offset);
+    let reparse_from = (1..blocks.len().saturating_sub(1))
+        .rev()
+        .find_map(|index| fresh_start(&blocks[index - 1], &blocks[index], rest))
+        .map_or(start, |at| {
+            let at = shift(at);
             text[..at].rfind('\n').map_or(0, |line| line + 1)
         });
     Parsed {
@@ -215,6 +212,28 @@ fn parse_from(text: &str, mut found: Found, start: usize) -> Parsed {
         found,
         reparse_from,
     }
+}
+
+/// Where `block` starts, when its text parses alone as it does after `before`: no container
+/// (a list or quote) is open before it, which would close on its first line and leave the
+/// parser thinking no paragraph is open, and a blank line separates the two.
+fn fresh_start(before: &Node, block: &Node, source: &str) -> Option<usize> {
+    if matches!(
+        before,
+        Node::List(_) | Node::Blockquote(_) | Node::FootnoteDefinition(_)
+    ) {
+        return None;
+    }
+    let (end, start) = (
+        before.position()?.end.offset,
+        block.position()?.start.offset,
+    );
+    let lines: Vec<&str> = source.get(end..start)?.split('\n').collect();
+    let inner = lines.get(1..lines.len().saturating_sub(1)).unwrap_or(&[]);
+    inner
+        .iter()
+        .any(|line| line.trim().is_empty())
+        .then_some(start)
 }
 
 fn with_inserts(text: &str, found: &Found) -> Prepared {
@@ -327,18 +346,100 @@ mod tests {
             "para about https://a.io\n``` x `y` https://b.io\nmore https://c.io\n\nTitle https://d.io\n---\n\n| a | b |\n| - | - |\n| https://e.io | /home/dev/c.rs |\n",
             "> quote https://a.io\nlazy https://b.io\n\n1. first\n\n   still first https://c.io\n2. second\n\n    indented https://f.io\n\nend",
             "Use [a][ref] here.\n\n[ref]: https://g.io\n",
+            "- done\n\nNext steps:\n2. Open the docs\n\n    cargo run -- https://a.io/x\n",
+            "> ```\n$$\n    indented https://i.i\n\nafter https://j.io\n",
+            "intro\n\n- [ref]: https://k.io\n\nsee [ref] and [b][ref]\n",
         ];
         for text in texts {
             for step in [1, 3, 17] {
                 let chars: Vec<char> = text.chars().collect();
-                for end in (step..chars.len()).step_by(step).chain([chars.len()]) {
-                    let prefix: String = chars[..end].iter().collect();
-                    let streamed = prepare(&prefix);
-                    let whole = parse(&prefix);
-                    assert_eq!(streamed.text, whole.text, "{prefix:?}");
-                    assert_eq!(streamed.labeled, whole.labeled, "{prefix:?}");
-                }
+                let ends = (step..chars.len()).step_by(step).chain([chars.len()]);
+                streams_as_whole(ends.map(|end| chars[..end].iter().collect()));
             }
+        }
+    }
+
+    fn streams_as_whole(prefixes: impl Iterator<Item = String>) {
+        for prefix in prefixes {
+            let streamed = prepare(&prefix);
+            let whole = parse(&prefix);
+            assert_eq!(streamed.text, whole.text, "{prefix:?}");
+            assert_eq!(streamed.labeled, whole.labeled, "{prefix:?}");
+        }
+    }
+
+    #[test]
+    fn random_streams_prepare_as_whole_parses_of_them_do() {
+        const FRAGMENTS: &[&str] = &[
+            "\n",
+            "\n",
+            "\n",
+            "Next steps:\n",
+            "Next steps:\n2. Open the docs\n",
+            "2. Run it\n\n    cargo run -- https://r.io/x\n",
+            "- done\n\n",
+            "> quote\n\n",
+            "Plain text with /home/dev/a.rs and [docs](https://f.io) here.\n",
+            "lazy line https://h.io\n",
+            "- done\n",
+            "- [x] item https://a.io\n",
+            "* star https://s.io\n",
+            "+ plus\n",
+            "1. first\n",
+            "2. Open the docs\n",
+            "10) ten https://t.io\n",
+            "  continued https://b.io\n",
+            "   - nested\n",
+            "    cargo run -- https://c.io/x\n",
+            "> quote https://d.io\n",
+            "> ```\n",
+            "> - quoted item\n",
+            "```\n",
+            "```rust\n",
+            "~~~\n",
+            "# Title https://e.io\n",
+            "===\n",
+            "---\n",
+            "***\n",
+            "| a | b |\n",
+            "| - | - |\n",
+            "| https://g.io | x |\n",
+            "<div>\n",
+            "</div>\n",
+            "<!-- note -->\n",
+            "![shot](C:/tmp/s.png)\n",
+        ];
+        let docs = std::env::var("LINKS_FUZZ_DOCS")
+            .ok()
+            .and_then(|docs| docs.parse().ok())
+            .unwrap_or(1000);
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        for doc in 0..docs {
+            let mut text: String = (0..4 + next(14))
+                .map(|_| FRAGMENTS[next(FRAGMENTS.len())])
+                .collect();
+            if doc % 5 == 0 {
+                text = text.replace('\n', "\r\n");
+            }
+            if std::panic::catch_unwind(|| parse(&text)).is_err() {
+                continue;
+            }
+            let mut ends = Vec::new();
+            let mut end = 0;
+            while end < text.len() {
+                end = (end + 1 + next(40)).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                ends.push(end);
+            }
+            streams_as_whole(ends.into_iter().map(|end| text[..end].to_owned()));
         }
     }
 
