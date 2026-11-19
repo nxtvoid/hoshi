@@ -577,9 +577,7 @@ impl Render for HoshiWindow {
             .text_color(colors.foreground)
             .child(hoshi_ui::selection_release())
             .child(self.edit_menu.clone())
-            .when(self.sidebar_open, |this| {
-                this.child(sidebar::element(&self.sidebar, cx))
-            })
+            .when(self.sidebar_open, |this| this.child(self.sidebar.clone()))
             .child(
                 div()
                     .flex_1()
