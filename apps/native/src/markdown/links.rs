@@ -19,24 +19,71 @@ pub struct Prepared {
     pub labeled: Arc<HashSet<String>>,
 }
 
+/// A prepared message and what its parse found, so text that extends it, as a reply does while
+/// it streams, parses again only from `reparse_from`.
+struct Parsed {
+    prepared: Prepared,
+    found: Found,
+    /// Where the line of the second to last top-level block starts: the blocks before it
+    /// stay as they are whatever text comes after.
+    reparse_from: usize,
+}
+
 thread_local! {
-    static PREPARED: RefCell<HashMap<Arc<str>, Prepared>> = RefCell::default();
+    static PREPARED: RefCell<HashMap<Arc<str>, Parsed>> = RefCell::default();
 }
 
 /// `text` with its links' icons, read from a cache when it was prepared before.
 pub fn prepare(text: &str) -> Prepared {
-    if let Some(prepared) = PREPARED.with(|cache| cache.borrow().get(text).cloned()) {
+    if let Some(prepared) = PREPARED.with(|cache| {
+        cache
+            .borrow()
+            .get(text)
+            .map(|parsed| parsed.prepared.clone())
+    }) {
         return prepared;
     }
-    let prepared = parse(text);
+    let extended = PREPARED.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key = cache
+            .keys()
+            .filter(|key| key.len() < text.len() && text.starts_with(&***key))
+            .max_by_key(|key| key.len())
+            .cloned()?;
+        cache.remove(&key)
+    });
+    let parsed = match extended {
+        Some(before) if !has_definitions(text) => parse_after(text, before),
+        _ => parse_from(text, Found::default(), 0),
+    };
+    let prepared = parsed.prepared.clone();
     PREPARED.with(|cache| {
         let mut cache = cache.borrow_mut();
         if cache.len() >= KEPT {
             cache.clear();
         }
-        cache.insert(Arc::from(text), prepared.clone());
+        cache.insert(Arc::from(text), parsed);
     });
     prepared
+}
+
+/// Whether a line may define a link reference or footnote, which links before it can use.
+fn has_definitions(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start_matches([' ', '\t', '>']);
+        line.starts_with('[') && line.contains("]:")
+    })
+}
+
+/// `text`, which extends the text `before` was parsed from.
+fn parse_after(text: &str, before: Parsed) -> Parsed {
+    let start = before.reparse_from;
+    let mut found = before.found;
+    found.icons.retain(|(at, _)| *at < start);
+    found.local_images.retain(|(at, _, _)| *at < start);
+    found.labeled.retain(|(at, _)| *at < start);
+    found.bare_paths.retain(|(at, _)| *at < start);
+    parse_from(text, found, start)
 }
 
 fn plain_text(node: &Node) -> String {
@@ -56,17 +103,22 @@ fn plain_text(node: &Node) -> String {
 struct Found {
     icons: Vec<(usize, String)>,
     local_images: Vec<(usize, usize, String)>,
-    labeled: HashSet<String>,
+    labeled: Vec<(usize, String)>,
     bare_paths: Vec<(usize, usize)>,
 }
 
 fn collect(node: &Node, source: &str, found: &mut Found) {
     match node {
         Node::Link(link) => {
+            let Some(position) = &link.position else {
+                return;
+            };
             if plain_text(node) != link.url {
-                found.labeled.insert(link.url.clone());
+                found
+                    .labeled
+                    .push((position.start.offset, link.url.clone()));
             }
-            if let (Some(host), Some(position)) = (sites::web_host(&link.url), &link.position) {
+            if let Some(host) = sites::web_host(&link.url) {
                 found.icons.push((position.start.offset, host));
             }
         }
@@ -117,44 +169,98 @@ fn bare_paths(text: &str) -> impl Iterator<Item = (usize, usize)> + '_ {
     })
 }
 
-fn parse(text: &str) -> Prepared {
-    let Ok(tree) = markdown::to_mdast(text, &markdown::ParseOptions::gfm()) else {
-        return Prepared {
-            text: Arc::from(text),
-            labeled: Arc::default(),
+/// `text` whose blocks before `start` were parsed into `found`: parses the rest.
+fn parse_from(text: &str, mut found: Found, start: usize) -> Parsed {
+    let rest = &text[start..];
+    let Ok(tree) = markdown::to_mdast(rest, &markdown::ParseOptions::gfm()) else {
+        return Parsed {
+            prepared: Prepared {
+                text: Arc::from(text),
+                labeled: Arc::default(),
+            },
+            found: Found::default(),
+            reparse_from: 0,
         };
     };
-    let mut found = Found::default();
-    collect(&tree, text, &mut found);
+    let mut more = Found::default();
+    collect(&tree, rest, &mut more);
+    let shift = |at: usize| start + at;
+    found
+        .icons
+        .extend(more.icons.into_iter().map(|(at, host)| (shift(at), host)));
+    found.local_images.extend(
+        more.local_images
+            .into_iter()
+            .map(|(from, to, url)| (shift(from), shift(to), url)),
+    );
+    found
+        .labeled
+        .extend(more.labeled.into_iter().map(|(at, url)| (shift(at), url)));
+    found.bare_paths.extend(
+        more.bare_paths
+            .into_iter()
+            .map(|(from, to)| (shift(from), shift(to))),
+    );
+    let blocks = tree.children().map_or(&[][..], Vec::as_slice);
+    let reparse_from = blocks
+        .len()
+        .checked_sub(2)
+        .and_then(|second_to_last| blocks[second_to_last].position())
+        .map_or(start, |position| {
+            let at = shift(position.start.offset);
+            text[..at].rfind('\n').map_or(0, |line| line + 1)
+        });
+    Parsed {
+        prepared: with_inserts(text, &found),
+        found,
+        reparse_from,
+    }
+}
+
+fn with_inserts(text: &str, found: &Found) -> Prepared {
     let mut inserts: Vec<(usize, String)> = found
         .icons
-        .into_iter()
+        .iter()
         .map(|(at, host)| {
             (
-                at,
+                *at,
                 format!("<img src=\"{SCHEME}{host}\" alt=\"\" width=\"14\" height=\"14\">\u{a0}"),
             )
         })
         .collect();
-    for (start, end, url) in found.local_images {
-        inserts.push((start, "[".to_owned()));
-        inserts.push((end, format!("]({url})")));
+    for (start, end, url) in &found.local_images {
+        inserts.push((*start, "[".to_owned()));
+        inserts.push((*end, format!("]({url})")));
     }
-    for (start, end) in found.bare_paths {
-        inserts.push((start, format!("`{BARE}")));
-        inserts.push((end, "`".to_owned()));
+    for (start, end) in &found.bare_paths {
+        inserts.push((*start, format!("`{BARE}")));
+        inserts.push((*end, "`".to_owned()));
     }
-    inserts.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    let mut out = text.to_owned();
-    for (at, insert) in inserts {
-        if out.is_char_boundary(at) {
-            out.insert_str(at, &insert);
-        }
+    let mut inserts: Vec<(usize, usize, String)> = inserts
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (at, _))| text.is_char_boundary(*at))
+        .map(|(order, (at, insert))| (at, order, insert))
+        .collect();
+    inserts.sort_by_key(|(at, order, _)| (*at, std::cmp::Reverse(*order)));
+    let mut out =
+        String::with_capacity(text.len() + inserts.iter().map(|i| i.2.len()).sum::<usize>());
+    let mut copied = 0;
+    for (at, _, insert) in inserts {
+        out.push_str(&text[copied..at]);
+        out.push_str(&insert);
+        copied = at;
     }
+    out.push_str(&text[copied..]);
     Prepared {
         text: Arc::from(out),
-        labeled: Arc::new(found.labeled),
+        labeled: Arc::new(found.labeled.iter().map(|(_, url)| url.clone()).collect()),
     }
+}
+
+#[cfg(test)]
+fn parse(text: &str) -> Prepared {
+    parse_from(text, Found::default(), 0).prepared
 }
 
 /// Copied markdown without what [`prepare`] added: the site icons before links, as the
@@ -212,7 +318,29 @@ fn local_image_link(after: &str) -> Option<(String, &str)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, unprepare};
+    use super::{parse, prepare, unprepare};
+
+    #[test]
+    fn a_streamed_text_prepares_as_a_whole_parse_of_it_does() {
+        let texts = [
+            "Intro with https://github.com/x/y and /home/dev/a.rs.\n\n- [one](https://a.io/1)\n- two C:\\dev\\b.rs\n\n```rust\nlet x = \"https://no.io\";\n```\n\nSee [docs](https://docs.rs/z) and ![shot](C:/tmp/shot.png) after.\n",
+            "para about https://a.io\n``` x `y` https://b.io\nmore https://c.io\n\nTitle https://d.io\n---\n\n| a | b |\n| - | - |\n| https://e.io | /home/dev/c.rs |\n",
+            "> quote https://a.io\nlazy https://b.io\n\n1. first\n\n   still first https://c.io\n2. second\n\n    indented https://f.io\n\nend",
+            "Use [a][ref] here.\n\n[ref]: https://g.io\n",
+        ];
+        for text in texts {
+            for step in [1, 3, 17] {
+                let chars: Vec<char> = text.chars().collect();
+                for end in (step..chars.len()).step_by(step).chain([chars.len()]) {
+                    let prefix: String = chars[..end].iter().collect();
+                    let streamed = prepare(&prefix);
+                    let whole = parse(&prefix);
+                    assert_eq!(streamed.text, whole.text, "{prefix:?}");
+                    assert_eq!(streamed.labeled, whole.labeled, "{prefix:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn web_links_get_an_icon_and_labeled_ones_their_address() {
