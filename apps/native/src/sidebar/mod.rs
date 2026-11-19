@@ -54,6 +54,23 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+/// The sidebar as the window shows it: drawn again only when it changes, so frames for the
+/// rest of the window skip its rows.
+pub fn element(sidebar: &Entity<Sidebar>, cx: &App) -> AnyElement {
+    let shown = sidebar.read(cx);
+    if shown.shows_overlay() {
+        return sidebar.clone().into_any_element();
+    }
+    AnyView::from(sidebar.clone())
+        .cached(
+            StyleRefinement::default()
+                .w(px(shown.width()))
+                .h_full()
+                .flex_none(),
+        )
+        .into_any_element()
+}
+
 /// Handles the sidebar's shortcuts on `element`, the window's root.
 pub fn shortcuts(element: Div, sidebar: &Entity<Sidebar>) -> Div {
     let step = |sidebar: &Entity<Sidebar>, step: isize, attention: bool| {
@@ -135,10 +152,14 @@ pub struct Sidebar {
     list_scroll: ScrollHandle,
     rail_scroll: ScrollHandle,
     updates: Entity<UpdatesButton>,
+    /// Redraws the rows' relative times.
+    _clock: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
+
+const CLOCK_EVERY: Duration = Duration::from_secs(30);
 
 impl Sidebar {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -201,6 +222,14 @@ impl Sidebar {
             list_scroll: ScrollHandle::new(),
             rail_scroll: ScrollHandle::new(),
             updates,
+            _clock: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(CLOCK_EVERY).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }),
             _subscriptions: subscriptions,
         };
         sidebar.follow_scope(cx);
@@ -289,6 +318,20 @@ impl Sidebar {
         }
         self.save_prefs(cx);
         cx.notify();
+    }
+
+    pub fn width(&self) -> f32 {
+        self.prefs.width
+    }
+
+    /// A dialog, menu or card is open: the window's layers take those from each render.
+    pub fn shows_overlay(&self) -> bool {
+        self.menu.is_some()
+            || self.sort_open
+            || self.cards.shown.is_some()
+            || self.setup.is_some()
+            || self.custom_snooze.is_some()
+            || self.project_settings.is_some()
     }
 
     fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {

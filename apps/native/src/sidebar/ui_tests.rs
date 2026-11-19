@@ -19,12 +19,12 @@ struct Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         shortcuts(div(), &self.sidebar)
             .track_focus(&self.focus)
             .size_full()
             .flex()
-            .child(self.sidebar.clone())
+            .child(super::element(&self.sidebar, cx))
             .child(
                 div()
                     .id("main")
