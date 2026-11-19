@@ -101,11 +101,22 @@ pub struct TranscriptView {
     fork_marks: Rc<crate::fork::ForkMarks>,
     /// The answers that offer a fork.
     forkable: crate::fork::Forkable,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 /// Rows left above the viewport when the page before them starts loading.
 const LOAD_OLDER_WITHIN: usize = 5;
+
+/// The transcript as the window shows it: drawn again only when it changes, so frames for the
+/// rest of the window skip its rows. Drawn afresh in the frame the lanes' room changes.
+pub fn element(transcript: Entity<TranscriptView>, room_changed: bool) -> AnyElement {
+    if room_changed {
+        return transcript.into_any_element();
+    }
+    AnyView::from(transcript)
+        .cached(StyleRefinement::default().flex_1().min_h_0().size_full())
+        .into_any_element()
+}
 
 impl TranscriptView {
     pub fn new(thread: Entity<ThreadState>, working: bool, cx: &mut Context<Self>) -> Self {
@@ -126,14 +137,17 @@ impl TranscriptView {
             {
                 this.thread.update(cx, |thread, cx| thread.load_older(cx));
             }
+            cx.notify();
         });
+        let observe_room = cx.observe_global::<hoshi_ui::LaneRoom>(|_, cx| cx.notify());
         let first_item = thread.read(cx).items.first().map(|item| item.id.clone());
         let approvals = Rc::new(approvals_by_call(&thread.read(cx).items));
         let turn_changes = Rc::new(answers_with_changes(&thread.read(cx).items));
         let observe_workspace = crate::markdown::workspace(cx).map(|workspace| {
             cx.observe(&workspace, |this, _, cx| {
                 this.follow_forks(cx);
-                this.follow_tasks(cx)
+                this.follow_tasks(cx);
+                cx.notify();
             })
         });
         Self {
@@ -154,7 +168,7 @@ impl TranscriptView {
             minimap: Default::default(),
             fork_marks: Rc::new(fork_marks),
             forkable,
-            _subscriptions: [observe_thread, observe_scroll],
+            _subscriptions: [observe_thread, observe_scroll, observe_room],
         }
     }
 

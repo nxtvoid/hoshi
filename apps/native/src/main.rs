@@ -539,7 +539,7 @@ impl Render for HoshiWindow {
             .read(cx)
             .lane_room()
             .unwrap_or_else(|| self.details.read(cx).lane_room(cx));
-        hoshi_ui::LaneRoom::set(room, cx);
+        let room_changed = hoshi_ui::LaneRoom::set(room, cx);
         let colors = cx.hoshi().clone();
         let workspace = self.workspace.read(cx);
         let draft = workspace.draft.clone();
@@ -641,7 +641,9 @@ impl Render for HoshiWindow {
                                         .child(self.snooze_status.clone())
                                     })
                                     .when(self.subagents.is_empty(), |this| {
-                                        this.children(self.transcript.clone())
+                                        this.children(self.transcript.clone().map(|transcript| {
+                                            transcript::element(transcript, room_changed)
+                                        }))
                                     })
                                     .when_some(prompt, |this, prompt| {
                                         this.child(
