@@ -202,7 +202,7 @@ fn parse_from(text: &str, mut found: Found, start: usize) -> Parsed {
     let blocks = tree.children().map_or(&[][..], Vec::as_slice);
     let reparse_from = (1..blocks.len().saturating_sub(1))
         .rev()
-        .find_map(|index| fresh_start(&blocks[index - 1], &blocks[index], rest))
+        .find_map(|index| fresh_start(&blocks[..index], &blocks[index], rest))
         .map_or(start, |at| {
             let at = shift(at);
             text[..at].rfind('\n').map_or(0, |line| line + 1)
@@ -214,25 +214,36 @@ fn parse_from(text: &str, mut found: Found, start: usize) -> Parsed {
     }
 }
 
-/// Where `block` starts, when its text parses alone as it does after `before`: no container
-/// (a list or quote) is open before it, which would close on its first line and leave the
-/// parser thinking no paragraph is open, and a blank line separates the two.
-fn fresh_start(before: &Node, block: &Node, source: &str) -> Option<usize> {
-    if matches!(
-        before,
-        Node::List(_) | Node::Blockquote(_) | Node::FootnoteDefinition(_)
-    ) {
+/// Where `block` starts, when its text parses alone as it does after the blocks `before` it
+/// in `source`, whose own start parses alone too. The parser carries state out of a list or
+/// quote until a paragraph, so one must come after the last of them; a blank line must
+/// separate `block` from the block before it; and its line can't start with a byte order
+/// mark, which the parser drops only at the start of a text.
+fn fresh_start(before: &[Node], block: &Node, source: &str) -> Option<usize> {
+    let after_container = before
+        .iter()
+        .rev()
+        .find(|node| {
+            matches!(
+                node,
+                Node::Paragraph(_)
+                    | Node::List(_)
+                    | Node::Blockquote(_)
+                    | Node::FootnoteDefinition(_)
+            )
+        })
+        .is_some_and(|node| !matches!(node, Node::Paragraph(_)));
+    if after_container {
         return None;
     }
     let (end, start) = (
-        before.position()?.end.offset,
+        before.last()?.position()?.end.offset,
         block.position()?.start.offset,
     );
     let lines: Vec<&str> = source.get(end..start)?.split('\n').collect();
     let inner = lines.get(1..lines.len().saturating_sub(1)).unwrap_or(&[]);
-    inner
-        .iter()
-        .any(|line| line.trim().is_empty())
+    let line = source[..start].rfind('\n').map_or(0, |line| line + 1);
+    (inner.iter().any(|line| line.trim().is_empty()) && !source[line..].starts_with('\u{feff}'))
         .then_some(start)
 }
 
@@ -349,6 +360,9 @@ mod tests {
             "- done\n\nNext steps:\n2. Open the docs\n\n    cargo run -- https://a.io/x\n",
             "> ```\n$$\n    indented https://i.i\n\nafter https://j.io\n",
             "intro\n\n- [ref]: https://k.io\n\nsee [ref] and [b][ref]\n",
+            "- a |\n```bash\nls\n```\n\n<pre>\nfirst\n\nsee https://example.com/x\n</pre>\n\npara\n\nend\n",
+            "> quote |\n---\n\n## Result\n\n<!--\n\nhttps://m.io\n-->\n\nafter\n",
+            "intro\n\nmore\n\n\u{feff}    code https://c.io/x\n\nend https://n.io\n",
         ];
         for text in texts {
             for step in [1, 3, 17] {
@@ -408,6 +422,16 @@ mod tests {
             "</div>\n",
             "<!-- note -->\n",
             "![shot](C:/tmp/s.png)\n",
+            "- a |\n",
+            "> quote |\n",
+            "## Result\n",
+            "```bash\n",
+            "<pre>\n",
+            "</pre>\n",
+            "<!--\n",
+            "-->\n",
+            "see https://example.com/x\n",
+            "\u{feff}    code https://c.io/x\n",
         ];
         let docs = std::env::var("LINKS_FUZZ_DOCS")
             .ok()
