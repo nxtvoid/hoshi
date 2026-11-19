@@ -290,6 +290,7 @@ fn perf_window_while_a_tool_runs(cx: &mut TestAppContext) {
         },
     );
     animation_frames(&mut h, "tool running");
+    timed_frames(&mut h, "tool running");
 }
 
 #[gpui_kit::test]
