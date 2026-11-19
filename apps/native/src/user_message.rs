@@ -47,9 +47,12 @@ impl RenderOnce for Collapsible {
                 move |bounds, _, cx| {
                     let long = bounds.size.height > COLLAPSED_HEIGHT + COLLAPSE_SLACK;
                     if *measured.read(cx) != long {
-                        measured.update(cx, |overflows, cx| {
-                            *overflows = long;
-                            cx.notify();
+                        let measured = measured.clone();
+                        cx.defer(move |cx| {
+                            measured.update(cx, |overflows, cx| {
+                                *overflows = long;
+                                cx.notify();
+                            });
                         });
                     }
                 },
@@ -318,6 +321,12 @@ pub fn not_sent_note(id: &str, send_again: impl Fn(&mut App) + 'static, cx: &App
 #[cfg(test)]
 mod tests {
     use super::files_outside_text;
+    use gpui_kit::component::theme::ThemeMode;
+    use gpui_kit::{
+        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Point,
+        Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window,
+        WindowBounds, WindowOptions, div, px, size,
+    };
     use hoshi_core::MessageAttachment;
 
     fn file(id: &str) -> MessageAttachment {
@@ -334,5 +343,76 @@ mod tests {
         let attachments = [file("a"), file("b")];
         let outside = files_outside_text("see [File #2]", &attachments);
         assert_eq!(outside, [&attachments[0]]);
+    }
+
+    struct Message {
+        lines: usize,
+    }
+
+    impl Render for Message {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let text = "A long question.\n\n".repeat(self.lines);
+            div().size_full().child(super::user_message(
+                "u1",
+                &text,
+                &[],
+                false,
+                "2026-11-12T10:00:00Z",
+                None,
+                None,
+                cx,
+            ))
+        }
+    }
+
+    struct Cached(Entity<Message>);
+
+    impl Render for Cached {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(AnyView::from(self.0.clone()).cached(StyleRefinement::default().size_full()))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_long_message_collapses_inside_a_cached_view(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            hoshi_ui::theme::apply(ThemeMode::Dark, cx);
+        });
+        let (window, message) = cx.update(|cx| {
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Point::default(),
+                    size: size(px(600.), px(2000.)),
+                })),
+                ..Default::default()
+            };
+            let mut shown = None;
+            let (window, _) = gpui_kit::open_window(options, cx, |_, cx| {
+                let message = cx.new(|_| Message { lines: 1 });
+                shown = Some(message.clone());
+                cx.new(|_| Cached(message))
+            })
+            .unwrap();
+            (window, shown.unwrap())
+        });
+        let mut cx = VisualTestContext::from_window(window, cx);
+        let redraw = |cx: &mut VisualTestContext| {
+            cx.run_until_parked();
+            for _ in 0..3 {
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.run_until_parked();
+            }
+        };
+        redraw(&mut cx);
+        message.update(&mut cx, |message, cx| {
+            message.lines = 40;
+            cx.notify();
+        });
+        redraw(&mut cx);
+        let bubble = cx.debug_bounds("collapse-u1").expect("the bubble shows");
+        assert!(bubble.size.height < px(500.), "{bubble:?}");
     }
 }
