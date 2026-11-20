@@ -16,6 +16,8 @@ reviews:
       instructions: "Hold changed code to the rules in AGENTS.md."
     - path: "**/tests/**"
       instructions: "Hold changed tests to the Tests rules in AGENTS.md. Request tests only as those rules allow."
+    - path: "vendor/**"
+      instructions: "Vendored upstream crates, kept as published except the patches vendor/README.md lists. Review only those patches; leave the rest of the upstream code alone, even when a pull request adds the copy."
 knowledge_base:
   code_guidelines:
     filePatterns:

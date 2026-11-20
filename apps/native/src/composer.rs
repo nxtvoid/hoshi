@@ -1828,7 +1828,21 @@ mod ui_tests {
         }
     }
 
+    /// Sets the thread's branch and its project root's, once the engine has told its own read
+    /// of the root, which would land over them.
     fn on_branch(h: &mut Harness, branch: &str, root: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        h.cx.run_until_parked();
+        while !h.workspace.read_with(&h.cx, |workspace, _| {
+            workspace.project_branches.contains_key("p")
+        }) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the engine never read the root's branch"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.cx.run_until_parked();
+        }
         h.workspace.update(&mut h.cx, |workspace, cx| {
             workspace.model.apply(&Event::ThreadBranchSet {
                 thread_id: "t".into(),

@@ -19,8 +19,9 @@ use crate::text::{
 /// Parse Markdown into a tree of nodes.
 pub(crate) fn parse(source: &str, cx: &mut NodeContext) -> Result<ParsedDocument, SharedString> {
     let options = cx.markdown_extensions.parse_options();
-    let mut root =
-        markdown::to_mdast(source, &options).map_err(|e| SharedString::from(e.to_string()))?;
+    let Ok(mut root) = markdown::to_mdast(source, &options) else {
+        return Ok(ast_to_document(source, plain_lines(source), cx));
+    };
     let mut prose = options;
     prose.constructs.math_text = false;
     prose.constructs.math_flow = false;
@@ -976,6 +977,38 @@ fn collect_definitions(node: &Node, definitions: &mut BTreeMap<String, LinkMark>
             collect_definitions(child, definitions);
         }
     }
+}
+
+/// The source as plain text, a paragraph per line, for Markdown the parser
+/// can't read.
+fn plain_lines(source: &str) -> Node {
+    let mut children = Vec::new();
+    let mut offset = 0;
+    for (index, raw) in source.split('\n').enumerate() {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        if !line.trim().is_empty() {
+            let position = markdown::unist::Position::new(
+                index + 1,
+                1,
+                offset,
+                index + 1,
+                line.chars().count() + 1,
+                offset + line.len(),
+            );
+            children.push(Node::Paragraph(mdast::Paragraph {
+                children: vec![Node::Text(mdast::Text {
+                    value: line.to_string(),
+                    position: Some(position.clone()),
+                })],
+                position: Some(position),
+            }));
+        }
+        offset += raw.len() + 1;
+    }
+    Node::Root(mdast::Root {
+        children,
+        position: None,
+    })
 }
 
 fn ast_to_document(source: &str, root: mdast::Node, cx: &mut NodeContext) -> ParsedDocument {

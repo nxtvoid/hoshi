@@ -57,3 +57,4 @@ strip = true
 # See vendor/README.md.
 [patch.crates-io]
 gpui-base = { path = "vendor/gpui-base" }
+markdown = { path = "vendor/markdown" }
