@@ -3,7 +3,7 @@ use crate::agent_processes::{self, Identity, Noted};
 use hoshi_core::{ProviderOutput, TurnFailure, TurnOutcome};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -64,6 +64,8 @@ impl ProcessTurn {
 #[derive(Clone, Default)]
 pub struct Stdin {
     lines: Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    /// Lines queued and not written yet.
+    unwritten: Arc<AtomicUsize>,
     process: Option<Process>,
 }
 
@@ -72,7 +74,8 @@ impl Stdin {
         let (sender, lines) = mpsc::channel::<String>();
         let stdin = Self {
             lines: Arc::new(Mutex::new(pipe.as_ref().map(|_| sender))),
-            process: Some(process),
+            unwritten: Arc::default(),
+            process: Some(process.clone()),
         };
         if let Some(mut pipe) = pipe {
             let writer = stdin.clone();
@@ -81,8 +84,12 @@ impl Stdin {
                     let written = pipe
                         .write_all(format!("{line}\n").as_bytes())
                         .and_then(|()| pipe.flush());
+                    writer.unwritten.fetch_sub(1, Ordering::SeqCst);
+                    // A process that can't be written to can't be answered or stopped
+                    // either: ending it ends its turn.
                     if written.is_err() {
                         writer.sender().take();
+                        process.end();
                         return;
                     }
                 }
@@ -99,9 +106,21 @@ impl Stdin {
 
     /// Queues `line` after those not written yet; `false` when the process no longer reads.
     pub fn write_line(&self, line: &str) -> bool {
-        self.sender()
-            .as_ref()
-            .is_some_and(|sender| sender.send(line.to_owned()).is_ok())
+        let sender = self.sender();
+        let Some(sender) = sender.as_ref() else {
+            return false;
+        };
+        self.unwritten.fetch_add(1, Ordering::SeqCst);
+        let queued = sender.send(line.to_owned()).is_ok();
+        if !queued {
+            self.unwritten.fetch_sub(1, Ordering::SeqCst);
+        }
+        queued
+    }
+
+    /// Whether every line queued so far reached the process.
+    pub fn is_written(&self) -> bool {
+        self.unwritten.load(Ordering::SeqCst) == 0
     }
 
     pub fn is_open(&self) -> bool {
@@ -364,6 +383,7 @@ mod tests {
 
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(turn.stdin().is_open());
+        assert!(!turn.stdin().is_written());
         turn.interrupt();
         assert!(matches!(
             last_output(&receiver),

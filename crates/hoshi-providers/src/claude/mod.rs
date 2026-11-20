@@ -1053,11 +1053,10 @@ fn ask_to_stop(process: &LiveProcess, grace: Duration) {
         "request_id": INTERRUPT_REQUEST_ID,
         "request": { "subtype": "interrupt" },
     });
+    kill_after(process.clone(), grace);
     if !process.stdin().write_line(&request.to_string()) {
         process.interrupt();
-        return;
     }
-    kill_after(process.clone(), grace);
 }
 
 /// Kills `process` after `grace` if it still runs then, stdin closed or not.
