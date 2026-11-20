@@ -1854,6 +1854,17 @@ fn resolved(content: &ItemContent, response: &RequestResponse) -> Option<ItemCon
     }
 }
 
+fn compaction_started(thread_id: &str, turn_id: &str, now: &str) -> Event {
+    Event::ItemAdded {
+        item: ThreadItem {
+            id: format!("{turn_id}:compaction"),
+            thread_id: thread_id.to_owned(),
+            created_at: now.to_owned(),
+            content: compaction(CompactionStatus::Running),
+        },
+    }
+}
+
 fn compaction(status: CompactionStatus) -> ItemContent {
     ItemContent::Compaction {
         status,
@@ -1990,14 +2001,7 @@ fn message_events(
             model: runs_on,
         });
         if compacts {
-            events.push(Event::ItemAdded {
-                item: ThreadItem {
-                    id: format!("{message_id}:compaction"),
-                    thread_id,
-                    created_at: now.to_owned(),
-                    content: compaction(CompactionStatus::Running),
-                },
-            });
+            events.push(compaction_started(&thread_id, &message_id, now));
         }
     }
     Ok(events)
@@ -2907,17 +2911,16 @@ pub fn start_queued_turn(
     message: Option<&ThreadItem>,
     now: &str,
 ) -> Vec<Event> {
+    let compacts = matches!(
+        message.map(|message| &message.content),
+        Some(ItemContent::UserMessage { text, .. }) if crate::is_compact_command(text)
+    );
     let shown = match message.map(|message| &message.content) {
         Some(ItemContent::UserMessage {
-            text,
             task_result,
             pull_request_update,
             ..
-        }) => {
-            task_result.is_none()
-                && pull_request_update.is_none()
-                && !crate::is_compact_command(text)
-        }
+        }) => task_result.is_none() && pull_request_update.is_none() && !compacts,
         Some(_) => false,
         None => true,
     };
@@ -2937,6 +2940,9 @@ pub fn start_queued_turn(
             },
         };
         events.insert(events.len() - 1, marked);
+    }
+    if compacts && !events.is_empty() {
+        events.push(compaction_started(thread_id, message_id, now));
     }
     events
 }
@@ -3236,6 +3242,32 @@ mod tests {
 
         let sent = run(&mut model, send("m1", "carry on")).unwrap();
         assert_eq!(compaction_status(&sent), None);
+        record(
+            &mut model,
+            "m1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+
+        let queued = ThreadItem {
+            id: "c3".into(),
+            thread_id: "t".into(),
+            created_at: NOW.into(),
+            content: ItemContent::UserMessage {
+                text: "/compact".into(),
+                attachments: Vec::new(),
+                steer: true,
+                task_result: None,
+                pull_request_update: None,
+                resumed: None,
+                rewind: None,
+                dropped: false,
+                model_switch: None,
+            },
+        };
+        let started = start_queued_turn(&model, "t", "c3", Some(&queued), NOW);
+        assert_eq!(compaction_status(&started), Some(CompactionStatus::Running));
     }
 
     #[test]
