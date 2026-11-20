@@ -200,9 +200,20 @@ fn parse_from(text: &str, mut found: Found, start: usize) -> Parsed {
             .map(|(from, to)| (shift(from), shift(to))),
     );
     let blocks = tree.children().map_or(&[][..], Vec::as_slice);
+    let mut after_container = Vec::with_capacity(blocks.len());
+    let mut open = false;
+    for block in blocks {
+        after_container.push(open);
+        match block {
+            Node::Paragraph(_) => open = false,
+            Node::List(_) | Node::Blockquote(_) | Node::FootnoteDefinition(_) => open = true,
+            _ => {}
+        }
+    }
     let reparse_from = (1..blocks.len().saturating_sub(1))
         .rev()
-        .find_map(|index| fresh_start(&blocks[..index], &blocks[index], rest))
+        .filter(|index| !after_container[*index])
+        .find_map(|index| fresh_start(&blocks[index - 1], &blocks[index], rest))
         .map_or(start, |at| {
             let at = shift(at);
             text[..at].rfind('\n').map_or(0, |line| line + 1)
@@ -214,30 +225,14 @@ fn parse_from(text: &str, mut found: Found, start: usize) -> Parsed {
     }
 }
 
-/// Where `block` starts, when its text parses alone as it does after the blocks `before` it
-/// in `source`, whose own start parses alone too. The parser carries state out of a list or
-/// quote until a paragraph, so one must come after the last of them; a blank line must
-/// separate `block` from the block before it; and its line can't start with a byte order
-/// mark, which the parser drops only at the start of a text.
-fn fresh_start(before: &[Node], block: &Node, source: &str) -> Option<usize> {
-    let after_container = before
-        .iter()
-        .rev()
-        .find(|node| {
-            matches!(
-                node,
-                Node::Paragraph(_)
-                    | Node::List(_)
-                    | Node::Blockquote(_)
-                    | Node::FootnoteDefinition(_)
-            )
-        })
-        .is_some_and(|node| !matches!(node, Node::Paragraph(_)));
-    if after_container {
-        return None;
-    }
+/// Where `block` starts, when its text parses alone as it does after `before` in `source`.
+/// The parser carries state out of a list or quote until a paragraph, so the caller checks
+/// that one comes after the last of them. Here, a blank line must separate the two blocks,
+/// and `block`'s line can't start with a byte order mark, which the parser drops only at the
+/// start of a text.
+fn fresh_start(before: &Node, block: &Node, source: &str) -> Option<usize> {
     let (end, start) = (
-        before.last()?.position()?.end.offset,
+        before.position()?.end.offset,
         block.position()?.start.offset,
     );
     let lines: Vec<&str> = source.get(end..start)?.split('\n').collect();
