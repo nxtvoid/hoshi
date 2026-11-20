@@ -90,19 +90,45 @@ impl Stdin {
         let _ = wait.recv();
     }
 
-    /// Open too while a line is still being written.
-    pub fn is_open(&self) -> bool {
+    /// `None` while another line is being written.
+    fn try_lock(&self) -> Option<MutexGuard<'_, Option<ChildStdin>>> {
         match self.pipe.try_lock() {
-            Ok(pipe) => pipe.is_some(),
-            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner().is_some(),
-            Err(TryLockError::WouldBlock) => true,
+            Ok(pipe) => Some(pipe),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
         }
     }
 
+    /// Writes `line` now, or once the line being written is done, from another thread:
+    /// `None` then. `Some(false)` when the process no longer reads.
+    pub fn write_line_unblocked(&self, line: String) -> Option<bool> {
+        if let Some(mut pipe) = self.try_lock() {
+            return Some(write_line(&mut pipe, &line));
+        }
+        let stdin = self.clone();
+        thread::spawn(move || stdin.write_line(&line));
+        None
+    }
+
+    /// Open too while a line is still being written.
+    pub fn is_open(&self) -> bool {
+        self.try_lock().is_none_or(|pipe| pipe.is_some())
+    }
+
     /// An agent reading stream-json exits once its stdin closes; one still running after
-    /// [`ENDING_GRACE`] is ended with what it started.
+    /// [`ENDING_GRACE`] is ended with what it started. Stdin closes once the line being
+    /// written is done, without waiting for it here.
     pub fn close(&self) {
-        let closed = self.lock().take().is_some();
+        let closed = match self.try_lock() {
+            Some(mut pipe) => pipe.take().is_some(),
+            None => {
+                let stdin = self.clone();
+                thread::spawn(move || {
+                    stdin.lock().take();
+                });
+                true
+            }
+        };
         if let Some(process) = self.process.clone().filter(|_| closed) {
             thread::spawn(move || {
                 thread::sleep(ENDING_GRACE);
@@ -376,6 +402,29 @@ mod tests {
                 outcome: TurnOutcome::Interrupted
             }
         ));
+    }
+
+    #[test]
+    fn closing_stdin_does_not_wait_for_a_message_the_process_does_not_read() {
+        let _noting = noting();
+        let (sender, receiver) = mpsc::channel();
+        let sink: OutputSink = Box::new(move |output| {
+            let _ = sender.send(output);
+        });
+        let turn = spawn_turn(
+            long_running(),
+            "x".repeat(4 << 20),
+            sink,
+            |_, _| Vec::new(),
+            || false,
+        )
+        .unwrap();
+
+        let closing = std::time::Instant::now();
+        turn.stdin().close();
+
+        assert!(closing.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(last_output(&receiver), ProviderOutput::ProcessEnded);
     }
 
     #[test]

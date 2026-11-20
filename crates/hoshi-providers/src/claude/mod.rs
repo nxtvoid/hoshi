@@ -937,17 +937,8 @@ impl RunningTurn for ClaudeTurn {
     /// Asks Claude Code to stop, which lets it record the stop in its session; kills it when it
     /// takes too long.
     fn interrupt(&self) {
-        let request = json!({
-            "type": "control_request",
-            "request_id": INTERRUPT_REQUEST_ID,
-            "request": { "subtype": "interrupt" },
-        });
         self.queue.state().interrupted = true;
-        if !self.process.stdin().write_line(&request.to_string()) {
-            self.process.interrupt();
-            return;
-        }
-        kill_after(self.process.clone(), INTERRUPT_GRACE);
+        ask_to_stop(&self.process, INTERRUPT_GRACE);
     }
 
     /// `at_once`, the agent reads the message now: what runs in the foreground moves to the
@@ -1053,6 +1044,21 @@ impl RunningTurn for ClaudeTurn {
         self.queue.state().closing = true;
         self.process.interrupt();
     }
+}
+
+/// Asks the process to stop, without waiting for what it still has to read, and kills it
+/// after `grace` if it still runs then.
+fn ask_to_stop(process: &LiveProcess, grace: Duration) {
+    let request = json!({
+        "type": "control_request",
+        "request_id": INTERRUPT_REQUEST_ID,
+        "request": { "subtype": "interrupt" },
+    });
+    if process.stdin().write_line_unblocked(request.to_string()) == Some(false) {
+        process.interrupt();
+        return;
+    }
+    kill_after(process.clone(), grace);
 }
 
 /// Kills `process` after `grace` if it still runs then, stdin closed or not.
@@ -4529,6 +4535,34 @@ mod tests {
         let live = LiveProcess::default();
         live.replace(process);
         kill_after(live, Duration::from_millis(100));
+        assert!(matches!(
+            outputs.recv_timeout(Duration::from_secs(10)),
+            Ok(ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted
+            })
+        ));
+    }
+
+    #[test]
+    fn stopping_a_turn_does_not_wait_for_the_agent_to_read_its_message() {
+        let _noting = noting();
+        let (sink, outputs) = collecting_sink();
+        let (silent_windows, silent_unix) = SILENT;
+        let process = spawn_turn(
+            script(silent_windows, silent_unix),
+            "x".repeat(4 << 20),
+            sink,
+            |_, _| Vec::new(),
+            || true,
+        )
+        .unwrap();
+        let live = LiveProcess::default();
+        live.replace(process);
+
+        let asked = std::time::Instant::now();
+        ask_to_stop(&live, Duration::from_millis(100));
+
+        assert!(asked.elapsed() < Duration::from_secs(1));
         assert!(matches!(
             outputs.recv_timeout(Duration::from_secs(10)),
             Ok(ProviderOutput::TurnCompleted {
