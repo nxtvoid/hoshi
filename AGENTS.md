@@ -13,7 +13,7 @@
 - `crates/hoshi-store` - SQLite persistence for events and projections, in `state.sqlite` under hoshi's home. Each append writes events and projection rows in one transaction.
 - `crates/hoshi-providers` - One adapter per agent CLI behind a common trait: Claude Code, Codex and Copilot.
 - `crates/hoshi-forge` - Forge adapters (GitHub, Bitbucket Cloud) for the pull requests of threads' branches.
-- `vendor/gpui-base` - `gpui-base` with two patches; see `vendor/README.md`.
+- `vendor/gpui-base`, `vendor/markdown` - `gpui-base` and `markdown` with patches; see `vendor/README.md`.
 - `scripts` - Release helpers run with Bun (`bump.ts`, `release-notes.ts`).
 
 ## Data

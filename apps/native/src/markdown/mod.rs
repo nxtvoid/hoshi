@@ -648,3 +648,101 @@ mod emphasis_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod parse_tests {
+    use gpui_kit::base::text::editor_host::{BlockNode, parse_markdown};
+    use gpui_kit::component::text::MarkdownExtensions;
+    use std::sync::Arc;
+
+    fn blocks(text: &str) -> Vec<BlockNode> {
+        let extensions = MarkdownExtensions::default()
+            .block_parser(super::fenced_code)
+            .plugin(super::file_links::FileLinks);
+        parse_markdown(text, Arc::new(extensions)).expect("the text parses")
+    }
+
+    #[test]
+    fn a_message_the_parser_cant_read_shows_as_its_lines() {
+        for text in ["- ```\n1)", "+ $$\n1)", "- ```\n2.", "0) <?\n-"] {
+            assert_eq!(&*super::links::prepare(text).text, text);
+            let lines: Vec<String> = blocks(text)
+                .iter()
+                .filter_map(|block| match block {
+                    BlockNode::Paragraph(paragraph) => Some(
+                        paragraph
+                            .children()
+                            .iter()
+                            .map(|inline| inline.text().to_owned())
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<&str> = text.lines().collect();
+            assert_eq!(lines, expected, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn random_text_never_panics_the_parser() {
+        const FRAGMENTS: &[&str] = &[
+            "\n",
+            "\n",
+            "- ",
+            "- a\n",
+            "1. x\n",
+            "2.",
+            "0) ",
+            "1)",
+            "+ ",
+            "<?",
+            "<pre>\n",
+            "```",
+            "```\n",
+            "~~~\n",
+            "$$\n",
+            "===\n",
+            "---\n",
+            "> ",
+            "> q\n",
+            "[a",
+            "]: u\n",
+            "[^1]: n\n",
+            "    i\n",
+            "  ",
+            "| a |\n",
+            "| - |\n",
+            "*",
+            "**",
+            "`",
+            "x\n",
+            "# h\n",
+            "<!--\n",
+            "-->",
+            "![i](",
+            ")",
+            "\t",
+            "<div>\n",
+            "</div>\n",
+            "[x](y)",
+            "https://a.io ",
+            "\\",
+            "&amp;",
+        ];
+        let mut seed: u64 = 0x1234_5678_9abc_def1;
+        let mut next = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let text: String = (0..2 + next(8))
+                .map(|_| FRAGMENTS[next(FRAGMENTS.len())])
+                .collect();
+            super::links::prepare(&text);
+            blocks(&text);
+        }
+    }
+}

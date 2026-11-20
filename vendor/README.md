@@ -3,7 +3,7 @@
 ## gpui-base 0.9.1
 
 From crates.io (Apache-2.0, https://github.com/longbridge/gpui-kit), patched in through
-`[patch.crates-io]` in the root `Cargo.toml`. Two changes.
+`[patch.crates-io]` in the root `Cargo.toml`. Three changes.
 
 ### Textarea decorations
 
@@ -31,4 +31,27 @@ Upstream PRs: longbridge/gpui-kit#3970 (decorations) and #3971 (`set_tokens`).
 - `src/selectable_text.rs`: `SelectableText::highlights` styles ranges of its text, so the
   changes panel's diff lines show their syntax colors and stay selectable.
 
+### Markdown it can't parse
+
+- `src/text/format/markdown.rs`: when `markdown::to_mdast` fails, `parse` shows the source as
+  plain text, a paragraph per line (`plain_lines`), instead of an error in place of the text.
+
 Drop this copy and the patch once an upstream release offers the same.
+
+## markdown 1.0.0
+
+From crates.io (MIT, https://github.com/wooorm/markdown-rs), patched in through
+`[patch.crates-io]` in the root `Cargo.toml`. One change.
+
+### Errors instead of panics
+
+For some inputs, such as ``"- ```\n1)"`` or ``"+ $$\n1)"``, the tokenizer makes events that
+don't nest, and `to_mdast` panicked on them; release builds abort on a panic, so a message
+holding such text closed the app.
+
+- `src/to_mdast.rs`: a mismatched exit returns an error (`malformed`) instead of
+  `unreachable!`, and an enter the tree can't take (a child pushed into a node without
+  children) sets `CompileContext::broken`, which stops compiling with that error. `tail_pop`
+  returns it too when its stacks run out.
+
+Drop this copy and the patch once an upstream release no longer panics on those inputs.

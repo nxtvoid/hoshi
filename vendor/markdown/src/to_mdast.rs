@@ -105,6 +105,8 @@ struct CompileContext<'a> {
     trees: Vec<(Node, Vec<usize>, Vec<usize>)>,
     /// Current event index.
     index: usize,
+    /// Set when the events don't nest as the tree needs: compiling stops with an error.
+    broken: bool,
 }
 
 impl<'a> CompileContext<'a> {
@@ -139,6 +141,7 @@ impl<'a> CompileContext<'a> {
             raw_flow_fence_seen: false,
             trees: vec![(tree, vec![], vec![])],
             index: 0,
+            broken: false,
         }
     }
 
@@ -190,7 +193,10 @@ impl<'a> CompileContext<'a> {
 
         let (tree, stack, event_stack) = self.trees.last_mut().expect("Cannot get tail w/o tree");
         let node = delve_mut(tree, stack);
-        let children = node.children_mut().expect("Cannot push to non-parent");
+        let Some(children) = node.children_mut() else {
+            self.broken = true;
+            return;
+        };
         let index = children.len();
         children.push(child);
         stack.push(index);
@@ -200,7 +206,10 @@ impl<'a> CompileContext<'a> {
     fn tail_push_again(&mut self) {
         let (tree, stack, event_stack) = self.trees.last_mut().expect("Cannot get tail w/o tree");
         let node = delve_mut(tree, stack);
-        let children = node.children().expect("Cannot push to non-parent");
+        let Some(children) = node.children().filter(|children| !children.is_empty()) else {
+            self.broken = true;
+            return;
+        };
         stack.push(children.len() - 1);
         event_stack.push(self.index);
     }
@@ -213,8 +222,9 @@ impl<'a> CompileContext<'a> {
         let pos = node.position_mut().expect("Cannot pop manually added node");
         pos.end = end;
 
-        stack.pop().unwrap();
-        let left_index = event_stack.pop().unwrap();
+        let (Some(_), Some(left_index)) = (stack.pop(), event_stack.pop()) else {
+            return Err(malformed(ev));
+        };
         let left = &self.events[left_index];
         if left.name != ev.name {
             on_mismatch_error(self, Some(ev), left)?;
@@ -234,6 +244,10 @@ pub fn compile(events: &[Event], bytes: &[u8]) -> Result<Node, message::Message>
         index += 1;
     }
 
+    if context.broken {
+        return Err(malformed(&events[events.len() - 1]));
+    }
+
     debug_assert_eq!(context.trees.len(), 1, "expected 1 final tree");
     let (tree, _, event_stack) = context.trees.pop().unwrap();
 
@@ -248,6 +262,10 @@ pub fn compile(events: &[Event], bytes: &[u8]) -> Result<Node, message::Message>
 /// Handle the event at `index`.
 fn handle(context: &mut CompileContext, index: usize) -> Result<(), message::Message> {
     context.index = index;
+
+    if context.broken {
+        return Err(malformed(&context.events[index]));
+    }
 
     if context.events[index].kind == Kind::Enter {
         enter(context)?;
@@ -445,7 +463,10 @@ fn on_enter_buffer(context: &mut CompileContext) {
 /// Handle [`Enter`][Kind::Enter]:[`Data`][Name::Data] (and many text things).
 fn on_enter_data(context: &mut CompileContext) {
     let parent = context.tail_mut();
-    let children = parent.children_mut().expect("expected parent");
+    let Some(children) = parent.children_mut() else {
+        context.broken = true;
+        return;
+    };
 
     // Add to stack again.
     if let Some(Node::Text(_)) = children.last_mut() {
@@ -1814,9 +1835,19 @@ fn on_mismatch_error(
                 }
             );
         }
-        unreachable!("mismatched (non-jsx): {:?} / {:?}", left.name, right.name);
+        Err(malformed(right))
     } else {
-        unreachable!("mismatched (non-jsx): document / {:?}", right.name);
+        Err(malformed(right))
+    }
+}
+
+/// The error for events that don't nest, which the tokenizer makes for some inputs.
+fn malformed(event: &Event) -> message::Message {
+    message::Message {
+        place: Some(Box::new(message::Place::Point(event.point.to_unist()))),
+        reason: format!("Unexpected `{:?}` in the events", event.name),
+        rule_id: Box::new("malformed-events".into()),
+        source: Box::new("markdown-rs".into()),
     }
 }
 
