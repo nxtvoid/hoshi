@@ -716,6 +716,8 @@ pub struct ReadModel {
     retries: BTreeMap<String, TurnRetry>,
     /// The MCP servers each thread already told of failing to start, since the app started.
     mcp_failures: BTreeMap<String, BTreeSet<String>>,
+    /// The compaction each thread's running turn shows as running, by thread.
+    compacting: BTreeMap<String, String>,
 }
 
 impl ReadModel {
@@ -744,6 +746,7 @@ impl ReadModel {
                 .collect(),
             retries: BTreeMap::new(),
             mcp_failures: BTreeMap::new(),
+            compacting: BTreeMap::new(),
         }
     }
 
@@ -879,6 +882,8 @@ impl ReadModel {
                     .retain(|thread_id, _| threads.contains_key(thread_id));
                 self.mcp_failures
                     .retain(|thread_id, _| threads.contains_key(thread_id));
+                self.compacting
+                    .retain(|thread_id, _| threads.contains_key(thread_id));
             }
             Event::ThreadCreated { thread } => {
                 self.threads
@@ -889,6 +894,7 @@ impl ReadModel {
                 self.task_previews.remove(thread_id);
                 self.retries.remove(thread_id);
                 self.mcp_failures.remove(thread_id);
+                self.compacting.remove(thread_id);
                 self.requests.retain(|_, item| &item.thread_id != thread_id);
                 self.open_calls
                     .retain(|call| root_thread(&call.thread_id) != thread_id);
@@ -1062,6 +1068,16 @@ impl ReadModel {
                             .or_default()
                             .insert(name.clone());
                     }
+                    ItemContent::Compaction {
+                        status: CompactionStatus::Running,
+                        ..
+                    } => {
+                        self.compacting
+                            .insert(item.thread_id.clone(), item.id.clone());
+                    }
+                    ItemContent::Compaction { .. } => {
+                        self.compacting.remove(&item.thread_id);
+                    }
                     _ => {}
                 }
                 match item.content.request_status() {
@@ -1099,6 +1115,7 @@ impl ReadModel {
                 ..
             } => {
                 self.retries.remove(thread_id);
+                self.compacting.remove(thread_id);
                 if let Some(thread) = self.threads.get_mut(thread_id) {
                     thread.active_turn_id = None;
                     thread.status = match outcome {
@@ -1837,6 +1854,15 @@ fn resolved(content: &ItemContent, response: &RequestResponse) -> Option<ItemCon
     }
 }
 
+fn compaction(status: CompactionStatus) -> ItemContent {
+    ItemContent::Compaction {
+        status,
+        before_tokens: None,
+        after_tokens: None,
+        error: None,
+    }
+}
+
 /// The request as it stands once nobody waits for it any more.
 fn cancelled(content: &ItemContent) -> ItemContent {
     let mut content = content.clone();
@@ -1926,7 +1952,8 @@ fn message_events(
     };
     // Only a turn the transcript opens with the user's message records what it runs on, so a
     // change shows over that message rather than over one hoshi sent unseen.
-    let shown = matches!(origin, Origin::User) && !crate::is_compact_command(&text);
+    let compacts = crate::is_compact_command(&text);
+    let shown = matches!(origin, Origin::User) && !compacts;
     let runs_on = (thread.active_turn_id.is_none() && shown).then(|| runs_on(thread));
     let model_switch = runs_on.as_ref().and_then(|to| turn_switch(thread, to));
     events.extend(switch);
@@ -1957,11 +1984,21 @@ fn message_events(
     // A running turn takes the message in; the engine passes it on.
     if thread.active_turn_id.is_none() {
         events.push(Event::TurnStarted {
-            thread_id,
-            turn_id: message_id,
+            thread_id: thread_id.clone(),
+            turn_id: message_id.clone(),
             at: now.to_owned(),
             model: runs_on,
         });
+        if compacts {
+            events.push(Event::ItemAdded {
+                item: ThreadItem {
+                    id: format!("{message_id}:compaction"),
+                    thread_id,
+                    created_at: now.to_owned(),
+                    content: compaction(CompactionStatus::Running),
+                },
+            });
+        }
     }
     Ok(events)
 }
@@ -2615,12 +2652,7 @@ fn record_turn_output(
         }
         ProviderOutput::CompactionStarted => vec![item(
             format!("{turn_id}:compaction"),
-            ItemContent::Compaction {
-                status: CompactionStatus::Running,
-                before_tokens: None,
-                after_tokens: None,
-                error: None,
-            },
+            compaction(CompactionStatus::Running),
         )],
         ProviderOutput::CompactionFinished {
             before_tokens,
@@ -2716,6 +2748,9 @@ fn record_turn_output(
                         item_id: call.item_id.clone(),
                     }),
             );
+            if let Some(id) = model.compacting.get(thread_id) {
+                events.push(item(id.clone(), compaction(CompactionStatus::Failed)));
+            }
             match &outcome {
                 TurnOutcome::Failed { reason } => events.push(item(
                     format!("{turn_id}:failed"),
@@ -3150,6 +3185,57 @@ mod tests {
             text: text.into(),
             attachments: Vec::new(),
         }
+    }
+
+    fn compaction_status(events: &[Event]) -> Option<CompactionStatus> {
+        events.iter().find_map(|event| match event {
+            Event::ItemAdded {
+                item:
+                    ThreadItem {
+                        content: ItemContent::Compaction { status, .. },
+                        ..
+                    },
+            } => Some(*status),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn compact_shows_its_compaction_at_once_and_ends_it_with_the_turn() {
+        let mut model = model_with_thread();
+        let sent = run(&mut model, send("c1", "/compact")).unwrap();
+        assert_eq!(compaction_status(&sent), Some(CompactionStatus::Running));
+
+        let done = record(
+            &mut model,
+            "c1",
+            ProviderOutput::CompactionFinished {
+                before_tokens: 150_000,
+                after_tokens: 12_000,
+            },
+        );
+        assert_eq!(compaction_status(&done), Some(CompactionStatus::Done));
+        let ended = record(
+            &mut model,
+            "c1",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            },
+        );
+        assert_eq!(compaction_status(&ended), None);
+
+        run(&mut model, send("c2", "/compact")).unwrap();
+        let ended = record(
+            &mut model,
+            "c2",
+            ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+            },
+        );
+        assert_eq!(compaction_status(&ended), Some(CompactionStatus::Failed));
+
+        let sent = run(&mut model, send("m1", "carry on")).unwrap();
+        assert_eq!(compaction_status(&sent), None);
     }
 
     #[test]
