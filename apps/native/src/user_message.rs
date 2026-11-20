@@ -96,6 +96,10 @@ impl RenderOnce for Collapsible {
                 bubble.child(
                     div()
                         .id(self.id.clone())
+                        .debug_selector({
+                            let id = self.id.clone();
+                            move || format!("{id}-toggle")
+                        })
                         .mt_1()
                         .mr(px(-4.))
                         .self_end()
@@ -323,9 +327,9 @@ mod tests {
     use super::files_outside_text;
     use gpui_kit::component::theme::ThemeMode;
     use gpui_kit::{
-        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, ParentElement as _, Point,
-        Render, StyleRefinement, Styled as _, TestAppContext, VisualTestContext, Window,
-        WindowBounds, WindowOptions, div, px, size,
+        AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers,
+        ParentElement as _, Point, Render, StyleRefinement, Styled as _, TestAppContext,
+        VisualTestContext, Window, WindowBounds, WindowOptions, div, px, size,
     };
     use hoshi_core::MessageAttachment;
 
@@ -412,7 +416,23 @@ mod tests {
             cx.notify();
         });
         redraw(&mut cx);
-        let bubble = cx.debug_bounds("collapse-u1").expect("the bubble shows");
-        assert!(bubble.size.height < px(500.), "{bubble:?}");
+        let height = |cx: &mut VisualTestContext| {
+            cx.debug_bounds("collapse-u1")
+                .expect("the bubble shows")
+                .size
+                .height
+        };
+        let collapsed = height(&mut cx);
+        assert!(
+            collapsed > super::COLLAPSED_HEIGHT && collapsed < px(500.),
+            "{collapsed:?}"
+        );
+        let toggle = cx
+            .debug_bounds("collapse-u1-toggle")
+            .expect("the show full button shows")
+            .center();
+        cx.simulate_click(toggle, Modifiers::none());
+        redraw(&mut cx);
+        assert!(height(&mut cx) > px(1000.), "the whole message shows");
     }
 }

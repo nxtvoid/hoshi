@@ -715,19 +715,7 @@ fn the_cached_transcript_follows_the_lanes_room_and_a_limits_reset_passing(
         crate::markdown::init(engine.clone(), home.clone(), cx);
     });
     let workspace = cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)));
-    let resets_at = chrono::Utc::now() + chrono::Duration::seconds(3);
-    let items = vec![
-        user("u1", "Go", None),
-        item(
-            "f1",
-            ItemContent::TurnFailed {
-                reason: TurnFailure::UsageLimited {
-                    detail: "limit".into(),
-                    resets_at: Some(resets_at.to_rfc3339()),
-                },
-            },
-        ),
-    ];
+    let items = vec![user("u1", "Go", None)];
     let (window, shell) = cx
         .update(|cx| {
             let options = WindowOptions {
@@ -750,6 +738,21 @@ fn the_cached_transcript_follows_the_lanes_room_and_a_limits_reset_passing(
         })
         .unwrap();
     let mut cx = VisualTestContext::from_window(window, cx);
+    redraw(&mut cx);
+    let thread = shell.read_with(&cx, |shell, cx| shell.transcript.read(cx).thread.clone());
+    let resets_at = chrono::Utc::now() + chrono::Duration::seconds(2);
+    thread.update(&mut cx, |thread, cx| {
+        thread.items.push(item(
+            "f1",
+            ItemContent::TurnFailed {
+                reason: TurnFailure::UsageLimited {
+                    detail: "limit".into(),
+                    resets_at: Some(resets_at.to_rfc3339()),
+                },
+            },
+        ));
+        cx.notify();
+    });
     redraw(&mut cx);
     assert!(shows(&mut cx, "limit-resume-f1"));
 
