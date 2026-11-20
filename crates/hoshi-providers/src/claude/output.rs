@@ -143,6 +143,9 @@ impl LiveOutput {
         thread::spawn(move || {
             while stdin.is_open() {
                 thread::sleep(POLL_EVERY);
+                if !stdin.is_written() {
+                    continue;
+                }
                 let tasks: Vec<String> = live.tasks().commands.keys().cloned().collect();
                 for task_id in tasks {
                     let request = json!({
