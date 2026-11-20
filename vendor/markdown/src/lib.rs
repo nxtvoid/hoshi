@@ -138,9 +138,10 @@ pub fn to_html_with_options(value: &str, options: &Options) -> Result<String, me
 ///
 /// ## Errors
 ///
-/// `to_mdast()` never errors with normal markdown because markdown does not
-/// have syntax errors, so feel free to `unwrap()`.
-/// However, MDX does have syntax errors.
+/// Markdown has no syntax errors, but for some inputs the tokenizer makes
+/// events that don't nest, and `to_mdast()` then returns a `malformed-events`
+/// error: handle `Err` even with MDX off.
+/// MDX does have syntax errors.
 /// When MDX is turned on, there are several errors that can occur with how
 /// JSX, expressions, or ESM are written.
 ///

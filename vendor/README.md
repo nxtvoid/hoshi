@@ -53,5 +53,6 @@ holding such text closed the app.
   `unreachable!`, and an enter the tree can't take (a child pushed into a node without
   children) sets `CompileContext::broken`, which stops compiling with that error. `tail_pop`
   returns it too when its stacks run out.
+- `src/lib.rs`: `to_mdast`'s docs say it can return that error with MDX off.
 
 Drop this copy and the patch once an upstream release no longer panics on those inputs.
