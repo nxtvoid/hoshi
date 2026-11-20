@@ -99,17 +99,6 @@ impl Stdin {
         }
     }
 
-    /// Writes `line` now, or once the line being written is done, from another thread:
-    /// `None` then. `Some(false)` when the process no longer reads.
-    pub fn write_line_unblocked(&self, line: String) -> Option<bool> {
-        if let Some(mut pipe) = self.try_lock() {
-            return Some(write_line(&mut pipe, &line));
-        }
-        let stdin = self.clone();
-        thread::spawn(move || stdin.write_line(&line));
-        None
-    }
-
     /// Open too while a line is still being written.
     pub fn is_open(&self) -> bool {
         self.try_lock().is_none_or(|pipe| pipe.is_some())
