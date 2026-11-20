@@ -122,8 +122,8 @@ fn taken(spans: &[MarkSpan], at: usize) -> bool {
 }
 
 /// Where `marker` closes the stretch opened before `from`: the next one on the same line
-/// with text between that doesn't touch a space on either side.
-fn closing(text: &str, from: usize, marker: &str, single: bool) -> Option<usize> {
+/// with text between that doesn't touch a space on either side, nor `lone` when given.
+fn closing(text: &str, from: usize, marker: &str, lone: Option<u8>) -> Option<usize> {
     let bytes = text.as_bytes();
     let mut at = from;
     while let Some(found) = text[at..].find(marker) {
@@ -131,10 +131,11 @@ fn closing(text: &str, from: usize, marker: &str, single: bool) -> Option<usize>
         if text[from..close].contains('\n') {
             return None;
         }
-        let lone = !single
-            || (bytes.get(close + 1) != Some(&b'*') && (close == 0 || bytes[close - 1] != b'*'));
+        let alone = lone.is_none_or(|byte| {
+            bytes.get(close + 1) != Some(&byte) && (close == 0 || bytes[close - 1] != byte)
+        });
         let content = &text[from..close];
-        if lone
+        if alone
             && !content.is_empty()
             && !content.starts_with(char::is_whitespace)
             && !content.ends_with(char::is_whitespace)
@@ -153,7 +154,7 @@ pub fn spans(text: &str) -> Vec<MarkSpan> {
     let bytes = text.as_bytes();
     for mark in [Mark::Code, Mark::Strike, Mark::Bold, Mark::Italic] {
         let marker = mark.marker();
-        let single = mark == Mark::Italic;
+        let lone = matches!(mark, Mark::Italic | Mark::Code).then(|| mark.char() as u8);
         let mut at = 0;
         while let Some(offset) = text[at..].find(marker) {
             let open = at + offset;
@@ -161,13 +162,13 @@ pub fn spans(text: &str) -> Vec<MarkSpan> {
             if taken(&found, open) {
                 continue;
             }
-            if single
-                && (bytes.get(open + 1) == Some(&b'*') || (open > 0 && bytes[open - 1] == b'*'))
-            {
+            if lone.is_some_and(|byte| {
+                bytes.get(open + 1) == Some(&byte) || (open > 0 && bytes[open - 1] == byte)
+            }) {
                 continue;
             }
             let start = open + marker.len();
-            let Some(close) = closing(text, start, marker, single) else {
+            let Some(close) = closing(text, start, marker, lone) else {
                 continue;
             };
             let end = close + marker.len();
@@ -353,6 +354,19 @@ mod tests {
         assert!(super::spans("** nope **").is_empty());
         assert!(super::spans("*open\nclose*").is_empty());
         assert!(super::spans("**").is_empty());
+    }
+
+    #[test]
+    fn a_fence_is_not_inline_code() {
+        assert!(super::spans("```").is_empty());
+        assert!(super::spans("```tsx").is_empty());
+        assert!(super::spans("see ```a``` here").is_empty());
+        let text = "``` and `code`";
+        let found: Vec<_> = super::spans(text)
+            .into_iter()
+            .map(|span| (span.mark, &text[span.content]))
+            .collect();
+        assert_eq!(found, [(Mark::Code, "code")]);
     }
 
     #[test]
