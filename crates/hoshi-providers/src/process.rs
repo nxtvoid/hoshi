@@ -4,7 +4,7 @@ use hoshi_core::{ProviderOutput, TurnFailure, TurnOutcome};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
+use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -58,66 +58,61 @@ impl ProcessTurn {
     }
 }
 
-/// The process's stdin, open while the agent can be answered or given another turn.
+/// The process's stdin, open while the agent can be answered or given another turn. Lines
+/// go to the process in order from a thread of their own, so writing one never waits for the
+/// process to read: it may not read until it has started, and a long line fills the pipe.
 #[derive(Clone, Default)]
 pub struct Stdin {
-    pipe: Arc<Mutex<Option<ChildStdin>>>,
+    lines: Arc<Mutex<Option<mpsc::Sender<String>>>>,
     process: Option<Process>,
 }
 
 impl Stdin {
-    /// `false` when the process no longer reads.
-    pub fn write_line(&self, line: &str) -> bool {
-        write_line(&mut self.lock(), line)
+    fn new(pipe: Option<ChildStdin>, process: Process) -> Self {
+        let (sender, lines) = mpsc::channel::<String>();
+        let stdin = Self {
+            lines: Arc::new(Mutex::new(pipe.as_ref().map(|_| sender))),
+            process: Some(process),
+        };
+        if let Some(mut pipe) = pipe {
+            let writer = stdin.clone();
+            thread::spawn(move || {
+                for line in lines {
+                    let written = pipe
+                        .write_all(format!("{line}\n").as_bytes())
+                        .and_then(|()| pipe.flush());
+                    if written.is_err() {
+                        writer.sender().take();
+                        return;
+                    }
+                }
+            });
+        }
+        stdin
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<ChildStdin>> {
-        self.pipe
+    fn sender(&self) -> MutexGuard<'_, Option<mpsc::Sender<String>>> {
+        self.lines
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Writes `line` from another thread, as a process that hasn't started reading yet takes
-    /// a long line only once it does; lines written after it still follow it.
-    fn write_line_behind(&self, line: String) {
-        let (locked, wait) = mpsc::channel();
-        let stdin = self.clone();
-        thread::spawn(move || {
-            let mut pipe = stdin.lock();
-            let _ = locked.send(());
-            write_line(&mut pipe, &line);
-        });
-        let _ = wait.recv();
+    /// Queues `line` after those not written yet; `false` when the process no longer reads.
+    pub fn write_line(&self, line: &str) -> bool {
+        self.sender()
+            .as_ref()
+            .is_some_and(|sender| sender.send(line.to_owned()).is_ok())
     }
 
-    /// `None` while another line is being written.
-    fn try_lock(&self) -> Option<MutexGuard<'_, Option<ChildStdin>>> {
-        match self.pipe.try_lock() {
-            Ok(pipe) => Some(pipe),
-            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-            Err(TryLockError::WouldBlock) => None,
-        }
-    }
-
-    /// Open too while a line is still being written.
     pub fn is_open(&self) -> bool {
-        self.try_lock().is_none_or(|pipe| pipe.is_some())
+        self.sender().is_some()
     }
 
-    /// An agent reading stream-json exits once its stdin closes; one still running after
-    /// [`ENDING_GRACE`] is ended with what it started. Stdin closes once the line being
-    /// written is done, without waiting for it here.
+    /// An agent reading stream-json exits once its stdin closes, which it does once the lines
+    /// queued before are written; one still running after [`ENDING_GRACE`] is ended with
+    /// what it started.
     pub fn close(&self) {
-        let closed = match self.try_lock() {
-            Some(mut pipe) => pipe.take().is_some(),
-            None => {
-                let stdin = self.clone();
-                thread::spawn(move || {
-                    stdin.lock().take();
-                });
-                true
-            }
-        };
+        let closed = self.sender().take().is_some();
         if let Some(process) = self.process.clone().filter(|_| closed) {
             thread::spawn(move || {
                 thread::sleep(ENDING_GRACE);
@@ -127,23 +122,10 @@ impl Stdin {
     }
 }
 
-fn write_line(stdin: &mut Option<ChildStdin>, line: &str) -> bool {
-    let Some(pipe) = stdin.as_mut() else {
-        return false;
-    };
-    let written = pipe
-        .write_all(format!("{line}\n").as_bytes())
-        .and_then(|()| pipe.flush());
-    if written.is_err() {
-        *stdin = None;
-    }
-    written.is_ok()
-}
-
 /// Spawns `command`, writes `input` to its stdin without waiting for the process to read
 /// it, then feeds each stdout line through `parse` into `sink` on a background thread.
-/// `parse` closes stdin once the agent should end. When the process ends, a turn still open (`in_turn`) completes as failed or
-/// interrupted; otherwise the sink gets `ProcessEnded`. What the process leaves running when
+/// `parse` closes stdin once the agent should end. When the process ends, a turn still open
+/// (`in_turn`) completes as failed or interrupted; otherwise the sink gets `ProcessEnded`. What the process leaves running when
 /// it exits is ended with it.
 pub fn spawn_turn(
     mut command: Command,
@@ -164,19 +146,16 @@ pub fn spawn_turn(
     let noted = Noted::new(pid);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let pipe = Arc::new(Mutex::new(child.stdin.take()));
+    let pipe = child.stdin.take();
     let process = Process {
         child: Arc::new(Mutex::new(child)),
         pid,
         identity: noted.identity(),
         exited: Arc::default(),
     };
-    let stdin = Stdin {
-        pipe,
-        process: Some(process.clone()),
-    };
+    let stdin = Stdin::new(pipe, process.clone());
     // A write error means the process already died; the reader reports how.
-    stdin.write_line_behind(input.trim_end().to_owned());
+    stdin.write_line(input.trim_end());
     let interrupted = Arc::new(AtomicBool::new(false));
 
     let stderr_tail = thread::spawn(move || {
@@ -381,6 +360,7 @@ mod tests {
             || true,
         )
         .unwrap();
+        assert!(turn.stdin().write_line(&"y".repeat(4 << 20)));
 
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
         assert!(turn.stdin().is_open());

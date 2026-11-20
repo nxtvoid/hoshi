@@ -1046,22 +1046,18 @@ impl RunningTurn for ClaudeTurn {
     }
 }
 
-/// Asks the process to stop from another thread, as its stdin may be full of what it has yet
-/// to read, and kills it after `grace` if it still runs then.
+/// Asks the process to stop, and kills it after `grace` if it still runs then.
 fn ask_to_stop(process: &LiveProcess, grace: Duration) {
     let request = json!({
         "type": "control_request",
         "request_id": INTERRUPT_REQUEST_ID,
         "request": { "subtype": "interrupt" },
-    })
-    .to_string();
-    kill_after(process.clone(), grace);
-    let (stdin, process) = (process.stdin(), process.clone());
-    thread::spawn(move || {
-        if !stdin.write_line(&request) {
-            process.interrupt();
-        }
     });
+    if !process.stdin().write_line(&request.to_string()) {
+        process.interrupt();
+        return;
+    }
+    kill_after(process.clone(), grace);
 }
 
 /// Kills `process` after `grace` if it still runs then, stdin closed or not.
