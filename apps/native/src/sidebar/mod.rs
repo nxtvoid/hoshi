@@ -135,10 +135,20 @@ pub struct Sidebar {
     list_scroll: ScrollHandle,
     rail_scroll: ScrollHandle,
     updates: Entity<UpdatesButton>,
+    /// The rail and the sections of threads, views of their own so that frames for the rest of
+    /// the window, or of the rail's signal rings, draw what didn't change from the cache.
+    rail_part: Entity<Part>,
+    list_part: Entity<Part>,
+    /// The rail's signal rings, by element id.
+    rings: HashMap<SharedString, Entity<SignalRing>>,
+    /// Redraws the rows' relative times.
+    _clock: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<SidebarEvent> for Sidebar {}
+
+const CLOCK_EVERY: Duration = Duration::from_secs(30);
 
 impl Sidebar {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -170,6 +180,10 @@ impl Sidebar {
                 this.schedule_refresh(cx);
                 cx.notify();
             }),
+            cx.observe_self(|this, cx| {
+                this.rail_part.update(cx, |_, cx| cx.notify());
+                this.list_part.update(cx, |_, cx| cx.notify());
+            }),
         ];
         let home = workspace
             .read(cx)
@@ -180,6 +194,12 @@ impl Sidebar {
         let prefs = home.as_deref().map(prefs::load).unwrap_or_default();
         let project_id = latest_project(workspace.read(cx).model.projects());
         let updates = cx.new(|cx| UpdatesButton::new(workspace.clone(), window, cx));
+        let part = |draw: Draw, cx: &mut Context<Self>| {
+            let sidebar = cx.weak_entity();
+            cx.new(|_| Part { sidebar, draw })
+        };
+        let rail_part = part(Self::rail, cx);
+        let list_part = part(Self::list, cx);
         let mut sidebar = Self {
             workspace,
             search,
@@ -201,6 +221,17 @@ impl Sidebar {
             list_scroll: ScrollHandle::new(),
             rail_scroll: ScrollHandle::new(),
             updates,
+            rail_part,
+            list_part,
+            rings: HashMap::new(),
+            _clock: cx.spawn(async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(CLOCK_EVERY).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                }
+            }),
             _subscriptions: subscriptions,
         };
         sidebar.follow_scope(cx);
@@ -289,6 +320,26 @@ impl Sidebar {
         }
         self.save_prefs(cx);
         cx.notify();
+    }
+
+    /// The ring with this id, kept from the rail's last draw in `before` when it had one.
+    fn ring(
+        &mut self,
+        before: &mut HashMap<SharedString, Entity<SignalRing>>,
+        id: impl Into<SharedString>,
+        signal: Signal,
+        cx: &mut App,
+    ) -> AnyElement {
+        let id: SharedString = id.into();
+        let ring = before.remove(&id).unwrap_or_else(|| {
+            cx.new(|_| SignalRing {
+                id: id.clone(),
+                signal,
+            })
+        });
+        ring.update(cx, |ring, _| ring.signal = signal);
+        self.rings.insert(id, ring.clone());
+        ring.into_any_element()
     }
 
     fn set_width(&mut self, width: f32, cx: &mut Context<Self>) {
@@ -860,7 +911,14 @@ impl Sidebar {
             })
     }
 
+    fn shows_rail(&self, cx: &App) -> bool {
+        let model = &self.workspace.read(cx).model;
+        model.projects().next().is_some()
+            || model.threads().any(|thread| thread.project_id.is_none())
+    }
+
     fn rail(&mut self, colors: &Colors, cx: &mut Context<Self>) -> AnyElement {
+        let mut rings = std::mem::take(&mut self.rings);
         let projects = self.ordered_projects(cx);
         let workspace = self.workspace.read(cx);
         let threads: Vec<Thread> = workspace.model.threads().cloned().collect();
@@ -886,6 +944,12 @@ impl Sidebar {
             .as_deref()
             .and_then(|id| workspace.model.thread(id)?.project_id.clone());
         let view = self.prefs.view;
+        let now = Utc::now();
+        let awake: Vec<Thread> = threads
+            .iter()
+            .filter(|thread| !is_snoozed(&workspace.model, thread, now))
+            .cloned()
+            .collect();
 
         let inbox_label = if inbox_count > 0 {
             m::inbox_waiting(inbox_count)
@@ -897,6 +961,8 @@ impl Sidebar {
         } else {
             Signal::Done
         });
+        let inbox_ring =
+            inbox_signal.map(|signal| self.ring(&mut rings, "signal-inbox", signal, cx));
         let inbox_button = rail_button("rail-inbox", colors)
             .when(view == View::Inbox, |this| selected(this, colors))
             .when_some(inbox_signal, |this, signal| {
@@ -910,20 +976,16 @@ impl Sidebar {
                 };
                 this.set_view(view, cx)
             }))
-            .children(inbox_signal.map(|signal| signal_ring("signal-inbox", signal, colors, cx)))
+            .children(inbox_ring)
             .child(Icon::new(IconName::Inbox).size_4())
             .when(inbox_count > 0, |this| {
                 this.child(count_badge(inbox_count, colors))
             })
             .with_tooltip(rail_tooltip(Tooltip::new(inbox_label)));
 
-        let now = Utc::now();
-        let awake: Vec<Thread> = threads
-            .iter()
-            .filter(|thread| !is_snoozed(&workspace.model, thread, now))
-            .cloned()
-            .collect();
         let chats_signal = project_signal(&awake, None, &unseen);
+        let chats_ring =
+            chats_signal.map(|signal| self.ring(&mut rings, "signal-chats", signal, cx));
         let chats_button = rail_button("rail-chats", colors)
             .when(view == View::Chats, |this| selected(this, colors))
             .when_some(chats_signal, |this, signal| {
@@ -936,7 +998,7 @@ impl Sidebar {
                     this.open_new_draft(None, cx)
                 }
             }))
-            .children(chats_signal.map(|signal| signal_ring("signal-chats", signal, colors, cx)))
+            .children(chats_ring)
             .child(Icon::new(IconName::MessageCircle).size_4())
             .with_tooltip(rail_tooltip(Tooltip::new(m::chats())));
 
@@ -945,6 +1007,9 @@ impl Sidebar {
             .into_iter()
             .map(|project| {
                 let signal = project_signal(&awake, Some(&project.id), &unseen);
+                let ring = signal.map(|signal| {
+                    self.ring(&mut rings, format!("signal-{}", project.id), signal, cx)
+                });
                 let icon = self.icon(&project.id, cx);
                 let chosen = in_project && self.project_id.as_deref() == Some(project.id.as_str());
                 let holds_open =
@@ -992,14 +1057,7 @@ impl Sidebar {
                     .on_drop(cx.listener(move |this, drag: &ProjectDrag, _, cx| {
                         this.move_project(&drag.id, &dropped_on, cx)
                     }))
-                    .children(signal.map(|signal| {
-                        signal_ring(
-                            SharedString::from(format!("signal-{}", project.id)),
-                            signal,
-                            colors,
-                            cx,
-                        )
-                    }))
+                    .children(ring)
                     .child(project_mark(icon, initials, px(20.), px(5.)))
                     .with_tooltip(rail_tooltip(Tooltip::element(move |_, _| {
                         div()
@@ -2224,8 +2282,16 @@ impl Render for Sidebar {
                     .flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.rail(&colors, cx))
-                    .child(self.list(&colors, cx)),
+                    .when(self.shows_rail(cx), |this| {
+                        this.child(
+                            AnyView::from(self.rail_part.clone())
+                                .cached(StyleRefinement::default().w_12().flex_none().h_full()),
+                        )
+                    })
+                    .child(
+                        AnyView::from(self.list_part.clone())
+                            .cached(StyleRefinement::default().flex_1().min_w_0().h_full()),
+                    ),
             )
             .child(self.footer(&colors, cx))
             .child(
@@ -2522,6 +2588,40 @@ fn starfield(colors: &Colors) -> impl IntoElement {
         }))
 }
 
+type Draw = fn(&mut Sidebar, &Colors, &mut Context<Sidebar>) -> AnyElement;
+
+/// A part of the sidebar drawn as a view of its own.
+struct Part {
+    sidebar: WeakEntity<Sidebar>,
+    draw: Draw,
+}
+
+impl Render for Part {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.hoshi().clone();
+        let draw = self.draw;
+        let drawn = self
+            .sidebar
+            .update(cx, |sidebar, cx| draw(sidebar, &colors, cx))
+            .ok();
+        div().size_full().flex().children(drawn)
+    }
+}
+
+/// A rail button's signal ring, a view of its own so that its animation redraws only itself
+/// and what holds it.
+struct SignalRing {
+    id: SharedString,
+    signal: Signal,
+}
+
+impl Render for SignalRing {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.hoshi().clone();
+        signal_ring(self.id.clone(), self.signal, &colors, cx)
+    }
+}
+
 /// A ring in the signal's color that grows from a rail button and fades, again and again, as the
 /// web's `animate-signal`. Still when the system asks for less motion.
 fn signal_ring(id: impl Into<ElementId>, signal: Signal, colors: &Colors, cx: &App) -> AnyElement {
@@ -2539,7 +2639,7 @@ fn signal_ring(id: impl Into<ElementId>, signal: Signal, colors: &Colors, cx: &A
     }
     ring.with_animation(
         id,
-        Animation::new(Duration::from_millis(2400)).repeat(),
+        hoshi_ui::looping(Duration::from_millis(2400)),
         |ring, delta| {
             let progress = (delta / 0.7).min(1.);
             let eased = 1. - (1. - progress).powi(2);

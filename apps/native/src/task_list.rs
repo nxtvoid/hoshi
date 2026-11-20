@@ -39,7 +39,7 @@ pub fn task_list_row(id: &str, tasks: &[Task], working: bool, colors: &Colors) -
             icon.text_color(colors.status_working)
                 .with_animation(
                     SharedString::from(format!("task-spin-{id}-{index}")),
-                    Animation::new(Duration::from_secs(1)).repeat(),
+                    hoshi_ui::looping(Duration::from_secs(1)),
                     |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
                 )
                 .into_any_element()

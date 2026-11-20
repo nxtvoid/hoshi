@@ -161,7 +161,7 @@ pub fn background_rows(
             .child(if waiting {
                 icon.with_animation(
                     SharedString::from(format!("spin-{}", task.task_id)),
-                    Animation::new(Duration::from_secs(1)).repeat(),
+                    hoshi_ui::looping(Duration::from_secs(1)),
                     |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
                 )
                 .into_any_element()

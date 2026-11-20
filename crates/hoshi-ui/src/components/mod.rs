@@ -68,7 +68,7 @@ pub use section_label::SectionLabel;
 pub use select::{Select, SelectOption};
 pub use selection_release::{PressSelectsNothing, selection_area, selection_release};
 pub use settings::{SettingsAdvanced, SettingsGroup, SettingsListItem, SettingsRow, SettingsSplit};
-pub use spinner::spinner;
+pub use spinner::{LOOP_FPS, looping, spinner};
 pub use status_dot::{Status, StatusDot};
 pub use switch::Switch;
 pub use tooltip::{TOOLTIP_PRIORITY, Tooltip, TooltipProvider, TooltipTrigger, WithTooltip};

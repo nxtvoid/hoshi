@@ -786,7 +786,7 @@ fn icon_view(icon: IconName, tone: Hsla, spin: bool) -> AnyElement {
     if spin {
         icon.with_animation(
             "spin",
-            Animation::new(Duration::from_secs(1)).repeat(),
+            hoshi_ui::looping(Duration::from_secs(1)),
             |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
         )
         .into_any_element()

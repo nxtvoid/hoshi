@@ -12,11 +12,13 @@ pub struct LaneRoom {
 impl Global for LaneRoom {}
 
 impl LaneRoom {
-    /// Sets the room the lanes leave; tells nothing when it is the same.
-    pub fn set(room: LaneRoom, cx: &mut App) {
-        if cx.try_global::<LaneRoom>() != Some(&room) {
+    /// Sets the room the lanes leave; tells nothing when it is the same. Whether it changed.
+    pub fn set(room: LaneRoom, cx: &mut App) -> bool {
+        let changed = cx.try_global::<LaneRoom>() != Some(&room);
+        if changed {
             cx.set_global(room);
         }
+        changed
     }
 }
 
