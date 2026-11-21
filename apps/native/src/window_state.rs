@@ -2,8 +2,7 @@
 //! opens it the same way.
 
 use gpui_kit::{
-    App, AppContext as _, Bounds, Context, DisplayId, Entity, Pixels, Task, Window, WindowBounds,
-    point, px, size,
+    App, Bounds, Context, DisplayId, Entity, Pixels, Task, Window, WindowBounds, point, px, size,
 };
 use serde_json::{Value, json};
 use std::cell::RefCell;
@@ -13,8 +12,9 @@ use std::time::Duration;
 
 const DEFAULT_SIZE: (f32, f32) = (1280., 820.);
 const MIN_SIZE: f32 = 200.;
-/// How much of the window's top edge must be on a display to keep the saved position.
-const GRIP: f32 = 32.;
+/// How much of the window's top edge, down and across, must be on a display to keep the saved
+/// position: enough to grab it and drag it back.
+const GRIP: (f32, f32) = (32., 100.);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Saved {
@@ -111,11 +111,13 @@ pub fn place(
         rect.size.width.min(area.size.width),
         rect.size.height.min(area.size.height),
     );
-    let top_edge = Bounds {
-        origin: rect.origin,
-        size: size(fitted.width, px(GRIP)),
-    };
-    let origin = if area.intersects(&top_edge) {
+    let top = rect.origin.y;
+    let across = (rect.origin.x + fitted.width).min(area.origin.x + area.size.width)
+        - rect.origin.x.max(area.origin.x);
+    let grabbable = top >= area.origin.y
+        && top + px(GRIP.0) <= area.origin.y + area.size.height
+        && across >= fitted.width.min(px(GRIP.1));
+    let origin = if grabbable {
         rect.origin
     } else {
         let center = area.center();
@@ -165,13 +167,14 @@ struct Keeper {
 }
 
 impl Keeper {
-    /// The state to write, unless it is already on disk.
-    fn change(&mut self, saved: Saved) -> Option<(PathBuf, Saved)> {
+    /// Writes the state unless it is already on disk; a failed write is tried again next time.
+    fn save(&mut self, saved: Saved) {
         if self.written.as_ref() == Some(&saved) {
-            return None;
+            return;
         }
-        self.written = Some(saved.clone());
-        Some((file(&self.home), saved))
+        if std::fs::write(file(&self.home), serialize(&saved)).is_ok() {
+            self.written = Some(saved);
+        }
     }
 }
 
@@ -189,8 +192,8 @@ fn snapshot(window: &Window, cx: &App) -> Option<Saved> {
 fn save_now(keeper: &RefCell<Keeper>, window: &Window, cx: &App) {
     let mut keeper = keeper.borrow_mut();
     keeper.saving = None;
-    if let Some((path, saved)) = snapshot(window, cx).and_then(|saved| keeper.change(saved)) {
-        std::fs::write(path, serialize(&saved)).ok();
+    if let Some(saved) = snapshot(window, cx) {
+        keeper.save(saved);
     }
 }
 
@@ -210,15 +213,8 @@ pub fn remember<V: 'static>(home: PathBuf, view: &Entity<V>, window: &mut Window
                     cx.background_executor()
                         .timer(Duration::from_millis(300))
                         .await;
-                    let change = cx
-                        .update(|window, cx| snapshot(window, cx))
-                        .ok()
-                        .flatten()
-                        .and_then(|saved| pending.borrow_mut().change(saved));
-                    if let Some((path, saved)) = change {
-                        cx.background_spawn(async move { std::fs::write(path, serialize(&saved)) })
-                            .await
-                            .ok();
+                    if let Ok(Some(saved)) = cx.update(|window, cx| snapshot(window, cx)) {
+                        pending.borrow_mut().save(saved);
                     }
                 });
                 keeper.borrow_mut().saving = Some(task);
@@ -244,7 +240,7 @@ pub fn remember<V: 'static>(home: PathBuf, view: &Entity<V>, window: &mut Window
 
 #[cfg(test)]
 mod tests {
-    use super::{Saved, Screen, parse, place, serialize};
+    use super::{Keeper, Saved, Screen, file, parse, place, serialize};
     use gpui_kit::{Bounds, Pixels, WindowBounds, point, px, size};
 
     fn rect(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
@@ -320,6 +316,41 @@ mod tests {
             bounds,
             WindowBounds::Maximized(rect(1920. + 780., 0. + 0.5 * (1400. - 700.), 1000., 700.))
         );
+    }
+
+    #[test]
+    fn a_window_barely_on_its_screen_is_centered() {
+        let screens = [screen("a", 0., 1920., 1080.)];
+        let centered = |x: f32, y: f32| {
+            let was = saved(WindowBounds::Windowed(rect(x, y, 800., 600.)), Some("a"));
+            place(&was, &screens, None).unwrap().0 != WindowBounds::Windowed(rect(x, y, 800., 600.))
+        };
+        assert!(centered(-799., 100.), "one pixel across");
+        assert!(centered(100., -31.), "top edge above the screen");
+        assert!(centered(100., 1030.), "top edge below the screen");
+        assert!(!centered(-700., 100.), "the top edge can still be grabbed");
+    }
+
+    #[test]
+    fn a_failed_write_is_tried_again() {
+        let home = std::env::temp_dir().join(format!("hoshi-window-{}", std::process::id()));
+        std::fs::remove_dir_all(&home).ok();
+        let mut keeper = Keeper {
+            home: home.clone(),
+            written: None,
+            saving: None,
+        };
+        let state = saved(WindowBounds::Maximized(rect(0., 0., 800., 600.)), None);
+        keeper.save(state.clone());
+        assert_eq!(keeper.written, None);
+        std::fs::create_dir_all(&home).unwrap();
+        keeper.save(state.clone());
+        assert_eq!(keeper.written.as_ref(), Some(&state));
+        assert_eq!(
+            parse(&std::fs::read_to_string(file(&home)).unwrap()),
+            Some(state)
+        );
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
