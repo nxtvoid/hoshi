@@ -236,7 +236,7 @@ fn collect(
         Node::Paragraph(_) | Node::Heading(_) => {
             let column = node.position().map_or(0, |position| {
                 let start = position.start.offset;
-                start - source[..start].rfind('\n').map_or(0, |at| at + 1)
+                width(&source[source[..start].rfind('\n').map_or(0, |at| at + 1)..start])
             });
             for child in node.children().into_iter().flatten() {
                 collect(child, source, first, column, found, known);
@@ -337,27 +337,37 @@ fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
     .then_some(kept)
 }
 
-/// The line break at `at` as a hard break. The next line keeps its first `column` bytes when
-/// they are the quote and list indent its paragraph stands in, and the indent after them in
-/// spaces markdown keeps.
+/// The line break at `at` as a hard break. The next line keeps the quote markers and list
+/// indent its paragraph stands in, up to `column`, and the indent past them in spaces
+/// markdown keeps.
 fn line_break(source: &str, at: usize, column: usize) -> (std::ops::Range<usize>, String) {
     let line = &source[at + 1..];
-    let prefix = line
-        .get(..column)
-        .filter(|prefix| prefix.chars().all(|char| " \t>".contains(char)));
-    let Some(prefix) = prefix else {
-        return (at..at + 1, "\\\n".to_owned());
-    };
-    let indent = &line[column..];
-    let indent = &indent[..indent.len() - indent.trim_start_matches([' ', '\t']).len()];
-    let width: usize = indent
-        .chars()
-        .map(|char| if char == '\t' { 4 } else { 1 })
-        .sum();
+    let lead = &line[..line.len() - line.trim_start_matches([' ', '\t', '>']).len()];
+    let quote_end = lead.rfind('>').map_or(0, |last| {
+        last + 1 + usize::from(lead[last + 1..].starts_with(' '))
+    });
+    let quote = &lead[..quote_end];
+    let quote_width = width(quote);
+    let structural = column.max(quote_width);
     (
-        at..at + 1 + column + indent.len(),
-        format!("\\\n{prefix}{}", "\u{a0}".repeat(width)),
+        at..at + 1 + lead.len(),
+        format!(
+            "\\\n{quote}{}{}",
+            " ".repeat(structural - quote_width),
+            "\u{a0}".repeat(width(lead).saturating_sub(structural)),
+        ),
     )
+}
+
+/// How many columns `text` spans from the start of a line, with tab stops every 4.
+fn width(text: &str) -> usize {
+    text.chars().fold(0, |columns, char| {
+        if char == '\t' {
+            columns + 4 - columns % 4
+        } else {
+            columns + 1
+        }
+    })
 }
 
 /// Leads a tag that would otherwise stand alone on its line, which markdown reads as a block
@@ -621,6 +631,10 @@ mod tests {
         for (message, expected) in [
             ("look at\n  **a.rs**", "look at\\\n\u{a0}\u{a0}**a.rs**"),
             ("> one\n  > two", "> one\\\n  > two"),
+            ("> one\n   > two", "> one\\\n   > two"),
+            ("one\n  > two", "one\n  > two"),
+            ("- one\n\t  two", "- one\\\n  \u{a0}\u{a0}\u{a0}\u{a0}two"),
+            ("> - one\n>     two", "> - one\\\n>   \u{a0}\u{a0}two"),
             ("- one\n  two", "- one\\\n  two"),
             ("- one\n    two", "- one\\\n  \u{a0}\u{a0}two"),
             (
