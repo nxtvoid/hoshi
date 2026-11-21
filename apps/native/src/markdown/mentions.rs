@@ -77,7 +77,7 @@ fn ends_word(text: &str, at: usize, also: &str) -> bool {
 fn file_mention(text: &str, at: usize) -> Option<usize> {
     let rest = &text[at + 1..];
     if let Some(quoted) = rest.strip_prefix('"') {
-        let close = quoted.find(['"', '\n'])?;
+        let close = quoted.find(['"', '\n', '\r'])?;
         let path = &quoted[..close];
         return (quoted[close..].starts_with('"') && close > 0 && looks_like_path(path))
             .then_some(at + 1 + 1 + close + 1);
@@ -257,7 +257,11 @@ fn collect(
         return;
     }
     match node {
-        Node::Code(_) | Node::InlineCode(_) | Node::Link(_) | Node::Html(_) => {}
+        Node::Code(_)
+        | Node::InlineCode(_)
+        | Node::Link(_)
+        | Node::LinkReference(_)
+        | Node::Html(_) => {}
         Node::Text(text) => {
             let Some(position) = &text.position else {
                 return;
@@ -333,8 +337,16 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
             };
             (range, format!(r#"{lead}<{TAG} i="{index}"/>"#))
         })
-        .chain(found.breaks)
         .collect();
+    let chips = edits.len();
+    for (range, replacement) in found.breaks {
+        let overlaps = edits[..chips]
+            .iter()
+            .any(|(chip, _)| chip.start < range.end && range.start < chip.end);
+        if !overlaps {
+            edits.push((range, replacement));
+        }
+    }
     edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
     let mut out = text.to_owned();
     for (range, replacement) in edits {
@@ -791,6 +803,14 @@ mod tests {
             ("one\\\n  two", "one\\\n\u{a0}\u{a0}two"),
             ("one\r\n  two", "one\\\n\u{a0}\u{a0}two"),
             ("one\r  two", "one\\\n\u{a0}\u{a0}two"),
+            (
+                "@\"a\r     b.rs\"",
+                "@\"a\\\n\u{a0}\u{a0}\u{a0}\u{a0}\u{a0}b.rs\"",
+            ),
+            (
+                "[one  \n  two][]\n\n[one two]: https://example.test",
+                "[one  \n  two][]\n\n[one two]: https://example.test",
+            ),
             ("- one\n two", "- one\\\n two"),
             ("one\n  > two", "one\n  > two"),
             ("- one\n\t  two", "- one\\\n  \u{a0}\u{a0}\u{a0}\u{a0}two"),
