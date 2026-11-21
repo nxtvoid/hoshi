@@ -58,6 +58,7 @@ mod turn_status;
 mod updates;
 mod usage;
 mod user_message;
+mod window_state;
 mod work;
 
 use composer::Composer;
@@ -751,8 +752,10 @@ fn main() {
             });
             theme::load_fonts(cx);
             markdown::init(engine.clone(), home.clone(), cx);
+            let (window_bounds, display_id) = window_state::initial(&home, cx);
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(1280.0), px(820.0)), cx)),
+                window_bounds: Some(window_bounds),
+                display_id,
                 titlebar: Some(TitlebarOptions {
                     title: Some("hoshi".into()),
                     appears_transparent: true,
@@ -803,6 +806,7 @@ fn main() {
                     shown.update(cx, |shown, cx| shown.open_usage(window, cx));
                 }
                 onboarding::install(&shown, window, cx);
+                window_state::remember(home.clone(), &shown, window, cx);
                 sample_workspace = Some(workspace.clone());
                 shown
             })
