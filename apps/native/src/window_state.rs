@@ -327,7 +327,11 @@ mod tests {
         };
         assert!(centered(-799., 100.), "one pixel across");
         assert!(centered(100., -31.), "top edge above the screen");
-        assert!(centered(100., 1030.), "top edge below the screen");
+        assert!(
+            centered(100., 1030.),
+            "less than 32 px left below the top edge"
+        );
+        assert!(centered(100., 1050.), "top edge below the screen");
         assert!(!centered(-700., 100.), "the top edge can still be grabbed");
     }
 
