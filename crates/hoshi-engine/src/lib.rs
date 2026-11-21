@@ -98,7 +98,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, TryLockError, Weak, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 pub use terminal::TerminalSink;
 use terminal::{Launch, Terminals};
 use watch::GitWatcher;
@@ -4955,7 +4955,7 @@ fn end_idle_lingering(state: Weak<Mutex<State>>) {
             let Some(state) = state.upgrade() else {
                 return;
             };
-            lock(&state).close_idle_lingering(Instant::now());
+            lock(&state).close_idle_lingering(SystemTime::now());
         }
     });
 }
@@ -5337,6 +5337,7 @@ fn start_turn(
         .filter(|_| !request.fork_session);
     state.note_resumed_session(thread_id, resumed);
     let (workspace, checkpointed) = state.turn_workspace(thread_id, turn_id, &cwd);
+    state.close_lingering_if_idle(thread_id, SystemTime::now());
     if let Some(lingering) = state.lingering.remove(thread_id) {
         if lingering.running.continue_with(&request) {
             let turn = Turn {
@@ -8375,7 +8376,7 @@ Blue"
                 background: None,
                 owes_answer: true,
                 ended: false,
-                heard_at: Instant::now(),
+                heard_at: SystemTime::now(),
             },
         );
 
@@ -8446,7 +8447,7 @@ Blue"
                 background: None,
                 owes_answer,
                 ended: false,
-                heard_at: Instant::now(),
+                heard_at: SystemTime::now(),
             },
         );
         child_turn_ends(&harness, &adapter, 1);
@@ -8638,7 +8639,7 @@ Blue"
                 background: None,
                 owes_answer: true,
                 ended: false,
-                heard_at: Instant::now(),
+                heard_at: SystemTime::now(),
             },
         );
         child_turn_ends(&harness, &adapter, 1);
@@ -11806,7 +11807,7 @@ is it up?",
     #[test]
     fn a_kept_process_that_stays_quiet_too_long_is_ended() {
         let (harness, process) = leave_dev_server_running("kept-process-quiet");
-        let now = Instant::now();
+        let now = SystemTime::now();
 
         lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(60 * 60));
         assert!(!*process.closed.lock().unwrap(), "its dev server runs");
@@ -11824,7 +11825,7 @@ is it up?",
             tasks: Vec::new(),
             waiting: false,
         });
-        let now = Instant::now();
+        let now = SystemTime::now();
 
         lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(20 * 60));
         assert!(!*process.closed.lock().unwrap());
@@ -11841,13 +11842,34 @@ is it up?",
             waiting: false,
         });
         *process.awaits_work.lock().unwrap() = true;
-        let now = Instant::now();
+        let now = SystemTime::now();
 
         lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(60 * 60));
         assert!(!*process.closed.lock().unwrap(), "its wakeup is ahead");
 
         lock(&harness.engine.state).close_idle_lingering(now + Duration::from_secs(5 * 60 * 60));
         assert!(*process.closed.lock().unwrap());
+    }
+
+    #[test]
+    fn a_next_message_starts_a_new_process_when_the_kept_one_went_quiet_too_long() {
+        let (harness, process) = leave_dev_server_running("kept-process-slept");
+        process.report(ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false,
+        });
+        lock(&harness.engine.state)
+            .lingering
+            .get_mut("t")
+            .unwrap()
+            .heard_at = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+
+        harness.send("t", "m2", "good morning");
+        harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+
+        assert!(*process.closed.lock().unwrap());
+        assert!(process.continued.lock().unwrap().is_empty());
+        assert_eq!(*process.spawned.lock().unwrap(), 2);
     }
 
     #[test]

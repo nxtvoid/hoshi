@@ -6,7 +6,7 @@ use crate::{Notification, State, Turn, delegation, now};
 use hoshi_core::{BackgroundTask, Event, ProviderOutput, ThreadBackgroundTasks, start_woken_turn};
 use hoshi_providers::RunningTurn;
 use serde_json::{Value, json};
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime};
 
 pub(crate) const TOOL: &str = "await_background_tasks";
 const WAITING_NEXT: &str = "End your turn; it stays open until they finish.";
@@ -26,12 +26,13 @@ pub(crate) struct Lingering {
     /// Its commands all ended, which shows once it wakes or ends: a task waiting on them
     /// would otherwise read as done for a moment.
     pub ended: bool,
-    /// When it last reported anything.
-    pub heard_at: Instant,
+    /// When it last reported anything, by the wall clock: a monotonic one stops while the
+    /// computer sleeps on Linux and macOS, and the process would outlive its sign-in.
+    pub heard_at: SystemTime,
 }
 
 impl Lingering {
-    fn quiet_too_long(&self, now: Instant) -> bool {
+    fn quiet_too_long(&self, now: SystemTime) -> bool {
         let running = (!self.ended
             && self
                 .background
@@ -43,7 +44,7 @@ impl Lingering {
         } else {
             IDLE_LIMIT
         };
-        now.saturating_duration_since(self.heard_at) >= limit
+        now.duration_since(self.heard_at).unwrap_or_default() >= limit
     }
 }
 
@@ -127,7 +128,7 @@ impl State {
 
     fn receive_between_turns(&mut self, thread_id: &str, output: ProviderOutput) {
         if let Some(lingering) = self.lingering.get_mut(thread_id) {
-            lingering.heard_at = Instant::now();
+            lingering.heard_at = SystemTime::now();
         }
         match output {
             ProviderOutput::BackgroundTasks { tasks, waiting } => {
@@ -236,7 +237,7 @@ impl State {
                 background,
                 owes_answer,
                 ended: false,
-                heard_at: Instant::now(),
+                heard_at: SystemTime::now(),
             },
         );
     }
@@ -270,8 +271,19 @@ impl State {
         }
     }
 
+    /// Ends the process kept for `thread_id` when it went quiet for longer than it may.
+    pub(crate) fn close_lingering_if_idle(&mut self, thread_id: &str, now: SystemTime) {
+        if self
+            .lingering
+            .get(thread_id)
+            .is_some_and(|lingering| lingering.quiet_too_long(now))
+        {
+            self.close_lingering(thread_id);
+        }
+    }
+
     /// Ends the processes kept between turns that went quiet for longer than they may.
-    pub(crate) fn close_idle_lingering(&mut self, now: Instant) {
+    pub(crate) fn close_idle_lingering(&mut self, now: SystemTime) {
         let quiet: Vec<String> = self
             .lingering
             .iter()

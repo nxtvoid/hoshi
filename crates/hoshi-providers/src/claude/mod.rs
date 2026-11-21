@@ -1040,9 +1040,18 @@ impl RunningTurn for ClaudeTurn {
         false
     }
 
+    /// Between turns the process gets its stdin closed and a moment to exit on its own, as it
+    /// may be refreshing its sign-in; a turn still open is stopped at once.
     fn close(&self) {
-        self.queue.state().closing = true;
-        self.process.interrupt();
+        let mut queue = self.queue.state();
+        queue.closing = true;
+        let between_turns = !queue.turn_open;
+        drop(queue);
+        if between_turns {
+            self.process.stdin().close();
+        } else {
+            self.process.interrupt();
+        }
     }
 }
 
