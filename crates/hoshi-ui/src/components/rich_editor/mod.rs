@@ -697,6 +697,13 @@ impl RichEditor {
         self.active + 1 >= self.blocks.len() && self.caret_line(cx).1
     }
 
+    /// The caret in window coordinates, from the last layout.
+    pub fn caret_bounds(&self, cx: &App) -> Option<Bounds<Pixels>> {
+        self.active_block()
+            .caret_geometry(cx)
+            .map(|(caret, _, _)| caret)
+    }
+
     /// Where the caret sits in its block: on the first or the last line as shown.
     fn caret_line(&self, cx: &App) -> (bool, bool) {
         let input = self.active_block();
