@@ -224,24 +224,39 @@ struct Found {
     breaks: Vec<(std::ops::Range<usize>, String)>,
 }
 
+/// A block that each line of what it holds starts with a prefix of.
+#[derive(Clone, Copy)]
+enum Container {
+    Quote,
+    /// A list item, whose lines start with this many columns of indent.
+    ListItem(usize),
+}
+
 fn collect(
     node: &Node,
     source: &str,
     first: usize,
-    column: usize,
+    containers: &mut Vec<Container>,
     found: &mut Found,
     known: &Known,
 ) {
-    match node {
-        Node::Paragraph(_) | Node::Heading(_) => {
-            let column = node.position().map_or(0, |position| {
-                let start = position.start.offset;
-                width(&source[source[..start].rfind('\n').map_or(0, |at| at + 1)..start])
-            });
-            for child in node.children().into_iter().flatten() {
-                collect(child, source, first, column, found, known);
-            }
+    let container = match node {
+        Node::Blockquote(_) => Some(Container::Quote),
+        Node::ListItem(item) => item
+            .position
+            .as_ref()
+            .map(|position| Container::ListItem(list_indent(source, position.start.offset))),
+        _ => None,
+    };
+    if let Some(container) = container {
+        containers.push(container);
+        for child in node.children().into_iter().flatten() {
+            collect(child, source, first, containers, found, known);
         }
+        containers.pop();
+        return;
+    }
+    match node {
         Node::Code(_) | Node::InlineCode(_) | Node::Link(_) | Node::Html(_) => {}
         Node::Text(text) => {
             let Some(position) = &text.position else {
@@ -258,12 +273,14 @@ fn collect(
                 }
             }
             for (at, _) in written.match_indices('\n') {
-                found.breaks.push(line_break(source, start + at, column));
+                found
+                    .breaks
+                    .push(line_break(source, start + at, containers));
             }
         }
         _ => {
             for child in node.children().into_iter().flatten() {
-                collect(child, source, first, column, found, known);
+                collect(child, source, first, containers, found, known);
             }
         }
     }
@@ -277,7 +294,7 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
     };
     let first = text.len() - text.trim_start().len();
     let mut found = Found::default();
-    collect(&tree, text, first, 0, &mut found, known);
+    collect(&tree, text, first, &mut Vec::new(), &mut found, known);
     let mentions: Vec<Mention> = found
         .mentions
         .iter()
@@ -337,26 +354,122 @@ fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
     .then_some(kept)
 }
 
-/// The line break at `at` as a hard break. The next line keeps the quote markers and list
-/// indent its paragraph stands in, up to `column`, and the indent past them in spaces
-/// markdown keeps.
-fn line_break(source: &str, at: usize, column: usize) -> (std::ops::Range<usize>, String) {
-    let line = &source[at + 1..];
-    let lead = &line[..line.len() - line.trim_start_matches([' ', '\t', '>']).len()];
-    let quote_end = lead.rfind('>').map_or(0, |last| {
-        last + 1 + usize::from(lead[last + 1..].starts_with(' '))
-    });
-    let quote = &lead[..quote_end];
-    let quote_width = width(quote);
-    let structural = column.max(quote_width);
+/// The line break at `at` as a hard break. The next line keeps the prefix of the quotes and
+/// list items its paragraph stands in, and the indent past it in spaces markdown keeps. A
+/// line that leaves out part of that prefix keeps only the break.
+fn line_break(
+    source: &str,
+    at: usize,
+    containers: &[Container],
+) -> (std::ops::Range<usize>, String) {
+    let mut line = Blanks::new(&source[at + 1..]);
+    let mut prefix = String::new();
+    for container in containers {
+        match *container {
+            Container::Quote => {
+                line.take(3);
+                if !line.next_is('>') {
+                    return (at..at + 1, "\\\n".to_owned());
+                }
+                line.at += 1;
+                line.column += 1;
+                line.take(1);
+                prefix.push_str("> ");
+            }
+            Container::ListItem(indent) => {
+                if line.take(indent) < indent {
+                    return (at..at + 1, "\\\n".to_owned());
+                }
+                prefix.push_str(&" ".repeat(indent));
+            }
+        }
+    }
+    let indent = line.take(usize::MAX);
     (
-        at..at + 1 + lead.len(),
-        format!(
-            "\\\n{quote}{}{}",
-            " ".repeat(structural - quote_width),
-            "\u{a0}".repeat(width(lead).saturating_sub(structural)),
-        ),
+        at..at + 1 + line.at,
+        format!("\\\n{prefix}{}", "\u{a0}".repeat(indent)),
     )
+}
+
+/// Reads the spaces and tabs a line starts with by columns, tab stops every 4, so a tab can
+/// be taken in part.
+struct Blanks<'a> {
+    line: &'a str,
+    at: usize,
+    column: usize,
+    /// Columns left of a tab already read.
+    spare: usize,
+}
+
+impl<'a> Blanks<'a> {
+    fn new(line: &'a str) -> Self {
+        Self {
+            line,
+            at: 0,
+            column: 0,
+            spare: 0,
+        }
+    }
+
+    /// Takes up to `most` columns of blanks; how many it took.
+    fn take(&mut self, most: usize) -> usize {
+        let mut taken = 0;
+        while taken < most {
+            if self.spare > 0 {
+                let part = self.spare.min(most - taken);
+                self.spare -= part;
+                taken += part;
+                continue;
+            }
+            match self.line.as_bytes().get(self.at) {
+                Some(b' ') => {
+                    self.at += 1;
+                    self.column += 1;
+                    taken += 1;
+                }
+                Some(b'\t') => {
+                    let tab = 4 - self.column % 4;
+                    self.at += 1;
+                    self.column += tab;
+                    self.spare = tab;
+                }
+                _ => break,
+            }
+        }
+        taken
+    }
+
+    fn next_is(&self, char: char) -> bool {
+        self.spare == 0 && self.line[self.at..].starts_with(char)
+    }
+}
+
+/// The columns of indent the lines of the list item at `start` start with: the item's own
+/// indent, its marker and the spaces after it, but not a task's checkbox.
+fn list_indent(source: &str, start: usize) -> usize {
+    let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+    let column = |offset: usize| width(&source[line_start..offset]);
+    let before = &source[line_start..start];
+    let mut from = line_start + before.trim_end_matches([' ', '\t']).len();
+    if from > line_start && source[..from].ends_with('>') && source[from..].starts_with(' ') {
+        from += 1;
+    }
+    let rest = &source[start..];
+    let marker = start + rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    let digits = source[marker..]
+        .find(|char: char| !char.is_ascii_digit())
+        .unwrap_or(0);
+    let marker_end = marker + digits + 1;
+    let after = &source[marker_end..];
+    let content = marker_end + after.len() - after.trim_start_matches([' ', '\t']).len();
+    let gap = column(content) - column(marker_end);
+    let blank = source[content..].starts_with('\n') || content == source.len();
+    let content_column = if gap == 0 || gap > 4 || blank {
+        column(marker_end) + 1
+    } else {
+        column(content)
+    };
+    content_column - column(from)
 }
 
 /// How many columns `text` spans from the start of a line, with tab stops every 4.
@@ -630,8 +743,12 @@ mod tests {
         assert_eq!(mentions[0].text.as_ref(), "@src/b.rs");
         for (message, expected) in [
             ("look at\n  **a.rs**", "look at\\\n\u{a0}\u{a0}**a.rs**"),
-            ("> one\n  > two", "> one\\\n  > two"),
-            ("> one\n   > two", "> one\\\n   > two"),
+            ("> one\n  > two", "> one\\\n> two"),
+            ("> one\n   > two", "> one\\\n> two"),
+            ("  > one\n>   two", "  > one\\\n> \u{a0}\u{a0}two"),
+            ("- [ ] one\n    two", "- [ ] one\\\n  \u{a0}\u{a0}two"),
+            ("1. one\n   two", "1. one\\\n   two"),
+            ("- one\n two", "- one\\\n two"),
             ("one\n  > two", "one\n  > two"),
             ("- one\n\t  two", "- one\\\n  \u{a0}\u{a0}\u{a0}\u{a0}two"),
             ("> - one\n>     two", "> - one\\\n>   \u{a0}\u{a0}two"),
