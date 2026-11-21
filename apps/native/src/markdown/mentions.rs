@@ -272,10 +272,26 @@ fn collect(
                     found.mentions.push((start, Segment { range, ..segment }));
                 }
             }
-            for (at, _) in written.match_indices('\n') {
+            for ending in line_endings(written) {
+                let ending = start + ending.start..start + ending.end;
                 found
                     .breaks
-                    .push(line_break(source, start + at, containers));
+                    .push(line_break(source, ending, containers, "\\"));
+            }
+        }
+        Node::Break(_) => {
+            let Some(position) = node.position() else {
+                return;
+            };
+            let start = position.start.offset;
+            let Some(written) = source.get(start..position.end.offset) else {
+                return;
+            };
+            if let Some(ending) = line_endings(written).pop() {
+                let ending = start + ending.start..start + ending.end;
+                found
+                    .breaks
+                    .push(line_break(source, ending, containers, ""));
             }
         }
         _ => {
@@ -338,12 +354,13 @@ fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
         if line_start && (blank(byte) || byte == b'>') {
             continue;
         }
-        if byte == b'\n' {
+        let ending = byte == b'\n' || byte == b'\r';
+        if ending {
             while kept.last().is_some_and(|&last| blank(bytes[last])) {
                 kept.pop();
             }
         }
-        line_start = byte == b'\n';
+        line_start = ending;
         kept.push(at);
     }
     (kept.len() == value.len()
@@ -354,22 +371,43 @@ fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
     .then_some(kept)
 }
 
-/// The line break at `at` as a hard break. The next line keeps the prefix of the quotes and
-/// list items its paragraph stands in, and the indent past it in spaces markdown keeps. A
-/// line that leaves out part of that prefix keeps only the break.
+/// Where `text`'s line endings stand: `\n`, `\r\n` or `\r`.
+fn line_endings(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut endings = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let length = match bytes[at] {
+            b'\r' if bytes.get(at + 1) == Some(&b'\n') => 2,
+            b'\r' | b'\n' => 1,
+            _ => 0,
+        };
+        if length > 0 {
+            endings.push(at..at + length);
+        }
+        at += length.max(1);
+    }
+    endings
+}
+
+/// The line `ending` after `mark` as a hard break; `mark` is empty when the break is one
+/// already. The next line keeps the prefix of the quotes and list items its paragraph stands
+/// in, and the indent past it in spaces markdown keeps. A line that leaves out part of that
+/// prefix keeps only the break.
 fn line_break(
     source: &str,
-    at: usize,
+    ending: std::ops::Range<usize>,
     containers: &[Container],
+    mark: &str,
 ) -> (std::ops::Range<usize>, String) {
-    let mut line = Blanks::new(&source[at + 1..]);
+    let mut line = Blanks::new(&source[ending.end..]);
     let mut prefix = String::new();
     for container in containers {
         match *container {
             Container::Quote => {
                 line.take(3);
                 if !line.next_is('>') {
-                    return (at..at + 1, "\\\n".to_owned());
+                    return (ending, format!("{mark}\n"));
                 }
                 line.at += 1;
                 line.column += 1;
@@ -378,7 +416,7 @@ fn line_break(
             }
             Container::ListItem(indent) => {
                 if line.take(indent) < indent {
-                    return (at..at + 1, "\\\n".to_owned());
+                    return (ending, format!("{mark}\n"));
                 }
                 prefix.push_str(&" ".repeat(indent));
             }
@@ -386,8 +424,8 @@ fn line_break(
     }
     let indent = line.take(usize::MAX);
     (
-        at..at + 1 + line.at,
-        format!("\\\n{prefix}{}", "\u{a0}".repeat(indent)),
+        ending.start..ending.end + line.at,
+        format!("{mark}\n{prefix}{}", "\u{a0}".repeat(indent)),
     )
 }
 
@@ -445,15 +483,11 @@ impl<'a> Blanks<'a> {
 }
 
 /// The columns of indent the lines of the list item at `start` start with: the item's own
-/// indent, its marker and the spaces after it, but not a task's checkbox.
+/// indent, its marker and the spaces after it, but not a task's checkbox. The item starts
+/// past the prefix of the blocks it stands in.
 fn list_indent(source: &str, start: usize) -> usize {
-    let line_start = source[..start].rfind('\n').map_or(0, |at| at + 1);
+    let line_start = source[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
     let column = |offset: usize| width(&source[line_start..offset]);
-    let before = &source[line_start..start];
-    let mut from = line_start + before.trim_end_matches([' ', '\t']).len();
-    if from > line_start && source[..from].ends_with('>') && source[from..].starts_with(' ') {
-        from += 1;
-    }
     let rest = &source[start..];
     let marker = start + rest.len() - rest.trim_start_matches([' ', '\t']).len();
     let digits = source[marker..]
@@ -463,13 +497,13 @@ fn list_indent(source: &str, start: usize) -> usize {
     let after = &source[marker_end..];
     let content = marker_end + after.len() - after.trim_start_matches([' ', '\t']).len();
     let gap = column(content) - column(marker_end);
-    let blank = source[content..].starts_with('\n') || content == source.len();
+    let blank = source[content..].starts_with(['\n', '\r']) || content == source.len();
     let content_column = if gap == 0 || gap > 4 || blank {
         column(marker_end) + 1
     } else {
         column(content)
     };
-    content_column - column(from)
+    content_column - column(start)
 }
 
 /// How many columns `text` spans from the start of a line, with tab stops every 4.
@@ -748,6 +782,15 @@ mod tests {
             ("  > one\n>   two", "  > one\\\n> \u{a0}\u{a0}two"),
             ("- [ ] one\n    two", "- [ ] one\\\n  \u{a0}\u{a0}two"),
             ("1. one\n   two", "1. one\\\n   two"),
+            ("  - one\n    two", "  - one\\\n    two"),
+            (
+                "- outer\n  - inner\n      next",
+                "- outer\n  - inner\\\n    \u{a0}\u{a0}next",
+            ),
+            ("one  \n  two", "one  \n\u{a0}\u{a0}two"),
+            ("one\\\n  two", "one\\\n\u{a0}\u{a0}two"),
+            ("one\r\n  two", "one\\\n\u{a0}\u{a0}two"),
+            ("one\r  two", "one\\\n\u{a0}\u{a0}two"),
             ("- one\n two", "- one\\\n two"),
             ("one\n  > two", "one\n  > two"),
             ("- one\n\t  two", "- one\\\n  \u{a0}\u{a0}\u{a0}\u{a0}two"),
