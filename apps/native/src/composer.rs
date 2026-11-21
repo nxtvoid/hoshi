@@ -460,12 +460,14 @@ impl Composer {
         if self.menu == Some(FooterMenu::Model) {
             return self.model_key(keystroke, window, cx);
         }
+        if !self.editor.read(cx).is_focused(window, cx) {
+            return false;
+        }
         let modifiers = &keystroke.modifiers;
         if keystroke.key == "v"
             && (modifiers.control || modifiers.platform)
             && modifiers.shift
             && !modifiers.alt
-            && self.editor.read(cx).is_focused(window, cx)
         {
             return self.paste_as_text(window, cx);
         }
@@ -1415,6 +1417,18 @@ mod ui_tests {
     }
 
     #[gpui_kit::test]
+    fn arrows_typed_elsewhere_leave_the_composer_alone(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "history-unfocused");
+        h.cx.simulate_input("first");
+        h.cx.simulate_keystrokes("enter");
+        h.cx.run_until_parked();
+
+        h.cx.update(|window, cx| window.blur(cx));
+        h.cx.simulate_keystrokes("up");
+        assert_eq!(value(&mut h), "");
+    }
+
+    #[gpui_kit::test]
     fn a_slash_command_hoshi_runs_opens_the_model_picker(cx: &mut TestAppContext) {
         let mut h = harness(cx, "slash");
         h.cx.simulate_input("/mod");
@@ -1587,6 +1601,29 @@ mod ui_tests {
         h.cx.run_until_parked();
         let error = state(&mut h).1.unwrap_or_default();
         assert_eq!(error, crate::m::error_request_not_pending());
+    }
+
+    #[gpui_kit::test]
+    fn digits_typed_elsewhere_leave_the_question_unanswered(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "questions-unfocused");
+        ask(
+            &mut h,
+            "q1",
+            ItemContent::Questions {
+                questions: vec![question(&["red", "blue"])],
+                status: RequestStatus::Pending,
+                answers: None,
+            },
+        );
+
+        h.cx.update(|window, cx| window.blur(cx));
+        h.cx.simulate_keystrokes("2");
+        h.cx.run_until_parked();
+        let progress = h
+            .composer
+            .read_with(&h.cx, |composer, _| composer.progress.get("q1").cloned());
+        assert!(progress.is_none());
+        assert_eq!(state(&mut h).1, None);
     }
 
     #[gpui_kit::test]
