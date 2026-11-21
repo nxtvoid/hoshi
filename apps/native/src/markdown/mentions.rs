@@ -77,7 +77,7 @@ fn ends_word(text: &str, at: usize, also: &str) -> bool {
 fn file_mention(text: &str, at: usize) -> Option<usize> {
     let rest = &text[at + 1..];
     if let Some(quoted) = rest.strip_prefix('"') {
-        let close = quoted.find(['"', '\n'])?;
+        let close = quoted.find(['"', '\n', '\r'])?;
         let path = &quoted[..close];
         return (quoted[close..].starts_with('"') && close > 0 && looks_like_path(path))
             .then_some(at + 1 + 1 + close + 1);
@@ -220,30 +220,87 @@ pub fn segments(text: &str, known: &Known, leading: bool) -> Vec<Segment> {
 #[derive(Default)]
 struct Found {
     mentions: Vec<(usize, Segment)>,
-    breaks: Vec<usize>,
+    /// Each line break, through the indent that follows it, and what draws it as written.
+    breaks: Vec<(std::ops::Range<usize>, String)>,
 }
 
-fn collect(node: &Node, source: &str, first: usize, found: &mut Found, known: &Known) {
+/// A block that each line of what it holds starts with a prefix of.
+#[derive(Clone, Copy)]
+enum Container {
+    Quote,
+    /// A list item, whose lines start with this many columns of indent.
+    ListItem(usize),
+}
+
+fn collect(
+    node: &Node,
+    source: &str,
+    first: usize,
+    containers: &mut Vec<Container>,
+    found: &mut Found,
+    known: &Known,
+) {
+    let container = match node {
+        Node::Blockquote(_) => Some(Container::Quote),
+        Node::ListItem(item) => item
+            .position
+            .as_ref()
+            .map(|position| Container::ListItem(list_indent(source, position.start.offset))),
+        _ => None,
+    };
+    if let Some(container) = container {
+        containers.push(container);
+        for child in node.children().into_iter().flatten() {
+            collect(child, source, first, containers, found, known);
+        }
+        containers.pop();
+        return;
+    }
     match node {
-        Node::Code(_) | Node::InlineCode(_) | Node::Link(_) | Node::Html(_) => {}
+        Node::Code(_)
+        | Node::InlineCode(_)
+        | Node::Link(_)
+        | Node::LinkReference(_)
+        | Node::Html(_) => {}
         Node::Text(text) => {
             let Some(position) = &text.position else {
                 return;
             };
-            let (start, end) = (position.start.offset, position.end.offset);
-            if source.get(start..end) != Some(text.value.as_str()) {
+            let start = position.start.offset;
+            let Some(written) = source.get(start..position.end.offset) else {
                 return;
+            };
+            if let Some(kept) = kept_bytes(written, &text.value) {
+                for segment in segments(&text.value, known, start == first) {
+                    let range = kept[segment.range.start]..kept[segment.range.end - 1] + 1;
+                    found.mentions.push((start, Segment { range, ..segment }));
+                }
             }
-            for segment in segments(&text.value, known, start == first) {
-                found.mentions.push((start, segment));
+            for ending in line_endings(written) {
+                let ending = start + ending.start..start + ending.end;
+                found
+                    .breaks
+                    .push(line_break(source, ending, containers, "\\"));
             }
-            found
-                .breaks
-                .extend(text.value.match_indices('\n').map(|(at, _)| start + at));
+        }
+        Node::Break(_) => {
+            let Some(position) = node.position() else {
+                return;
+            };
+            let start = position.start.offset;
+            let Some(written) = source.get(start..position.end.offset) else {
+                return;
+            };
+            if let Some(ending) = line_endings(written).pop() {
+                let ending = start + ending.start..start + ending.end;
+                found
+                    .breaks
+                    .push(line_break(source, ending, containers, ""));
+            }
         }
         _ => {
             for child in node.children().into_iter().flatten() {
-                collect(child, source, first, found, known);
+                collect(child, source, first, containers, found, known);
             }
         }
     }
@@ -257,7 +314,7 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
     };
     let first = text.len() - text.trim_start().len();
     let mut found = Found::default();
-    collect(&tree, text, first, &mut found, known);
+    collect(&tree, text, first, &mut Vec::new(), &mut found, known);
     let mentions: Vec<Mention> = found
         .mentions
         .iter()
@@ -280,19 +337,196 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
             };
             (range, format!(r#"{lead}<{TAG} i="{index}"/>"#))
         })
-        .chain(
-            found
-                .breaks
-                .iter()
-                .map(|at| (*at..*at + 1, "\\\n".to_owned())),
-        )
         .collect();
+    let chips = edits.len();
+    for (range, replacement) in found.breaks {
+        let overlaps = edits[..chips]
+            .iter()
+            .any(|(chip, _)| chip.start < range.end && range.start < chip.end);
+        if !overlaps {
+            edits.push((range, replacement));
+        }
+    }
     edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
     let mut out = text.to_owned();
     for (range, replacement) in edits {
         out.replace_range(range, &replacement);
     }
     (out, mentions)
+}
+
+/// For each byte of `value`, where it stands in `written`, when `value` is `written` without
+/// the spaces markdown drops around its line breaks.
+fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
+    let bytes = written.as_bytes();
+    let blank = |byte: u8| byte == b' ' || byte == b'\t';
+    let mut kept: Vec<usize> = Vec::with_capacity(value.len());
+    let mut line_start = false;
+    for (at, &byte) in bytes.iter().enumerate() {
+        if line_start && (blank(byte) || byte == b'>') {
+            continue;
+        }
+        let ending = byte == b'\n' || byte == b'\r';
+        if ending {
+            while kept.last().is_some_and(|&last| blank(bytes[last])) {
+                kept.pop();
+            }
+        }
+        line_start = ending;
+        kept.push(at);
+    }
+    (kept.len() == value.len()
+        && kept
+            .iter()
+            .zip(value.bytes())
+            .all(|(&at, b)| bytes[at] == b))
+    .then_some(kept)
+}
+
+/// Where `text`'s line endings stand: `\n`, `\r\n` or `\r`.
+fn line_endings(text: &str) -> Vec<std::ops::Range<usize>> {
+    let bytes = text.as_bytes();
+    let mut endings = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let length = match bytes[at] {
+            b'\r' if bytes.get(at + 1) == Some(&b'\n') => 2,
+            b'\r' | b'\n' => 1,
+            _ => 0,
+        };
+        if length > 0 {
+            endings.push(at..at + length);
+        }
+        at += length.max(1);
+    }
+    endings
+}
+
+/// The line `ending` after `mark` as a hard break; `mark` is empty when the break is one
+/// already. The next line keeps the prefix of the quotes and list items its paragraph stands
+/// in, and the indent past it in spaces markdown keeps. A line that leaves out part of that
+/// prefix keeps only the break.
+fn line_break(
+    source: &str,
+    ending: std::ops::Range<usize>,
+    containers: &[Container],
+    mark: &str,
+) -> (std::ops::Range<usize>, String) {
+    let mut line = Blanks::new(&source[ending.end..]);
+    let mut prefix = String::new();
+    for container in containers {
+        match *container {
+            Container::Quote => {
+                line.take(3);
+                if !line.next_is('>') {
+                    return (ending, format!("{mark}\n"));
+                }
+                line.at += 1;
+                line.column += 1;
+                line.take(1);
+                prefix.push_str("> ");
+            }
+            Container::ListItem(indent) => {
+                if line.take(indent) < indent {
+                    return (ending, format!("{mark}\n"));
+                }
+                prefix.push_str(&" ".repeat(indent));
+            }
+        }
+    }
+    let indent = line.take(usize::MAX);
+    (
+        ending.start..ending.end + line.at,
+        format!("{mark}\n{prefix}{}", "\u{a0}".repeat(indent)),
+    )
+}
+
+/// Reads the spaces and tabs a line starts with by columns, tab stops every 4, so a tab can
+/// be taken in part.
+struct Blanks<'a> {
+    line: &'a str,
+    at: usize,
+    column: usize,
+    /// Columns left of a tab already read.
+    spare: usize,
+}
+
+impl<'a> Blanks<'a> {
+    fn new(line: &'a str) -> Self {
+        Self {
+            line,
+            at: 0,
+            column: 0,
+            spare: 0,
+        }
+    }
+
+    /// Takes up to `most` columns of blanks; how many it took.
+    fn take(&mut self, most: usize) -> usize {
+        let mut taken = 0;
+        while taken < most {
+            if self.spare > 0 {
+                let part = self.spare.min(most - taken);
+                self.spare -= part;
+                taken += part;
+                continue;
+            }
+            match self.line.as_bytes().get(self.at) {
+                Some(b' ') => {
+                    self.at += 1;
+                    self.column += 1;
+                    taken += 1;
+                }
+                Some(b'\t') => {
+                    let tab = 4 - self.column % 4;
+                    self.at += 1;
+                    self.column += tab;
+                    self.spare = tab;
+                }
+                _ => break,
+            }
+        }
+        taken
+    }
+
+    fn next_is(&self, char: char) -> bool {
+        self.spare == 0 && self.line[self.at..].starts_with(char)
+    }
+}
+
+/// The columns of indent the lines of the list item at `start` start with: the item's own
+/// indent, its marker and the spaces after it, but not a task's checkbox. The item starts
+/// past the prefix of the blocks it stands in.
+fn list_indent(source: &str, start: usize) -> usize {
+    let line_start = source[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
+    let column = |offset: usize| width(&source[line_start..offset]);
+    let rest = &source[start..];
+    let marker = start + rest.len() - rest.trim_start_matches([' ', '\t']).len();
+    let digits = source[marker..]
+        .find(|char: char| !char.is_ascii_digit())
+        .unwrap_or(0);
+    let marker_end = marker + digits + 1;
+    let after = &source[marker_end..];
+    let content = marker_end + after.len() - after.trim_start_matches([' ', '\t']).len();
+    let gap = column(content) - column(marker_end);
+    let blank = source[content..].starts_with(['\n', '\r']) || content == source.len();
+    let content_column = if gap == 0 || gap > 4 || blank {
+        column(marker_end) + 1
+    } else {
+        column(content)
+    };
+    content_column - column(start)
+}
+
+/// How many columns `text` spans from the start of a line, with tab stops every 4.
+fn width(text: &str) -> usize {
+    text.chars().fold(0, |columns, char| {
+        if char == '\t' {
+            columns + 4 - columns % 4
+        } else {
+            columns + 1
+        }
+    })
 }
 
 /// Leads a tag that would otherwise stand alone on its line, which markdown reads as a block
@@ -543,6 +777,53 @@ mod tests {
     fn line_breaks_stay_as_written() {
         let (text, _) = tag("one\ntwo\n\n```\na\nb\n```", &known());
         assert_eq!(text, "one\\\ntwo\n\n```\na\nb\n```");
+    }
+
+    #[test]
+    fn indented_lines_keep_their_break_and_indent() {
+        let (text, mentions) = tag("look at\n[core]\n  a.rs @src/b.rs \n\tc.rs", &known());
+        assert_eq!(
+            text,
+            "look at\\\n[core]\\\n\u{a0}\u{a0}a.rs <hoshi-mention i=\"0\"/> \\\n\u{a0}\u{a0}\u{a0}\u{a0}c.rs"
+        );
+        assert_eq!(mentions[0].text.as_ref(), "@src/b.rs");
+        for (message, expected) in [
+            ("look at\n  **a.rs**", "look at\\\n\u{a0}\u{a0}**a.rs**"),
+            ("> one\n  > two", "> one\\\n> two"),
+            ("> one\n   > two", "> one\\\n> two"),
+            ("  > one\n>   two", "  > one\\\n> \u{a0}\u{a0}two"),
+            ("- [ ] one\n    two", "- [ ] one\\\n  \u{a0}\u{a0}two"),
+            ("1. one\n   two", "1. one\\\n   two"),
+            ("  - one\n    two", "  - one\\\n    two"),
+            (
+                "- outer\n  - inner\n      next",
+                "- outer\n  - inner\\\n    \u{a0}\u{a0}next",
+            ),
+            ("one  \n  two", "one  \n\u{a0}\u{a0}two"),
+            ("one\\\n  two", "one\\\n\u{a0}\u{a0}two"),
+            ("one\r\n  two", "one\\\n\u{a0}\u{a0}two"),
+            ("one\r  two", "one\\\n\u{a0}\u{a0}two"),
+            (
+                "@\"a\r     b.rs\"",
+                "@\"a\\\n\u{a0}\u{a0}\u{a0}\u{a0}\u{a0}b.rs\"",
+            ),
+            (
+                "[one  \n  two][]\n\n[one two]: https://example.test",
+                "[one  \n  two][]\n\n[one two]: https://example.test",
+            ),
+            ("- one\n two", "- one\\\n two"),
+            ("one\n  > two", "one\n  > two"),
+            ("- one\n\t  two", "- one\\\n  \u{a0}\u{a0}\u{a0}\u{a0}two"),
+            ("> - one\n>     two", "> - one\\\n>   \u{a0}\u{a0}two"),
+            ("- one\n  two", "- one\\\n  two"),
+            ("- one\n    two", "- one\\\n  \u{a0}\u{a0}two"),
+            (
+                "> one\n>   @src/b.rs here",
+                "> one\\\n> \u{a0}\u{a0}<hoshi-mention i=\"0\"/> here",
+            ),
+        ] {
+            assert_eq!(tag(message, &known()).0, expected, "{message:?}");
+        }
     }
 
     fn has_block_html(node: &markdown::mdast::Node, in_paragraph: bool) -> bool {

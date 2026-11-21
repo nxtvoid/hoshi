@@ -38,7 +38,8 @@ pub fn attachment_chip_source(kind: AttachmentKind, key: u64) -> String {
 
 /// The prompt as sent: each attachment chip becomes its label in brackets, such as
 /// `[Image #1]` or `[File #2]`, the way Claude Code names pasted images. A chip whose
-/// attachment is gone goes too.
+/// attachment is gone goes too. The space a chip was placed with joins any typed after it;
+/// the rest of the text keeps its spaces.
 pub fn number_attachment_chips(text: &str, labels: &HashMap<u64, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -53,12 +54,19 @@ pub fn number_attachment_chips(text: &str, labels: &HashMap<u64, String>) -> Str
         });
         match chip {
             Some((key, end)) => {
-                if let Some(label) = labels.get(&key) {
+                let after = &tail[end + 1..];
+                let spaced = after.trim_start_matches([' ', '\t']);
+                let label = labels.get(&key);
+                if let Some(label) = label {
                     out.push('[');
                     out.push_str(label);
                     out.push(']');
                 }
-                rest = &tail[end + 1..];
+                let spaced_before = out.is_empty() || out.ends_with([' ', '\t', '\n']);
+                if spaced.len() < after.len() && (label.is_some() || !spaced_before) {
+                    out.push(' ');
+                }
+                rest = spaced;
             }
             None => {
                 out.push('[');
@@ -67,20 +75,7 @@ pub fn number_attachment_chips(text: &str, labels: &HashMap<u64, String>) -> Str
         }
     }
     out.push_str(rest);
-    let mut collapsed = String::with_capacity(out.len());
-    let mut spaces = 0;
-    for char in out.chars() {
-        if char == ' ' || char == '\t' {
-            spaces += 1;
-            if spaces == 1 {
-                collapsed.push(' ');
-            }
-        } else {
-            spaces = 0;
-            collapsed.push(char);
-        }
-    }
-    collapsed.trim().to_owned()
+    out.trim().to_owned()
 }
 
 /// `Image #n` and `File #n` for attachments in the order they are sent.
@@ -298,6 +293,11 @@ mod tests {
         assert_eq!(
             number_attachment_chips("gone [image:4] here [link] a[b", &labels),
             "gone here [link] a[b"
+        );
+        let indented = "look at\n  a.rs  [image:7]  \n```\n    fn main() {}\n\tdone\n```";
+        assert_eq!(
+            number_attachment_chips(indented, &labels),
+            "look at\n  a.rs  [Image #1] \n```\n    fn main() {}\n\tdone\n```"
         );
     }
 }
