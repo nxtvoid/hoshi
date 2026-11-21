@@ -220,7 +220,8 @@ pub fn segments(text: &str, known: &Known, leading: bool) -> Vec<Segment> {
 #[derive(Default)]
 struct Found {
     mentions: Vec<(usize, Segment)>,
-    breaks: Vec<usize>,
+    /// Each line break's offset, and the width of the indent that follows it.
+    breaks: Vec<(usize, usize)>,
 }
 
 fn collect(node: &Node, source: &str, first: usize, found: &mut Found, known: &Known) {
@@ -230,16 +231,21 @@ fn collect(node: &Node, source: &str, first: usize, found: &mut Found, known: &K
             let Some(position) = &text.position else {
                 return;
             };
-            let (start, end) = (position.start.offset, position.end.offset);
-            if source.get(start..end) != Some(text.value.as_str()) {
+            let start = position.start.offset;
+            let Some(written) = source.get(start..position.end.offset) else {
                 return;
+            };
+            if let Some(kept) = kept_bytes(written, &text.value) {
+                for segment in segments(&text.value, known, start == first) {
+                    let range = kept[segment.range.start]..kept[segment.range.end - 1] + 1;
+                    found.mentions.push((start, Segment { range, ..segment }));
+                }
             }
-            for segment in segments(&text.value, known, start == first) {
-                found.mentions.push((start, segment));
+            for (at, _) in written.match_indices('\n') {
+                let line = &written[at + 1..];
+                let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+                found.breaks.push((start + at, indent));
             }
-            found
-                .breaks
-                .extend(text.value.match_indices('\n').map(|(at, _)| start + at));
         }
         _ => {
             for child in node.children().into_iter().flatten() {
@@ -280,12 +286,12 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
             };
             (range, format!(r#"{lead}<{TAG} i="{index}"/>"#))
         })
-        .chain(
-            found
-                .breaks
-                .iter()
-                .map(|at| (*at..*at + 1, "\\\n".to_owned())),
-        )
+        .chain(found.breaks.iter().map(|&(at, indent)| {
+            (
+                at..at + 1 + indent,
+                line_break(&text[at + 1..at + 1 + indent]),
+            )
+        }))
         .collect();
     edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
     let mut out = text.to_owned();
@@ -293,6 +299,42 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
         out.replace_range(range, &replacement);
     }
     (out, mentions)
+}
+
+/// For each byte of `value`, where it stands in `written`, when `value` is `written` without
+/// the spaces markdown drops around its line breaks.
+fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
+    let bytes = written.as_bytes();
+    let blank = |byte: u8| byte == b' ' || byte == b'\t';
+    let mut kept: Vec<usize> = Vec::with_capacity(value.len());
+    let mut line_start = false;
+    for (at, &byte) in bytes.iter().enumerate() {
+        if line_start && blank(byte) {
+            continue;
+        }
+        if byte == b'\n' {
+            while kept.last().is_some_and(|&last| blank(bytes[last])) {
+                kept.pop();
+            }
+        }
+        line_start = byte == b'\n';
+        kept.push(at);
+    }
+    (kept.len() == value.len()
+        && kept
+            .iter()
+            .zip(value.bytes())
+            .all(|(&at, b)| bytes[at] == b))
+    .then_some(kept)
+}
+
+/// A hard break, then `indent` in spaces markdown keeps.
+fn line_break(indent: &str) -> String {
+    let width: usize = indent
+        .chars()
+        .map(|char| if char == '\t' { 4 } else { 1 })
+        .sum();
+    format!("\\\n{}", "\u{a0}".repeat(width))
 }
 
 /// Leads a tag that would otherwise stand alone on its line, which markdown reads as a block
@@ -543,6 +585,16 @@ mod tests {
     fn line_breaks_stay_as_written() {
         let (text, _) = tag("one\ntwo\n\n```\na\nb\n```", &known());
         assert_eq!(text, "one\\\ntwo\n\n```\na\nb\n```");
+    }
+
+    #[test]
+    fn indented_lines_keep_their_break_and_indent() {
+        let (text, mentions) = tag("look at\n[core]\n  a.rs @src/b.rs \n\tc.rs", &known());
+        assert_eq!(
+            text,
+            "look at\\\n[core]\\\n\u{a0}\u{a0}a.rs <hoshi-mention i=\"0\"/> \\\n\u{a0}\u{a0}\u{a0}\u{a0}c.rs"
+        );
+        assert_eq!(mentions[0].text.as_ref(), "@src/b.rs");
     }
 
     fn has_block_html(node: &markdown::mdast::Node, in_paragraph: bool) -> bool {
