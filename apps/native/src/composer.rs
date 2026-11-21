@@ -84,8 +84,8 @@ pub struct Composer {
     status: Option<SharedString>,
     suggestion_scroll: ScrollHandle,
     editor_scroll: ScrollHandle,
-    /// The caret's top within the scrolled text at the last frame.
-    caret_top: Option<Pixels>,
+    /// Where the caret was within the scrolled text at the last frame.
+    caret_at: Option<Point<Pixels>>,
     reveal_caret: bool,
     active: usize,
     search: u64,
@@ -207,7 +207,7 @@ impl Composer {
             status: None,
             suggestion_scroll: ScrollHandle::new(),
             editor_scroll: ScrollHandle::new(),
-            caret_top: None,
+            caret_at: None,
             reveal_caret: false,
             active: 0,
             search: 0,
@@ -359,10 +359,10 @@ impl Composer {
                     return;
                 };
                 let offset = scroll.offset();
-                let top = caret.top() - offset.y;
+                let at = point(caret.left(), caret.top() - offset.y);
                 this.update(cx, |this, cx| {
-                    let moved = this.caret_top != Some(top);
-                    this.caret_top = Some(top);
+                    let moved = this.caret_at != Some(at);
+                    this.caret_at = Some(at);
                     if !(moved || std::mem::take(&mut this.reveal_caret)) {
                         return;
                     }
@@ -1062,6 +1062,27 @@ mod ui_tests {
             )
         });
         assert!(offset.y < px(0.));
+        assert!(caret.top() >= view.top() && caret.bottom() <= view.bottom());
+
+        h.composer.read_with(&h.cx, |composer, _| {
+            composer.editor_scroll.set_offset(Point::default())
+        });
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+        let offset = h
+            .composer
+            .read_with(&h.cx, |composer, _| composer.editor_scroll.offset());
+        assert_eq!(offset.y, px(0.));
+
+        h.cx.simulate_keystrokes("left");
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+        let (caret, view) = h.composer.read_with(&h.cx, |composer, cx| {
+            (
+                composer.editor.read(cx).caret_bounds(cx).unwrap(),
+                composer.editor_scroll.bounds(),
+            )
+        });
         assert!(caret.top() >= view.top() && caret.bottom() <= view.bottom());
     }
 
