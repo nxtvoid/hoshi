@@ -220,12 +220,28 @@ pub fn segments(text: &str, known: &Known, leading: bool) -> Vec<Segment> {
 #[derive(Default)]
 struct Found {
     mentions: Vec<(usize, Segment)>,
-    /// Each line break's offset, and the width of the indent that follows it.
-    breaks: Vec<(usize, usize)>,
+    /// Each line break, through the indent that follows it, and what draws it as written.
+    breaks: Vec<(std::ops::Range<usize>, String)>,
 }
 
-fn collect(node: &Node, source: &str, first: usize, found: &mut Found, known: &Known) {
+fn collect(
+    node: &Node,
+    source: &str,
+    first: usize,
+    column: usize,
+    found: &mut Found,
+    known: &Known,
+) {
     match node {
+        Node::Paragraph(_) | Node::Heading(_) => {
+            let column = node.position().map_or(0, |position| {
+                let start = position.start.offset;
+                start - source[..start].rfind('\n').map_or(0, |at| at + 1)
+            });
+            for child in node.children().into_iter().flatten() {
+                collect(child, source, first, column, found, known);
+            }
+        }
         Node::Code(_) | Node::InlineCode(_) | Node::Link(_) | Node::Html(_) => {}
         Node::Text(text) => {
             let Some(position) = &text.position else {
@@ -242,14 +258,12 @@ fn collect(node: &Node, source: &str, first: usize, found: &mut Found, known: &K
                 }
             }
             for (at, _) in written.match_indices('\n') {
-                let line = &written[at + 1..];
-                let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-                found.breaks.push((start + at, indent));
+                found.breaks.push(line_break(source, start + at, column));
             }
         }
         _ => {
             for child in node.children().into_iter().flatten() {
-                collect(child, source, first, found, known);
+                collect(child, source, first, column, found, known);
             }
         }
     }
@@ -263,7 +277,7 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
     };
     let first = text.len() - text.trim_start().len();
     let mut found = Found::default();
-    collect(&tree, text, first, &mut found, known);
+    collect(&tree, text, first, 0, &mut found, known);
     let mentions: Vec<Mention> = found
         .mentions
         .iter()
@@ -286,12 +300,7 @@ pub fn tag(text: &str, known: &Known) -> (String, Vec<Mention>) {
             };
             (range, format!(r#"{lead}<{TAG} i="{index}"/>"#))
         })
-        .chain(found.breaks.iter().map(|&(at, indent)| {
-            (
-                at..at + 1 + indent,
-                line_break(&text[at + 1..at + 1 + indent]),
-            )
-        }))
+        .chain(found.breaks)
         .collect();
     edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
     let mut out = text.to_owned();
@@ -309,7 +318,7 @@ fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
     let mut kept: Vec<usize> = Vec::with_capacity(value.len());
     let mut line_start = false;
     for (at, &byte) in bytes.iter().enumerate() {
-        if line_start && blank(byte) {
+        if line_start && (blank(byte) || byte == b'>') {
             continue;
         }
         if byte == b'\n' {
@@ -328,13 +337,27 @@ fn kept_bytes(written: &str, value: &str) -> Option<Vec<usize>> {
     .then_some(kept)
 }
 
-/// A hard break, then `indent` in spaces markdown keeps.
-fn line_break(indent: &str) -> String {
+/// The line break at `at` as a hard break. The next line keeps its first `column` bytes when
+/// they are the quote and list indent its paragraph stands in, and the indent after them in
+/// spaces markdown keeps.
+fn line_break(source: &str, at: usize, column: usize) -> (std::ops::Range<usize>, String) {
+    let line = &source[at + 1..];
+    let prefix = line
+        .get(..column)
+        .filter(|prefix| prefix.chars().all(|char| " \t>".contains(char)));
+    let Some(prefix) = prefix else {
+        return (at..at + 1, "\\\n".to_owned());
+    };
+    let indent = &line[column..];
+    let indent = &indent[..indent.len() - indent.trim_start_matches([' ', '\t']).len()];
     let width: usize = indent
         .chars()
         .map(|char| if char == '\t' { 4 } else { 1 })
         .sum();
-    format!("\\\n{}", "\u{a0}".repeat(width))
+    (
+        at..at + 1 + column + indent.len(),
+        format!("\\\n{prefix}{}", "\u{a0}".repeat(width)),
+    )
 }
 
 /// Leads a tag that would otherwise stand alone on its line, which markdown reads as a block
@@ -595,6 +618,18 @@ mod tests {
             "look at\\\n[core]\\\n\u{a0}\u{a0}a.rs <hoshi-mention i=\"0\"/> \\\n\u{a0}\u{a0}\u{a0}\u{a0}c.rs"
         );
         assert_eq!(mentions[0].text.as_ref(), "@src/b.rs");
+        for (message, expected) in [
+            ("look at\n  **a.rs**", "look at\\\n\u{a0}\u{a0}**a.rs**"),
+            ("> one\n  > two", "> one\\\n  > two"),
+            ("- one\n  two", "- one\\\n  two"),
+            ("- one\n    two", "- one\\\n  \u{a0}\u{a0}two"),
+            (
+                "> one\n>   @src/b.rs here",
+                "> one\\\n> \u{a0}\u{a0}<hoshi-mention i=\"0\"/> here",
+            ),
+        ] {
+            assert_eq!(tag(message, &known()).0, expected, "{message:?}");
+        }
     }
 
     fn has_block_html(node: &markdown::mdast::Node, in_paragraph: bool) -> bool {
