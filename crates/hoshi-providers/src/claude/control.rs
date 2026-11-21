@@ -38,7 +38,17 @@ pub(crate) fn ask_within(
         .current_dir(cwd)
         .args(["-p", "--input-format", "stream-json"])
         .args(["--output-format", "stream-json", "--verbose"])
-        .arg("--no-session-persistence")
+        .arg("--no-session-persistence");
+    ask_command(command, request_id, request, timeout)
+}
+
+fn ask_command(
+    mut command: Command,
+    request_id: &'static str,
+    request: Value,
+    timeout: Duration,
+) -> Option<Value> {
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -156,5 +166,55 @@ mod tests {
                 "TERM ends it: {elapsed:?}"
             );
         }
+    }
+
+    /// A CLI that answers, then writes more than a pipe holds before it exits.
+    fn chatty_cli(marker: &Path) -> Command {
+        let answer = json!({
+            "type": "control_response",
+            "response": { "subtype": "success", "request_id": "hoshi-test", "response": { "ok": true } },
+        });
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("powershell");
+            command.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Out.WriteLine($env:ANSWER); [Console]::Out.Flush(); \
+                 Start-Sleep -Seconds 1; $line = 'x' * 100; \
+                 for ($i = 0; $i -lt 3000; $i++) { [Console]::Out.WriteLine($line) }; \
+                 [Console]::Out.Flush(); New-Item -ItemType File -Path $env:MARKER | Out-Null",
+            ]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                "read line; printf '%s\\n' \"$ANSWER\"; sleep 1; \
+                 i=0; while [ $i -lt 3000 ]; do printf '%0100d\\n' 0; i=$((i+1)); done; \
+                 touch \"$MARKER\"",
+            ]);
+            command
+        };
+        command
+            .env("ANSWER", answer.to_string())
+            .env("MARKER", marker);
+        command
+    }
+
+    #[test]
+    fn the_answer_comes_back_at_once_and_the_cli_still_finishes_writing() {
+        let marker = std::env::temp_dir().join(format!("hoshi-control-{}", uuid::Uuid::new_v4()));
+
+        let answer = ask_command(chatty_cli(&marker), "hoshi-test", json!({}), TIMEOUT);
+
+        assert_eq!(answer, Some(json!({ "ok": true })));
+        assert!(!marker.exists(), "answered before the CLI ended");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(EXIT_POLL);
+        }
+        assert!(marker.exists(), "the CLI was cut off before it ended");
+        let _ = std::fs::remove_file(marker);
     }
 }
