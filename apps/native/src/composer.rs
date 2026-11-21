@@ -83,6 +83,10 @@ pub struct Composer {
     /// Shown under the suggestions, or alone while there are none.
     status: Option<SharedString>,
     suggestion_scroll: ScrollHandle,
+    editor_scroll: ScrollHandle,
+    /// Where the caret was within the scrolled text at the last frame.
+    caret_at: Option<Point<Pixels>>,
+    reveal_caret: bool,
     active: usize,
     search: u64,
     commands: HashMap<Scope, Vec<SlashCommand>>,
@@ -202,6 +206,9 @@ impl Composer {
             suggestions: Vec::new(),
             status: None,
             suggestion_scroll: ScrollHandle::new(),
+            editor_scroll: ScrollHandle::new(),
+            caret_at: None,
+            reveal_caret: false,
             active: 0,
             search: 0,
             commands: HashMap::new(),
@@ -341,6 +348,47 @@ impl Composer {
             .update(cx, |editor, cx| editor.focus(window, cx));
     }
 
+    /// Scrolls the text to the caret after it moves or the text changes, once laid out.
+    fn caret_follower(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.weak_entity();
+        let editor = self.editor.clone();
+        let scroll = self.editor_scroll.clone();
+        canvas(
+            move |_, _, cx| {
+                let Some(caret) = editor.read(cx).caret_bounds(cx) else {
+                    return;
+                };
+                let offset = scroll.offset();
+                let at = point(caret.left(), caret.top() - offset.y);
+                this.update(cx, |this, cx| {
+                    let moved = this.caret_at != Some(at);
+                    this.caret_at = Some(at);
+                    let requested = std::mem::take(&mut this.reveal_caret);
+                    if !(moved || requested) {
+                        return;
+                    }
+                    let view = scroll.bounds();
+                    let margin = px(4.);
+                    let mut y = offset.y;
+                    if caret.bottom() + margin > view.bottom() {
+                        y -= caret.bottom() + margin - view.bottom();
+                    } else if caret.top() - margin < view.top() {
+                        y += view.top() - (caret.top() - margin);
+                    }
+                    let y = y.clamp(-scroll.max_offset().y, px(0.));
+                    if y != offset.y {
+                        scroll.set_offset(point(offset.x, y));
+                        cx.notify();
+                    }
+                })
+                .ok();
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_0()
+    }
+
     /// Shows a note for a few seconds where errors show.
     pub(crate) fn show_notice(&mut self, notice: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.notice = Some(notice.into());
@@ -394,6 +442,7 @@ impl Composer {
                 if self.editor.read(cx).is_empty(cx) {
                     self.tall = false;
                 }
+                self.reveal_caret = true;
                 self.keep_draft(cx);
                 self.update_trigger(cx);
                 cx.notify();
@@ -782,8 +831,10 @@ impl Render for Composer {
                     .min_h(min_height)
                     .max_h(px(240.))
                     .overflow_y_scroll()
+                    .track_scroll(&self.editor_scroll)
                     .child(self.editor.clone()),
             )
+            .child(self.caret_follower(cx))
             .when(!stacked, |this| {
                 this.child(
                     canvas(
@@ -989,6 +1040,87 @@ mod ui_tests {
         });
         assert_eq!(sent, Some(vec!["first\nsecond".to_owned()]));
         assert_eq!(h.thread_id, "t");
+    }
+
+    #[gpui_kit::test]
+    fn typing_past_the_max_height_keeps_the_caret_in_view(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "follow");
+        for line in 0..30 {
+            if line > 0 {
+                h.cx.simulate_keystrokes("shift-enter");
+            }
+            h.cx.simulate_input("line");
+            h.cx.run_until_parked();
+        }
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+
+        let (caret, view, offset) = h.composer.read_with(&h.cx, |composer, cx| {
+            (
+                composer.editor.read(cx).caret_bounds(cx).unwrap(),
+                composer.editor_scroll.bounds(),
+                composer.editor_scroll.offset(),
+            )
+        });
+        assert!(offset.y < px(0.));
+        assert!(caret.top() >= view.top() && caret.bottom() <= view.bottom());
+
+        h.composer.read_with(&h.cx, |composer, _| {
+            composer.editor_scroll.set_offset(Point::default())
+        });
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+        let offset = h
+            .composer
+            .read_with(&h.cx, |composer, _| composer.editor_scroll.offset());
+        assert_eq!(offset.y, px(0.));
+
+        h.cx.simulate_keystrokes("left");
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+        let (caret, view) = h.composer.read_with(&h.cx, |composer, cx| {
+            (
+                composer.editor.read(cx).caret_bounds(cx).unwrap(),
+                composer.editor_scroll.bounds(),
+            )
+        });
+        assert!(caret.top() >= view.top() && caret.bottom() <= view.bottom());
+    }
+
+    #[gpui_kit::test]
+    fn wheel_scrolling_right_after_typing_stays_where_it_was_scrolled(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "wheel");
+        for line in 0..30 {
+            if line > 0 {
+                h.cx.simulate_keystrokes("shift-enter");
+            }
+            h.cx.simulate_input("line");
+            h.cx.run_until_parked();
+        }
+        h.composer.read_with(&h.cx, |composer, _| {
+            composer.editor_scroll.set_offset(Point::default())
+        });
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+
+        let offset = h
+            .composer
+            .read_with(&h.cx, |composer, _| composer.editor_scroll.offset());
+        assert_eq!(offset.y, px(0.));
+    }
+
+    #[gpui_kit::test]
+    fn down_leaves_a_code_block_for_a_line_below(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "fence");
+        h.cx.simulate_input("```tsx");
+        h.cx.simulate_keystrokes("enter");
+        h.cx.simulate_input("const a = 1");
+        h.cx.run_until_parked();
+        h.cx.simulate_keystrokes("down");
+        h.cx.simulate_input("after");
+        h.cx.run_until_parked();
+
+        assert_eq!(value(&mut h), "```tsx\nconst a = 1\n```\n\nafter");
     }
 
     #[gpui_kit::test]
