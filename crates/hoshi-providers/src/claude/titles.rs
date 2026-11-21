@@ -1,5 +1,6 @@
 //! Thread titles from a short, tool-less Claude Code run on a small model.
 
+use super::control;
 use super::models::manifest;
 use crate::process::hide_console;
 use crate::titles::{parse, prompt};
@@ -83,7 +84,6 @@ pub(crate) fn run_quick(
         let _ = sender.send(output);
     });
     let output = receiver.recv_timeout(timeout).ok();
-    let _ = child.kill();
-    let _ = child.wait();
+    thread::spawn(move || control::let_exit(child));
     output
 }
