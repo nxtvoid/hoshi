@@ -715,9 +715,8 @@ impl RichEditor {
                 !text[cursor..].contains('\n'),
             );
         };
-        let first = caret.top() < bounds.top() + line_height * 0.5;
-        let last = caret.bottom() > bounds.bottom() - line_height * 0.5;
-        (first, last)
+        let row = ((caret.top() - bounds.top()) / line_height).floor().max(0.) as usize;
+        (row == 0, row + 1 >= input.rows(cx))
     }
 
     /// Keys that move across blocks or shape them. The owner calls this from its keystroke
@@ -818,6 +817,19 @@ impl RichEditor {
                     }
                     None => false,
                 }
+            }
+            "down" | "right"
+                if code
+                    && !modifiers.shift
+                    && !selected
+                    && index + 1 == self.blocks.len()
+                    && (keystroke.key == "down" && self.caret_line(cx).1 || cursor == length) =>
+            {
+                let after = self.new_block(BlockKind::Paragraph, window, cx);
+                self.blocks.push(after);
+                self.focus_block(index + 1, Caret::Start, window, cx);
+                self.changed(window, cx);
+                true
             }
             "down"
                 if !modifiers.shift && index + 1 < self.blocks.len() && self.caret_line(cx).1 =>

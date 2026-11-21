@@ -1087,6 +1087,20 @@ mod ui_tests {
     }
 
     #[gpui_kit::test]
+    fn down_leaves_a_code_block_for_a_line_below(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "fence");
+        h.cx.simulate_input("```tsx");
+        h.cx.simulate_keystrokes("enter");
+        h.cx.simulate_input("const a = 1");
+        h.cx.run_until_parked();
+        h.cx.simulate_keystrokes("down");
+        h.cx.simulate_input("after");
+        h.cx.run_until_parked();
+
+        assert_eq!(value(&mut h), "```tsx\nconst a = 1\n```\n\nafter");
+    }
+
+    #[gpui_kit::test]
     fn an_attached_file_is_saved_and_goes_with_the_message(cx: &mut TestAppContext) {
         let mut h = harness(cx, "attach");
         let source = std::env::temp_dir().join(format!("notes-{}.txt", uuid::Uuid::new_v4()));

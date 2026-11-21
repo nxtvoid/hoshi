@@ -120,6 +120,56 @@ fn a_fence_opens_a_code_block_where_enter_breaks_lines(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn down_and_right_leave_a_code_block_for_a_line_below(cx: &mut TestAppContext) {
+    for key in ["down", "right"] {
+        let mut h = harness(cx);
+        h.cx.simulate_input("```tsx");
+        h.cx.simulate_keystrokes("enter");
+        h.cx.simulate_input("const a = 1");
+        h.cx.simulate_keystrokes("enter");
+        h.cx.simulate_input("a");
+        h.cx.run_until_parked();
+        h.cx.simulate_keystrokes(key);
+        h.cx.simulate_input("after");
+        h.cx.run_until_parked();
+
+        assert_eq!(
+            markdown(&mut h),
+            "```tsx\nconst a = 1\na\n```\n\nafter",
+            "{key}"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn a_code_block_set_last_opens_a_line_below_on_down(cx: &mut TestAppContext) {
+    let mut h = harness(cx);
+    h.editor.update_in(&mut h.cx, |editor, window, cx| {
+        editor.set_markdown(
+            "```tsx
+const a = 1
+```",
+            window,
+            cx,
+        );
+        editor.focus(window, cx);
+    });
+    h.cx.run_until_parked();
+    h.cx.simulate_keystrokes("ctrl-end down");
+    h.cx.simulate_input("after");
+    h.cx.run_until_parked();
+
+    assert_eq!(
+        markdown(&mut h),
+        "```tsx
+const a = 1
+```
+
+after"
+    );
+}
+
+#[gpui_kit::test]
 fn enter_submits_and_backspace_at_the_start_joins_blocks(cx: &mut TestAppContext) {
     let mut h = harness(cx);
     h.cx.simulate_input("first");
