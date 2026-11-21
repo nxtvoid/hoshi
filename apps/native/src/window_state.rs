@@ -172,9 +172,9 @@ impl Keeper {
         if self.written.as_ref() == Some(&saved) {
             return;
         }
-        if std::fs::write(file(&self.home), serialize(&saved)).is_ok() {
-            self.written = Some(saved);
-        }
+        self.written = std::fs::write(file(&self.home), serialize(&saved))
+            .is_ok()
+            .then_some(saved);
     }
 }
 
@@ -350,6 +350,19 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         keeper.save(state.clone());
         assert_eq!(keeper.written.as_ref(), Some(&state));
+        assert_eq!(
+            parse(&std::fs::read_to_string(file(&home)).unwrap()),
+            Some(state.clone())
+        );
+
+        std::fs::remove_dir_all(&home).unwrap();
+        keeper.save(saved(
+            WindowBounds::Windowed(rect(0., 0., 800., 600.)),
+            None,
+        ));
+        assert_eq!(keeper.written, None, "what was on disk may be gone");
+        std::fs::create_dir_all(&home).unwrap();
+        keeper.save(state.clone());
         assert_eq!(
             parse(&std::fs::read_to_string(file(&home)).unwrap()),
             Some(state)
