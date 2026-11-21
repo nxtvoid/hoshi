@@ -363,7 +363,8 @@ impl Composer {
                 this.update(cx, |this, cx| {
                     let moved = this.caret_at != Some(at);
                     this.caret_at = Some(at);
-                    if !(moved || std::mem::take(&mut this.reveal_caret)) {
+                    let requested = std::mem::take(&mut this.reveal_caret);
+                    if !(moved || requested) {
                         return;
                     }
                     let view = scroll.bounds();
@@ -1084,6 +1085,28 @@ mod ui_tests {
             )
         });
         assert!(caret.top() >= view.top() && caret.bottom() <= view.bottom());
+    }
+
+    #[gpui_kit::test]
+    fn wheel_scrolling_right_after_typing_stays_where_it_was_scrolled(cx: &mut TestAppContext) {
+        let mut h = harness(cx, "wheel");
+        for line in 0..30 {
+            if line > 0 {
+                h.cx.simulate_keystrokes("shift-enter");
+            }
+            h.cx.simulate_input("line");
+            h.cx.run_until_parked();
+        }
+        h.composer.read_with(&h.cx, |composer, _| {
+            composer.editor_scroll.set_offset(Point::default())
+        });
+        h.cx.update(|window, _| window.refresh());
+        h.cx.run_until_parked();
+
+        let offset = h
+            .composer
+            .read_with(&h.cx, |composer, _| composer.editor_scroll.offset());
+        assert_eq!(offset.y, px(0.));
     }
 
     #[gpui_kit::test]
