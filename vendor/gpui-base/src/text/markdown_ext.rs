@@ -254,6 +254,7 @@ pub struct MarkdownExtensions {
     inline_parsers: Vec<Arc<MarkdownInlineParserFn>>,
     inline_renderers: HashMap<SharedString, Arc<MarkdownInlineRenderFn>>,
     block_surfaces: HashMap<SharedString, Arc<BlockSurfaceRenderFn>>,
+    lazy_blocks: bool,
     revision: u64,
     parser_revision: u64,
 }
@@ -266,6 +267,20 @@ impl MarkdownExtensions {
         self.parser_revision = revision;
         self.bump_revision();
         self
+    }
+
+    /// Builds the top-level blocks of a long document only while they show, when the view is
+    /// not its own scroller but sits in one, as a message in a transcript: a block is drawn whole
+    /// once, and out of view it stands in at that height. Only for a document as wide as its
+    /// container, since a stand-in has no width of its own to size a container to its text.
+    pub fn lazy_blocks(mut self, lazy: bool) -> Self {
+        self.lazy_blocks = lazy;
+        self.bump_revision();
+        self
+    }
+
+    pub(crate) fn has_lazy_blocks(&self) -> bool {
+        self.lazy_blocks
     }
 
     /// Enable YAML frontmatter parsing.

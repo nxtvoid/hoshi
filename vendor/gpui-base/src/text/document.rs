@@ -1,15 +1,21 @@
 use gpui::{
-    App, IntoElement, ListState, ParentElement as _, SharedString, Styled as _, Window, div,
+    App, IntoElement, ListState, ParentElement as _, SharedString, Styled as _, Window, canvas,
+    div,
 };
 
 use std::{
+    cell::RefCell,
     ops::{Range, RangeInclusive},
+    rc::Rc,
     sync::Arc,
 };
 
-use crate::text::{
-    SelectionFormat,
-    node::{BlockNode, NodeContext, SelectionStyles, SourceRangeSelection},
+use crate::{
+    text::{
+        SelectionFormat,
+        lazy_block::{BlockHeights, LazyBlock},
+        node::{BlockNode, NodeContext, SelectionStyles, SourceRangeSelection},
+    },
 };
 
 /// The parsed document AST.
@@ -240,10 +246,52 @@ impl ParsedDocument {
     pub(super) fn render_root(
         &self,
         list_state: Option<ListState>,
+        lazy: Option<Rc<RefCell<BlockHeights>>>,
         node_cx: &NodeContext,
         window: &mut Window,
         cx: &mut App,
     ) -> impl IntoElement {
+        if list_state.is_none()
+            && let Some(heights) = lazy
+        {
+            let blocks = self.blocks.clone();
+            let node_cx = Rc::new(node_cx.clone());
+            let started = heights.clone();
+            // Prepainted before the blocks, so they measure from where the document starts.
+            let start = canvas(
+                move |bounds, window, _| {
+                    if !started.borrow_mut().start(bounds) {
+                        window.refresh();
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full();
+            return div()
+                .relative()
+                .child(start)
+                .children((0..blocks.len()).map(move |ix| {
+                    let (blocks, node_cx) = (blocks.clone(), node_cx.clone());
+                    LazyBlock::new(ix, heights.clone(), move |window, cx| {
+                        let (is_first, prev) = flow_position(&blocks, ix);
+                        blocks[ix].render_block(
+                            NodeRenderOptions {
+                                ix,
+                                is_last: ix + 1 == blocks.len(),
+                                is_first,
+                                prev,
+                                ..Default::default()
+                            },
+                            &node_cx,
+                            window,
+                            cx,
+                        )
+                    })
+                }));
+        }
         let Some(list_state) = list_state else {
             let blocks_len = self.blocks.len();
             return div().children(self.blocks.iter().enumerate().map(move |(ix, node)| {

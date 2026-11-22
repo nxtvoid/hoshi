@@ -113,6 +113,9 @@ pub struct TextViewState {
     entity_id: EntityId,
     pub(super) focus_handle: FocusHandle,
     pub(super) list_state: ListState,
+    /// The heights of the top-level blocks of a view that is not its own scroller, so blocks
+    /// out of view are not built; see [`super::lazy_block`].
+    pub(super) block_heights: std::rc::Rc<std::cell::RefCell<super::lazy_block::BlockHeights>>,
 
     /// The bounds of the text view
     bounds: Bounds<Pixels>,
@@ -236,6 +239,7 @@ impl TextViewState {
             // as zero height until scrolled into view, which makes the
             // scrollbar jitter as more blocks get measured during scrolling.
             list_state: ListState::new(0, gpui::ListAlignment::Top, px(1000.)).measure_all(),
+            block_heights: Default::default(),
             text_view_style: Arc::default(),
             code_block_actions: None,
             code_block_highlighter: None,
@@ -506,6 +510,7 @@ impl TextViewState {
     /// while keeping their old sizes as hints, so the scrollbar does not
     /// collapse in the frame before the next layout measures the real heights.
     fn invalidate_measured_heights(&self) {
+        self.block_heights.borrow_mut().forget();
         let count = self.list_state.item_count();
         if count > 0 {
             self.list_state.remeasure_items(0..count);
@@ -821,7 +826,11 @@ impl TextViewState {
     /// the range is not needed.
     pub(super) fn block_ix_at(&self, content_y: Pixels) -> Option<usize> {
         if !self.scrollable {
-            return None;
+            let heights = self.block_heights.borrow();
+            return heights
+                .measured()
+                .then(|| heights.block_at(content_y))
+                .flatten();
         }
 
         let origin = self.bounds.origin.y + self.scroll_offset().y;
@@ -1153,6 +1162,28 @@ impl Render for TextViewState {
             reveal,
             body_font_size,
         };
+        // Blocks out of view stand in at their height when the view asks for it, unless something
+        // has to see them all: a clamp to whole lines, a line to scroll to, or text still fading in.
+        let lazy = self.markdown_extensions.has_lazy_blocks()
+            && !self.scrollable
+            && self.max_lines.is_none()
+            && node_cx.reveal.is_none()
+            && node_cx.stream_fade.is_none();
+        if !lazy {
+            self.block_heights.borrow_mut().forget();
+        } else {
+            let document = &self.parsed_content.document;
+            self.block_heights.borrow_mut().sync(
+                super::lazy_block::HeightsKey {
+                    blocks: Arc::as_ptr(&document.blocks) as usize,
+                    source: document.source.len(),
+                    style: Arc::as_ptr(&self.text_view_style) as usize,
+                    rem_size: window.rem_size(),
+                    font_size: body_font_size,
+                },
+                document.blocks.len(),
+            );
+        }
 
         let content = v_flex()
             .w_full()
@@ -1166,6 +1197,7 @@ impl Render for TextViewState {
                     } else {
                         None
                     },
+                    lazy.then(|| self.block_heights.clone()),
                     &node_cx,
                     window,
                     cx,

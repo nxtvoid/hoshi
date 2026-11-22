@@ -102,7 +102,18 @@ pub fn markdown(
     colors: &Colors,
 ) -> TextView {
     let text: SharedString = text.into();
-    view(id, &text, colors, Vec::new()).selection_format(SelectionFormat::SourceAcrossStyles)
+    view(id, &text, colors, Vec::new(), false).selection_format(SelectionFormat::SourceAcrossStyles)
+}
+
+/// [`markdown`] for an answer in the transcript, as wide as its column: only the blocks in view
+/// are built, so a long answer costs as little to scroll past as a short one.
+pub fn answer_markdown(
+    id: impl Into<ElementId>,
+    text: impl Into<SharedString>,
+    colors: &Colors,
+) -> TextView {
+    let text: SharedString = text.into();
+    view(id, &text, colors, Vec::new(), true).selection_format(SelectionFormat::SourceAcrossStyles)
 }
 
 /// The window's selected text as the clipboard gets it: markdown where it takes in several
@@ -129,7 +140,7 @@ pub fn message_markdown(
     colors: &Colors,
 ) -> TextView {
     let (tagged, mentions) = mentions::tag(text, &mentions::Known::of(attachments));
-    view(id, &tagged, colors, mentions)
+    view(id, &tagged, colors, mentions, false)
 }
 
 fn view(
@@ -137,8 +148,10 @@ fn view(
     text: &str,
     colors: &Colors,
     mentions: Vec<mentions::Mention>,
+    lazy: bool,
 ) -> TextView {
     let mut extensions = MarkdownExtensions::default()
+        .lazy_blocks(lazy)
         .block_parser(fenced_code)
         .block_renderer(CODE_BLOCK, render_code_block)
         .plugin(file_links::FileLinks);
