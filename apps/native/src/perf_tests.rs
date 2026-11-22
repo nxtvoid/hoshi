@@ -296,6 +296,17 @@ fn perf_window_while_a_tool_runs(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 #[ignore]
 fn perf_window_streaming(cx: &mut TestAppContext) {
+    stream_reply(cx, 30);
+}
+
+#[gpui_kit::test]
+#[ignore]
+fn perf_window_streaming_a_long_reply(cx: &mut TestAppContext) {
+    stream_reply(cx, 200);
+}
+
+/// Streams a reply of `paragraphs` into the open thread, 60 characters at a time.
+fn stream_reply(cx: &mut TestAppContext, paragraphs: usize) {
     let mut h = harness(cx, threads());
     send(
         &mut h,
@@ -306,7 +317,7 @@ fn perf_window_streaming(cx: &mut TestAppContext) {
             model: None,
         },
     );
-    let reply = answer_text(99, 30);
+    let reply = answer_text(99, paragraphs);
     let chars: Vec<char> = reply.chars().collect();
     let mut batches = Vec::new();
     for chunk in chars.chunks(60) {
@@ -320,10 +331,12 @@ fn perf_window_streaming(cx: &mut TestAppContext) {
         h.cx.run_until_parked();
         batches.push(start.elapsed());
     }
+    let last = &batches[batches.len() - batches.len() / 10..];
+    let last_mean = last.iter().sum::<Duration>() / last.len() as u32;
     let mean = batches.iter().sum::<Duration>() / batches.len() as u32;
     batches.sort();
     eprintln!(
-        "streaming {} bytes: batches={} mean={mean:?} p90={:?}",
+        "streaming {} bytes: batches={} mean={mean:?} p90={:?} last tenth mean={last_mean:?}",
         reply.len(),
         batches.len(),
         batches[batches.len() * 9 / 10]

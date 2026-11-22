@@ -115,7 +115,9 @@ fn shape(rows: &[Row], items: &[ThreadItem]) -> Vec<String> {
         .map(|row| match row {
             Row::Item(index) | Row::Note(index, _) => items[*index].id.clone(),
             Row::Work(_) => "work".into(),
-            Row::Streaming(_) | Row::StreamingNote(..) => "streaming".into(),
+            Row::Streaming(_) | Row::ReplyBlock { .. } | Row::StreamingNote(..) => {
+                "streaming".into()
+            }
             Row::Status(_) => "status".into(),
             Row::Background => "background".into(),
             Row::Agents(_) => "agents".into(),
