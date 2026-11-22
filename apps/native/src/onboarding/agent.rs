@@ -699,8 +699,7 @@ fn progress(percent: Option<u8>, colors: &Colors) -> Div {
             .into_any_element(),
         None => fill
             .w(relative(0.4))
-            .with_animation(
-                "onboarding-install-progress",
+            .with_loop(
                 hoshi_ui::looping(Duration::from_millis(1400)),
                 |fill, delta| fill.left(relative(0.6 * delta)),
             )

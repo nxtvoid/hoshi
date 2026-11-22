@@ -343,8 +343,7 @@ impl MiniBrowser {
                     colors.foreground.opacity(0.25)
                 });
             let dot = if agent_active {
-                dot.with_animation(
-                    "mini-browser-pulse",
+                dot.with_loop(
                     hoshi_ui::looping(Duration::from_secs(2))
                         .with_easing(pulsating_between(0.5, 1.)),
                     |dot, delta| dot.opacity(delta),

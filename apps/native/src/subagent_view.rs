@@ -275,9 +275,11 @@ impl SubagentView {
                                 .text_color(colors.foreground)
                                 .child(run.unwrap_or_else(m::subagent)),
                         )
-                        .children(state.map(|state| {
-                            crate::subagents::status(state, &started, None, &self.call_id, &colors)
-                        }))
+                        .children(
+                            state.map(|state| {
+                                crate::subagents::status(state, &started, None, &colors)
+                            }),
+                        )
                         .child(div().flex_1())
                         .child(
                             div()

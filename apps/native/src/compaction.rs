@@ -5,6 +5,7 @@ use crate::m;
 use gpui_kit::component::Icon;
 use gpui_kit::*;
 use hoshi_core::CompactionStatus;
+use hoshi_ui::LoopExt as _;
 use hoshi_ui::assets::IconName;
 use hoshi_ui::prelude::Colors;
 use std::time::Duration;
@@ -47,11 +48,9 @@ pub fn compaction_row(
     .size_3p5()
     .flex_none();
     let icon = if running {
-        icon.with_animation(
-            SharedString::from(format!("compaction-spin-{id}")),
-            hoshi_ui::looping(Duration::from_secs(1)),
-            |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-        )
+        icon.with_loop(hoshi_ui::looping(Duration::from_secs(1)), |icon, delta| {
+            icon.transform(Transformation::rotate(percentage(delta)))
+        })
         .into_any_element()
     } else {
         icon.into_any_element()

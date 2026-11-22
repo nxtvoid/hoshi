@@ -10,12 +10,9 @@ impl Sidebar {
         cx: &mut App,
     ) -> AnyElement {
         let id: SharedString = id.into();
-        let ring = before.remove(&id).unwrap_or_else(|| {
-            cx.new(|_| SignalRing {
-                id: id.clone(),
-                signal,
-            })
-        });
+        let ring = before
+            .remove(&id)
+            .unwrap_or_else(|| cx.new(|_| SignalRing { signal }));
         ring.update(cx, |ring, _| ring.signal = signal);
         self.rings.insert(id, ring.clone());
         ring.into_any_element()

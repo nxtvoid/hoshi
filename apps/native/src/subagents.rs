@@ -155,13 +155,7 @@ pub fn avatar(state: Option<AgentState>, provider: &str, colors: &Colors) -> Div
         }))
 }
 
-pub fn status(
-    state: AgentState,
-    started_at: &str,
-    ended_at: Option<&str>,
-    id: &str,
-    colors: &Colors,
-) -> Div {
+pub fn status(state: AgentState, started_at: &str, ended_at: Option<&str>, colors: &Colors) -> Div {
     let icon = match state {
         AgentState::Running => IconName::LoaderCircle,
         AgentState::Waiting => IconName::MessageCircleQuestionMark,
@@ -172,11 +166,9 @@ pub fn status(
     let icon = Icon::new(icon).size_3p5().flex_none();
     let icon = match state {
         AgentState::Running => icon
-            .with_animation(
-                SharedString::from(format!("agent-spin-{id}")),
-                hoshi_ui::looping(Duration::from_secs(1)),
-                |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-            )
+            .with_loop(hoshi_ui::looping(Duration::from_secs(1)), |icon, delta| {
+                icon.transform(Transformation::rotate(percentage(delta)))
+            })
             .into_any_element(),
         AgentState::Failed => icon.text_color(colors.destructive).into_any_element(),
         AgentState::Waiting => icon.text_color(colors.status_waiting).into_any_element(),
@@ -329,7 +321,7 @@ pub fn subagent_row(
                 .text_color(colors.muted_foreground)
                 .child(run)
         }))
-        .child(status(state, &item.created_at, None, &item.id, colors))
+        .child(status(state, &item.created_at, None, colors))
         .when(running, |card| {
             card.child(
                 Button::new(SharedString::from(format!("stop-subagent-{id}")))

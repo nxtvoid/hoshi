@@ -5,6 +5,7 @@ use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hoshi_core::{Task, TaskStatus};
+use hoshi_ui::LoopExt as _;
 use hoshi_ui::assets::IconName;
 use hoshi_ui::prelude::Colors;
 use std::time::Duration;
@@ -31,17 +32,15 @@ pub fn task_list_row(id: &str, tasks: &[Task], working: bool, colors: &Colors) -
         .iter()
         .filter(|task| task.status == TaskStatus::Completed)
         .count();
-    let rows = tasks.iter().enumerate().map(|(index, task)| {
+    let rows = tasks.iter().map(|task| {
         let (icon, active) = task_look(task.status, working);
         let completed = task.status == TaskStatus::Completed;
         let icon = Icon::new(icon).size_3p5().flex_none().mt_0p5();
         let icon = if active {
             icon.text_color(colors.status_working)
-                .with_animation(
-                    SharedString::from(format!("task-spin-{id}-{index}")),
-                    hoshi_ui::looping(Duration::from_secs(1)),
-                    |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-                )
+                .with_loop(hoshi_ui::looping(Duration::from_secs(1)), |icon, delta| {
+                    icon.transform(Transformation::rotate(percentage(delta)))
+                })
                 .into_any_element()
         } else {
             icon.into_any_element()
