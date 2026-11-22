@@ -132,6 +132,7 @@ impl Glyphs {
         let color = self.highlight(window.text_style().color);
         let layout = self.text.layout();
         let line_height = layout.line_height();
+        let align = window.text_style().text_align;
         let mut line_top = bounds.top();
         window.paint_layer(bounds, |window| {
             for wrapped in layout.line_layouts() {
@@ -140,6 +141,7 @@ impl Glyphs {
                 let mut wraps = wrapped.wrap_boundaries.iter().peekable();
                 let mut row_top = line_top;
                 let mut row_start = px(0.);
+                let mut row_left = aligned_left(bounds, align, row_end(line, wraps.peek()));
                 for (run_ix, run) in line.runs.iter().enumerate() {
                     let glyph_size = cx
                         .text_system()
@@ -153,11 +155,16 @@ impl Glyphs {
                             wraps.next();
                             row_top += line_height;
                             row_start = glyph.position.x;
+                            row_left = aligned_left(
+                                bounds,
+                                align,
+                                row_end(line, wraps.peek()) - row_start,
+                            );
                         }
                         if glyph.is_emoji {
                             continue;
                         }
-                        let origin = point(bounds.left() + glyph.position.x - row_start, row_top);
+                        let origin = point(row_left + glyph.position.x - row_start, row_top);
                         let glyph_bounds = Bounds::new(origin, glyph_size);
                         let at = origin + point(px(0.), baseline + glyph.position.y);
                         for mask in &masks {
@@ -199,6 +206,22 @@ impl Glyphs {
     }
 }
 
+/// Where a row's glyphs end, measured from the start of its line.
+fn row_end(line: &LineLayout, next_wrap: Option<&&WrapBoundary>) -> Pixels {
+    next_wrap.map_or(line.width, |wrap| {
+        line.runs[wrap.run_ix].glyphs[wrap.glyph_ix].position.x
+    })
+}
+
+/// Where a row `width` wide starts, as `StyledText` places it.
+fn aligned_left(bounds: Bounds<Pixels>, align: TextAlign, width: Pixels) -> Pixels {
+    match align {
+        TextAlign::Left => bounds.left(),
+        TextAlign::Center => bounds.left() + (bounds.size.width - width) / 2.,
+        TextAlign::Right => bounds.right() - width,
+    }
+}
+
 /// Where `layer` of the band is at `phase`: it starts left of the text and leaves past its end.
 fn band(bounds: Bounds<Pixels>, phase: f32, layer: usize) -> Option<Bounds<Pixels>> {
     let width = bounds.size.width.as_f32();
@@ -221,8 +244,8 @@ fn band(bounds: Bounds<Pixels>, phase: f32, layer: usize) -> Option<Bounds<Pixel
 
 #[cfg(test)]
 mod tests {
-    use super::{LAYERS, band};
-    use gpui_kit::{Bounds, Pixels, point, px, size};
+    use super::{LAYERS, aligned_left, band};
+    use gpui_kit::{Bounds, Pixels, TextAlign, point, px, size};
 
     fn bounds() -> Bounds<Pixels> {
         Bounds::new(point(px(10.), px(0.)), size(px(100.), px(20.)))
@@ -242,5 +265,12 @@ mod tests {
         assert_eq!(outer.size.width, px(60.));
         assert!(inner.size.width < outer.size.width);
         assert_eq!(inner.center().x, px(60.));
+    }
+
+    #[test]
+    fn a_row_starts_where_its_alignment_puts_it() {
+        assert_eq!(aligned_left(bounds(), TextAlign::Left, px(40.)), px(10.));
+        assert_eq!(aligned_left(bounds(), TextAlign::Center, px(40.)), px(40.));
+        assert_eq!(aligned_left(bounds(), TextAlign::Right, px(40.)), px(70.));
     }
 }
