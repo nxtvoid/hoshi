@@ -1,6 +1,8 @@
 use crate::*;
 
 impl Engine {
+    /// Names the thread again from its whole conversation, in the background. The
+    /// title only changes if the user did not rename it meanwhile.
     pub fn regenerate_title(&self, thread_id: &str) -> Result<(), CommandError> {
         let mut state = lock(&self.state);
         if state.model.thread(thread_id).is_none() {
@@ -290,10 +292,8 @@ impl Engine {
         lock(&self.state).streamed = thread_ids;
     }
 
-    /// Closes every page and the headless browser, as when the app quits.
     /// Ends the agent processes kept between turns, and the commands running in them, as
     /// when the app quits.
-    /// Ends the agent processes kept between turns, as hoshi quits.
     pub fn close_lingering_agents(&self) {
         let mut state = lock(&self.state);
         state.recovery.quitting = true;

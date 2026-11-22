@@ -2990,7 +2990,7 @@ fn the_user_cancels_a_task_waiting_on_its_plan_and_it_never_answers() {
 
 #[test]
 fn a_task_delegates_once_more_with_the_model_effort_and_mode_it_was_given() {
-    let harness = Harness::in_memory("delegate-nested", Vec::new());
+    let harness = Harness::in_memory("delegate-nested-settings", Vec::new());
     let adapter = adapter(None);
     harness.engine.set_adapter(Some(adapter.clone()));
     harness.send("t", "m1", "split the work");

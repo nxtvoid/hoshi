@@ -208,10 +208,10 @@ impl LiveProcess {
 pub(super) struct SharedSink(Arc<Mutex<SinkState>>);
 
 pub(super) struct SinkState {
-    pub(super) sink: OutputSink,
-    pub(super) attempt: u32,
+    sink: OutputSink,
+    attempt: u32,
     /// The process was killed for not starting in time, as `detail` says.
-    pub(super) timed_out: Option<String>,
+    timed_out: Option<String>,
 }
 
 impl SharedSink {

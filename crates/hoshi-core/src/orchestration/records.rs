@@ -197,6 +197,7 @@ pub fn reopen_task(model: &ReadModel, thread_id: &str) -> Vec<Event> {
     }
 }
 
+/// Links a thread to the one whose agent delegated its task to it.
 pub fn record_delegation(model: &ReadModel, thread_id: &str, parent_thread_id: &str) -> Vec<Event> {
     let (Some(thread), Some(parent)) = (
         model.threads.get(thread_id),

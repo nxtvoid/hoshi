@@ -27,8 +27,6 @@ impl Engine {
         }
     }
 
-    /// Names the thread again from its whole conversation, in the background. The
-    /// title only changes if the user did not rename it meanwhile.
     /// Whether threads a restart cut short go on by themselves; see
     /// [`Engine::continue_cut_threads`].
     pub fn set_continue_after_restart(&self, on: bool) {

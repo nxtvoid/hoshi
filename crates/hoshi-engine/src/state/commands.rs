@@ -163,7 +163,6 @@ impl State {
         self.commit(&events, &now)
     }
 
-    /// Worktrees (with their repository) that a deletion leaves without a thread.
     /// The images and files in the transcripts of the threads `command` deletes.
     pub(crate) fn images_freed_by(&self, command: &Command) -> Vec<MessageAttachment> {
         self.threads_deleted_by(command)
@@ -196,6 +195,7 @@ impl State {
         }
     }
 
+    /// Worktrees (with their repository) that a deletion leaves without a thread.
     pub(crate) fn worktrees_freed_by(&self, command: &Command) -> Vec<(String, String)> {
         let deleted: Vec<String> = self
             .threads_deleted_by(command)

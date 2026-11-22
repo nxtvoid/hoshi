@@ -78,6 +78,7 @@ impl Engine {
         self.browsing().user_close(thread_id);
     }
 
+    /// Closes every page and the headless browser, as when the app quits.
     pub fn close_browser(&self) {
         let browsing = self.browsing.clone();
         let (closed, done) = mpsc::channel();

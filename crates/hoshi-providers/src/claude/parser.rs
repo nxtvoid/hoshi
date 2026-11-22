@@ -1,9 +1,9 @@
 use super::*;
 
 pub(super) struct Unlanded {
-    pub(super) item_id: String,
-    pub(super) reasoning: bool,
-    pub(super) text: String,
+    item_id: String,
+    reasoning: bool,
+    text: String,
 }
 
 /// Translates Claude Code's `stream-json` output, one line at a time.

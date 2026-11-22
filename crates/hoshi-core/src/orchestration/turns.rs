@@ -1,6 +1,5 @@
 use super::*;
 
-/// Links a thread to the one whose agent delegated its task to it.
 /// Closes a turn the app's close cut short. Its questions stay open: the agent that asked
 /// is gone, so the user's answers go to the thread as a message.
 pub fn close_stale_turn(
@@ -156,7 +155,7 @@ pub fn retry_settled(
     events
 }
 
-pub(super) fn record_turn_output(
+fn record_turn_output(
     model: &ReadModel,
     thread: &Thread,
     turn_id: &str,
