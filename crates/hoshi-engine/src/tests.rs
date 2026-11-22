@@ -1725,6 +1725,8 @@ fn a_usage_limit_holds_the_queue_and_the_thread_goes_on_once_it_resets() {
     finish(&first, 0, usage_limited(&reset.to_rfc3339()));
     harness.wait_for_turn_end();
     assert_eq!(first.requests.lock().unwrap().len(), 1);
+    // The turn's end is told before its usage limit is saved, under the same lock.
+    drop(lock(&harness.engine.state));
     drop(harness);
 
     let (engine, adapter, events) = reopen("usage-limit", &database);
