@@ -402,3 +402,125 @@ pub fn left_out(content: &ItemContent) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ThreadState;
+    use gpui_kit::{AppContext as _, TestAppContext};
+    use hoshi_core::{Event, ItemContent, StreamDelta, StreamKind, ThreadItem, TurnOutcome};
+
+    fn message(id: &str) -> ThreadItem {
+        ThreadItem {
+            id: id.into(),
+            thread_id: "t".into(),
+            created_at: "2026-11-15T10:00:00Z".into(),
+            content: ItemContent::UserMessage {
+                text: id.into(),
+                attachments: Vec::new(),
+                steer: true,
+                task_result: None,
+                pull_request_update: None,
+                resumed: None,
+                rewind: None,
+                dropped: false,
+                model_switch: None,
+            },
+        }
+    }
+
+    #[gpui_kit::test]
+    fn messages_the_turn_dropped_are_marked_in_place(cx: &mut TestAppContext) {
+        let thread =
+            cx.update(|cx| cx.new(|_| ThreadState::new("t", vec![message("m1"), message("m2")])));
+        thread.update(cx, |thread, cx| {
+            thread.apply(
+                &Event::MessagesDropped {
+                    thread_id: "other".into(),
+                    message_ids: vec!["m1".into()],
+                },
+                cx,
+            );
+            thread.apply(
+                &Event::MessagesDropped {
+                    thread_id: "t".into(),
+                    message_ids: vec!["m2".into()],
+                },
+                cx,
+            );
+        });
+        let dropped: Vec<bool> = thread.read_with(cx, |thread, _| {
+            thread
+                .items
+                .iter()
+                .map(|item| matches!(item.content, ItemContent::UserMessage { dropped: true, .. }))
+                .collect()
+        });
+        assert_eq!(dropped, [false, true]);
+    }
+
+    fn delta(item_id: &str, kind: StreamKind, text: &str) -> StreamDelta {
+        StreamDelta {
+            thread_id: "t".into(),
+            item_id: item_id.into(),
+            kind,
+            delta: text.into(),
+        }
+    }
+
+    fn streams(thread: &gpui_kit::Entity<ThreadState>, cx: &mut TestAppContext) -> Vec<String> {
+        thread.read_with(cx, |thread, _| {
+            thread
+                .streaming
+                .iter()
+                .map(|streaming| streaming.item_id.clone())
+                .collect()
+        })
+    }
+
+    #[gpui_kit::test]
+    fn a_reply_cut_in_the_middle_goes_once_its_run_or_turn_ends(cx: &mut TestAppContext) {
+        let thread = cx.update(|cx| cx.new(|_| ThreadState::new("t", Vec::new())));
+        let stream_all = |thread: &gpui_kit::Entity<ThreadState>, cx: &mut TestAppContext| {
+            thread.update(cx, |thread, cx| {
+                thread.stream(
+                    vec![
+                        delta("m1:0", StreamKind::Reasoning, "Let me check"),
+                        delta("m1:1", StreamKind::Text, "So far"),
+                        delta("call", StreamKind::ToolOutput, "line 1\n"),
+                    ],
+                    cx,
+                );
+            });
+        };
+
+        stream_all(&thread, cx);
+        thread.update(cx, |thread, cx| {
+            thread.apply(
+                &Event::ItemAdded {
+                    item: ThreadItem {
+                        id: "turn:run1".into(),
+                        thread_id: "t".into(),
+                        created_at: "2026-11-15T10:00:01Z".into(),
+                        content: ItemContent::RunEnded,
+                    },
+                },
+                cx,
+            );
+        });
+        assert_eq!(streams(&thread, cx), ["call"]);
+
+        stream_all(&thread, cx);
+        thread.update(cx, |thread, cx| {
+            thread.apply(
+                &Event::TurnCompleted {
+                    thread_id: "t".into(),
+                    turn_id: "turn".into(),
+                    outcome: TurnOutcome::Completed,
+                    at: "2026-11-15T10:00:02Z".into(),
+                },
+                cx,
+            );
+        });
+        assert_eq!(streams(&thread, cx), ["call"]);
+    }
+}
