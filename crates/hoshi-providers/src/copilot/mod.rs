@@ -699,34 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn the_plan_comes_from_the_plan_file_in_copilots_session() {
-        let path = |parts: &[&str]| parts.join(std::path::MAIN_SEPARATOR_STR);
-        let written = json!({
-            "sessionUpdate": "tool_call_update",
-            "content": [{
-                "type": "diff",
-                "path": path(&["", "home", "me", ".copilot", "session-state", "s1", "plan.md"]),
-                "newText": "# Plan",
-            }],
-        });
-        let elsewhere = json!({
-            "sessionUpdate": "tool_call_update",
-            "content": [{ "type": "diff", "path": path(&["", "repo", "plan.md"]), "newText": "# Plan" }],
-        });
-        assert!(plan_file(&written).is_some());
-        assert_eq!(plan_file(&elsewhere), None);
-    }
-
-    #[test]
-    fn copilot_reads_hoshis_tools_by_its_own_names() {
-        let instructions = format!("Use mcp__hoshi__delegate_task{}.", crate::DEFERRED_TOOLS);
-        assert_eq!(
-            copilot_instructions(&instructions),
-            "Use hoshi-delegate_task."
-        );
-    }
-
-    #[test]
     fn a_plan_without_a_choice_of_models_offers_its_default() {
         let catalog = catalog(Vec::new(), None, &[]);
 
@@ -801,42 +773,5 @@ mod tests {
         for request in &changed {
             assert_ne!(Launch::of(request), launch);
         }
-    }
-
-    #[test]
-    fn a_kept_process_gives_way_once_it_lost_its_session() {
-        let error = |code: i64, message: &str| RpcError {
-            code,
-            message: message.into(),
-            data: Value::Null,
-        };
-        let lost_session = RpcError {
-            data: json!({ "details": "session event delivery failed: session not found: s1" }),
-            ..error(-32603, "Internal error")
-        };
-
-        assert!(lost(&RpcError::gone()));
-        assert!(lost(&lost_session));
-        assert!(lost(&error(
-            -32603,
-            "session lock unavailable during is_session_generation_current: acquisition timed out"
-        )));
-        assert!(!lost(&error(-32603, "quota exceeded")));
-    }
-
-    #[test]
-    fn instructions_lead_a_new_sessions_prompt() {
-        let blocks = prompt_blocks("hi", &[], Some("Use hoshi's tools."));
-        assert_eq!(
-            blocks,
-            [json!({
-                "type": "text",
-                "text": "<hoshi-instructions>\nUse hoshi's tools.\n</hoshi-instructions>\n\nhi",
-            })]
-        );
-        assert_eq!(
-            prompt_blocks("hi", &[], None),
-            [json!({ "type": "text", "text": "hi" })]
-        );
     }
 }

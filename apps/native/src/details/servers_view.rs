@@ -60,7 +60,7 @@ impl ThreadDetails {
                                         .text_size(px(13.))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(mono)
-                                        .child(format!("localhost:{}", server.port)),
+                                        .child(m::server_address(server.port)),
                                 )
                                 .child(
                                     div()

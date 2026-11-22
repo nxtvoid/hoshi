@@ -348,7 +348,7 @@ impl SettingsView {
                                 .bg(colors.muted)
                                 .text_color(colors.muted_foreground)
                                 .text_size(rems(0.625))
-                                .child(format!("+{}", count - 1)),
+                                .child(m::theme_more_variants(count - 1)),
                         )
                     })
                     .into_any_element(),

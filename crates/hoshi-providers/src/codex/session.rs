@@ -275,3 +275,19 @@ pub(super) fn user_input(
     }
     input
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_modes_become_codexs_approval_policy_and_sandbox() {
+        assert_eq!(policy(AccessMode::Ask).0, "untrusted");
+        assert_eq!(policy(AccessMode::Ask).2["type"], "readOnly");
+        assert_eq!(policy(AccessMode::AcceptEdits).0, "on-request");
+        assert_eq!(policy(AccessMode::AcceptEdits).2["type"], "workspaceWrite");
+        assert_eq!(policy(AccessMode::Auto).1, "auto_review");
+        assert_eq!(policy(AccessMode::FullAccess).0, "never");
+        assert_eq!(policy(AccessMode::FullAccess).2["type"], "dangerFullAccess");
+    }
+}

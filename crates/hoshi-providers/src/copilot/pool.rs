@@ -285,3 +285,29 @@ impl Probe {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_process_gives_way_once_it_lost_its_session() {
+        let error = |code: i64, message: &str| RpcError {
+            code,
+            message: message.into(),
+            data: Value::Null,
+        };
+        let lost_session = RpcError {
+            data: json!({ "details": "session event delivery failed: session not found: s1" }),
+            ..error(-32603, "Internal error")
+        };
+
+        assert!(lost(&RpcError::gone()));
+        assert!(lost(&lost_session));
+        assert!(lost(&error(
+            -32603,
+            "session lock unavailable during is_session_generation_current: acquisition timed out"
+        )));
+        assert!(!lost(&error(-32603, "quota exceeded")));
+    }
+}

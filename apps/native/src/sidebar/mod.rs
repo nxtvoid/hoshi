@@ -507,11 +507,11 @@ fn cleanup_error_message(error: &CommandError) -> String {
     }
 }
 
-fn palette_shortcut() -> &'static str {
+fn palette_shortcut() -> String {
     if cfg!(target_os = "macos") {
-        "⌘K"
+        m::palette_shortcut_cmd()
     } else {
-        "Ctrl K"
+        m::palette_shortcut_ctrl()
     }
 }
 

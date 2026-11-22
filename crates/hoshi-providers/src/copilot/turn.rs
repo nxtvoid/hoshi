@@ -466,7 +466,13 @@ impl Turn {
             proposals += 1;
             let request_id = format!("plan-{session_id}-{proposals}");
             let (sender, answers) = mpsc::channel();
-            *lock(&self.plan_answer) = Some((request_id.clone(), sender));
+            {
+                let mut slot = lock(&self.plan_answer);
+                if self.cancelled.load(Ordering::SeqCst) {
+                    return interrupted;
+                }
+                *slot = Some((request_id.clone(), sender));
+            }
             {
                 let mut outputs = Vec::new();
                 lock(&self.translator).flush(&mut outputs);
@@ -550,7 +556,7 @@ impl Turn {
 }
 
 /// The plan file a plan-mode update wrote: Copilot keeps it as `plan.md` in its session.
-pub(super) fn plan_file(update: &Value) -> Option<std::path::PathBuf> {
+fn plan_file(update: &Value) -> Option<std::path::PathBuf> {
     let is_plan = |path: &str| {
         let path = Path::new(path);
         path.file_name().is_some_and(|name| name == "plan.md")
@@ -572,7 +578,7 @@ pub(super) fn plan_file(update: &Value) -> Option<std::path::PathBuf> {
 
 /// hoshi's instructions as Copilot reads them: its tools are named `hoshi-<tool>`, and none
 /// are deferred.
-pub(super) fn copilot_instructions(instructions: &str) -> String {
+fn copilot_instructions(instructions: &str) -> String {
     instructions
         .replace(crate::DEFERRED_TOOLS, "")
         .replace(HOSHI_TOOL_PREFIX, &format!("{}-", crate::MCP_SERVER_NAME))
@@ -595,7 +601,7 @@ pub(super) fn mcp(server: &McpServer) -> Value {
 
 /// The prompt's content blocks: hoshi's instructions on a new session, the text, then its
 /// images and files.
-pub(super) fn prompt_blocks(
+fn prompt_blocks(
     prompt: &str,
     attachments: &[TurnAttachment],
     instructions: Option<&str>,
@@ -640,4 +646,53 @@ pub(super) fn resource_link(path: &Path, name: &str) -> Value {
         format!("file:///{path}")
     };
     json!({ "type": "resource_link", "uri": uri, "name": name })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_plan_comes_from_the_plan_file_in_copilots_session() {
+        let path = |parts: &[&str]| parts.join(std::path::MAIN_SEPARATOR_STR);
+        let written = json!({
+            "sessionUpdate": "tool_call_update",
+            "content": [{
+                "type": "diff",
+                "path": path(&["", "home", "me", ".copilot", "session-state", "s1", "plan.md"]),
+                "newText": "# Plan",
+            }],
+        });
+        let elsewhere = json!({
+            "sessionUpdate": "tool_call_update",
+            "content": [{ "type": "diff", "path": path(&["", "repo", "plan.md"]), "newText": "# Plan" }],
+        });
+        assert!(plan_file(&written).is_some());
+        assert_eq!(plan_file(&elsewhere), None);
+    }
+
+    #[test]
+    fn copilot_reads_hoshis_tools_by_its_own_names() {
+        let instructions = format!("Use mcp__hoshi__delegate_task{}.", crate::DEFERRED_TOOLS);
+        assert_eq!(
+            copilot_instructions(&instructions),
+            "Use hoshi-delegate_task."
+        );
+    }
+
+    #[test]
+    fn instructions_lead_a_new_sessions_prompt() {
+        let blocks = prompt_blocks("hi", &[], Some("Use hoshi's tools."));
+        assert_eq!(
+            blocks,
+            [json!({
+                "type": "text",
+                "text": "<hoshi-instructions>\nUse hoshi's tools.\n</hoshi-instructions>\n\nhi",
+            })]
+        );
+        assert_eq!(
+            prompt_blocks("hi", &[], None),
+            [json!({ "type": "text", "text": "hi" })]
+        );
+    }
 }

@@ -156,6 +156,32 @@ fn center(h: &mut Harness, selector: &'static str) -> Point<Pixels> {
 use gpui_kit::{FocusHandle, Pixels};
 
 #[gpui_kit::test]
+fn without_projects_only_the_project_view_asks_for_one(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "sidebar-no-projects");
+    let engine = h
+        .workspace
+        .read_with(&h.cx, |workspace, _| workspace.engine.clone());
+    engine
+        .dispatch(Command::ProjectRemove {
+            project_id: "p".into(),
+        })
+        .unwrap();
+    wait_for(&mut h, "the project to go", |h| {
+        h.workspace.read_with(&h.cx, |workspace, _| {
+            workspace.model.projects().next().is_none()
+        })
+    });
+    assert!(h.cx.debug_bounds("no-projects").is_some());
+
+    for view in [crate::sections::View::Inbox, crate::sections::View::Chats] {
+        h.sidebar
+            .update(&mut h.cx, |sidebar, cx| sidebar.set_view(view, cx));
+        redraw(&mut h.cx);
+        assert!(h.cx.debug_bounds("no-projects").is_none(), "{view:?}");
+    }
+}
+
+#[gpui_kit::test]
 fn a_right_click_opens_the_thread_menu_and_pins_it(cx: &mut TestAppContext) {
     let mut h = harness(cx, "sidebar-pin");
     let row = center(&mut h, "thread-a");

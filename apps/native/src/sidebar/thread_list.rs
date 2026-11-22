@@ -6,8 +6,9 @@ impl Sidebar {
         let view = self.prefs.view;
         let workspace = self.workspace.read(cx);
         let has_projects = workspace.model.projects().next().is_some();
-        if !has_projects && view != View::Chats {
+        if !has_projects && view == View::Project {
             return div()
+                .debug_selector(|| "no-projects".into())
                 .flex_1()
                 .flex()
                 .flex_col()

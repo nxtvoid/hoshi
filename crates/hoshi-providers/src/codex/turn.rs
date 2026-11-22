@@ -65,10 +65,13 @@ impl Turn {
     }
 
     pub(super) fn emit(&self, outputs: Vec<ProviderOutput>) {
-        if outputs.is_empty() || self.finished.load(Ordering::SeqCst) {
+        if outputs.is_empty() {
             return;
         }
         let mut sink = lock(&self.sink);
+        if self.finished.load(Ordering::SeqCst) {
+            return;
+        }
         for output in outputs {
             sink(output);
         }
@@ -749,7 +752,7 @@ pub(super) fn error_detail(error: &Value) -> String {
 
 /// The attempt and the most Codex makes, as a retry's message counts them: `Reconnecting...
 /// 2/5`.
-pub(super) fn retry_progress(message: &str) -> Option<(u32, u32)> {
+fn retry_progress(message: &str) -> Option<(u32, u32)> {
     let chars: Vec<char> = message.chars().collect();
     let number = |digits: &[char]| -> Option<u32> {
         if digits.is_empty() {
@@ -787,4 +790,18 @@ pub(super) fn retry_progress(message: &str) -> Option<(u32, u32)> {
             let max = number(&chars[first..last])?;
             (attempt >= 1 && max >= 1).then_some((attempt, max))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_messages_count_their_attempts() {
+        assert_eq!(retry_progress("Reconnecting... 2/5"), Some((2, 5)));
+        assert_eq!(retry_progress("Reconnecting... (3 / 10)"), Some((3, 10)));
+        assert_eq!(retry_progress("Reconnecting..."), None);
+        assert_eq!(retry_progress("see https://status.openai.com/v2"), None);
+        assert_eq!(retry_progress("0/5"), None);
+    }
 }
