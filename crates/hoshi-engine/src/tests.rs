@@ -4797,6 +4797,55 @@ fn cleaning_up_a_root_thread_goes_back_to_the_base_branch() {
     assert_eq!(thread.session_id, None);
 }
 
+#[test]
+fn a_root_cleanup_that_fails_after_switching_still_tells_the_threads_sharing_the_root() {
+    let repo = git::tests::temp_repository("engine-cleanup-root-fails");
+    let harness = Harness::new(
+        "cleanup-root-fails",
+        repo,
+        Store::open_in_memory().unwrap(),
+        Vec::new(),
+    );
+    harness
+        .create_thread("r1234567-rest", ThreadWorkspace::Local)
+        .unwrap();
+    harness
+        .create_thread("s1234567-rest", ThreadWorkspace::Local)
+        .unwrap();
+    git_in(&harness.root, &["branch", "feature"]);
+    harness
+        .engine
+        .switch_branch("r1234567-rest", "feature")
+        .unwrap();
+    let head = commit_in(&harness.root, "a.txt");
+    set_pull_request(
+        &harness,
+        "r1234567-rest",
+        hoshi_core::PullRequestState::Merged,
+        Some(head),
+    );
+    let root = harness.root.clone();
+    lock(&harness.engine.state).record_branch_read("s1234567-rest", &root, Some("feature".into()));
+    assert_eq!(
+        harness.thread("s1234567-rest").branch.as_deref(),
+        Some("feature")
+    );
+    let lock_file = Path::new(&harness.root).join(".git/refs/heads/feature.lock");
+    std::fs::write(&lock_file, "").unwrap();
+
+    assert!(matches!(
+        harness.engine.clean_up_thread("r1234567-rest"),
+        Err(CommandError::GitFailed { .. })
+    ));
+
+    assert_eq!(git::current_branch(&harness.root).as_deref(), Some("main"));
+    assert_eq!(
+        harness.thread("s1234567-rest").branch.as_deref(),
+        Some("main")
+    );
+    std::fs::remove_file(lock_file).unwrap();
+}
+
 fn bash(command: &str) -> ProviderOutput {
     ProviderOutput::ToolCallStarted {
         item_id: command.into(),

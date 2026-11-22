@@ -109,7 +109,12 @@ impl Engine {
                 Err(error)
             }
         };
-        state.end_op(op, None)?;
+        let ended = state.end_op(op, None);
+        drop(state);
+        if committed.is_err() && !plan.sharing_root.is_empty() {
+            read_branches(&Arc::downgrade(&self.state), &plan.sharing_root);
+        }
+        ended?;
         committed.map(|()| plan.sharing_root)
     }
 
