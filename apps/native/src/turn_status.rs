@@ -159,11 +159,9 @@ pub fn background_rows(
             .text_sm()
             .text_color(colors.muted_foreground)
             .child(if waiting {
-                icon.with_animation(
-                    SharedString::from(format!("spin-{}", task.task_id)),
-                    hoshi_ui::looping(Duration::from_secs(1)),
-                    |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-                )
+                icon.with_loop(hoshi_ui::looping(Duration::from_secs(1)), |icon, delta| {
+                    icon.transform(Transformation::rotate(percentage(delta)))
+                })
                 .into_any_element()
             } else {
                 icon.into_any_element()

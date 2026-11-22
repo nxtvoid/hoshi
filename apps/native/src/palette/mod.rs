@@ -516,8 +516,7 @@ impl Palette {
                         .children(row)
                         .map(|row| {
                             if running && !cx.reduce_motion() {
-                                row.with_animation(
-                                    "running",
+                                row.with_loop(
                                     hoshi_ui::looping(std::time::Duration::from_secs(2)),
                                     |row, delta| {
                                         row.opacity(1. - 0.5 * (delta * std::f32::consts::PI).sin())

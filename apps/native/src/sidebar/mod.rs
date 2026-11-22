@@ -602,20 +602,19 @@ impl Render for Part {
 /// A rail button's signal ring, a view of its own so that its animation redraws only itself
 /// and what holds it.
 struct SignalRing {
-    id: SharedString,
     signal: Signal,
 }
 
 impl Render for SignalRing {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.hoshi().clone();
-        signal_ring(self.id.clone(), self.signal, &colors, cx)
+        signal_ring(self.signal, &colors, cx)
     }
 }
 
 /// A ring in the signal's color that grows from a rail button and fades, again and again, as the
 /// web's `animate-signal`. Still when the system asks for less motion.
-fn signal_ring(id: impl Into<ElementId>, signal: Signal, colors: &Colors, cx: &App) -> AnyElement {
+fn signal_ring(signal: Signal, colors: &Colors, cx: &App) -> AnyElement {
     let ring = div()
         .absolute()
         .top(px(-1.))
@@ -628,8 +627,7 @@ fn signal_ring(id: impl Into<ElementId>, signal: Signal, colors: &Colors, cx: &A
     if cx.reduce_motion() {
         return ring.opacity(0.).into_any_element();
     }
-    ring.with_animation(
-        id,
+    ring.with_loop(
         hoshi_ui::looping(Duration::from_millis(2400)),
         |ring, delta| {
             let progress = (delta / 0.7).min(1.);

@@ -411,7 +411,6 @@ pub fn delegation_row(item: &ThreadItem, grouped: bool, colors: &Colors, cx: &Ap
                 state,
                 child.map_or(item.created_at.as_str(), |child| &child.created_at),
                 child.map(|child| child.updated_at.as_str()),
-                &item.id,
                 colors,
             )
         }))

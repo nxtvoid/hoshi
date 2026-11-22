@@ -784,11 +784,9 @@ fn progress_ring(id: &'static str, percent: Option<u8>, tone: Hsla) -> AnyElemen
 fn icon_view(icon: IconName, tone: Hsla, spin: bool) -> AnyElement {
     let icon = Icon::new(icon).size_4().text_color(tone);
     if spin {
-        icon.with_animation(
-            "spin",
-            hoshi_ui::looping(Duration::from_secs(1)),
-            |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-        )
+        icon.with_loop(hoshi_ui::looping(Duration::from_secs(1)), |icon, delta| {
+            icon.transform(Transformation::rotate(percentage(delta)))
+        })
         .into_any_element()
     } else {
         icon.into_any_element()

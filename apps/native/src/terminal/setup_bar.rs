@@ -128,11 +128,9 @@ impl Render for WorktreeSetupBar {
                 .size_3p5()
                 .flex_none()
                 .text_color(colors.muted_foreground)
-                .with_animation(
-                    "worktree-setup-spin",
-                    hoshi_ui::looping(Duration::from_secs(1)),
-                    |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-                )
+                .with_loop(hoshi_ui::looping(Duration::from_secs(1)), |icon, delta| {
+                    icon.transform(Transformation::rotate(percentage(delta)))
+                })
                 .into_any_element(),
             WorktreeSetupStatus::Failed => Icon::new(IconName::TriangleAlert)
                 .size_3p5()

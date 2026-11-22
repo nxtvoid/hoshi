@@ -8,7 +8,6 @@ use crate::tool_calls::{
     verb,
 };
 use crate::transcript::TranscriptView;
-use gpui_kit::component::shimmer::ShimmerText;
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::*;
 use hoshi_core::{Command, ItemContent, ThreadItem, ToolDetail};
@@ -91,7 +90,7 @@ fn icon(name: IconName, color: Option<Hsla>) -> impl IntoElement {
 fn label(text: impl Into<SharedString>, running: bool, colors: &Colors) -> AnyElement {
     let text = text.into();
     if running {
-        ShimmerText::new(text)
+        Shimmer::new(text)
             .flex_none()
             .font_weight(FontWeight::MEDIUM)
             .text_color(colors.foreground)
@@ -153,14 +152,7 @@ pub fn work_group(entries: &[&ThreadItem], live: bool, ctx: &WorkContext, cx: &A
             }
         );
         let line = live_line(latest, ctx, cx);
-        if failed {
-            line
-        } else {
-            vec![shimmer(
-                SharedString::from(format!("live-{}", first.id)),
-                line,
-            )]
-        }
+        if failed { line } else { vec![shimmer(line)] }
     } else {
         summary_line(entries, colors)
     };
@@ -198,15 +190,14 @@ pub fn work_group(entries: &[&ThreadItem], live: bool, ctx: &WorkContext, cx: &A
 }
 
 /// What runs now, brightening and fading as it goes.
-fn shimmer(id: SharedString, line: Vec<AnyElement>) -> AnyElement {
+fn shimmer(line: Vec<AnyElement>) -> AnyElement {
     div()
         .flex()
         .min_w_0()
         .items_center()
         .gap_2()
         .children(line)
-        .with_animation(
-            id,
+        .with_loop(
             hoshi_ui::looping(std::time::Duration::from_millis(1600))
                 .with_easing(bounce(ease_in_out)),
             |line, delta| line.opacity(0.55 + 0.45 * delta),

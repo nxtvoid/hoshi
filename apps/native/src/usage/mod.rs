@@ -449,11 +449,9 @@ impl UsageView {
                     Icon::new(IconName::RefreshCw)
                         .size_4()
                         .text_color(colors.foreground)
-                        .with_animation(
-                            "usage-refresh-spin",
-                            hoshi_ui::looping(Duration::from_secs(1)),
-                            |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
-                        ),
+                        .with_loop(hoshi_ui::looping(Duration::from_secs(1)), |icon, delta| {
+                            icon.transform(Transformation::rotate(percentage(delta)))
+                        }),
                 )
                 .into_any_element()
         } else {
@@ -693,8 +691,7 @@ impl UsageView {
             )
             .into_any_element(),
             _ => skeleton(id, colors)
-                .with_animation(
-                    SharedString::from(format!("usage-checking-pulse-{id}")),
+                .with_loop(
                     hoshi_ui::looping(Duration::from_secs(2)),
                     |skeleton, delta| {
                         skeleton.opacity(1. - 0.5 * (delta * std::f32::consts::PI).sin())
