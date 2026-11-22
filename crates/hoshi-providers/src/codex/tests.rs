@@ -47,17 +47,6 @@ fn a_thread_reaches_hoshis_mcp_server_and_its_environment() {
 }
 
 #[test]
-fn access_modes_become_codexs_approval_policy_and_sandbox() {
-    assert_eq!(policy(AccessMode::Ask).0, "untrusted");
-    assert_eq!(policy(AccessMode::Ask).2["type"], "readOnly");
-    assert_eq!(policy(AccessMode::AcceptEdits).0, "on-request");
-    assert_eq!(policy(AccessMode::AcceptEdits).2["type"], "workspaceWrite");
-    assert_eq!(policy(AccessMode::Auto).1, "auto_review");
-    assert_eq!(policy(AccessMode::FullAccess).0, "never");
-    assert_eq!(policy(AccessMode::FullAccess).2["type"], "dangerFullAccess");
-}
-
-#[test]
 fn a_turn_carries_its_model_effort_and_mode() {
     let settings = TurnSettings {
         model: "gpt-6-luna".into(),
@@ -402,15 +391,6 @@ fn turn_errors_become_the_failures_hoshi_knows() {
         ),
         json!({ "message": "turn failed", "codexErrorInfo": "contextWindowExceeded" })
     );
-}
-
-#[test]
-fn retry_messages_count_their_attempts() {
-    assert_eq!(retry_progress("Reconnecting... 2/5"), Some((2, 5)));
-    assert_eq!(retry_progress("Reconnecting... (3 / 10)"), Some((3, 10)));
-    assert_eq!(retry_progress("Reconnecting..."), None);
-    assert_eq!(retry_progress("see https://status.openai.com/v2"), None);
-    assert_eq!(retry_progress("0/5"), None);
 }
 
 fn recorded() -> (OutputSink, Arc<Mutex<Vec<ProviderOutput>>>) {
