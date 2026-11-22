@@ -302,6 +302,103 @@ fn alt_down_steps_through_the_listed_threads(cx: &mut TestAppContext) {
     assert_eq!(open(&mut h), Some(first));
 }
 
+fn add_threads(h: &mut Harness, count: usize) {
+    let engine = h
+        .workspace
+        .read_with(&h.cx, |workspace, _| workspace.engine.clone());
+    for index in 0..count {
+        engine
+            .dispatch(thread(&format!("x{index}"), &format!("thread {index}")))
+            .unwrap();
+    }
+    let last = format!("x{}", count - 1);
+    wait_for(h, "the threads", move |h| {
+        h.workspace.read_with(&h.cx, |workspace, _| {
+            workspace.model.thread(&last).is_some()
+        })
+    });
+}
+
+fn listed(h: &mut Harness) -> Vec<String> {
+    h.sidebar.update(&mut h.cx, |sidebar, cx| {
+        sidebar
+            .current_sections(cx)
+            .into_iter()
+            .flat_map(|section| section.threads)
+            .map(|thread| thread.id)
+            .collect()
+    })
+}
+
+fn row_bounds(h: &mut Harness, thread_id: &str) -> Option<Bounds<Pixels>> {
+    let selector: &'static str = Box::leak(format!("thread-{thread_id}").into_boxed_str());
+    h.cx.debug_bounds(selector)
+}
+
+fn scroll_list(h: &mut Harness, by: f32) {
+    let window = h.cx.update(|window, _| window.viewport_size());
+    let at = listed(h)
+        .iter()
+        .filter_map(|id| row_bounds(h, id))
+        .find(|bounds| bounds.top() >= px(0.) && bounds.bottom() <= window.height)
+        .expect("a row in view")
+        .center();
+    h.cx.simulate_mouse_move(at, None, Modifiers::none());
+    redraw(&mut h.cx);
+    h.cx.simulate_event(gpui_kit::ScrollEvent {
+        position: at,
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(by))),
+        ..Default::default()
+    });
+    redraw(&mut h.cx);
+}
+
+#[gpui_kit::test]
+fn scrolling_a_long_list_reaches_its_last_thread(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "sidebar-long-scroll");
+    add_threads(&mut h, 120);
+    let order = listed(&mut h);
+    let last = order[order.len() - 1].clone();
+    let window = h.cx.update(|window, _| window.viewport_size());
+    assert!(row_bounds(&mut h, &order[0]).is_some());
+
+    scroll_list(&mut h, -100_000.);
+    let bottom = row_bounds(&mut h, &last).expect("the last thread is drawn");
+    assert!(
+        bottom.top() >= px(0.) && bottom.bottom() <= window.height,
+        "{bottom:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_long_section_draws_only_the_rows_in_view(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "sidebar-long-drawn");
+    add_threads(&mut h, 300);
+    let order = listed(&mut h);
+    let drawn = order
+        .iter()
+        .filter(|id| row_bounds(&mut h, id).is_some())
+        .count();
+    assert!(drawn > 5, "the rows in view are drawn: {drawn}");
+    assert!(drawn < 100, "only the rows in view are drawn, not {drawn}");
+}
+
+#[gpui_kit::test]
+fn clicking_a_row_opens_its_thread_even_far_down_the_list(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "sidebar-long-click");
+    add_threads(&mut h, 120);
+    let order = listed(&mut h);
+    let last = order[order.len() - 1].clone();
+    scroll_list(&mut h, -100_000.);
+    let at = row_bounds(&mut h, &last).unwrap().center();
+    h.cx.simulate_mouse_move(at, None, Modifiers::none());
+    h.cx.simulate_click(at, Modifiers::none());
+    let wanted = last.clone();
+    wait_for(&mut h, "the clicked thread to open", move |h| {
+        open_thread_id(h).as_deref() == Some(wanted.as_str())
+    });
+}
+
 #[gpui_kit::test]
 fn a_folded_section_is_remembered(cx: &mut TestAppContext) {
     let mut h = harness(cx, "sidebar-prefs");
@@ -352,14 +449,14 @@ fn the_rail_and_the_list_fill_the_sidebar_and_scroll_what_overflows(cx: &mut Tes
     });
     let (list, rail) = h.sidebar.read_with(&h.cx, |sidebar, _| {
         (
-            sidebar.list_scroll.max_offset().y,
+            sidebar.thread_list.max_offset_for_scrollbar().y,
             sidebar.rail_scroll.max_offset().y,
         )
     });
     assert!(list > px(0.), "the list scrolls");
     assert!(rail > px(0.), "the rail scrolls");
     let width = h.sidebar.read_with(&h.cx, |sidebar, _| sidebar.prefs.width);
-    let row = h.cx.debug_bounds("thread-a").unwrap().size.width;
+    let row = h.cx.debug_bounds("thread-x39").unwrap().size.width;
     assert!(row > px(width / 2.), "a short row spans the list: {row:?}");
 }
 
