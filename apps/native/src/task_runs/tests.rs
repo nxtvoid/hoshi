@@ -1,0 +1,308 @@
+use super::{TaskOutcome, fold_task_runs, task_outcome};
+use crate::fold::{After, Ending, Fold};
+use crate::transcript::Row;
+use hoshi_core::{ItemContent, ThreadItem};
+
+fn at(second: u32) -> String {
+    format!("2026-11-10T10:{:02}:{:02}.000Z", second / 60, second % 60)
+}
+
+fn item(id: &str, second: u32, content: ItemContent) -> ThreadItem {
+    ThreadItem {
+        id: id.into(),
+        thread_id: "t".into(),
+        created_at: at(second),
+        content,
+    }
+}
+
+fn message(id: &str, second: u32, text: &str, steer: bool, task: Option<&str>) -> ThreadItem {
+    item(
+        id,
+        second,
+        ItemContent::UserMessage {
+            text: text.into(),
+            attachments: Vec::new(),
+            steer,
+            task_result: task.map(str::to_owned),
+            pull_request_update: None,
+            resumed: None,
+            rewind: None,
+            dropped: false,
+            model_switch: None,
+        },
+    )
+}
+
+fn user(id: &str, second: u32) -> ThreadItem {
+    message(id, second, id, false, None)
+}
+
+fn steer(id: &str, second: u32) -> ThreadItem {
+    message(id, second, id, true, None)
+}
+
+fn result(id: &str, task: &str, second: u32, status: &str) -> ThreadItem {
+    let text = format!("Delegated task {task} ({task}) [{status}]:\n{task} is done");
+    message(id, second, &text, false, Some(task))
+}
+
+fn said(id: &str, second: u32) -> ThreadItem {
+    item(
+        id,
+        second,
+        ItemContent::AssistantMessage { text: id.into() },
+    )
+}
+
+fn delegated(id: &str, task: &str) -> ThreadItem {
+    item(
+        id,
+        1,
+        ItemContent::ToolCall {
+            name: "mcp__hoshi__delegate_task".into(),
+            input: format!(r#"{{"title":"{task}"}}"#),
+            output: Some(format!(r#"{{"taskId":"{task}"}}"#)),
+            is_error: false,
+            detail: None,
+            output_omitted: false,
+            interrupted: false,
+        },
+    )
+}
+
+/// The thread's items and its rows: each item its own row, except `d1` and `d2`, which
+/// the turn folded.
+fn thread(extra: Vec<ThreadItem>) -> (Vec<ThreadItem>, Vec<Row>) {
+    let mut items = vec![
+        user("u1", 0),
+        delegated("d1", "a"),
+        delegated("d2", "b"),
+        said("started", 2),
+        result("ra", "a", 30, "completed"),
+        said("a answered", 31),
+        result("rb", "b", 90, "failed"),
+        said("summary", 92),
+    ];
+    items.extend(extra);
+    let mut rows = vec![
+        Row::Item(0),
+        Row::Fold(Fold {
+            start: 0,
+            rows: vec![Row::Item(1), Row::Item(2)],
+            ending: Ending::Answered,
+            after: After::Start,
+            duration: Some(2000),
+            tasks: false,
+        }),
+    ];
+    rows.extend((3..items.len()).map(Row::Item));
+    (items, rows)
+}
+
+fn shape(rows: &[Row], items: &[ThreadItem]) -> Vec<String> {
+    rows.iter()
+        .map(|row| match row {
+            Row::Item(index) => items[*index].id.clone(),
+            Row::Note(index, outcome) => format!("{} ({outcome:?})", items[*index].id),
+            Row::Fold(fold) => format!(
+                "[{}] {:?}",
+                shape(&fold.rows, items).join(", "),
+                fold.duration
+            ),
+            row => format!("{row:?}"),
+        })
+        .collect()
+}
+
+fn none(_: &str) -> bool {
+    false
+}
+
+fn still_b(task: &str) -> bool {
+    task == "b"
+}
+
+#[test]
+fn a_task_answer_tells_how_the_task_ended() {
+    assert_eq!(
+        task_outcome("Delegated task a (A) [completed]:\nDone"),
+        TaskOutcome::Completed
+    );
+    assert_eq!(
+        task_outcome("Delegated task a (A) [failed]:\nNo"),
+        TaskOutcome::Failed
+    );
+    assert_eq!(
+        task_outcome("Delegated task a (A) [stopped]:\n"),
+        TaskOutcome::Stopped
+    );
+}
+
+#[test]
+fn while_a_task_still_runs_its_answers_hide_and_the_replies_read_as_notes() {
+    let (items, mut rows) = thread(Vec::new());
+    rows.truncate(5);
+    assert_eq!(
+        shape(&fold_task_runs(rows, &items, &still_b), &items),
+        [
+            "u1",
+            "[d1, d2] Some(2000)",
+            "started",
+            "a answered (Completed)"
+        ]
+    );
+}
+
+#[test]
+fn once_every_task_answered_the_work_folds_behind_its_last_answer() {
+    let (items, rows) = thread(Vec::new());
+    assert_eq!(
+        shape(&fold_task_runs(rows, &items, &none), &items),
+        [
+            "u1",
+            "[d1, d2, started, a answered (Completed)] Some(92000)",
+            "summary"
+        ]
+    );
+}
+
+#[test]
+fn the_agent_still_working_on_the_last_answer_keeps_it_all_open() {
+    let (items, rows) = thread(Vec::new());
+    let shown = fold_task_runs(rows, &items, &still_b);
+    assert_eq!(shape(&shown, &items).last().unwrap(), "summary (Failed)");
+    assert!(matches!(shown[1], Row::Fold(Fold { tasks: false, .. })));
+}
+
+#[test]
+fn of_the_replies_after_the_last_answer_only_the_latest_stays_in_view() {
+    let (items, rows) = thread(vec![said("all of it", 95)]);
+    let shown = fold_task_runs(rows, &items, &none);
+    assert_eq!(
+        shape(&shown, &items),
+        [
+            "u1",
+            "[d1, d2, started, a answered (Completed), summary (Failed)] Some(95000)",
+            "all of it"
+        ]
+    );
+    assert!(matches!(shown[1], Row::Fold(Fold { tasks: true, .. })));
+}
+
+#[test]
+fn a_reply_to_a_task_still_being_written_reads_as_a_note() {
+    let (items, mut rows) = thread(Vec::new());
+    rows.truncate(4);
+    rows.push(Row::Streaming(0));
+    let shown = fold_task_runs(rows, &items, &still_b);
+    assert_eq!(
+        shown.last(),
+        Some(&Row::StreamingNote(0, TaskOutcome::Completed))
+    );
+}
+
+#[test]
+fn an_answer_being_written_after_the_last_task_answer_stays_in_view_as_text() {
+    let (items, mut rows) = thread(Vec::new());
+    rows.push(Row::Streaming(0));
+    assert_eq!(
+        shape(&fold_task_runs(rows, &items, &none), &items),
+        [
+            "u1",
+            "[d1, d2, started, a answered (Completed), summary (Failed)] Some(90000)",
+            "Streaming(0)"
+        ]
+    );
+}
+
+#[test]
+fn work_without_delegated_tasks_stays_as_it_is() {
+    let items = vec![user("u1", 0), said("done", 3)];
+    let rows = vec![Row::Item(0), Row::Item(1)];
+    assert_eq!(fold_task_runs(rows.clone(), &items, &none), rows);
+}
+
+#[test]
+fn each_message_of_the_user_starts_its_own_stretch() {
+    let (items, rows) = thread(vec![user("u2", 100), said("next", 101)]);
+    let shown = shape(&fold_task_runs(rows, &items, &none), &items);
+    assert_eq!(shown[shown.len() - 3..], ["summary", "u2", "next"]);
+}
+
+#[test]
+fn what_settled_stays_folded_while_the_agent_delegates_again() {
+    let items = vec![
+        user("u1", 0),
+        delegated("d1", "a"),
+        said("started", 2),
+        result("ra", "a", 10, "completed"),
+        delegated("d2", "b"),
+        said("got a", 12),
+    ];
+    let first: Vec<Row> = (0..4).map(Row::Item).collect();
+    assert_eq!(
+        shape(&fold_task_runs(first, &items, &none), &items),
+        ["u1", "[d1, started] Some(10000)"]
+    );
+    let second: Vec<Row> = (0..6).map(Row::Item).collect();
+    assert_eq!(
+        shape(&fold_task_runs(second, &items, &still_b), &items),
+        ["u1", "[d1, started] Some(1000)", "d2", "got a"]
+    );
+}
+
+#[test]
+fn what_the_agent_tells_the_user_between_task_answers_is_no_note() {
+    let (mut items, _) = thread(Vec::new());
+    items.truncate(6);
+    items.extend([
+        steer("steer", 32),
+        said("going well", 33),
+        result("rb", "b", 90, "completed"),
+        said("summary", 92),
+    ]);
+    let rows: Vec<Row> = (0..items.len()).map(Row::Item).collect();
+    let open = shape(
+        &fold_task_runs(rows[..8].to_vec(), &items, &still_b),
+        &items,
+    );
+    assert_eq!(
+        open[open.len() - 3..],
+        ["a answered (Completed)", "steer", "going well"]
+    );
+    assert_eq!(
+        shape(&fold_task_runs(rows, &items, &none), &items),
+        [
+            "u1",
+            "[d1, d2, started, a answered (Completed)] Some(32000)",
+            "steer",
+            "going well",
+            "summary"
+        ]
+    );
+}
+
+#[test]
+fn each_reply_goes_with_the_oldest_answer_or_message_still_without_one() {
+    let (mut items, _) = thread(Vec::new());
+    items.truncate(5);
+    items.extend([
+        steer("steer", 31),
+        said("a is done", 32),
+        result("rc", "c", 33, "completed"),
+        said("fine, thanks", 34),
+        said("c is done", 35),
+    ]);
+    let rows: Vec<Row> = (0..items.len()).map(Row::Item).collect();
+    let shown = shape(&fold_task_runs(rows, &items, &still_b), &items);
+    assert_eq!(
+        shown[shown.len() - 4..],
+        [
+            "steer",
+            "a is done (Completed)",
+            "fine, thanks",
+            "c is done (Completed)"
+        ]
+    );
+}

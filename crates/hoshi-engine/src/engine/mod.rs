@@ -1,0 +1,11 @@
+mod attachments;
+mod browser;
+mod changes;
+mod folders;
+mod providers;
+mod pull_requests;
+mod queue;
+mod settings;
+mod terminal;
+mod threads;
+mod worktrees;

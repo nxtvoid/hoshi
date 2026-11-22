@@ -66,7 +66,7 @@ The repo is indexed by [CodeGraph](https://github.com/colbymchenry/codegraph). O
 
 ## Tests
 
-- **Rust:** unit tests for a module go in a `#[cfg(test)] mod tests` at the bottom of that file. Tests that use a crate only through its public API go in that crate's `tests/` folder. UI behavior is tested headless with `#[gpui_kit::test]`.
+- **Rust:** unit tests for a module go in a `#[cfg(test)] mod tests` at the bottom of that file; once they outgrow the code beside them (a few hundred lines), in their own file as `#[cfg(test)] mod tests;` (`foo.rs` → `foo/tests.rs`). Tests that use a crate only through its public API go in that crate's `tests/` folder. UI behavior is tested headless with `#[gpui_kit::test]`.
 - **TypeScript:** the scripts' tests live in `scripts/tests` and import from `bun:test`.
 - Test behavior that can break (orchestrator decisions, provider protocol parsing, persistence). Skip tests for what types already guarantee.
 - **What agents read:** `agent-context-budget.json` holds the exact size of the instructions and MCP tool descriptions hoshi gives agents; a change to them, up or down, updates it. Before and after such a change, run the cases it touches in `crates/hoshi-engine/tests/tool_use_evals.rs` (real Claude Code, spends tokens: `cargo test -p hoshi-engine --test tool_use_evals -- --ignored`). A new case reproduces a real mistake and fails on the text before the fix.
