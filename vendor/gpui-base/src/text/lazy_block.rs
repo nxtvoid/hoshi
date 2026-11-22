@@ -34,6 +34,8 @@ pub(crate) struct BlockHeights {
     key: Option<HeightsKey>,
     width: Option<Pixels>,
     heights: Vec<Option<Pixels>>,
+    /// How many of `heights` are still unknown, so `measured` needn't look at them all.
+    unmeasured: usize,
     /// This frame: where the document starts and where each block drawn so far ends.
     top: Pixels,
     bottoms: Vec<Pixels>,
@@ -46,6 +48,7 @@ impl BlockHeights {
         if self.key != Some(key) || self.heights.len() != count {
             self.key = Some(key);
             self.heights = vec![None; count];
+            self.unmeasured = count;
         }
         self.bottoms.resize(count, px(0.));
     }
@@ -54,6 +57,7 @@ impl BlockHeights {
     pub(crate) fn forget(&mut self) {
         self.key = None;
         self.heights.clear();
+        self.unmeasured = 0;
     }
 
     /// Starts a frame of the document at `bounds`; `false` when the heights were measured at
@@ -63,6 +67,7 @@ impl BlockHeights {
         match self.width.replace(bounds.size.width) {
             Some(before) if before != bounds.size.width => {
                 self.heights.iter_mut().for_each(|height| *height = None);
+                self.unmeasured = self.heights.len();
                 false
             }
             _ => true,
@@ -83,7 +88,7 @@ impl BlockHeights {
 
     /// Whether every block was measured, so blocks out of view can stand in at their height.
     pub(crate) fn measured(&self) -> bool {
-        !self.heights.is_empty() && self.heights.iter().all(Option::is_some)
+        !self.heights.is_empty() && self.unmeasured == 0
     }
 
     /// The height the block at `ix` stands in at out of view. The first and the last block are
@@ -116,7 +121,13 @@ impl BlockHeights {
     fn record(&mut self, ix: usize, height: Pixels, bottom: Pixels) -> bool {
         self.note_bottom(ix, bottom);
         match self.heights.get_mut(ix) {
-            Some(slot) => slot.replace(height).is_none_or(|before| before == height),
+            Some(slot) => match slot.replace(height) {
+                None => {
+                    self.unmeasured -= 1;
+                    true
+                }
+                Some(before) => before == height,
+            },
             None => true,
         }
     }
