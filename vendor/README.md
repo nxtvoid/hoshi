@@ -50,7 +50,9 @@ so scrolling past it cost several times a frame's budget.
   is measured, a block outside the content mask only takes up that room; one that comes into view
   is built in prepaint, as `gpui::list` builds its items. The first and last blocks are always
   built, since their margins can collapse into the document's edges. A new document, style, rem
-  or font size, or a new width forgets the heights.
+  or font size, a new width, a reflow (`invalidate_measured_heights`, as when an inline resource
+  loads) or a frame drawn whole forgets the heights, and a block standing in while they are
+  forgotten never records the room it stood in at.
 - `src/text/document.rs`: `render_root` lays the blocks of a non-scrollable view out as
   `LazyBlock`s when given heights. `src/text/state.rs` gives them unless the view clamps to
   `max_lines`, reveals a line or fades streamed text in.

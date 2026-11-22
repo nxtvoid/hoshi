@@ -50,6 +50,12 @@ impl BlockHeights {
         self.bottoms.resize(count, px(0.));
     }
 
+    /// Forgets every height, for a document laid out anew: drawn whole, or reflowed.
+    pub(crate) fn forget(&mut self) {
+        self.key = None;
+        self.heights.clear();
+    }
+
     /// Starts a frame of the document at `bounds`; `false` when the heights were measured at
     /// another width, which forgets them.
     pub(crate) fn start(&mut self, bounds: Bounds<Pixels>) -> bool {
@@ -97,12 +103,18 @@ impl BlockHeights {
         }
     }
 
-    /// Records the room the block at `ix` took and where it ended; `false` when that room differs
-    /// from what it was laid out with.
-    fn record(&mut self, ix: usize, height: Pixels, bottom: Pixels) -> bool {
+    /// Notes where a block that stood in out of view ended. Its room is not recorded: that is
+    /// the room it stood in at, which a new width may already have made wrong.
+    fn note_bottom(&mut self, ix: usize, bottom: Pixels) {
         if let Some(end) = self.bottoms.get_mut(ix) {
             *end = bottom;
         }
+    }
+
+    /// Records the room the block at `ix` took and where it ended; `false` when that room differs
+    /// from what it was laid out with.
+    fn record(&mut self, ix: usize, height: Pixels, bottom: Pixels) -> bool {
+        self.note_bottom(ix, bottom);
         match self.heights.get_mut(ix) {
             Some(slot) => slot.replace(height).is_none_or(|before| before == height),
             None => true,
@@ -196,9 +208,7 @@ impl Element for LazyBlock {
             return;
         }
         if !bounds.intersects(&window.content_mask().bounds) {
-            self.heights
-                .borrow_mut()
-                .record(self.ix, bounds.size.height, bounds.bottom());
+            self.heights.borrow_mut().note_bottom(self.ix, bounds.bottom());
             return;
         }
         let Some(build) = self.build.take() else {
@@ -294,6 +304,29 @@ mod tests {
 
         draw(&mut heights, 90.);
         heights.sync(key(2), 3);
+        assert!(!heights.measured());
+    }
+
+    #[test]
+    fn a_stand_in_after_a_width_change_leaves_its_room_unmeasured() {
+        let mut heights = BlockHeights::default();
+        heights.sync(key(1), 3);
+        draw(&mut heights, 100.);
+        assert!(!heights.start(at(90.)));
+        heights.note_bottom(1, px(154.));
+        assert!(!heights.measured());
+        assert_eq!(heights.stand_in(1), None);
+    }
+
+    #[test]
+    fn forgotten_heights_find_no_block() {
+        let mut heights = BlockHeights::default();
+        heights.sync(key(1), 3);
+        draw(&mut heights, 100.);
+        heights.forget();
+        assert!(!heights.measured());
+        assert_eq!(heights.block_at(px(25.)), None);
+        heights.sync(key(1), 3);
         assert!(!heights.measured());
     }
 

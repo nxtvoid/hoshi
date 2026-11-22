@@ -510,6 +510,7 @@ impl TextViewState {
     /// while keeping their old sizes as hints, so the scrollbar does not
     /// collapse in the frame before the next layout measures the real heights.
     fn invalidate_measured_heights(&self) {
+        self.block_heights.borrow_mut().forget();
         let count = self.list_state.item_count();
         if count > 0 {
             self.list_state.remeasure_items(0..count);
@@ -1168,7 +1169,9 @@ impl Render for TextViewState {
             && self.max_lines.is_none()
             && node_cx.reveal.is_none()
             && node_cx.stream_fade.is_none();
-        if lazy {
+        if !lazy {
+            self.block_heights.borrow_mut().forget();
+        } else {
             let document = &self.parsed_content.document;
             self.block_heights.borrow_mut().sync(
                 super::lazy_block::HeightsKey {
