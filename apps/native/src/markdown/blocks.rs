@@ -19,30 +19,26 @@ pub fn split(text: &str) -> Option<Vec<Range<usize>>> {
     let mut after_text = false;
     let mut text_start = 0;
     let mut after_section = false;
+    let mut any_text = false;
     for line in text.split('\n') {
         let opener = fence_opener(line);
         if let Some((open, indent)) = fence {
-            if line
-                .get(..indent)
-                .unwrap_or(line)
-                .chars()
-                .any(|c| !c.is_whitespace())
-            {
+            if !is_blank(line.get(..indent).unwrap_or(line)) {
                 break;
             }
-            if opener.is_some_and(|(close, _)| {
+            if opener.is_some_and(|(close, at)| {
                 close.as_bytes()[0] == open.as_bytes()[0]
                     && close.len() >= open.len()
-                    && line.trim() == close
+                    && is_blank(&line[at + close.len()..])
             }) {
                 fence = None;
             }
-        } else if line.trim().is_empty() {
+        } else if is_blank(line) {
             after_blank = true;
             after_text = false;
         } else {
             if after_blank
-                && line_start > block_start
+                && any_text
                 && !after_section
                 && !continues(line)
                 && !starts_section(line)
@@ -63,6 +59,7 @@ pub fn split(text: &str) -> Option<Vec<Range<usize>>> {
             after_section = is_heading(line) || is_rule(line) || underline;
             after_text = opener.is_none();
             after_blank = false;
+            any_text = true;
             fence = opener;
         }
         line_start += line.len() + 1;
@@ -72,20 +69,23 @@ pub fn split(text: &str) -> Option<Vec<Range<usize>>> {
 }
 
 /// Link definitions, footnotes, HTML, directives and display math, any of which can span or
-/// tie together blocks.
+/// tie together blocks. A definition's label ends in `]:` wherever it sits: in a quote, in a
+/// list or over several lines.
 fn ties_blocks(text: &str) -> bool {
     text.contains("[^")
+        || text.contains("]:")
         || text.lines().any(|line| {
             let line = indented_up_to_three(line).unwrap_or("");
             line.starts_with(":::")
                 || line.starts_with("$$")
                 || line.starts_with('<')
                     && line[1..].starts_with(|c: char| c.is_ascii_alphabetic() || "!?/".contains(c))
-                || line.starts_with('[')
-                    && line[1..]
-                        .find(']')
-                        .is_some_and(|end| end > 0 && line[1 + end + 1..].starts_with(':'))
         })
+}
+
+/// Whether a line holds only spaces and tabs, the only whitespace Markdown counts as blank.
+fn is_blank(line: &str) -> bool {
+    line.chars().all(|c| c == ' ' || c == '\t')
 }
 
 /// The line past up to three spaces of indent, or `None` when it is indented more.

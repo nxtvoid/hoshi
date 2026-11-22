@@ -51,6 +51,9 @@ const SAMPLES: &[&str] = &[
     "costs $5 and $10\n\nthen `x`\n\n* * *\n\nend",
     "a\n\nb\nc\n---\n\nd\n\ne\n===\n\nf",
     "- item\n\nafter\n\n    code\n\n1) one\n\nlast",
+    "```\na\n```\u{00a0}\n\nb\n\nc",
+    "a\n\u{00a0}\nb\n\nc",
+    "\n\nHello\n\nthere",
 ];
 
 #[test]
@@ -64,6 +67,22 @@ fn every_block_parses_as_it_does_in_the_whole_text_at_every_streamed_prefix() {
             assert_eq!(apart, parse(source), "{source:?} cut as {blocks:?}");
         }
     }
+}
+
+#[test]
+fn blank_lines_before_the_first_text_stay_with_it() {
+    assert_eq!(pieces("\n\nHello"), ["\n\nHello"]);
+    assert_eq!(pieces("\n\na\n\nb"), ["\n\na\n\n", "b"]);
+}
+
+#[test]
+fn only_spaces_and_tabs_make_a_line_blank() {
+    assert_eq!(pieces("a\n\u{00a0}\nb"), ["a\n\u{00a0}\nb"]);
+    assert_eq!(
+        pieces("```\na\n```\u{00a0}\n\nb"),
+        ["```\na\n```\u{00a0}\n\nb"]
+    );
+    assert_eq!(pieces("```\na\n``` \t\n\nb"), ["```\na\n``` \t\n\n", "b"]);
 }
 
 #[test]
@@ -116,6 +135,8 @@ fn every_block_but_the_last_ends_and_every_block_but_the_first_starts_with_a_pla
 fn text_with_syntax_that_ties_blocks_together_stays_whole() {
     for text in [
         "[ref]\n\n[ref]: /later",
+        "> [ref]: /url\n\n[ref]",
+        "- [ref]:\n  /url\n\n[ref]",
         "a[^x]\n\n[^x]: note",
         "<details>\n\nbody\n\n</details>",
         ":::note\n\ncontent\n\n:::",
