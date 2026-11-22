@@ -31,6 +31,7 @@ pub struct ThreadAgent {
     pub id: String,
     pub title: String,
     pub state: AgentState,
+    pub provider: String,
     /// When it started, as RFC 3339.
     pub at: String,
 }
@@ -168,14 +169,22 @@ pub fn thread_agents<'a>(
     pending: &HashSet<String>,
     busy: &HashSet<String>,
 ) -> Vec<ThreadAgent> {
+    let threads: Vec<&Thread> = threads.into_iter().collect();
+    let provider = threads
+        .iter()
+        .find(|thread| thread.id == thread_id)
+        .map_or_else(hoshi_core::default_provider, |thread| {
+            thread.provider.clone()
+        });
     let tasks = threads
-        .into_iter()
+        .iter()
         .filter(|thread| thread.parent_thread_id.as_deref() == Some(thread_id))
         .map(|thread| ThreadAgent {
             kind: AgentKind::Task,
             id: thread.id.clone(),
             title: thread.title.clone(),
             state: task_state(thread, pending, busy),
+            provider: thread.provider.clone(),
             at: thread.created_at.clone(),
         });
     let subagents = calls
@@ -194,6 +203,7 @@ pub fn thread_agents<'a>(
                 id: item.id.clone(),
                 title: subagent_title(input),
                 state: subagent_state(output.is_some(), *is_error, *interrupted),
+                provider: provider.clone(),
                 at: item.created_at.clone(),
             }),
             _ => None,
@@ -323,6 +333,39 @@ mod tests {
                 (AgentKind::Task, "task", "Count files", AgentState::Waiting),
                 (AgentKind::Subagent, "a3", "look a3", AgentState::Stopped),
                 (AgentKind::Subagent, "a1", "look a1", AgentState::Done),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_task_shows_its_own_provider_and_a_subagent_its_thread_s() {
+        let mut parent = thread("t", None);
+        parent.provider = "codex".into();
+        let mut task = thread("task", Some("t"));
+        task.provider = "copilot".into();
+        let threads = [parent, task];
+        let items = [agent_call("call", "2026-11-08T10:01:00Z", None, false)];
+        let none = HashSet::new();
+
+        let providers = |threads: &[Thread]| -> Vec<(AgentKind, String)> {
+            thread_agents("t", threads, &items, &none, &none)
+                .into_iter()
+                .map(|agent| (agent.kind, agent.provider))
+                .collect()
+        };
+
+        assert_eq!(
+            providers(&threads),
+            [
+                (AgentKind::Subagent, "codex".to_owned()),
+                (AgentKind::Task, "copilot".to_owned()),
+            ]
+        );
+        assert_eq!(
+            providers(&threads[1..]),
+            [
+                (AgentKind::Subagent, hoshi_core::default_provider()),
+                (AgentKind::Task, "copilot".to_owned()),
             ]
         );
     }

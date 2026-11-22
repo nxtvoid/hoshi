@@ -139,21 +139,24 @@ impl ThreadDetails {
             }
         };
         let selector = format!("details-agent-{}", agent.id);
+        let mark_selector = format!("details-agent-mark-{}-{}", agent.id, agent.provider);
+        let dot_selector = format!("details-agent-dot-{}", agent.id);
         base.debug_selector(move || selector)
             .child(
                 div()
                     .relative()
                     .flex()
                     .flex_none()
-                    .child(icon(
-                        match agent.kind {
-                            AgentKind::Task => IconName::GitFork,
-                            AgentKind::Subagent => IconName::Bot,
-                        },
-                        colors,
-                    ))
+                    .child(
+                        svg()
+                            .debug_selector(move || mark_selector)
+                            .path(crate::composer::provider_mark(&agent.provider))
+                            .size_4()
+                            .text_color(crate::composer::provider_tint(&agent.provider, colors)),
+                    )
                     .child(
                         div()
+                            .debug_selector(move || dot_selector)
                             .absolute()
                             .right(px(-2.))
                             .bottom(px(-2.))

@@ -391,6 +391,17 @@ fn a_subagent_row_asks_to_show_its_call_in_the_transcript(cx: &mut TestAppContex
     let row =
         h.cx.debug_bounds("details-agent-call-1")
             .expect("the subagent's row shows");
+    let provider = hoshi_core::default_provider();
+    let mark = format!("details-agent-mark-call-1-{provider}");
+    assert!(
+        h.cx.debug_bounds(Box::leak(mark.into_boxed_str()))
+            .is_some(),
+        "the row shows the thread's provider mark"
+    );
+    assert!(
+        h.cx.debug_bounds("details-agent-dot-call-1").is_some(),
+        "the row keeps its status dot"
+    );
     h.cx.simulate_click(row.center(), Modifiers::default());
     redraw(&mut h.cx);
 
