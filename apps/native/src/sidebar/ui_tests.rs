@@ -400,6 +400,26 @@ fn clicking_a_row_opens_its_thread_even_far_down_the_list(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn a_reorder_keeps_the_thread_at_the_top_of_the_view(cx: &mut TestAppContext) {
+    use super::thread_list::EntryKey;
+    use gpui_kit::ListOffset;
+    let mut h = harness(cx, "sidebar-reorder");
+    let rows = |ids: &[&str]| -> Vec<EntryKey> {
+        ids.iter().map(|id| EntryKey::Row((*id).into())).collect()
+    };
+    let top = h.sidebar.update(&mut h.cx, |sidebar, _| {
+        sidebar.sync_list(rows(&["a", "b", "c", "d", "e"]));
+        sidebar.thread_list.scroll_to(ListOffset {
+            item_ix: 2,
+            offset_in_item: px(5.),
+        });
+        sidebar.sync_list(rows(&["e", "a", "b", "c", "d"]));
+        sidebar.thread_list.logical_scroll_top()
+    });
+    assert_eq!((top.item_ix, top.offset_in_item), (3, px(5.)));
+}
+
+#[gpui_kit::test]
 fn a_folded_section_is_remembered(cx: &mut TestAppContext) {
     let mut h = harness(cx, "sidebar-prefs");
     let engine = h

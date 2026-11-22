@@ -353,10 +353,17 @@ impl Sidebar {
                 .zip(keys[prefix..].iter().rev())
                 .take_while(|(a, b)| a == b)
                 .count();
+            let anchor = old.get(top.item_ix).cloned();
             self.thread_list
                 .splice(prefix..old.len() - suffix, keys.len() - prefix - suffix);
+            let kept = anchor.and_then(|anchor| keys.iter().position(|key| *key == anchor));
             if at_top {
                 self.thread_list.scroll_to(ListOffset::default());
+            } else if let Some(item_ix) = kept {
+                self.thread_list.scroll_to(ListOffset {
+                    item_ix,
+                    offset_in_item: top.offset_in_item,
+                });
             }
         }
         let count = keys.len();
