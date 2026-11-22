@@ -3,7 +3,7 @@
 ## gpui-base 0.9.1
 
 From crates.io (Apache-2.0, https://github.com/longbridge/gpui-kit), patched in through
-`[patch.crates-io]` in the root `Cargo.toml`. Three changes.
+`[patch.crates-io]` in the root `Cargo.toml`. Four changes.
 
 ### Textarea decorations
 
@@ -35,6 +35,27 @@ Upstream PRs: longbridge/gpui-kit#3970 (decorations) and #3971 (`set_tokens`).
 
 - `src/text/format/markdown.rs`: when `markdown::to_mdast` fails, `parse` shows the source as
   plain text, a paragraph per line (`plain_lines`), instead of an error in place of the text.
+
+### Long documents in a scrolling parent
+
+A long answer in the transcript laid out and painted every block on every frame while it showed,
+so scrolling past it cost several times a frame's budget.
+
+- `src/text/markdown_ext.rs`: `MarkdownExtensions::lazy_blocks` turns it on, for a view that is
+  as wide as its container. A stand-in has no width of its own, so a view that sizes its container
+  to its text, as a message bubble, must leave it off.
+- `src/text/lazy_block.rs`: `LazyBlock` draws a top-level block whole while its room is unknown
+  and records it in `BlockHeights`: from the bottom of the block above to its own bottom, so a
+  margin that collapses above it (the transcript's code blocks have one) counts. Once every block
+  is measured, a block outside the content mask only takes up that room; one that comes into view
+  is built in prepaint, as `gpui::list` builds its items. The first and last blocks are always
+  built, since their margins can collapse into the document's edges. A new document, style, rem
+  or font size, or a new width forgets the heights.
+- `src/text/document.rs`: `render_root` lays the blocks of a non-scrollable view out as
+  `LazyBlock`s when given heights. `src/text/state.rs` gives them unless the view clamps to
+  `max_lines`, reveals a line or fades streamed text in.
+- `src/text/state.rs`: `block_ix_at` finds a block from the heights for such a view too, so a
+  selection whose blocks were never painted still copies them whole, as in a scrollable view.
 
 Drop this copy and the patch once an upstream release offers the same.
 

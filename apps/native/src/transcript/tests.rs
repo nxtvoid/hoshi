@@ -568,3 +568,100 @@ fn rows_put_above_or_added_below_replace_only_what_changed() {
     let streaming = [Row::Item(0), Row::Streaming(0)];
     assert_eq!(changed_rows(&streaming, &streaming, 0), (2..2, 0));
 }
+
+/// Where `needle` is drawn, when it shows.
+fn drawn_at(cx: &mut VisualTestContext, needle: &str) -> Option<Point<gpui_kit::Pixels>> {
+    cx.update(|window, cx| {
+        gpui_kit::base::test_support::begin_frame(window);
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.update(|window, _| gpui_kit::base::test_support::texts(window))
+        .into_iter()
+        .find(|text| text.visible() && text.text().contains(needle))
+        .map(|text| text.bounds().origin + point(px(2.), text.bounds().size.height / 2.))
+}
+
+#[gpui_kit::test]
+fn a_selection_through_a_long_answer_copies_the_blocks_scrolled_past(cx: &mut TestAppContext) {
+    let text = (0..60)
+        .map(|index| format!("Paragraph {index} says word{index}."))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let answer = ThreadItem {
+        content: ItemContent::AssistantMessage { text },
+        ..message(0)
+    };
+    let (mut cx, _, _) = open_with(cx, vec![answer]);
+    let start = drawn_at(&mut cx, "Paragraph 57").expect("the answer's end shows");
+    assert!(
+        drawn_at(&mut cx, "Paragraph 20").is_none(),
+        "far up is out of view"
+    );
+
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    for _ in 0..12 {
+        cx.simulate_event(gpui_kit::ScrollEvent {
+            position: start,
+            delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(80.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    let end = drawn_at(&mut cx, "Paragraph 20").expect("scrolled up to it");
+    assert!(
+        drawn_at(&mut cx, "Paragraph 57").is_none(),
+        "the start scrolled away"
+    );
+    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+
+    let copied = selected(&mut cx);
+    for index in 21..57 {
+        assert!(
+            copied.contains(&format!("Paragraph {index} says word{index}.")),
+            "paragraph {index} missing: {copied:?}"
+        );
+    }
+    assert!(copied.contains("Paragraph 57"), "{copied:?}");
+    assert!(!copied.contains("word58"), "{copied:?}");
+    assert!(!copied.contains("Paragraph 19"), "{copied:?}");
+    assert!(copied.contains("\n\n"), "paragraphs stay apart: {copied:?}");
+}
+
+#[gpui_kit::test]
+fn a_long_answer_keeps_its_height_as_it_scrolls_past(cx: &mut TestAppContext) {
+    let text = (0..40)
+        .map(|index| match index % 4 {
+            0 => format!("Paragraph {index} with `code` and **bold**."),
+            1 => format!("```rust\nfn step_{index}() {{}}\n```"),
+            2 => format!("| a | b |\n| - | - |\n| {index} | x |"),
+            _ => format!("- item {index}\n- another"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let answer = ThreadItem {
+        content: ItemContent::AssistantMessage { text },
+        ..message(0)
+    };
+    let (mut cx, _, _) = open_with(cx, vec![answer]);
+    let height = |cx: &mut VisualTestContext| {
+        cx.debug_bounds("answer-m0")
+            .expect("the answer shows")
+            .size
+            .height
+    };
+    let whole = height(&mut cx);
+    for step in 0..30 {
+        cx.simulate_event(gpui_kit::ScrollEvent {
+            position: point(px(400.), px(200.)),
+            delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(120.))),
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(height(&mut cx), whole, "after {step} steps up");
+    }
+}

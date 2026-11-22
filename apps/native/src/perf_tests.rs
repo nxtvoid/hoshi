@@ -6,8 +6,8 @@ use crate::HoshiWindow;
 use crate::state::{self, Workspace};
 use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::{
-    AppContext as _, Bounds, Entity, Point, TestAppContext, VisualTestContext, WindowBounds,
-    WindowOptions, px, size,
+    AppContext as _, Bounds, Entity, Modifiers, Point, ScrollDelta, ScrollEvent, TestAppContext,
+    VisualTestContext, WindowBounds, WindowOptions, point, px, size,
 };
 use hoshi_core::{
     AccessMode, Command, Event, EventEnvelope, ItemContent, Rewind, StreamDelta, StreamKind,
@@ -133,6 +133,11 @@ fn redraw(cx: &mut VisualTestContext) {
 
 /// Thread `t` open with a long transcript, among `threads` others in the sidebar.
 fn harness(cx: &mut TestAppContext, threads: usize) -> Harness {
+    harness_with(cx, threads, transcript(20))
+}
+
+/// Thread `t` open with `items`, among `threads` others in the sidebar.
+fn harness_with(cx: &mut TestAppContext, threads: usize, items: Vec<ThreadItem>) -> Harness {
     cx.executor().allow_parking();
     let dir = std::env::temp_dir().join(format!("hoshi-perf-{}", uuid::Uuid::new_v4()));
     let home = dir.join("home");
@@ -157,7 +162,7 @@ fn harness(cx: &mut TestAppContext, threads: usize) -> Harness {
             .unwrap();
     }
     let mut store = hoshi_store::Store::open(&home.join("state.sqlite")).unwrap();
-    let events: Vec<Event> = transcript(20)
+    let events: Vec<Event> = items
         .into_iter()
         .map(|item| Event::ItemAdded { item })
         .collect();
@@ -340,5 +345,48 @@ fn stream_reply(cx: &mut TestAppContext, paragraphs: usize) {
         reply.len(),
         batches.len(),
         batches[batches.len() * 9 / 10]
+    );
+}
+
+/// Replies the size of a document each, as when the agent wrote one.
+fn long_replies(count: usize, paragraphs: usize) -> Vec<ThreadItem> {
+    let mut items = Vec::new();
+    for turn in 0..count {
+        items.push(user(format!("u{turn}"), format!("Write document {turn}.")));
+        items.push(item(
+            format!("a{turn}"),
+            ItemContent::AssistantMessage {
+                text: answer_text(turn, paragraphs),
+            },
+        ));
+    }
+    items
+}
+
+#[gpui_kit::test]
+#[ignore]
+fn perf_window_scrolling_long_replies(cx: &mut TestAppContext) {
+    let mut h = harness_with(cx, threads(), long_replies(3, 150));
+    let at = point(px(900.), px(450.));
+    h.cx.simulate_mouse_move(at, None, Modifiers::none());
+    redraw(&mut h.cx);
+    let mut frames = Vec::new();
+    for _ in 0..200 {
+        let start = Instant::now();
+        h.cx.simulate_event(ScrollEvent {
+            position: at,
+            delta: ScrollDelta::Pixels(point(px(0.), px(60.))),
+            ..Default::default()
+        });
+        h.cx.run_until_parked();
+        frames.push(start.elapsed());
+    }
+    let mean = frames.iter().sum::<Duration>() / frames.len() as u32;
+    frames.sort();
+    eprintln!(
+        "scrolling 3 replies of {} bytes: frames={} mean={mean:?} p90={:?}",
+        answer_text(0, 150).len(),
+        frames.len(),
+        frames[frames.len() * 9 / 10]
     );
 }

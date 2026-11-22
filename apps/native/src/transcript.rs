@@ -1225,7 +1225,7 @@ fn render_item(item: &ThreadItem, ctx: &WorkContext, cx: &App) -> AnyElement {
 }
 
 fn markdown(id: &str, text: &str, colors: &Colors) -> TextView {
-    crate::markdown::markdown(SharedString::from(id.to_owned()), text.to_owned(), colors)
+    crate::markdown::answer_markdown(SharedString::from(id.to_owned()), text.to_owned(), colors)
 }
 
 /// A block of a reply being written. One that more blocks follow is spaced from the next as
