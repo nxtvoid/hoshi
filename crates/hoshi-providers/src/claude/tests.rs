@@ -1,3 +1,4 @@
+use super::parser::*;
 use super::*;
 use crate::agent_processes::tests::noting;
 use hoshi_core::{SubagentEffort, ToolDetail};
