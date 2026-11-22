@@ -1,4 +1,9 @@
 use super::*;
+use chrono::DateTime;
+
+const AGENT_ROW_HEIGHT: Rems = rems(2.);
+const ACTIVE_AGENTS_SHOWN: f32 = 7.5;
+const PREVIOUS_AGENTS_SHOWN: f32 = 6.;
 
 impl ThreadDetails {
     pub(super) fn agents_section(
@@ -16,71 +21,6 @@ impl ThreadDetails {
             .into_iter()
             .partition(|agent| agent.state.is_active());
         let now = Utc::now();
-        let agent_row = |agent: ThreadAgent, cx: &mut Context<Self>| {
-            let base = match agent.kind {
-                AgentKind::Task => {
-                    let id = agent.id.clone();
-                    row(
-                        SharedString::from(format!("details-agent-{}", agent.id)),
-                        colors,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_thread(id.clone(), cx)))
-                }
-                AgentKind::Subagent => {
-                    let id = agent.id.clone();
-                    row(
-                        SharedString::from(format!("details-agent-{}", agent.id)),
-                        colors,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| this.show_item(id.clone(), cx)))
-                }
-            };
-            let selector = format!("details-agent-{}", agent.id);
-            base.debug_selector(move || selector)
-                .child(
-                    div()
-                        .relative()
-                        .flex()
-                        .flex_none()
-                        .child(icon(
-                            match agent.kind {
-                                AgentKind::Task => IconName::GitFork,
-                                AgentKind::Subagent => IconName::Bot,
-                            },
-                            colors,
-                        ))
-                        .child(
-                            div()
-                                .absolute()
-                                .right(px(-2.))
-                                .bottom(px(-2.))
-                                .size(px(6.))
-                                .rounded_full()
-                                .border_2()
-                                .border_color(colors.popover)
-                                .bg(agent_dot(agent.state, colors)),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .child(if agent.title.is_empty() {
-                            m::subagent()
-                        } else {
-                            agent.title.clone()
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(colors.muted_foreground)
-                        .child(relative_time(&agent.at, now)),
-                )
-        };
         let mut column = column
             .child(separator(colors))
             .child(section_label(m::agents(), colors));
@@ -99,19 +39,14 @@ impl ThreadDetails {
             );
         }
         if !active.is_empty() {
-            let rows: Vec<_> = active
-                .into_iter()
-                .map(|agent| agent_row(agent, cx))
-                .collect();
-            column = column.child(
-                div()
-                    .id("details-agents-active")
-                    .flex()
-                    .flex_col()
-                    .max_h(px(240.))
-                    .overflow_y_scroll()
-                    .children(rows),
-            );
+            column = column.child(Self::agent_list(
+                "details-agents-active",
+                active,
+                ACTIVE_AGENTS_SHOWN,
+                now,
+                colors,
+                cx,
+            ));
         }
         if !previous.is_empty() {
             let open = self.previous_agents_open;
@@ -142,21 +77,111 @@ impl ThreadDetails {
                     })),
             );
             if open {
-                let rows: Vec<_> = previous
-                    .into_iter()
-                    .map(|agent| agent_row(agent, cx))
-                    .collect();
-                column = column.child(
-                    div()
-                        .id("details-agents-previous-list")
-                        .flex()
-                        .flex_col()
-                        .max_h(px(192.))
-                        .overflow_y_scroll()
-                        .children(rows),
-                );
+                column = column.child(Self::agent_list(
+                    "details-agents-previous-list",
+                    previous,
+                    PREVIOUS_AGENTS_SHOWN,
+                    now,
+                    colors,
+                    cx,
+                ));
             }
         }
         column
+    }
+
+    /// A list of agents that builds only the rows in view, however many there are.
+    fn agent_list(
+        id: &'static str,
+        agents: Vec<ThreadAgent>,
+        shown: f32,
+        now: DateTime<Utc>,
+        colors: &Colors,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let count = agents.len();
+        let colors = colors.clone();
+        uniform_list(
+            id,
+            count,
+            cx.processor(move |_, range: std::ops::Range<usize>, _, cx| {
+                range
+                    .map(|index| Self::agent_row(agents[index].clone(), now, &colors, cx))
+                    .collect::<Vec<_>>()
+            }),
+        )
+        .w_full()
+        .h(AGENT_ROW_HEIGHT * (count as f32).min(shown))
+    }
+
+    fn agent_row(
+        agent: ThreadAgent,
+        now: DateTime<Utc>,
+        colors: &Colors,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let base = match agent.kind {
+            AgentKind::Task => {
+                let id = agent.id.clone();
+                row(
+                    SharedString::from(format!("details-agent-{}", agent.id)),
+                    colors,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.open_thread(id.clone(), cx)))
+            }
+            AgentKind::Subagent => {
+                let id = agent.id.clone();
+                row(
+                    SharedString::from(format!("details-agent-{}", agent.id)),
+                    colors,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.show_item(id.clone(), cx)))
+            }
+        };
+        let selector = format!("details-agent-{}", agent.id);
+        base.debug_selector(move || selector)
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_none()
+                    .child(icon(
+                        match agent.kind {
+                            AgentKind::Task => IconName::GitFork,
+                            AgentKind::Subagent => IconName::Bot,
+                        },
+                        colors,
+                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .right(px(-2.))
+                            .bottom(px(-2.))
+                            .size(px(6.))
+                            .rounded_full()
+                            .border_2()
+                            .border_color(colors.popover)
+                            .bg(agent_dot(agent.state, colors)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(if agent.title.is_empty() {
+                        m::subagent()
+                    } else {
+                        agent.title.clone()
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_xs()
+                    .font_weight(FontWeight::NORMAL)
+                    .text_color(colors.muted_foreground)
+                    .child(relative_time(&agent.at, now)),
+            )
     }
 }

@@ -1,4 +1,9 @@
 use super::*;
+use std::rc::Rc;
+
+/// How far gpui's list scrolls for each line a mouse wheel turns; a scroll area goes a line
+/// height, so the list makes up the rest to scroll as far as the rest of the app.
+const LIST_LINE_HEIGHT: Pixels = px(20.);
 
 impl Sidebar {
     pub(super) fn list(&mut self, colors: &Colors, cx: &mut Context<Self>) -> AnyElement {
@@ -96,6 +101,8 @@ impl Sidebar {
         let narrowed = !search.is_empty() || self.prefs.filter != Filter::All;
         let only_active = !inbox && sections.len() == 1 && sections[0].id == SectionId::Active;
         let body = if sections.is_empty() {
+            self.sync_list(Vec::new());
+            self.list_view = None;
             empty_message(
                 if narrowed {
                     m::no_matching_threads()
@@ -110,20 +117,31 @@ impl Sidebar {
             )
         } else {
             let force_open = !search.is_empty();
+            let entries = self.list_entries(sections, !only_active, force_open, &rows);
+            self.sync_list(entries.iter().map(ListEntry::key).collect());
+            self.list_view = Some(Rc::new(ListView { entries, rows }));
+            let state = self.thread_list.clone();
             div()
-                .id("thread-sections")
-                .track_scroll(&self.list_scroll)
                 .flex_1()
                 .min_h_0()
+                .w_full()
                 .flex()
                 .flex_col()
-                .gap_1()
-                .px(px(6.))
-                .pb_2()
-                .overflow_y_scroll()
-                .children(sections.into_iter().map(|section| {
-                    self.section(section, !only_active, force_open, &rows, colors, cx)
-                }))
+                .on_scroll(move |event, window, _| {
+                    if let ScrollDelta::Lines(lines) = event.delta {
+                        let line = window.line_height() - LIST_LINE_HEIGHT;
+                        state.scroll_by(-(line * lines.y));
+                    }
+                })
+                .child(
+                    list(
+                        self.thread_list.clone(),
+                        cx.processor(|this, index, _, cx| this.list_entry(index, cx)),
+                    )
+                    .flex_1()
+                    .min_h_0()
+                    .w_full(),
+                )
                 .into_any_element()
         };
 
@@ -269,123 +287,254 @@ impl Sidebar {
         )
     }
 
-    pub(super) fn section(
-        &mut self,
-        section: Section,
+    /// The sections as one flat list: each header, then the rows it shows.
+    pub(super) fn list_entries(
+        &self,
+        sections: Vec<Section>,
         show_header: bool,
         force_open: bool,
         rows: &RowContext,
-        colors: &Colors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let id = section.id;
-        let open = force_open || !self.prefs.collapsed.contains(&id);
-        let count = section.threads.len();
-        let merged: Vec<String> = if id == SectionId::Done {
-            section
+    ) -> Vec<ListEntry> {
+        let mut entries = Vec::new();
+        for (index, section) in sections.into_iter().enumerate() {
+            let id = section.id;
+            let open = force_open || !self.prefs.collapsed.contains(&id);
+            let count = section.threads.len();
+            let merged: Vec<String> = if id == SectionId::Done {
+                section
+                    .threads
+                    .iter()
+                    .filter(|thread| {
+                        thread.status != ThreadStatus::Working
+                            && merged_cleanup(thread, rows.pull_requests.get(&thread.id)).is_some()
+                    })
+                    .map(|thread| thread.id.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let mut gap = if index > 0 { Gap::Section } else { Gap::None };
+            if show_header {
+                entries.push(ListEntry::Header {
+                    id,
+                    count,
+                    merged,
+                    open,
+                    force_open,
+                    gap,
+                });
+                gap = Gap::None;
+            }
+            let shown = section
                 .threads
+                .into_iter()
+                .filter(|thread| open || rows.open.as_deref() == Some(thread.id.as_str()));
+            for thread in shown {
+                entries.push(ListEntry::Row {
+                    thread: Box::new(thread),
+                    gap,
+                });
+                gap = Gap::Row;
+            }
+        }
+        entries
+    }
+
+    /// Tells the list which entries changed since it last drew, keeping its scroll.
+    pub(super) fn sync_list(&mut self, keys: Vec<EntryKey>) {
+        let old = &self.list_keys;
+        if *old != keys {
+            let top = self.thread_list.logical_scroll_top();
+            let at_top = top.item_ix == 0 && top.offset_in_item <= px(0.);
+            let prefix = old.iter().zip(&keys).take_while(|(a, b)| a == b).count();
+            let suffix = old[prefix..]
                 .iter()
-                .filter(|thread| {
-                    thread.status != ThreadStatus::Working
-                        && merged_cleanup(thread, rows.pull_requests.get(&thread.id)).is_some()
-                })
-                .map(|thread| thread.id.clone())
-                .collect()
-        } else {
-            Vec::new()
+                .rev()
+                .zip(keys[prefix..].iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let anchor = old.get(top.item_ix).cloned();
+            self.thread_list
+                .splice(prefix..old.len() - suffix, keys.len() - prefix - suffix);
+            let kept = anchor.and_then(|anchor| keys.iter().position(|key| *key == anchor));
+            if at_top {
+                self.thread_list.scroll_to(ListOffset::default());
+            } else if let Some(item_ix) = kept {
+                self.thread_list.scroll_to(ListOffset {
+                    item_ix,
+                    offset_in_item: top.offset_in_item,
+                });
+            }
+        }
+        let count = keys.len();
+        self.list_keys = keys;
+        self.thread_list.remeasure_items(0..count);
+    }
+
+    /// One entry of the list, drawn only while it is in view.
+    pub(super) fn list_entry(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(view) = self.list_view.clone() else {
+            return div().into_any_element();
         };
-        let shown: Vec<Thread> = section
-            .threads
-            .into_iter()
-            .filter(|thread| open || rows.open.as_deref() == Some(thread.id.as_str()))
-            .collect();
+        let Some(entry) = view.entries.get(index) else {
+            return div().into_any_element();
+        };
+        let colors = cx.hoshi().clone();
+        let (gap, content) = match entry {
+            ListEntry::Header {
+                id,
+                count,
+                merged,
+                open,
+                force_open,
+                gap,
+            } => (
+                *gap,
+                self.section_header(*id, *count, merged.clone(), *open, *force_open, &colors, cx)
+                    .into_any_element(),
+            ),
+            ListEntry::Row { thread, gap } => {
+                (*gap, self.row((**thread).clone(), &view.rows, &colors, cx))
+            }
+        };
         div()
+            .w_full()
             .flex()
             .flex_col()
-            .when(show_header, |this| {
+            .px(px(6.))
+            .when(gap == Gap::Section, |this| this.pt_1())
+            .when(gap == Gap::Row, |this| this.pt(px(1.)))
+            .when(index + 1 == view.entries.len(), |this| this.pb_2())
+            .child(content)
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn section_header(
+        &mut self,
+        id: SectionId,
+        count: usize,
+        merged: Vec<String>,
+        open: bool,
+        force_open: bool,
+        colors: &Colors,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .id(SharedString::from(format!("section-{id:?}")))
+                    .debug_selector(move || format!("section-{id:?}"))
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .rounded_md()
+                    .text_size(rems(0.6875))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.muted_foreground)
+                    .when(!force_open, |this| {
+                        this.cursor_pointer()
+                            .hover(|this| this.text_color(colors.sidebar_foreground))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_section(id, cx)),
+                            )
+                    })
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .size_3(),
+                    )
+                    .child(section_label(id).to_uppercase())
+                    .child(
+                        div()
+                            .ml_auto()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(count.to_string()),
+                    ),
+            )
+            .when(!merged.is_empty(), |this| {
+                let label = m::cleanup_merged(merged.len());
+                let running = self.cleaning_merged;
                 this.child(
                     div()
+                        .id("clean-up-merged")
+                        .mt_1()
+                        .mr_1()
+                        .size_5()
+                        .flex_none()
                         .flex()
                         .items_center()
-                        .gap_1()
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("section-{id:?}")))
-                                .debug_selector(move || format!("section-{id:?}"))
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_2()
-                                .pt_2()
-                                .pb_1()
-                                .rounded_md()
-                                .text_size(rems(0.6875))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(colors.muted_foreground)
-                                .when(!force_open, |this| {
-                                    this.cursor_pointer()
-                                        .hover(|this| this.text_color(colors.sidebar_foreground))
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.toggle_section(id, cx)
-                                        }))
+                        .justify_center()
+                        .rounded(px(4.))
+                        .text_color(colors.muted_foreground)
+                        .when(running, |this| this.opacity(0.5))
+                        .when(!running, |this| {
+                            this.cursor_pointer()
+                                .hover(|this| {
+                                    this.bg(colors.sidebar_accent)
+                                        .text_color(colors.sidebar_foreground)
                                 })
-                                .child(
-                                    Icon::new(if open {
-                                        IconName::ChevronDown
-                                    } else {
-                                        IconName::ChevronRight
-                                    })
-                                    .size_3(),
-                                )
-                                .child(section_label(id).to_uppercase())
-                                .child(
-                                    div()
-                                        .ml_auto()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(count.to_string()),
-                                ),
-                        )
-                        .when(!merged.is_empty(), |this| {
-                            let label = m::cleanup_merged(merged.len());
-                            let running = self.cleaning_merged;
-                            this.child(
-                                div()
-                                    .id("clean-up-merged")
-                                    .mt_1()
-                                    .mr_1()
-                                    .size_5()
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(4.))
-                                    .text_color(colors.muted_foreground)
-                                    .when(running, |this| this.opacity(0.5))
-                                    .when(!running, |this| {
-                                        this.cursor_pointer()
-                                            .hover(|this| {
-                                                this.bg(colors.sidebar_accent)
-                                                    .text_color(colors.sidebar_foreground)
-                                            })
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.clean_up_merged(merged.clone(), window, cx)
-                                            }))
-                                    })
-                                    .child(Icon::new(IconName::Brush).size(px(14.)))
-                                    .with_tooltip(Tooltip::new(label).side(Side::Right)),
-                            )
-                        }),
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.clean_up_merged(merged.clone(), window, cx)
+                                }))
+                        })
+                        .child(Icon::new(IconName::Brush).size(px(14.)))
+                        .with_tooltip(Tooltip::new(label).side(Side::Right)),
                 )
             })
-            .child(
-                div().flex().flex_col().gap_px().children(
-                    shown
-                        .into_iter()
-                        .map(|thread| self.row(thread, rows, colors, cx)),
-                ),
-            )
-            .into_any_element()
+    }
+}
+
+/// What the list draws, kept between its frames.
+pub(super) struct ListView {
+    entries: Vec<ListEntry>,
+    rows: RowContext,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gap {
+    None,
+    Section,
+    Row,
+}
+
+pub(super) enum ListEntry {
+    Header {
+        id: SectionId,
+        count: usize,
+        merged: Vec<String>,
+        open: bool,
+        force_open: bool,
+        gap: Gap,
+    },
+    Row {
+        thread: Box<Thread>,
+        gap: Gap,
+    },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) enum EntryKey {
+    Header(SectionId),
+    Row(String),
+}
+
+impl ListEntry {
+    fn key(&self) -> EntryKey {
+        match self {
+            Self::Header { id, .. } => EntryKey::Header(*id),
+            Self::Row { thread, .. } => EntryKey::Row(thread.id.clone()),
+        }
     }
 }

@@ -282,6 +282,62 @@ fn a_disabled_git_action_says_why_on_hover(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn a_long_list_of_previous_agents_draws_only_the_rows_in_view(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-many-agents", 1200.);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    let open = workspace
+        .read_with(&h.cx, |workspace, _| workspace.open.clone())
+        .expect("the thread is open");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while open.read_with(&h.cx, |thread, _| thread.loading) {
+        assert!(Instant::now() < deadline, "timed out loading the thread");
+        redraw(&mut h.cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let count = 50;
+    open.update(&mut h.cx, |thread, cx| {
+        for index in 0..count {
+            thread.items.push(hoshi_core::ThreadItem {
+                id: format!("call-{index}"),
+                thread_id: "t".into(),
+                created_at: "2026-11-13T10:00:00Z".into(),
+                content: hoshi_core::ItemContent::ToolCall {
+                    name: "Agent".into(),
+                    input: r#"{"description":"Look around","subagent_type":"Explore"}"#.into(),
+                    output: Some("done".into()),
+                    is_error: false,
+                    detail: None,
+                    output_omitted: false,
+                    interrupted: false,
+                },
+            });
+        }
+        cx.notify();
+    });
+    h.details.update(&mut h.cx, |details, cx| {
+        details.previous_agents_open = true;
+        details.toggle(cx);
+    });
+    redraw(&mut h.cx);
+
+    let drawn = (0..count)
+        .filter(|index| {
+            h.cx.debug_bounds(Box::leak(
+                format!("details-agent-call-{index}").into_boxed_str(),
+            ))
+            .is_some()
+        })
+        .count();
+    assert!(drawn > 0, "the first previous agents show");
+    assert!(
+        drawn < count,
+        "only the rows in view are drawn, not all {count}"
+    );
+}
+
+#[gpui_kit::test]
 fn a_subagent_row_asks_to_show_its_call_in_the_transcript(cx: &mut TestAppContext) {
     use super::DetailsEvent;
     use hoshi_core::{ItemContent, ThreadItem};
