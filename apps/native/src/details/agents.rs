@@ -31,6 +31,7 @@ pub struct ThreadAgent {
     pub id: String,
     pub title: String,
     pub state: AgentState,
+    pub provider: String,
     /// When it started, as RFC 3339.
     pub at: String,
 }
@@ -168,14 +169,22 @@ pub fn thread_agents<'a>(
     pending: &HashSet<String>,
     busy: &HashSet<String>,
 ) -> Vec<ThreadAgent> {
+    let threads: Vec<&Thread> = threads.into_iter().collect();
+    let provider = threads
+        .iter()
+        .find(|thread| thread.id == thread_id)
+        .map_or_else(hoshi_core::default_provider, |thread| {
+            thread.provider.clone()
+        });
     let tasks = threads
-        .into_iter()
+        .iter()
         .filter(|thread| thread.parent_thread_id.as_deref() == Some(thread_id))
         .map(|thread| ThreadAgent {
             kind: AgentKind::Task,
             id: thread.id.clone(),
             title: thread.title.clone(),
             state: task_state(thread, pending, busy),
+            provider: thread.provider.clone(),
             at: thread.created_at.clone(),
         });
     let subagents = calls
@@ -194,6 +203,7 @@ pub fn thread_agents<'a>(
                 id: item.id.clone(),
                 title: subagent_title(input),
                 state: subagent_state(output.is_some(), *is_error, *interrupted),
+                provider: provider.clone(),
                 at: item.created_at.clone(),
             }),
             _ => None,

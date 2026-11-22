@@ -145,13 +145,12 @@ impl ThreadDetails {
                     .relative()
                     .flex()
                     .flex_none()
-                    .child(icon(
-                        match agent.kind {
-                            AgentKind::Task => IconName::GitFork,
-                            AgentKind::Subagent => IconName::Bot,
-                        },
-                        colors,
-                    ))
+                    .child(
+                        svg()
+                            .path(crate::composer::provider_mark(&agent.provider))
+                            .size_4()
+                            .text_color(crate::composer::provider_tint(&agent.provider, colors)),
+                    )
                     .child(
                         div()
                             .absolute()
