@@ -29,6 +29,14 @@ pub enum Row {
     /// A run of tool calls and reasoning, by their index in the thread's items.
     Work(Vec<usize>),
     Streaming(usize),
+    /// A block of a reply being written, by the stream's index and the block's place in its
+    /// text, so that only the last block is drawn again as the reply grows. `more` when the
+    /// reply's next block follows.
+    ReplyBlock {
+        stream: usize,
+        text: Range<usize>,
+        more: bool,
+    },
     /// A finished turn's work, behind one line.
     Fold(Fold),
     /// How long the running turn has worked, since the item at the index, where its work
@@ -56,7 +64,7 @@ impl Row {
         match self {
             Self::Item(index) => Self::Item(index + by),
             Self::Work(indices) => Self::Work(indices.iter().map(|index| index + by).collect()),
-            Self::Streaming(index) => Self::Streaming(*index),
+            Self::Streaming(_) | Self::ReplyBlock { .. } => self.clone(),
             Self::Fold(fold) => Self::Fold(Fold {
                 start: fold.start + by,
                 rows: fold.rows.iter().map(|row| row.shifted(by)).collect(),
@@ -107,6 +115,9 @@ pub struct TranscriptView {
 }
 
 const CLOCK_EVERY: Duration = Duration::from_secs(30);
+
+/// The space below each row.
+const ROW_GAP: Rems = rems(1.);
 
 /// Rows left above the viewport when the page before them starts loading.
 const LOAD_OLDER_WITHIN: usize = 5;
@@ -403,6 +414,7 @@ fn row_of(rows: &[Row], index: usize, items: &[ThreadItem]) -> Option<(usize, Op
             Row::Fold(fold) => fold.rows.iter().any(|row| holds(row, index)),
             Row::Agents(indices) => indices.contains(&index),
             Row::Streaming(_)
+            | Row::ReplyBlock { .. }
             | Row::StreamingNote(..)
             | Row::Status(_)
             | Row::Background
@@ -565,7 +577,40 @@ fn build_rows(
     if task_waits && !working {
         rows.push(Row::TaskWaits);
     }
-    rows
+    reply_blocks(rows, thread)
+}
+
+/// The replies being written, each cut into its blocks when it has several.
+fn reply_blocks(rows: Vec<Row>, thread: &ThreadState) -> Vec<Row> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let blocks = match &row {
+            Row::Streaming(stream) => thread
+                .streaming
+                .get(*stream)
+                .filter(|streaming| streaming.kind == StreamKind::Text)
+                .and_then(|streaming| crate::markdown::blocks::split(&streaming.text))
+                .filter(|blocks| blocks.len() > 1)
+                .map(|blocks| (*stream, blocks)),
+            _ => None,
+        };
+        let Some((stream, blocks)) = blocks else {
+            out.push(row);
+            continue;
+        };
+        let last = blocks.len() - 1;
+        out.extend(
+            blocks
+                .into_iter()
+                .enumerate()
+                .map(|(index, text)| Row::ReplyBlock {
+                    stream,
+                    text,
+                    more: index < last,
+                }),
+        );
+    }
+    out
 }
 
 /// The thread's items as rows, with the marks of where runs end and start that turns fold by.
@@ -767,7 +812,7 @@ impl Render for TranscriptView {
                                 .child(Lane::new().child(row))
                         },
                     )
-                    .with_row_style(StyleRefinement::default().pb_4())
+                    .with_row_style(StyleRefinement::default().pb(ROW_GAP))
                     .with_bottom_fade(fade)
                     .with_jump_button_label(m::scroll_to_end())
                     .with_jump_button_renderer(|button| {
@@ -809,6 +854,20 @@ fn render_row(row: &Row, last: bool, ctx: &WorkContext, cx: &App) -> AnyElement 
                     work::reasoning(&streaming.item_id, &streaming.text, true, ctx)
                 }
                 _ => render_text(&streaming.item_id, &streaming.text, false, ctx.colors),
+            })
+            .unwrap_or_else(|| div().into_any_element()),
+        Row::ReplyBlock { stream, text, more } => thread
+            .streaming
+            .get(*stream)
+            .and_then(|streaming| {
+                let block = streaming.text.get(text.clone())?;
+                Some(reply_block(
+                    &streaming.item_id,
+                    text.start,
+                    block,
+                    *more,
+                    ctx.colors,
+                ))
             })
             .unwrap_or_else(|| div().into_any_element()),
         Row::StreamingNote(streaming, outcome) => thread
@@ -1167,6 +1226,23 @@ fn render_item(item: &ThreadItem, ctx: &WorkContext, cx: &App) -> AnyElement {
 
 fn markdown(id: &str, text: &str, colors: &Colors) -> TextView {
     crate::markdown::markdown(SharedString::from(id.to_owned()), text.to_owned(), colors)
+}
+
+/// A block of a reply being written. One that more blocks follow is spaced from the next as
+/// blocks are inside the whole reply, in place of the gap between rows.
+fn reply_block(item_id: &str, start: usize, text: &str, more: bool, colors: &Colors) -> AnyElement {
+    let id = match start {
+        0 => item_id.to_owned(),
+        start => format!("{item_id}@{start}"),
+    };
+    div()
+        .text_sm()
+        .text_color(colors.foreground)
+        .when(more, |block| {
+            block.mb(crate::markdown::PARAGRAPH_GAP - ROW_GAP)
+        })
+        .child(markdown(&id, text, colors))
+        .into_any_element()
 }
 
 fn render_text(id: &str, text: &str, muted: bool, colors: &Colors) -> AnyElement {

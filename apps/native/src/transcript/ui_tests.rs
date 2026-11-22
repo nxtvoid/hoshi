@@ -3,7 +3,7 @@ use crate::state::ThreadState;
 use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::{
     AppContext as _, Bounds, Entity, Modifiers, Point, TestAppContext, VisualTestContext,
-    WindowBounds, WindowOptions, px, size,
+    WindowBounds, WindowOptions, point, px, size,
 };
 use hoshi_core::{
     CompactionStatus, ItemContent, Rewind, Task, TaskStatus, ThreadItem, TurnFailure, TurnRetry,
@@ -863,4 +863,68 @@ fn a_retry_shows_beside_the_status_until_it_clears(cx: &mut TestAppContext) {
     view.update(&mut cx, |view, cx| view.set_retry(None, cx));
     redraw(&mut cx);
     assert!(!shows(&mut cx, "turn-retry"));
+}
+
+/// Where each piece of the reply's text is drawn, from the first piece.
+fn reply_layout(cx: &mut VisualTestContext, reply: &str) -> Vec<(String, Point<gpui_kit::Pixels>)> {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        gpui_kit::base::test_support::begin_frame(window);
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    let texts = cx.update(|window, _| gpui_kit::base::test_support::texts(window));
+    let pieces: Vec<_> = texts
+        .into_iter()
+        .filter(|text| !text.text().trim().is_empty() && reply.contains(text.text()))
+        .map(|text| (text.text().to_owned(), text.bounds().origin))
+        .collect();
+    let first = pieces.first().expect("the reply is drawn").1;
+    pieces
+        .into_iter()
+        .map(|(text, origin)| (text, point(origin.x - first.x, origin.y - first.y)))
+        .collect()
+}
+
+#[gpui_kit::test]
+fn a_reply_drawn_a_block_at_a_time_lays_out_as_the_whole_reply(cx: &mut TestAppContext) {
+    let reply = "First paragraph with `code` and **bold** words.\n\n\
+                 - one\n- two\n\n  continued\n\n\
+                 ```rust\nfn main() {}\n```\n\n\
+                 Then a paragraph.\n\n\
+                 ## A heading\n\n\
+                 Under the heading.\n\n\
+                 ---\n\n\
+                 | a | b |\n| - | - |\n| 1 | 2 |\n\n\
+                 > quoted\n\n\
+                 The end.";
+    assert!(crate::markdown::blocks::split(reply).is_some_and(|blocks| blocks.len() > 3));
+    let (mut cx, view) = open(cx, vec![user("u1", "Go", None)], true);
+    view.update(&mut cx, |view, cx| {
+        view.thread.update(cx, |thread, cx| {
+            thread.streaming.push(crate::state::Streaming {
+                item_id: "a1".into(),
+                kind: hoshi_core::StreamKind::Text,
+                text: reply.into(),
+            });
+            cx.notify();
+        });
+    });
+    redraw(&mut cx);
+    let streamed = reply_layout(&mut cx, reply);
+
+    view.update(&mut cx, |view, cx| {
+        view.thread.update(cx, |thread, cx| {
+            thread.streaming.clear();
+            thread.items.push(item(
+                "a1",
+                ItemContent::AssistantMessage { text: reply.into() },
+            ));
+            cx.notify();
+        });
+    });
+    redraw(&mut cx);
+    let whole = reply_layout(&mut cx, reply);
+    assert!(streamed.len() > 8, "{streamed:?}");
+    assert_eq!(streamed, whole);
 }

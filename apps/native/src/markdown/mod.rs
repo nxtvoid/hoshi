@@ -3,6 +3,7 @@
 //! the editor, pull request links show the pull request on hover, and fenced code sits in a
 //! card with its language and a copy button.
 
+pub mod blocks;
 mod file_links;
 mod images;
 mod links;
@@ -91,6 +92,9 @@ struct FencedCode {
     language: SharedString,
 }
 
+/// The space between blocks of markdown.
+pub const PARAGRAPH_GAP: Rems = rems(0.625);
+
 /// Markdown as the transcript shows it: the web's spacing, inline code on a faint tint.
 pub fn markdown(
     id: impl Into<ElementId>,
@@ -152,7 +156,7 @@ fn view(
                 .unwrap_or_else(|| ImageSource::from(uri.clone()))
         })
         .style(TextViewStyle {
-            paragraph_gap: rems(0.625),
+            paragraph_gap: PARAGRAPH_GAP,
             inline_code: HighlightStyle {
                 background_color: Some(colors.foreground.opacity(0.1)),
                 ..Default::default()
