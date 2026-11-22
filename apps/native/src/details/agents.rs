@@ -338,6 +338,39 @@ mod tests {
     }
 
     #[test]
+    fn a_task_shows_its_own_provider_and_a_subagent_its_thread_s() {
+        let mut parent = thread("t", None);
+        parent.provider = "codex".into();
+        let mut task = thread("task", Some("t"));
+        task.provider = "copilot".into();
+        let threads = [parent, task];
+        let items = [agent_call("call", "2026-11-08T10:01:00Z", None, false)];
+        let none = HashSet::new();
+
+        let providers = |threads: &[Thread]| -> Vec<(AgentKind, String)> {
+            thread_agents("t", threads, &items, &none, &none)
+                .into_iter()
+                .map(|agent| (agent.kind, agent.provider))
+                .collect()
+        };
+
+        assert_eq!(
+            providers(&threads),
+            [
+                (AgentKind::Subagent, "codex".to_owned()),
+                (AgentKind::Task, "copilot".to_owned()),
+            ]
+        );
+        assert_eq!(
+            providers(&threads[1..]),
+            [
+                (AgentKind::Subagent, hoshi_core::default_provider()),
+                (AgentKind::Task, "copilot".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn a_task_reads_as_running_waiting_finished_stopped_or_failed() {
         let none = HashSet::new();
         let task = |status: ThreadStatus| Thread {
