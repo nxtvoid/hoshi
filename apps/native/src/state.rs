@@ -705,8 +705,11 @@ impl Workspace {
             };
             if let Err(error) = created {
                 this.update(cx, |this, cx| {
-                    this.sending_drafts.remove(&thread_id);
-                    if this.model.thread(&thread_id).is_none() {
+                    let project_id = this.sending_drafts.remove(&thread_id).flatten();
+                    let place_exists = project_id
+                        .as_deref()
+                        .is_none_or(|project_id| this.model.project(project_id).is_some());
+                    if place_exists && this.model.thread(&thread_id).is_none() {
                         this.draft_threads.entry(place).or_insert(thread_id);
                     }
                     cx.notify();
@@ -1261,6 +1264,16 @@ mod recent_tests {
         ));
         assert_eq!(start(&workspace, cx), started_since);
         assert!(workspace.read_with(cx, |workspace, _| !workspace.thread_or_draft(&first)));
+
+        workspace
+            .update(cx, |workspace, cx| {
+                workspace.send_draft("hello".into(), Vec::new(), cx)
+            })
+            .detach();
+        cx.run_until_parked();
+        assert!(workspace.read_with(cx, |workspace, _| {
+            !workspace.thread_or_draft(&started_since)
+        }));
     }
 
     #[gpui_kit::test]
