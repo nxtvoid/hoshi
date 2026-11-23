@@ -596,7 +596,14 @@ impl State {
             },
         });
         let planning = child.plan_mode && self.delegations.contains_key(&child.id);
-        if child.active_turn_id.is_some() {
+        let held = self
+            .lingering
+            .get(&child.id)
+            .is_some_and(|lingering| lingering.holds_answer);
+        if held {
+            status["status"] = json!("running");
+        }
+        if child.active_turn_id.is_some() || held {
             status["next"] = json!(NEXT);
         } else if planning {
             status["status"] = json!("waiting_for_user");
@@ -754,11 +761,12 @@ impl State {
             return;
         }
         if *outcome == TurnOutcome::Completed
-            && self
+            && let Some(lingering) = self
                 .lingering
-                .get(child)
-                .is_some_and(|lingering| lingering.waits())
+                .get_mut(child)
+                .filter(|lingering| lingering.waits())
         {
+            lingering.holds_answer = true;
             return;
         }
         self.hand_back(child, outcome);

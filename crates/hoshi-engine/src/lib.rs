@@ -1417,7 +1417,7 @@ fn start_turn(
                 checkpointed,
                 arrivals: 0,
                 cursor: None,
-                background: lingering.background,
+                background: state.resumed_background(lingering.background),
                 compacting,
                 handoff,
             };

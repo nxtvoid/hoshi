@@ -1152,22 +1152,23 @@ fn a_stopped_command_left_running_ends_its_process() {
 
 #[test]
 #[ignore = "spends tokens on a real Claude Code turn"]
-fn a_message_sent_while_a_background_command_runs_joins_the_turn() {
+fn a_message_sent_while_an_awaited_command_runs_starts_a_turn_in_its_process() {
     let cwd = scratch("steer-background-command");
-    let mut steered = false;
+    let mut session = None;
+    let mut continued = false;
     let outputs = run_watching(
         &cwd,
         "Run the shell command `sleep 15 && echo done` with the Bash tool using run_in_background: true. Then reply 'started' and end your turn. When it finishes, tell me what it printed.",
         |output, turn| {
             await_first_command(output, turn);
-            if matches!(output, ProviderOutput::RunEnded { .. }) && !steered {
-                assert!(turn.steer(
-                    "0f8d6a3c-2b1e-4c5d-9e7f-1a2b3c4d5e6f",
-                    "While it runs, just say HOLA.",
-                    &[],
-                    true
-                ));
-                steered = true;
+            if let ProviderOutput::SessionStarted { session_id } = output {
+                session = Some(session_id.clone());
+            }
+            if matches!(output, ProviderOutput::TurnCompleted { .. }) && !continued {
+                let request =
+                    watched_request(&cwd, "While it runs, just say HOLA.", session.clone());
+                assert!(turn.continue_with(&request));
+                continued = true;
             }
         },
     );
@@ -1184,13 +1185,8 @@ fn a_message_sent_while_a_background_command_runs_joins_the_turn() {
         hola < task_ended,
         "HOLA waited for the command: {outputs:#?}"
     );
-    assert_eq!(completions(&outputs), 1, "{outputs:#?}");
-    assert!(matches!(
-        last_output(&outputs),
-        Some(ProviderOutput::TurnCompleted {
-            outcome: TurnOutcome::Completed
-        })
-    ));
+    assert!(completions(&outputs) >= 3, "{outputs:#?}");
+    assert!(outputs.contains(&ProviderOutput::Woke), "{outputs:#?}");
 }
 
 #[test]
