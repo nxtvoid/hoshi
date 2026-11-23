@@ -13,6 +13,7 @@ gpui_kit::assets::icon_assets!(
         AppWindow,
         ArrowLeft,
         ArrowRightLeft,
+        ArrowUpLeft,
         ArrowUpRight,
         Bot,
         Brain,
