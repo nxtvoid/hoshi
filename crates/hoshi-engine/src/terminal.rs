@@ -22,6 +22,8 @@ pub struct Launch<'a> {
     pub worktree_path: Option<&'a str>,
     /// Run by the shell, which exits with it, instead of an interactive session.
     pub command: Option<&'a str>,
+    /// For a thread a draft will create: kept while the thread doesn't exist yet.
+    pub draft: bool,
 }
 
 #[derive(Default)]
@@ -31,6 +33,7 @@ pub struct Terminals {
 
 struct Session {
     thread_id: String,
+    draft: bool,
     cwd: String,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -159,11 +162,14 @@ impl Terminals {
     pub fn retain_threads(&self, keep: impl Fn(&str) -> bool) {
         let closed: Vec<_> = {
             let mut sessions = guard(&self.sessions);
-            let ids: Vec<_> = sessions
-                .iter()
-                .filter(|(_, session)| !keep(&session.thread_id))
-                .map(|(id, _)| id.clone())
-                .collect();
+            let mut ids = Vec::new();
+            for (id, session) in sessions.iter_mut() {
+                if keep(&session.thread_id) {
+                    session.draft = false;
+                } else if !session.draft {
+                    ids.push(id.clone());
+                }
+            }
             ids.iter().filter_map(|id| sessions.remove(id)).collect()
         };
         closed.into_iter().for_each(stop);
@@ -255,6 +261,7 @@ fn spawn(
 
     Ok(Session {
         thread_id: launch.thread_id.to_owned(),
+        draft: launch.draft,
         cwd: launch.cwd.to_owned(),
         writer,
         killer,
@@ -464,6 +471,7 @@ mod tests {
             project_root: &cwd,
             worktree_path: None,
             command: None,
+            draft: false,
         };
 
         let attach = terminals

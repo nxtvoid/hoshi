@@ -411,7 +411,7 @@ impl HoshiWindow {
     }
 
     fn toggle_terminal(&mut self, cx: &mut Context<Self>) {
-        if let Some(id) = self.workspace.read(cx).open_thread_id(cx) {
+        if let Some(id) = self.workspace.read(cx).shown_thread_id(cx) {
             self.terminal
                 .update(cx, |terminal, cx| terminal.toggle(&id, cx));
             cx.notify();
@@ -427,10 +427,11 @@ impl HoshiWindow {
 
     fn header_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let thread_id = self.workspace.read(cx).open_thread_id(cx);
+        let shown_thread_id = self.workspace.read(cx).shown_thread_id(cx);
         let details_toggle = self
             .details
             .update(cx, |details, cx| details.header_toggle(cx));
-        let terminal_open = thread_id
+        let terminal_open = shown_thread_id
             .as_deref()
             .is_some_and(|id| self.terminal.read(cx).is_open(id));
         let panel_open = thread_id
@@ -458,7 +459,7 @@ impl HoshiWindow {
                 this.child(self.merge_back.clone())
             })
             .child(details_toggle)
-            .when(thread_id.is_some(), |this| {
+            .when(shown_thread_id.is_some(), |this| {
                 this.child(
                     toggle(
                         "toggle-terminal",
@@ -468,7 +469,9 @@ impl HoshiWindow {
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_terminal(cx))),
                 )
-                .child(
+            })
+            .when(thread_id.is_some(), |this| {
+                this.child(
                     toggle(
                         "toggle-panel",
                         IconName::PanelRight,
@@ -671,7 +674,9 @@ impl Render for HoshiWindow {
                                         .child(self.composer.clone())
                                     })
                                     .when(draft.is_some(), |this| this.child(div().flex_1()))
-                                    .when(thread_open, |this| this.child(self.terminal.clone()))
+                                    .when(thread_open || draft.is_some(), |this| {
+                                        this.child(self.terminal.clone())
+                                    })
                                     .when(thread_open || draft.is_some(), |this| {
                                         this.child(self.details.clone())
                                     })

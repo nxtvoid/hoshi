@@ -1370,6 +1370,59 @@ fn a_disabled_provider_fails_the_turn() {
 }
 
 #[test]
+fn empty_folders_of_chats_never_started_go_at_start() {
+    let data_dir = scratch_dir("chat-folders-data");
+    let chats = data_dir.join("chats");
+    std::fs::create_dir_all(chats.join("never-sent")).unwrap();
+    std::fs::create_dir_all(chats.join("kept")).unwrap();
+    std::fs::write(chats.join("kept").join("notes.txt"), "keep").unwrap();
+    let notify: Notify = Arc::new(|_| {});
+    let _engine = Engine::from_store(Store::open_in_memory().unwrap(), &data_dir, notify).unwrap();
+    assert!(!chats.join("never-sent").exists());
+    assert!(chats.join("kept").join("notes.txt").exists());
+}
+
+#[test]
+fn a_drafts_terminal_lives_through_other_commands_and_goes_with_its_thread() {
+    let harness = Harness::in_memory("draft-terminal", Vec::new());
+    let sink = || -> TerminalSink { Box::new(|_| {}) };
+    let attach = harness
+        .engine
+        .open_draft_terminal("d1", Some("p"), "draft-term", (80, 24), sink())
+        .unwrap();
+    assert_eq!(attach.cwd, harness.root);
+    let chat = harness
+        .engine
+        .open_draft_terminal("d2", None, "chat-term", (80, 24), sink())
+        .unwrap();
+    assert_eq!(
+        PathBuf::from(chat.cwd),
+        harness.data_dir.join("chats").join("d2")
+    );
+
+    harness
+        .engine
+        .dispatch(Command::ThreadVisit {
+            thread_id: "t".into(),
+        })
+        .unwrap();
+    assert!(harness.engine.write_terminal("draft-term", "").is_ok());
+    assert!(harness.engine.write_terminal("chat-term", "").is_ok());
+
+    harness.create_thread("d1", ThreadWorkspace::Local).unwrap();
+    assert!(harness.engine.write_terminal("draft-term", "").is_ok());
+    harness
+        .engine
+        .dispatch(Command::ThreadDelete {
+            thread_id: "d1".into(),
+        })
+        .unwrap();
+    assert!(harness.engine.write_terminal("draft-term", "").is_err());
+    assert!(harness.engine.write_terminal("chat-term", "").is_ok());
+    harness.engine.close_terminal("chat-term");
+}
+
+#[test]
 fn a_chat_whose_folder_cannot_be_made_fails_its_turn() {
     let harness = Harness::in_memory("chat-no-folder", completed_turn());
     std::fs::write(harness.data_dir.join("chats"), "not a folder").unwrap();

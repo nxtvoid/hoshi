@@ -604,3 +604,127 @@ fn the_panel_opens_runs_and_closes_terminals_through_its_host(cx: &mut TestAppCo
         Err(CommandError::TerminalNotFound { .. })
     ));
 }
+
+#[gpui_kit::test]
+fn a_drafts_terminal_starts_in_its_project_and_stays_with_the_thread_it_creates(
+    cx: &mut TestAppContext,
+) {
+    let mut h = harness(cx, "terminal-draft");
+    let draft_id = h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.start_draft(Some("p".into()), cx);
+        workspace
+            .shown_thread_id(cx)
+            .expect("the draft has a thread id")
+    });
+    h.drawer
+        .update(&mut h.cx, |drawer, cx| drawer.toggle(&draft_id, cx));
+    let id = h
+        .drawer
+        .read_with(&h.cx, |drawer, _| drawer.drawer(&draft_id).active_id)
+        .expect("a terminal shows");
+    wait_until(&mut h, "the shell to start", |h| running(h, &id));
+    let started_in = view(&h, &id).read_with(&h.cx, |view, _| view.started_in().map(PathBuf::from));
+    assert_eq!(started_in, Some(h.home.parent().unwrap().join("project")));
+
+    let again = h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.open_thread("t", cx);
+        workspace.start_draft(Some("p".into()), cx);
+        workspace.shown_thread_id(cx)
+    });
+    assert_eq!(again.as_deref(), Some(draft_id.as_str()));
+    settle(&mut h.cx);
+    assert!(h.engine.write_terminal(&id, "").is_ok());
+
+    h.engine
+        .dispatch(Command::ThreadCreate {
+            thread_id: draft_id.clone(),
+            project_id: Some("p".into()),
+            title: String::new(),
+            workspace: ThreadWorkspace::Local,
+            provider: hoshi_core::default_provider(),
+            model: None,
+            effort: None,
+            fast_mode: false,
+            ultracode: false,
+            access_mode: AccessMode::default(),
+            plan_mode: false,
+        })
+        .unwrap();
+    wait_until(&mut h, "the thread to be created", |h| {
+        h.workspace.read_with(&h.cx, |workspace, _| {
+            workspace.model.thread(&draft_id).is_some()
+        })
+    });
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.open_thread(&draft_id, cx)
+    });
+    settle(&mut h.cx);
+    let drawer = h
+        .drawer
+        .read_with(&h.cx, |drawer, _| drawer.drawer(&draft_id));
+    assert_eq!(drawer.terminal_ids, vec![id.clone()]);
+    assert!(h.engine.write_terminal(&id, "").is_ok());
+}
+
+#[gpui_kit::test]
+fn discarding_a_draft_ends_its_terminals(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "terminal-draft-discard");
+    let draft_id = h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.start_draft(Some("p".into()), cx);
+        workspace
+            .shown_thread_id(cx)
+            .expect("the draft has a thread id")
+    });
+    h.drawer
+        .update(&mut h.cx, |drawer, cx| drawer.toggle(&draft_id, cx));
+    let id = h
+        .drawer
+        .read_with(&h.cx, |drawer, _| drawer.drawer(&draft_id).active_id)
+        .expect("a terminal shows");
+    wait_until(&mut h, "the shell to start", |h| running(h, &id));
+
+    let fresh = h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.forget_drafts(&[crate::drafts::key(None, Some("p"))], cx);
+        workspace.shown_thread_id(cx)
+    });
+    settle(&mut h.cx);
+    assert!(fresh.is_some_and(|fresh| fresh != draft_id));
+    let drawer = h
+        .drawer
+        .read_with(&h.cx, |drawer, _| drawer.drawer(&draft_id));
+    assert!(drawer.terminal_ids.is_empty());
+    wait_until(&mut h, "the shell to end", |h| {
+        h.engine.write_terminal(&id, "").is_err()
+    });
+}
+
+#[gpui_kit::test]
+fn removing_the_project_ends_its_drafts_terminals(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "terminal-draft-project-removed");
+    let draft_id = h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.start_draft(Some("p".into()), cx);
+        workspace
+            .shown_thread_id(cx)
+            .expect("the draft has a thread id")
+    });
+    h.drawer
+        .update(&mut h.cx, |drawer, cx| drawer.toggle(&draft_id, cx));
+    let id = h
+        .drawer
+        .read_with(&h.cx, |drawer, _| drawer.drawer(&draft_id).active_id)
+        .expect("a terminal shows");
+    wait_until(&mut h, "the shell to start", |h| running(h, &id));
+
+    h.engine
+        .dispatch(Command::ProjectRemove {
+            project_id: "p".into(),
+        })
+        .unwrap();
+    wait_until(&mut h, "the shell to end", |h| {
+        h.engine.write_terminal(&id, "").is_err()
+    });
+    let drawer = h
+        .drawer
+        .read_with(&h.cx, |drawer, _| drawer.drawer(&draft_id));
+    assert!(drawer.terminal_ids.is_empty());
+}

@@ -92,7 +92,10 @@ fn harness(cx: &mut TestAppContext, name: &str, width: f32) -> Harness {
         hoshi_ui::theme::apply(ThemeMode::Dark, cx);
     });
     let workspace = cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)));
-    workspace.update(cx, |workspace, cx| workspace.open_thread("t", cx));
+    workspace.update(cx, |workspace, cx| {
+        workspace.settings_path = Some(dir.join("home").join("settings.json"));
+        workspace.open_thread("t", cx)
+    });
     let (window, details) = cx.update(|cx| {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -138,10 +141,6 @@ fn wait_for(h: &mut Harness, what: &str, done: impl Fn(&ThreadDetails) -> bool) 
 #[gpui_kit::test]
 fn the_card_shows_the_checkout_of_a_wide_chat(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-card", 1200.);
-    assert!(h.cx.debug_bounds("thread-details-card").is_none());
-
-    h.details
-        .update(&mut h.cx, |details, cx| details.toggle(cx));
     wait_for(&mut h, "the checkout", |details| {
         details.changes.contains_key("t") && details.statuses.contains_key("t")
     });
@@ -169,7 +168,7 @@ fn the_editor_menu_drops_under_its_whole_row(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-editor-menu", 1200.);
     h.details.update(&mut h.cx, |details, cx| {
         details.editors = Some(vec![Editor::Vscode, Editor::FileManager]);
-        details.toggle(cx);
+        details.set_open(true, cx);
     });
     redraw(&mut h.cx);
 
@@ -195,10 +194,49 @@ fn the_editor_menu_drops_under_its_whole_row(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn closing_the_card_holds_for_that_thread_only_and_across_restarts(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-closed", 1200.);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    assert!(h.cx.debug_bounds("thread-details-card").is_some());
+
+    h.details
+        .update(&mut h.cx, |details, cx| details.toggle(cx));
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.start_draft(Some("p".into()), cx)
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_some());
+
+    workspace.update(&mut h.cx, |workspace, cx| workspace.open_thread("t", cx));
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+
+    let home = workspace.read_with(&h.cx, |workspace, _| {
+        workspace
+            .settings_path
+            .clone()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    });
+    let closed = super::prefs::load(&home).closed_threads;
+    assert_eq!(closed.into_iter().collect::<Vec<_>>(), vec!["t".to_owned()]);
+    let reopened =
+        h.cx.update(|window, cx| cx.new(|cx| ThreadDetails::new(workspace.clone(), window, cx)));
+    assert!(!reopened.read_with(&h.cx, |details, cx| details.is_open(cx)));
+}
+
+#[gpui_kit::test]
 fn a_narrow_chat_shows_the_details_from_a_popover(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-narrow", 700.);
     h.details
-        .update(&mut h.cx, |details, cx| details.toggle(cx));
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
     redraw(&mut h.cx);
 
     assert!(!h.details.read_with(&h.cx, |details, _| details.is_inline()));
@@ -218,7 +256,7 @@ fn a_narrow_chat_shows_the_details_from_a_popover(cx: &mut TestAppContext) {
 fn the_git_action_commits_and_says_so_in_place_of_the_button(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-commit", 1200.);
     h.details
-        .update(&mut h.cx, |details, cx| details.toggle(cx));
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
     wait_for(&mut h, "the checkout", |details| {
         details.statuses.contains_key("t")
     });
@@ -257,7 +295,7 @@ fn the_git_action_commits_and_says_so_in_place_of_the_button(cx: &mut TestAppCon
 fn a_disabled_git_action_says_why_on_hover(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-git-why", 1200.);
     h.details
-        .update(&mut h.cx, |details, cx| details.toggle(cx));
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
     wait_for(&mut h, "the checkout", |details| {
         details.statuses.contains_key("t")
     });
@@ -318,7 +356,7 @@ fn a_long_list_of_previous_agents_draws_only_the_rows_in_view(cx: &mut TestAppCo
     });
     h.details.update(&mut h.cx, |details, cx| {
         details.previous_agents_open = true;
-        details.toggle(cx);
+        details.set_open(true, cx);
     });
     redraw(&mut h.cx);
 
@@ -385,7 +423,7 @@ fn a_subagent_row_asks_to_show_its_call_in_the_transcript(cx: &mut TestAppContex
         }
     });
     h.details
-        .update(&mut h.cx, |details, cx| details.toggle(cx));
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
     redraw(&mut h.cx);
 
     let row =
@@ -421,7 +459,7 @@ fn the_card_shows_the_threads_usage_limits_only_once_the_user_turns_them_on(
     use hoshi_core::{UsageLimits, UsageWindow, UsageWindowKind};
     let mut h = harness(cx, "details-usage", 1200.);
     h.details
-        .update(&mut h.cx, |details, cx| details.toggle(cx));
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
     wait_for(&mut h, "the checkout", |details| {
         details.statuses.contains_key("t")
     });
@@ -574,7 +612,7 @@ fn draft_workspace(h: &mut Harness) -> Entity<Workspace> {
         .read_with(&h.cx, |details, _| details.workspace.clone());
     h.details.update(&mut h.cx, |details, cx| {
         details.editors = Some(vec![Editor::Vscode]);
-        details.toggle(cx);
+        details.set_open(true, cx);
     });
     workspace.update(&mut h.cx, |workspace, cx| {
         workspace.settings.usage_limits_in_details = true;
@@ -645,8 +683,19 @@ fn a_new_thread_in_a_project_shows_the_card_without_a_thread(cx: &mut TestAppCon
     assert!(h.cx.debug_bounds("details-usage-0").is_none());
 
     workspace.update(&mut h.cx, |workspace, cx| workspace.start_draft(None, cx));
-    redraw(&mut h.cx);
-    assert!(h.cx.debug_bounds("thread-details-card").is_none());
+    wait_for(&mut h, "the new chat's folder", |details| {
+        details.chat_folders.len() == 1
+    });
+    assert!(h.cx.debug_bounds("thread-details-card").is_some());
+    let draft_id = workspace.read_with(&h.cx, |workspace, _| {
+        workspace.draft.as_ref().unwrap().thread_id.clone()
+    });
+    let folder = h.details.read_with(&h.cx, |details, _| {
+        details.chat_folders.get(&draft_id).cloned()
+    });
+    assert!(folder.is_some_and(|folder| folder.ends_with(&draft_id)));
+    assert!(h.cx.debug_bounds("details-editor-row").is_some());
+    assert!(h.cx.debug_bounds("details-draft-branch").is_none());
 }
 
 #[gpui_kit::test]
@@ -753,6 +802,9 @@ fn a_late_failure_stays_off_the_next_new_thread(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_failure_from_the_shortcut_opens_the_card_to_tell_it(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-shortcut-failure", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(false, cx));
+    redraw(&mut h.cx);
     assert!(h.cx.debug_bounds("thread-details-card").is_none());
     h.details.update(&mut h.cx, |details, cx| {
         details.run(
@@ -776,6 +828,7 @@ fn a_failure_from_the_shortcut_opens_the_card_to_tell_it(cx: &mut TestAppContext
 fn only_the_latest_launch_tells_its_failure(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-superseded", 1200.);
     h.details.update(&mut h.cx, |details, cx| {
+        details.set_open(false, cx);
         details.run(
             || {
                 Err(hoshi_core::CommandError::Internal {

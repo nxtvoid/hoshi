@@ -1,6 +1,7 @@
 use crate::m;
 use hoshi_core::Editor;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// What the card remembers across restarts. The web keeps it in the webview's storage; here it
@@ -11,6 +12,8 @@ pub struct Prefs {
     pub preferred_editor: Option<Editor>,
     /// Pull requests open as drafts.
     pub draft_pull_requests: bool,
+    /// The threads whose card the user closed; it shows on the others.
+    pub closed_threads: BTreeSet<String>,
 }
 
 pub fn file(home: &Path) -> PathBuf {
@@ -27,6 +30,10 @@ pub fn parse(text: &str) -> Prefs {
             .get("draftPullRequests")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        closed_threads: value
+            .get("closedThreads")
+            .and_then(|ids| serde_json::from_value(ids.clone()).ok())
+            .unwrap_or_default(),
     }
 }
 
@@ -34,6 +41,7 @@ pub fn serialize(prefs: &Prefs) -> String {
     json!({
         "preferredEditor": prefs.preferred_editor,
         "draftPullRequests": prefs.draft_pull_requests,
+        "closedThreads": prefs.closed_threads,
     })
     .to_string()
 }
@@ -45,7 +53,10 @@ pub fn load(home: &Path) -> Prefs {
 }
 
 pub fn save(home: &Path, prefs: &Prefs) -> std::io::Result<()> {
-    std::fs::write(file(home), serialize(prefs))
+    let file = file(home);
+    let partial = file.with_extension("json.tmp");
+    std::fs::write(&partial, serialize(prefs))?;
+    std::fs::rename(partial, file)
 }
 
 /// The target "Open in" uses: the one the user picked, else the first found.
@@ -138,6 +149,7 @@ mod tests {
         let prefs = Prefs {
             preferred_editor: Some(Editor::FileManager),
             draft_pull_requests: true,
+            closed_threads: ["t".to_owned()].into(),
         };
         assert_eq!(parse(&serialize(&prefs)), prefs);
         assert!(serialize(&prefs).contains(r#""preferredEditor":"fileManager""#));
