@@ -72,6 +72,12 @@ impl Sidebar {
             project_titles,
             pull_requests: workspace.pull_requests.clone(),
             unseen: workspace.unseen.clone(),
+            waiting: workspace
+                .background
+                .values()
+                .filter(|background| background.waiting)
+                .map(|background| background.thread_id.clone())
+                .collect(),
             root_branches: workspace.project_branches.clone(),
             drafts: workspace.drafts.keys().cloned().collect(),
         };

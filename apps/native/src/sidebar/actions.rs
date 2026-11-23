@@ -166,7 +166,7 @@ impl Sidebar {
     pub(super) fn current_sections(&self, cx: &App) -> Vec<Section> {
         let search = self.search.read(cx).value().to_string();
         let workspace = self.workspace.read(cx);
-        let threads: Vec<Thread> = workspace.model.threads().cloned().collect();
+        let threads: Vec<Thread> = workspace.listed_threads();
         sidebar_sections(
             &threads,
             &workspace.pull_requests,
@@ -190,7 +190,7 @@ impl Sidebar {
     pub(super) fn step(&mut self, step: isize, attention: bool, cx: &mut Context<Self>) {
         let order: Vec<String> = if attention {
             let workspace = self.workspace.read(cx);
-            let threads: Vec<Thread> = workspace.model.threads().cloned().collect();
+            let threads: Vec<Thread> = workspace.listed_threads();
             inbox_sections(
                 sections::with_delegated_work(&threads),
                 &workspace.pull_requests,
@@ -326,7 +326,7 @@ impl Sidebar {
                 } else {
                     thread.title.clone()
                 };
-                let threads: Vec<Thread> = workspace.model.threads().cloned().collect();
+                let threads: Vec<Thread> = workspace.listed_threads();
                 let tasks = delegated_tasks(&thread_id, &threads);
                 let description = if tasks > 0 {
                     m::delete_thread_with_tasks_confirm(tasks, &title)

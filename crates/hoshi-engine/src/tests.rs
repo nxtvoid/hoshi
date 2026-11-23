@@ -2713,6 +2713,7 @@ fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
             running: Box::new(KeptTurn(Arc::default())),
             background: None,
             owes_answer: true,
+            holds_answer: false,
             ended: false,
             heard_at: SystemTime::now(),
         },
@@ -2753,6 +2754,109 @@ fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
     assert!(harness.thread(&child).task_answered);
 }
 
+/// Thread `t` delegated a task whose turn ended while its agent awaits a command in process
+/// 99, holding back its answer.
+fn task_awaits_a_command(name: &str) -> (Harness, Arc<FakeAdapter>, String) {
+    let harness = Harness::in_memory(name, Vec::new());
+    let adapter = adapter(None);
+    harness.engine.set_adapter(Some(adapter.clone()));
+    harness.send("t", "m1", "split the work");
+    let task = delegate(&harness, serde_json::json!({ "task": "run the tests" }));
+    let child = task["taskId"].as_str().unwrap().to_owned();
+    finish(&adapter, 0, TurnOutcome::Completed);
+    harness.wait_for_turn_end();
+    lock(&harness.engine.state).lingering.insert(
+        child.clone(),
+        Lingering {
+            process: 99,
+            running: Box::new(KeptTurn(Arc::default())),
+            background: Some(ThreadBackgroundTasks {
+                thread_id: child.clone(),
+                tasks: vec![BackgroundTask {
+                    task_id: "b1".into(),
+                    tool_call_id: None,
+                    description: "Run the tests".into(),
+                    started_at: 0,
+                }],
+                waiting: true,
+            }),
+            owes_answer: true,
+            holds_answer: false,
+            ended: false,
+            heard_at: SystemTime::now(),
+        },
+    );
+    child_turn_ends(&harness, &adapter, 1);
+    (harness, adapter, child)
+}
+
+#[test]
+fn a_task_that_awaits_its_commands_answers_once_it_wakes_for_them() {
+    let (harness, adapter, child) = task_awaits_a_command("delegate-awaits");
+    assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+    assert!(!harness.thread(&child).task_answered);
+    assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+    let status = lock(&harness.engine.state)
+        .call_tool("t", "task_status", &serde_json::json!({ "taskId": child }))
+        .unwrap();
+    assert_eq!(status["status"], "running");
+    assert!(status.get("answer").is_none(), "{status}");
+
+    let state = &harness.engine.state;
+    lock(state).receive_from(&child, 99, ProviderOutput::Woke);
+    lock(state).receive_from(
+        &child,
+        99,
+        ProviderOutput::AssistantMessage {
+            item_id: "woken".into(),
+            text: "The tests pass.".into(),
+        },
+    );
+    lock(state).receive_from(
+        &child,
+        99,
+        ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+    let requests = adapter.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].prompt.contains("The tests pass."));
+    assert!(harness.thread(&child).task_answered);
+}
+
+#[test]
+fn a_task_whose_process_ends_before_it_wakes_answers_as_stopped() {
+    let (harness, adapter, child) = task_awaits_a_command("delegate-awaits-ends");
+    let state = &harness.engine.state;
+    let server = BackgroundTask {
+        task_id: "s1".into(),
+        tool_call_id: None,
+        description: "Start the dev server".into(),
+        started_at: 0,
+    };
+    lock(state).receive_from(
+        &child,
+        99,
+        ProviderOutput::BackgroundTasks {
+            tasks: vec![server],
+            waiting: false,
+        },
+    );
+    lock(state).receive_from(&child, 99, ProviderOutput::ProcessEnded);
+
+    harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+    let requests = adapter.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[2].prompt.contains("[stopped]"),
+        "{}",
+        requests[2].prompt
+    );
+    assert!(harness.thread(&child).task_answered);
+}
+
 /// Thread `t` delegated a task whose turn said `answer` and ended leaving a command
 /// running in process 99, its answer owed to `t` when `owes_answer`.
 fn task_left_a_command_running(
@@ -2784,6 +2888,7 @@ fn task_left_a_command_running(
             running: Box::new(KeptTurn(Arc::default())),
             background: None,
             owes_answer,
+            holds_answer: false,
             ended: false,
             heard_at: SystemTime::now(),
         },
@@ -2976,6 +3081,7 @@ fn cancelling_a_task_that_answered_stops_the_commands_it_left_running() {
             running: Box::new(KeptTurn(process.clone())),
             background: None,
             owes_answer: true,
+            holds_answer: false,
             ended: false,
             heard_at: SystemTime::now(),
         },
@@ -5844,6 +5950,28 @@ fn leave_dev_server_running(name: &str) -> (Harness, Arc<KeptProcess>) {
     });
     assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
     (harness, process)
+}
+
+#[test]
+fn a_message_to_a_thread_awaiting_its_commands_runs_in_its_process_no_longer_waiting() {
+    let (harness, process) = leave_dev_server_running("awaited-continue");
+    lock(&harness.engine.state)
+        .lingering
+        .get_mut("t")
+        .unwrap()
+        .background
+        .as_mut()
+        .unwrap()
+        .waiting = true;
+
+    harness.send("t", "m2", "meanwhile, say hi");
+    harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+
+    assert_eq!(*process.continued.lock().unwrap(), ["meanwhile, say hi"]);
+    let state = lock(&harness.engine.state);
+    let background = state.turns["t"].background.as_ref().unwrap();
+    assert!(!background.waiting);
+    assert_eq!(background.tasks, [dev_server()]);
 }
 
 /// Thread `t` on `database` left the dev server running and hoshi quit, `awaited` when

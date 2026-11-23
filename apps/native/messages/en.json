@@ -582,6 +582,7 @@
   "no_matching_threads": "No threads match your search",
   "untitled_thread": "Untitled thread",
   "status_working": "Working",
+  "status_waiting": "Waiting",
   "status_waiting_for_input": "Needs input",
   "status_error": "Error",
   "composer_placeholder": "Ask anything… @ files, / commands, # pull requests, $ skills",
