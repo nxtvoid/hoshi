@@ -1009,6 +1009,28 @@ impl Workspace {
         }
     }
 
+    /// Whether the thread's turn ended but its agent awaits commands it left running.
+    pub fn awaits_background(&self, thread_id: &str) -> bool {
+        self.background
+            .get(thread_id)
+            .is_some_and(|background| background.waiting)
+    }
+
+    /// The threads as the sidebar sorts them: one whose agent awaits its background commands
+    /// still works.
+    pub fn listed_threads(&self) -> Vec<hoshi_core::Thread> {
+        self.model
+            .threads()
+            .map(|thread| {
+                let mut thread = thread.clone();
+                if thread.status == ThreadStatus::Idle && self.awaits_background(&thread.id) {
+                    thread.status = ThreadStatus::Working;
+                }
+                thread
+            })
+            .collect()
+    }
+
     pub fn open_thread_id(&self, cx: &App) -> Option<String> {
         self.open
             .as_ref()

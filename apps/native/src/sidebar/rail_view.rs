@@ -52,7 +52,7 @@ impl Sidebar {
         let mut rings = std::mem::take(&mut self.rings);
         let projects = self.ordered_projects(cx);
         let workspace = self.workspace.read(cx);
-        let threads: Vec<Thread> = workspace.model.threads().cloned().collect();
+        let threads: Vec<Thread> = workspace.listed_threads();
         let has_chats = threads.iter().any(|thread| thread.project_id.is_none());
         if projects.is_empty() && !has_chats {
             return div().into_any_element();

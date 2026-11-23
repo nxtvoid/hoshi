@@ -3,7 +3,9 @@
 //! commands its turn waits for instead.
 
 use crate::{Notification, State, Turn, delegation, now};
-use hoshi_core::{BackgroundTask, Event, ProviderOutput, ThreadBackgroundTasks, start_woken_turn};
+use hoshi_core::{
+    BackgroundTask, Event, ProviderOutput, ThreadBackgroundTasks, TurnOutcome, start_woken_turn,
+};
 use hoshi_providers::RunningTurn;
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime};
@@ -32,6 +34,13 @@ pub(crate) struct Lingering {
 }
 
 impl Lingering {
+    /// The agent awaits commands it runs: its turn ended, but its work did not.
+    pub fn waits(&self) -> bool {
+        self.background
+            .as_ref()
+            .is_some_and(|background| background.waiting)
+    }
+
     fn quiet_too_long(&self, now: SystemTime) -> bool {
         let running = (!self.ended
             && self
@@ -154,6 +163,7 @@ impl State {
             ProviderOutput::ProcessEnded => {
                 if let Some(lingering) = self.lingering.remove(thread_id) {
                     self.clear_background(thread_id, lingering.background.as_ref());
+                    self.answer_held(thread_id, &lingering);
                 }
             }
             _ => {}
@@ -183,7 +193,13 @@ impl State {
             self.clear_background(thread_id, lingering.background.as_ref());
             None
         } else {
-            lingering.background
+            lingering.background.map(|mut background| {
+                if background.waiting {
+                    background.waiting = false;
+                    (self.notify)(Notification::BackgroundTasks(background.clone()));
+                }
+                background
+            })
         };
         let (workspace, checkpointed) = self
             .cwd(thread_id)
@@ -245,7 +261,16 @@ impl State {
     /// Ends the process a thread's completed turn kept, and the commands running in it.
     pub(crate) fn close_lingering(&mut self, thread_id: &str) {
         if let Some(lingering) = self.lingering.remove(thread_id) {
+            self.answer_held(thread_id, &lingering);
             self.end_lingering(thread_id, lingering);
+        }
+    }
+
+    /// A delegated task whose agent awaited commands answers once it woke for them; when its
+    /// process ends before that, it answers with what it said last.
+    fn answer_held(&mut self, thread_id: &str, lingering: &Lingering) {
+        if lingering.waits() && !self.turns.contains_key(thread_id) {
+            self.hand_back(thread_id, &TurnOutcome::Completed);
         }
     }
 

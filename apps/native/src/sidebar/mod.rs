@@ -374,6 +374,8 @@ struct RowContext {
     project_titles: HashMap<String, String>,
     pull_requests: HashMap<String, PullRequest>,
     unseen: HashSet<String>,
+    /// Threads whose turn only waits for commands left running in the background.
+    waiting: HashSet<String>,
     /// The branch each project's root is on.
     root_branches: HashMap<String, Option<String>>,
     /// Keys of the drafts kept.

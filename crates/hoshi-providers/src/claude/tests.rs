@@ -560,7 +560,7 @@ fn sleep_ended_output() -> ProviderOutput {
 }
 
 #[test]
-fn an_awaited_background_command_holds_the_turn_until_claude_answers_it() {
+fn an_awaited_background_command_ends_the_turn_and_wakes_the_agent_once_it_ends() {
     let mut parser = ClaudeParser::new(None);
     let started = await_sleep(&mut parser);
 
@@ -574,28 +574,26 @@ fn an_awaited_background_command_holds_the_turn_until_claude_answers_it() {
             (vec![called], true),
         ]
     );
-    assert!(started.contains(&ProviderOutput::RunEnded { run: 1 }));
-    assert!(completions(&started).is_empty(), "{started:#?}");
+    assert_eq!(completions(&started), [TurnOutcome::Completed]);
+    {
+        let queue = parser.queue.state();
+        assert!(!queue.closing && !queue.turn_open);
+    }
 
     let ended = feed(&mut parser, &sleep_ended());
     assert_eq!(
         ended,
-        [
-            ProviderOutput::BackgroundTasks {
-                tasks: Vec::new(),
-                waiting: true
-            },
-            sleep_ended_output(),
-        ]
+        [ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false
+        }]
     );
 
-    let answered = feed(&mut parser, &answer_to_sleep());
-    assert!(rosters(&answered).is_empty(), "{answered:#?}");
-    assert!(!answered.contains(&ProviderOutput::Woke));
-    assert_eq!(completions(&answered), [TurnOutcome::Completed]);
+    let woke = feed(&mut parser, &answer_to_sleep());
+    assert_eq!(woke[..2], [ProviderOutput::Woke, sleep_ended_output()]);
+    assert_eq!(completions(&woke), [TurnOutcome::Completed]);
     assert!(parser.queue.state().closing);
 }
-
 #[test]
 fn a_command_left_running_ends_the_turn_and_keeps_the_process() {
     let mut parser = ClaudeParser::new(None);
@@ -886,25 +884,7 @@ fn an_interrupted_turn_ends_its_process_with_the_commands_it_left() {
 }
 
 #[test]
-fn a_run_beside_an_awaited_background_command_is_not_waiting() {
-    let mut parser = ClaudeParser::new(None);
-    await_sleep(&mut parser);
-    parser.queue.state().waiting.insert("m2".into());
-
-    let steered = feed(
-        &mut parser,
-        &[
-            json!({ "type": "command_lifecycle", "command_uuid": "m2", "state": "started" }),
-            json!({ "type": "result", "subtype": "success", "is_error": false }),
-        ],
-    );
-
-    let waiting: Vec<bool> = rosters(&steered).into_iter().map(|(_, w)| w).collect();
-    assert_eq!(waiting, [false, true]);
-}
-
-#[test]
-fn a_stopped_awaited_command_ends_a_turn_with_nothing_left_to_wait_for() {
+fn a_stopped_awaited_command_is_no_longer_waited_for() {
     let mut parser = ClaudeParser::new(None);
     await_sleep(&mut parser);
 
@@ -918,37 +898,10 @@ fn a_stopped_awaited_command_ends_a_turn_with_nothing_left_to_wait_for() {
         ],
     );
 
-    assert_eq!(
-        stopped,
-        [
-            ProviderOutput::BackgroundTasks {
-                tasks: Vec::new(),
-                waiting: true
-            },
-            ProviderOutput::TurnCompleted {
-                outcome: TurnOutcome::Completed
-            },
-        ]
-    );
-    assert!(parser.queue.state().closing);
+    assert_eq!(rosters(&stopped), [(Vec::new(), false)]);
+    assert!(completions(&stopped).is_empty());
+    assert!(parser.queue.state().awaited.is_empty());
 }
-
-#[test]
-fn a_turn_asked_to_stop_while_it_waits_ends_once_the_agent_agrees() {
-    let mut parser = ClaudeParser::new(None);
-    await_sleep(&mut parser);
-    parser.queue.state().interrupted = true;
-
-    let answer = json!({ "type": "control_response", "response": {
-            "subtype": "success", "request_id": "hoshi-interrupt" } });
-
-    assert_eq!(
-        completions(&feed(&mut parser, &[answer])),
-        [TurnOutcome::Interrupted]
-    );
-    assert!(parser.queue.state().closing);
-}
-
 #[test]
 fn a_stop_while_a_message_runs_waits_for_that_run_to_end() {
     let mut parser = ClaudeParser::new(None);

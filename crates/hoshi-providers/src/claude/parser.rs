@@ -447,7 +447,7 @@ impl ClaudeParser {
                 let over = queue.interrupted
                     || (!self.cut_short
                         && !queue.steers_waiting()
-                        && !self.holds(&queue)
+                        && !self.holds()
                         && self.pending_wakes.is_empty());
                 self.runs += 1;
                 if over {
@@ -466,7 +466,9 @@ impl ClaudeParser {
                     Some((_, ended)) => outputs.push(ended),
                     None => self.between_runs = true,
                 }
-                outputs.extend(self.waiting_changed());
+                if !self.background_commands.is_empty() {
+                    outputs.push(self.roster_with(&queue));
+                }
                 outputs
             }
             Some("command_lifecycle") => self.command_lifecycle(value),
@@ -899,10 +901,10 @@ impl ClaudeParser {
         queue.commands = running;
     }
 
-    /// Whether the turn waits for background work: its subagents, and the commands the
-    /// agent awaits.
-    pub(super) fn holds(&self, queue: &QueueState) -> bool {
-        !self.background_agents.is_empty() || !self.reviving.is_empty() || !queue.awaited.is_empty()
+    /// Whether the turn waits for background work: its subagents. Commands the agent awaits
+    /// leave the turn to end, and wake the agent once they do.
+    pub(super) fn holds(&self) -> bool {
+        !self.background_agents.is_empty() || !self.reviving.is_empty()
     }
 
     /// Ends the turn. Its process stays for the commands still running in the background,
@@ -935,7 +937,7 @@ impl ClaudeParser {
         self.signals.turn_ended();
         let mut outputs = Vec::new();
         if lingers && !self.background_commands.is_empty() {
-            outputs.push(self.background_roster());
+            outputs.push(self.roster_with(queue));
         }
         if !dropped.is_empty() {
             outputs.push(ProviderOutput::MessagesDropped {
@@ -1000,9 +1002,16 @@ impl ClaudeParser {
     }
 
     pub(super) fn background_roster(&self) -> ProviderOutput {
+        let queue = self.queue.state();
+        self.roster_with(&queue)
+    }
+
+    /// Waiting while the turn only waits between runs, or, once it ended, while the agent
+    /// awaits commands still running.
+    fn roster_with(&self, queue: &QueueState) -> ProviderOutput {
         ProviderOutput::BackgroundTasks {
             tasks: self.background_commands.clone(),
-            waiting: self.idle,
+            waiting: self.idle || (!queue.turn_open && !queue.awaited.is_empty()),
         }
     }
 
@@ -1020,7 +1029,7 @@ impl ClaudeParser {
         }
         let shared = self.queue.clone();
         let mut queue = shared.state();
-        let waits = self.holds(&queue)
+        let waits = self.holds()
             || !self.pending_wakes.is_empty()
             || queue.steers_waiting()
             || self.cut_short;

@@ -2753,6 +2753,66 @@ fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
     assert!(harness.thread(&child).task_answered);
 }
 
+#[test]
+fn a_task_that_awaits_its_commands_answers_once_it_wakes_for_them() {
+    let harness = Harness::in_memory("delegate-awaits", Vec::new());
+    let adapter = adapter(None);
+    harness.engine.set_adapter(Some(adapter.clone()));
+    harness.send("t", "m1", "split the work");
+    let task = delegate(&harness, serde_json::json!({ "task": "run the tests" }));
+    let child = task["taskId"].as_str().unwrap().to_owned();
+    finish(&adapter, 0, TurnOutcome::Completed);
+    harness.wait_for_turn_end();
+    lock(&harness.engine.state).lingering.insert(
+        child.clone(),
+        Lingering {
+            process: 99,
+            running: Box::new(KeptTurn(Arc::default())),
+            background: Some(ThreadBackgroundTasks {
+                thread_id: child.clone(),
+                tasks: vec![BackgroundTask {
+                    task_id: "b1".into(),
+                    tool_call_id: None,
+                    description: "Run the tests".into(),
+                    started_at: 0,
+                }],
+                waiting: true,
+            }),
+            owes_answer: true,
+            ended: false,
+            heard_at: SystemTime::now(),
+        },
+    );
+
+    child_turn_ends(&harness, &adapter, 1);
+    assert_eq!(adapter.requests.lock().unwrap().len(), 2);
+    assert!(!harness.thread(&child).task_answered);
+    assert!(harness.engine.snapshot().pending_tasks.contains(&child));
+
+    let state = &harness.engine.state;
+    lock(state).receive_from(&child, 99, ProviderOutput::Woke);
+    lock(state).receive_from(
+        &child,
+        99,
+        ProviderOutput::AssistantMessage {
+            item_id: "woken".into(),
+            text: "The tests pass.".into(),
+        },
+    );
+    lock(state).receive_from(
+        &child,
+        99,
+        ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+    let requests = adapter.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].prompt.contains("The tests pass."));
+    assert!(harness.thread(&child).task_answered);
+}
+
 /// Thread `t` delegated a task whose turn said `answer` and ended leaving a command
 /// running in process 99, its answer owed to `t` when `owes_answer`.
 fn task_left_a_command_running(

@@ -10,6 +10,9 @@ impl Sidebar {
     ) -> AnyElement {
         let selected = rows.open.as_deref() == Some(thread.id.as_str());
         let status = match thread.status {
+            ThreadStatus::Working if rows.waiting.contains(&thread.id) => {
+                Some((m::status_waiting(), colors.muted_foreground))
+            }
             ThreadStatus::Working => Some((m::status_working(), colors.status_working)),
             ThreadStatus::WaitingForInput => {
                 Some((m::status_waiting_for_input(), colors.status_waiting))

@@ -753,6 +753,14 @@ impl State {
         {
             return;
         }
+        if *outcome == TurnOutcome::Completed
+            && self
+                .lingering
+                .get(child)
+                .is_some_and(|lingering| lingering.waits())
+        {
+            return;
+        }
         self.hand_back(child, outcome);
     }
 
