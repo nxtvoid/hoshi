@@ -204,6 +204,11 @@ impl TerminalView {
         view
     }
 
+    #[cfg(test)]
+    pub fn started_in(&self) -> Option<&str> {
+        self.started_in.as_deref()
+    }
+
     pub fn terminal_id(&self) -> &str {
         &self.terminal_id
     }
@@ -289,6 +294,7 @@ impl TerminalView {
         let thread_id = self.thread_id.clone();
         let terminal_id = self.terminal_id.clone();
         let command = self.command.clone();
+        let draft_project = self.workspace.read(cx).draft_project(&thread_id);
         self.pump = Some(cx.spawn(async move |this, cx| {
             let attach = cx
                 .background_spawn(async move {
@@ -298,13 +304,19 @@ impl TerminalView {
                     let sink: hoshi_engine::TerminalSink = Box::new(move |event| {
                         let _ = sender.unbounded_send(event);
                     });
-                    match command {
-                        Some(command) => {
-                            engine.run_in_terminal(&terminal_id, &command, engine_size(size), sink)
+                    let size = engine_size(size);
+                    match (command, draft_project) {
+                        (Some(command), _) => {
+                            engine.run_in_terminal(&terminal_id, &command, size, sink)
                         }
-                        None => {
-                            engine.open_terminal(&thread_id, &terminal_id, engine_size(size), sink)
-                        }
+                        (None, Some(project_id)) => engine.open_draft_terminal(
+                            &thread_id,
+                            project_id.as_deref(),
+                            &terminal_id,
+                            size,
+                            sink,
+                        ),
+                        (None, None) => engine.open_terminal(&thread_id, &terminal_id, size, sink),
                     }
                 })
                 .await;

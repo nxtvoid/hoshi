@@ -668,6 +668,7 @@ impl Engine {
         // A task the close cut short answers once the user has it finish.
         state.delegations = state.pending_delegations();
         secret_requests::forget_old(&state.secrets_dir);
+        state.forget_unused_chat_folders();
         let thread_ids = state
             .model
             .threads()

@@ -30,6 +30,9 @@ impl ThreadDetails {
             move || match subject {
                 Subject::Thread(thread_id) => engine.open_in_editor(&thread_id, editor),
                 Subject::Draft(project_id) => engine.open_project_in_editor(&project_id, editor),
+                Subject::ChatDraft(thread_id) => {
+                    engine.open_draft_chat_in_editor(&thread_id, editor)
+                }
             },
             cx,
         );
@@ -61,9 +64,9 @@ impl ThreadDetails {
                         return;
                     }
                     this.error = Some(error_message(&error));
-                    if !this.shown() {
+                    if !this.shown(cx) {
                         if this.inline {
-                            this.open = true;
+                            this.set_open(true, cx);
                         } else {
                             this.popover_open = true;
                         }

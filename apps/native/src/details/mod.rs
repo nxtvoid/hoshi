@@ -52,11 +52,13 @@ pub enum Surface {
     PullRequest,
 }
 
-/// What the card is about: the open thread, or the project a new thread will start in.
+/// What the card is about: the open thread, the project a new thread will start in, or the
+/// thread id a new chat will start as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Subject {
     Thread(String),
     Draft(String),
+    ChatDraft(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,13 +93,13 @@ struct SubagentCalls {
 /// enough, else a popover from the header button.
 pub struct ThreadDetails {
     workspace: Entity<Workspace>,
-    open: bool,
     inline: bool,
     popover_open: bool,
     branch_menu_open: bool,
     editor_anchor: PopoverAnchor,
     home: Option<PathBuf>,
     prefs: Prefs,
+    prefs_saving: Option<Task<()>>,
     /// Editors on this machine; `None` until found.
     editors: Option<Vec<Editor>>,
     /// Each thread's uncommitted changes and checkout, as last read.
@@ -137,7 +139,12 @@ impl ThreadDetails {
             .as_deref()
             .and_then(Path::parent)
             .map(Path::to_path_buf);
-        let prefs = home.as_deref().map(prefs::load).unwrap_or_default();
+        let mut prefs: Prefs = home.as_deref().map(prefs::load).unwrap_or_default();
+        let closed = prefs.closed_threads.len();
+        prefs
+            .closed_threads
+            .retain(|thread_id| workspace.read(cx).thread_or_draft(thread_id));
+        let pruned = prefs.closed_threads.len() != closed;
         let engine = workspace.read(cx).engine.clone();
         cx.spawn(async move |this, cx| {
             let editors = cx.background_spawn(async move { engine.editors() }).await;
@@ -170,6 +177,9 @@ impl ThreadDetails {
             }
             let subject = this.subject(cx);
             if subject != this.shown_subject {
+                if let Some(Subject::ChatDraft(thread_id)) = &subject {
+                    this.load_chat_folder(thread_id.clone(), cx);
+                }
                 this.shown_subject = subject;
                 this.subject_changes += 1;
                 this.popover_open = false;
@@ -177,15 +187,15 @@ impl ThreadDetails {
             }
             cx.notify();
         });
-        Self {
+        let mut this = Self {
             workspace,
-            open: false,
             inline: true,
             editor_anchor: PopoverAnchor::new(),
             popover_open: false,
             branch_menu_open: false,
             home,
             prefs,
+            prefs_saving: None,
             editors: None,
             changes: HashMap::new(),
             statuses: HashMap::new(),
@@ -207,7 +217,11 @@ impl ThreadDetails {
             error: None,
             server_error: None,
             _subscriptions: vec![keys, observe],
+        };
+        if pruned {
+            this.save_prefs(cx);
         }
+        this
     }
 }
 
@@ -229,7 +243,8 @@ impl Render for ThreadDetails {
         .absolute()
         .size_full();
         let subject = self.subject(cx);
-        let card = subject.filter(|_| self.open && self.inline).map(|subject| {
+        let open = self.is_open(cx);
+        let card = subject.filter(|_| open && self.inline).map(|subject| {
             let colors = cx.hoshi().clone();
             let content = self.subject_content(&subject, window, cx);
             div()

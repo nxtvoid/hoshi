@@ -193,6 +193,7 @@ impl WorktreeSetups {
                 project_root: &launch.project_root,
                 worktree_path: Some(&launch.worktree_path),
                 command: Some(&launch.command),
+                draft: false,
             },
             self.observer(thread_id, generation, finished.clone()),
         );

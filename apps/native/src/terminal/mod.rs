@@ -73,15 +73,38 @@ impl TerminalDrawer {
         this
     }
 
-    /// Drops the drawers of threads that were deleted.
+    /// Drops the drawers of threads that were deleted and of drafts that were discarded, with
+    /// their shells.
     fn forget_deleted(&mut self, cx: &mut Context<Self>) {
-        let model = &self.workspace.read(cx).model;
-        let before = self.drawers.len();
-        self.drawers
-            .retain(|thread_id, _| model.thread(thread_id).is_some());
-        if self.drawers.len() != before {
-            self.save(cx);
+        let workspace = self.workspace.read(cx);
+        let gone: Vec<String> = self
+            .drawers
+            .keys()
+            .filter(|thread_id| !workspace.thread_or_draft(thread_id))
+            .cloned()
+            .collect();
+        if gone.is_empty() {
+            return;
         }
+        let engine = workspace.engine.clone();
+        let mut terminals = Vec::new();
+        for thread_id in &gone {
+            if let Some(drawer) = self.drawers.remove(thread_id) {
+                terminals.extend(drawer.terminal_ids);
+            }
+        }
+        for id in &terminals {
+            if let Some(view) = self.views.remove(id) {
+                view.update(cx, |view, _| view.detach());
+            }
+        }
+        cx.background_spawn(async move {
+            for id in &terminals {
+                engine.close_terminal(id);
+            }
+        })
+        .detach();
+        self.save(cx);
     }
 
     fn save(&mut self, cx: &mut Context<Self>) {
@@ -293,7 +316,7 @@ impl TerminalDrawer {
 impl Render for TerminalDrawer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.hoshi().clone();
-        let thread_id = self.workspace.read(cx).open_thread_id(cx);
+        let thread_id = self.workspace.read(cx).shown_thread_id(cx);
         let drawer = thread_id
             .as_deref()
             .and_then(|id| self.drawers.get(id))

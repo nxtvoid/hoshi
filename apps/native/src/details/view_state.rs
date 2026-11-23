@@ -2,7 +2,35 @@ use super::*;
 
 impl ThreadDetails {
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
-        self.open = !self.open;
+        let open = self.is_open(cx);
+        self.set_open(!open, cx);
+    }
+
+    /// Whether the card shows for the thread on screen: unless the user closed it there.
+    pub(super) fn is_open(&self, cx: &App) -> bool {
+        self.workspace
+            .read(cx)
+            .shown_thread_id(cx)
+            .is_none_or(|thread_id| !self.prefs.closed_threads.contains(&thread_id))
+    }
+
+    /// Opens or closes the card for the thread on screen, and remembers it across restarts.
+    pub fn set_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        let workspace = self.workspace.read(cx);
+        let Some(thread_id) = workspace.shown_thread_id(cx) else {
+            return;
+        };
+        let closed = &mut self.prefs.closed_threads;
+        let changed = if open {
+            closed.remove(&thread_id)
+        } else {
+            closed.insert(thread_id)
+        };
+        if !changed {
+            return;
+        }
+        closed.retain(|thread_id| workspace.thread_or_draft(thread_id));
+        self.save_prefs(cx);
         cx.notify();
     }
 
@@ -22,7 +50,7 @@ impl ThreadDetails {
 
     /// What the floating card takes from the chat's lanes while it shows.
     pub fn lane_room(&self, cx: &App) -> LaneRoom {
-        let card = self.open && self.inline && self.subject(cx).is_some();
+        let card = self.inline && self.is_open(cx) && self.subject(cx).is_some();
         if card {
             LaneRoom {
                 right: px(CARD_WIDTH + CARD_GAP + CARD_CLEARANCE),
@@ -34,9 +62,9 @@ impl ThreadDetails {
     }
 
     /// Whether the details show now, as the card or the popover.
-    pub(super) fn shown(&self) -> bool {
+    pub(super) fn shown(&self, cx: &App) -> bool {
         if self.inline {
-            self.open
+            self.is_open(cx)
         } else {
             self.popover_open
         }
@@ -47,12 +75,36 @@ impl ThreadDetails {
         if let Some(thread_id) = workspace.open_thread_id(cx) {
             return Some(Subject::Thread(thread_id));
         }
-        workspace
-            .draft
-            .as_ref()
-            .and_then(|draft| draft.project_id.clone())
-            .filter(|project_id| workspace.model.project(project_id).is_some())
-            .map(Subject::Draft)
+        let draft = workspace.draft.as_ref()?;
+        match &draft.project_id {
+            Some(project_id) => workspace
+                .model
+                .project(project_id)
+                .is_some()
+                .then(|| Subject::Draft(project_id.clone())),
+            None => Some(Subject::ChatDraft(draft.thread_id.clone())),
+        }
+    }
+
+    pub(super) fn load_chat_folder(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        if self.chat_folders.contains_key(&thread_id) {
+            return;
+        }
+        let engine = self.engine(cx);
+        cx.spawn(async move |this, cx| {
+            let id = thread_id.clone();
+            let folder = cx
+                .background_spawn(async move { engine.draft_chat_folder(&id) })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(folder) = folder {
+                    this.chat_folders.insert(thread_id, folder);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(super) fn engine(&self, cx: &App) -> std::sync::Arc<hoshi_engine::Engine> {
@@ -190,12 +242,21 @@ impl ThreadDetails {
         .detach();
     }
 
-    pub(super) fn save_prefs(&self, cx: &mut Context<Self>) {
-        if let Some(home) = self.home.clone() {
-            let prefs = self.prefs.clone();
-            cx.background_spawn(async move { prefs::save(&home, &prefs) })
-                .detach_and_log_err(cx);
-        }
+    /// Saves the prefs after the previous save, so the file ends with the latest.
+    pub(super) fn save_prefs(&mut self, cx: &mut Context<Self>) {
+        let Some(home) = self.home.clone() else {
+            return;
+        };
+        let prefs = self.prefs.clone();
+        let previous = self.prefs_saving.take();
+        self.prefs_saving = Some(cx.background_spawn(async move {
+            if let Some(previous) = previous {
+                previous.await;
+            }
+            if let Err(error) = prefs::save(&home, &prefs) {
+                eprintln!("hoshi: could not save the details prefs: {error}");
+            }
+        }));
     }
 
     pub(super) fn show(&mut self, surface: Surface, cx: &mut Context<Self>) {

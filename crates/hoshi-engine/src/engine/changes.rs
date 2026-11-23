@@ -159,6 +159,24 @@ impl Engine {
         editors::open(editor, &cwd).map_err(|detail| CommandError::Internal { detail })
     }
 
+    /// The folder of a chat not started yet, made so it can be opened.
+    pub fn draft_chat_folder(&self, thread_id: &str) -> Option<String> {
+        lock(&self.state).made_chat_folder(thread_id)
+    }
+
+    pub fn open_draft_chat_in_editor(
+        &self,
+        thread_id: &str,
+        editor: Editor,
+    ) -> Result<(), CommandError> {
+        let folder =
+            self.draft_chat_folder(thread_id)
+                .ok_or_else(|| CommandError::ThreadNotFound {
+                    thread_id: thread_id.to_owned(),
+                })?;
+        editors::open(editor, &folder).map_err(|detail| CommandError::Internal { detail })
+    }
+
     /// Opens a project's folder, for a thread not started yet.
     pub fn open_project_in_editor(
         &self,

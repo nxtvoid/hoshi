@@ -62,6 +62,8 @@ pub struct DraftChoices {
 pub struct Draft {
     /// `None` for a chat.
     pub project_id: Option<String>,
+    /// The id its first message creates the thread with.
+    pub thread_id: String,
 }
 
 /// How many transcripts stay loaded: the open one and those open just before it.
@@ -172,6 +174,10 @@ pub struct Workspace {
     pub browsers: Entity<crate::browser::Browsers>,
     /// Unsent composer drafts by [`crate::drafts::key`].
     pub drafts: HashMap<String, crate::drafts::Draft>,
+    /// The thread id each new thread's place will create, by [`crate::drafts::key`].
+    draft_threads: HashMap<String, String>,
+    /// Draft threads sent but not created in the model yet, with their project.
+    sending_drafts: HashMap<String, Option<String>>,
     /// The latest worktree setup of each thread since the app started.
     pub worktree_setups: HashMap<String, hoshi_core::WorktreeSetupRun>,
     /// How full each thread's context window was after its last model call.
@@ -356,6 +362,8 @@ impl Workspace {
             merged_cleanup,
             browsers,
             drafts: HashMap::new(),
+            draft_threads: HashMap::new(),
+            sending_drafts: HashMap::new(),
             worktree_setups,
             context_usages,
             held_messages,
@@ -396,6 +404,17 @@ impl Workspace {
                     .and_then(|id| self.model.thread(&id))
                     .map(|thread| thread.project_id.clone());
                 self.model.apply(&envelope.event);
+                if let Event::ThreadCreated { thread } = &envelope.event {
+                    self.sending_drafts.remove(&thread.id);
+                }
+                if let Event::ProjectRemoved { .. } = &envelope.event {
+                    let model = &self.model;
+                    self.draft_threads.retain(|key, _| {
+                        crate::drafts::new_thread_project(key)
+                            .flatten()
+                            .is_none_or(|project_id| model.project(project_id).is_some())
+                    });
+                }
                 crate::fork::follow_created(self, &envelope.event, cx);
                 crate::details::track_pending_tasks(&mut self.pending_tasks, &envelope.event);
                 if let Event::ThreadDeleted { thread_id } = &envelope.event {
@@ -604,7 +623,15 @@ impl Workspace {
         self.keep_recent(left, cx);
         self.stream_held(cx);
         self.choices = self.new_thread_choices(project_id.as_deref());
-        self.draft = Some(Draft { project_id });
+        let thread_id = self
+            .draft_threads
+            .entry(crate::drafts::key(None, project_id.as_deref()))
+            .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone();
+        self.draft = Some(Draft {
+            project_id,
+            thread_id,
+        });
         cx.notify();
     }
 
@@ -636,7 +663,14 @@ impl Workspace {
         let Some(draft) = self.draft.clone() else {
             return Task::ready(Ok(()));
         };
-        let thread_id = uuid::Uuid::new_v4().to_string();
+        let thread_id = draft.thread_id.clone();
+        if self.sending_drafts.contains_key(&thread_id) || self.model.thread(&thread_id).is_some() {
+            return Task::ready(Err(CommandError::ThreadBusy { thread_id }));
+        }
+        let place = crate::drafts::key(None, draft.project_id.as_deref());
+        self.draft_threads.remove(&place);
+        self.sending_drafts
+            .insert(thread_id.clone(), draft.project_id.clone());
         let choices = &self.choices;
         let workspace = if draft.project_id.is_some() && choices.worktree {
             ThreadWorkspace::NewWorktree
@@ -664,14 +698,28 @@ impl Workspace {
         };
         let engine = self.engine.clone();
         cx.spawn(async move |this, cx| {
-            cx.background_spawn(async move {
-                engine.dispatch(create)?;
-                engine.dispatch(send)
-            })
-            .await?;
+            let created = {
+                let engine = engine.clone();
+                cx.background_spawn(async move { engine.dispatch(create) })
+                    .await
+            };
+            if let Err(error) = created {
+                this.update(cx, |this, cx| {
+                    this.sending_drafts.remove(&thread_id);
+                    if this.model.thread(&thread_id).is_none() {
+                        this.draft_threads.entry(place).or_insert(thread_id);
+                    }
+                    cx.notify();
+                })
+                .ok();
+                return Err(error);
+            }
+            let sent = cx
+                .background_spawn(async move { engine.dispatch(send) })
+                .await;
             this.update(cx, |this, cx| this.open_thread(&thread_id, cx))
                 .ok();
-            Ok(())
+            sent
         })
     }
 
@@ -819,6 +867,23 @@ impl Workspace {
 
     /// Drops these drafts whole, with the images and files the engine saved for them.
     pub fn forget_drafts(&mut self, keys: &[String], cx: &mut Context<Self>) {
+        let mut threads_changed = false;
+        for key in keys {
+            if self.draft_threads.remove(key).is_none() {
+                continue;
+            }
+            threads_changed = true;
+            if let Some(draft) = self.draft.as_mut()
+                && crate::drafts::key(None, draft.project_id.as_deref()) == *key
+            {
+                draft.thread_id = uuid::Uuid::new_v4().to_string();
+                self.draft_threads
+                    .insert(key.clone(), draft.thread_id.clone());
+            }
+        }
+        if threads_changed {
+            cx.notify();
+        }
         let before = self.drafts.len();
         let mut saved = Vec::new();
         self.drafts.retain(|key, draft| {
@@ -945,6 +1010,34 @@ impl Workspace {
         self.open
             .as_ref()
             .map(|open| open.read(cx).thread_id.clone())
+    }
+
+    /// The open thread, or the one the draft on screen will create.
+    pub fn shown_thread_id(&self, cx: &App) -> Option<String> {
+        self.open_thread_id(cx)
+            .or_else(|| self.draft.as_ref().map(|draft| draft.thread_id.clone()))
+    }
+
+    /// The project a draft thread is for, `Some(None)` for a chat; `None` for any other id.
+    pub fn draft_project(&self, thread_id: &str) -> Option<Option<String>> {
+        if self.model.thread(thread_id).is_some() {
+            return None;
+        }
+        if let Some(project_id) = self.sending_drafts.get(thread_id) {
+            return Some(project_id.clone());
+        }
+        self.draft_threads
+            .iter()
+            .find(|(_, id)| *id == thread_id)
+            .and_then(|(key, _)| crate::drafts::new_thread_project(key))
+            .map(|project_id| project_id.map(str::to_owned))
+    }
+
+    /// Whether `thread_id` is a thread, or one a draft will create.
+    pub fn thread_or_draft(&self, thread_id: &str) -> bool {
+        self.model.thread(thread_id).is_some()
+            || self.sending_drafts.contains_key(thread_id)
+            || self.draft_threads.values().any(|id| id == thread_id)
     }
 
     pub fn set_tasks_on_screen(&mut self, tasks: HashSet<String>, cx: &mut Context<Self>) {
@@ -1130,6 +1223,44 @@ mod recent_tests {
                 .unwrap();
         }
         cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)))
+    }
+
+    #[gpui_kit::test]
+    fn a_draft_sends_once_and_a_failed_send_keeps_the_draft_started_since(cx: &mut TestAppContext) {
+        use futures::FutureExt as _;
+        let workspace = workspace(cx, 0);
+        let start = |workspace: &Entity<Workspace>, cx: &mut TestAppContext| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.start_draft(Some("gone".into()), cx);
+                workspace.shown_thread_id(cx).unwrap()
+            })
+        };
+        let first = start(&workspace, cx);
+        let (sending, again) = workspace.update(cx, |workspace, cx| {
+            let sending = workspace.send_draft("hello".into(), Vec::new(), cx);
+            let again = workspace.send_draft("hello".into(), Vec::new(), cx);
+            (sending, again)
+        });
+        assert!(matches!(
+            again.now_or_never(),
+            Some(Err(hoshi_core::CommandError::ThreadBusy { .. }))
+        ));
+        let started_since = start(&workspace, cx);
+        assert_ne!(started_since, first);
+
+        let result = std::rc::Rc::new(std::cell::RefCell::new(None));
+        cx.update(|cx| {
+            let result = result.clone();
+            cx.spawn(async move |_| *result.borrow_mut() = Some(sending.await))
+                .detach()
+        });
+        cx.run_until_parked();
+        assert!(matches!(
+            result.borrow_mut().take(),
+            Some(Err(hoshi_core::CommandError::ProjectNotFound { .. }))
+        ));
+        assert_eq!(start(&workspace, cx), started_since);
+        assert!(workspace.read_with(cx, |workspace, _| !workspace.thread_or_draft(&first)));
     }
 
     #[gpui_kit::test]

@@ -15,12 +15,12 @@ impl ThreadDetails {
                 .servers
                 .get(thread_id)
                 .map_or(0, Vec::len),
-            Subject::Draft(_) => 0,
+            Subject::Draft(_) | Subject::ChatDraft(_) => 0,
         };
-        let notice = (!self.shown() && count > 0).then(|| {
+        let notice = (!self.shown(cx) && count > 0).then(|| {
             servers_notice(count, &colors).on_click(cx.listener(|this, _, _, cx| {
                 if this.inline {
-                    this.open = true;
+                    this.set_open(true, cx);
                 } else {
                     this.popover_open = true;
                 }
@@ -39,7 +39,7 @@ impl ThreadDetails {
                 .tooltip(Tooltip::new(m::thread_details()).side(Side::Bottom))
         };
         let button = if self.inline {
-            toggle(self.open)
+            toggle(self.is_open(cx))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle(cx)))
                 .into_any_element()
         } else {
@@ -80,7 +80,30 @@ impl ThreadDetails {
         match subject {
             Subject::Thread(thread_id) => self.content(thread_id, window, cx),
             Subject::Draft(project_id) => self.draft_content(project_id, cx),
+            Subject::ChatDraft(thread_id) => self.chat_draft_content(thread_id, cx),
         }
+    }
+
+    fn chat_draft_content(&mut self, thread_id: &str, cx: &mut Context<Self>) -> AnyElement {
+        let colors = cx.hoshi().clone();
+        let provider = self.workspace.read(cx).choices.model.provider.clone();
+        let mut column = div().flex().flex_col().gap(px(2.));
+        if let Some(folder) = self.chat_folders.get(thread_id) {
+            column = column.child(self.folder_row(folder, None, &colors));
+        }
+        if let Some(editor) = self.open_target() {
+            column = column.child(self.editor_row(editor, &colors, cx));
+        }
+        if let Some(limits) = self.usage_limits(&provider, cx) {
+            column = column
+                .child(separator(&colors))
+                .child(usage::section(&limits, &colors));
+        }
+        column
+            .when_some(self.error.clone(), |this, error| {
+                this.child(error_line(error, &colors))
+            })
+            .into_any_element()
     }
 
     pub(super) fn draft_content(&mut self, project_id: &str, cx: &mut Context<Self>) -> AnyElement {

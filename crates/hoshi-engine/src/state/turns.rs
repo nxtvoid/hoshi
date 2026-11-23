@@ -15,9 +15,27 @@ impl State {
         if thread.project_id.is_some() {
             return self.model.thread_cwd(thread_id).map(str::to_owned);
         }
+        self.made_chat_folder(thread_id)
+    }
+
+    /// The chat's folder, made if it isn't yet, as a thread's or a draft's.
+    pub(crate) fn made_chat_folder(&self, thread_id: &str) -> Option<String> {
         let folder = self.chat_folder(thread_id)?;
         std::fs::create_dir_all(&folder).ok()?;
         Some(folder.to_string_lossy().into_owned())
+    }
+
+    /// Removes the empty folders of chats that were never started.
+    pub(crate) fn forget_unused_chat_folders(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.chats_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if self.model.thread(&name.to_string_lossy()).is_none() {
+                std::fs::remove_dir(entry.path()).ok();
+            }
+        }
     }
 
     /// `None` for ids that could reach outside the chats folder.

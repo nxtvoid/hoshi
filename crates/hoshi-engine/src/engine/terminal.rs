@@ -30,6 +30,51 @@ impl Engine {
             project_root: &project_root,
             worktree_path: worktree_path.as_deref(),
             command: None,
+            draft: false,
+        };
+        self.terminals.open(terminal_id, launch, size, sink)
+    }
+
+    /// Like [`Self::open_terminal`] for a thread a draft will create in `project_id`, or as a
+    /// chat with `None`: the shell starts in the project's folder or the chat's.
+    pub fn open_draft_terminal(
+        &self,
+        thread_id: &str,
+        project_id: Option<&str>,
+        terminal_id: &str,
+        size: (u16, u16),
+        sink: TerminalSink,
+    ) -> Result<TerminalAttach, CommandError> {
+        let cwd = {
+            let state = lock(&self.state);
+            if state.model.thread(thread_id).is_some() {
+                drop(state);
+                return self.open_terminal(thread_id, terminal_id, size, sink);
+            }
+            match project_id {
+                Some(project_id) => state
+                    .model
+                    .project(project_id)
+                    .map(|project| project.workspace_root.clone())
+                    .ok_or_else(|| CommandError::ProjectNotFound {
+                        project_id: project_id.to_owned(),
+                    })?,
+                None => {
+                    state
+                        .made_chat_folder(thread_id)
+                        .ok_or_else(|| CommandError::Internal {
+                            detail: format!("no folder for chat {thread_id}"),
+                        })?
+                }
+            }
+        };
+        let launch = Launch {
+            thread_id,
+            cwd: &cwd,
+            project_root: &cwd,
+            worktree_path: None,
+            command: None,
+            draft: true,
         };
         self.terminals.open(terminal_id, launch, size, sink)
     }
@@ -53,6 +98,7 @@ impl Engine {
             project_root: &home,
             worktree_path: None,
             command: Some(command),
+            draft: false,
         };
         self.terminals.open(terminal_id, launch, size, sink)
     }
