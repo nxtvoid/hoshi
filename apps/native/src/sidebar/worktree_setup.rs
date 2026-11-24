@@ -112,15 +112,13 @@ impl WorktreeSetupForm {
             wait: false,
         });
         let files = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            crate::locale::textarea(m::worktree_setup_files_placeholder, window, cx)
                 .auto_grow(3, 8)
-                .placeholder(m::worktree_setup_files_placeholder())
                 .default_value(setup.files.join("\n"))
         });
         let command = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            crate::locale::textarea(m::worktree_setup_placeholder, window, cx)
                 .auto_grow(3, 8)
-                .placeholder(m::worktree_setup_placeholder())
                 .default_value(setup.command.clone())
         });
         let subscriptions = vec![
@@ -241,9 +239,8 @@ impl WorktreeSetupForm {
 
     fn start_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            crate::locale::textarea(m::worktree_setup_import_placeholder, window, cx)
                 .auto_grow(4, 10)
-                .placeholder(m::worktree_setup_import_placeholder())
         });
         self._subscriptions
             .push(cx.observe(&text, |_, _, cx| cx.notify()));

@@ -34,8 +34,7 @@ impl BrowserSurface {
         cx: &mut Context<Self>,
     ) -> Self {
         let browsers = workspace.read(cx).browsers.clone();
-        let address =
-            cx.new(|cx| InputState::new(window, cx).placeholder(m::browser_address_placeholder()));
+        let address = cx.new(|cx| crate::locale::input(m::browser_address_placeholder, window, cx));
         let shown_page = browsers.read(cx).page(&thread_id);
         let url = shown_page
             .map(|page| page.page.url.clone())

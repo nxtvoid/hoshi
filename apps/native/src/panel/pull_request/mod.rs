@@ -439,19 +439,19 @@ impl PullRequestSurface {
     fn new_text_box(
         &self,
         initial: &str,
-        placeholder: Option<String>,
+        placeholder: Option<fn() -> String>,
         rows: (usize, usize),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> TextBox {
         let state = cx.new(|cx| {
-            let state = TextareaState::new(window, cx)
+            let state = match placeholder {
+                Some(placeholder) => crate::locale::textarea(placeholder, window, cx),
+                None => TextareaState::new(window, cx),
+            };
+            state
                 .auto_grow(rows.0, rows.1)
-                .default_value(initial.to_owned());
-            match placeholder {
-                Some(placeholder) => state.placeholder(placeholder),
-                None => state,
-            }
+                .default_value(initial.to_owned())
         });
         let changes = cx.subscribe(&state, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -536,7 +536,7 @@ impl PullRequestSurface {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let text_box = self.new_text_box("", Some(m::write_reply()), (3, 8), window, cx);
+        let text_box = self.new_text_box("", Some(m::write_reply), (3, 8), window, cx);
         text_box
             .state
             .update(cx, |state, cx| state.focus(window, cx));
@@ -985,8 +985,7 @@ impl Render for PullRequestSurface {
         let detail = read.clone().flatten();
         let commenting = detail.is_some() && actions::can_comment(&pull_request);
         if commenting && self.tab == Tab::Timeline && self.comment.is_none() {
-            self.comment =
-                Some(self.new_text_box("", Some(m::write_comment()), (3, 8), window, cx));
+            self.comment = Some(self.new_text_box("", Some(m::write_comment), (3, 8), window, cx));
         }
         let body = match (&detail, self.tab) {
             (None, _) => div()

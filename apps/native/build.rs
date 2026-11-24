@@ -119,7 +119,11 @@ impl Text {
     fn shape(&self) -> Shape {
         match self {
             Self::Simple(text) => (params(&[text]), None),
-            Self::Plural { count, one, other } => (params(&[one, other]), Some(count.clone())),
+            Self::Plural { count, one, other } => {
+                let mut params = params(&[one, other]);
+                params.insert(count.clone());
+                (params, Some(count.clone()))
+            }
         }
     }
 

@@ -21,15 +21,9 @@ pub struct EditLabelsProvider(pub fn() -> EditLabels);
 impl Global for EditLabelsProvider {}
 
 fn labels(cx: &App) -> EditLabels {
-    match cx.try_global::<EditLabelsProvider>() {
-        Some(provider) => provider.0(),
-        None => EditLabels {
-            cut: "Cut".into(),
-            copy: "Copy".into(),
-            paste: "Paste".into(),
-            select_all: "Select All".into(),
-        },
-    }
+    cx.try_global::<EditLabelsProvider>()
+        .expect("the app sets an EditLabelsProvider")
+        .0()
 }
 
 fn items(

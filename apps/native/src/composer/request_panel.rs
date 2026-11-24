@@ -177,7 +177,7 @@ impl Composer {
     fn secret_field(
         &mut self,
         request: &ThreadItem,
-        placeholder: String,
+        placeholder: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<InputState> {
@@ -187,9 +187,11 @@ impl Composer {
             return field.input.clone();
         }
         let input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .masked(true)
-                .placeholder(placeholder)
+            match placeholder {
+                Some(placeholder) => InputState::new(window, cx).placeholder(placeholder),
+                None => crate::locale::input(m::secret_request_placeholder, window, cx),
+            }
+            .masked(true)
         });
         let answered = request.clone();
         let subscription = cx.subscribe_in(&input, window, move |this, input, event, _, cx| {
@@ -249,10 +251,7 @@ impl Composer {
                 placeholder,
                 ..
             } => {
-                let placeholder = placeholder
-                    .clone()
-                    .unwrap_or_else(m::secret_request_placeholder);
-                let field = self.secret_field(request, placeholder, window, cx);
+                let field = self.secret_field(request, placeholder.clone(), window, cx);
                 self.secret_panel(request, label, reason, field, cx)
             }
             _ => div().into_any_element(),

@@ -53,9 +53,7 @@ pub fn open(
     cx: &mut Context<ThreadDetails>,
 ) {
     let message = cx.new(|cx| {
-        TextareaState::new(window, cx)
-            .auto_grow(3, 6)
-            .placeholder(m::git_commit_message_placeholder())
+        crate::locale::textarea(m::git_commit_message_placeholder, window, cx).auto_grow(3, 6)
     });
     let form = cx.new(|_| CommitForm {
         files: None,

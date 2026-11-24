@@ -271,15 +271,12 @@ impl ThemeEditor {
             .or(seed_name)
             .unwrap_or_default();
         let placeholder = if editing.is_some() {
-            m::theme_name()
+            m::theme_name
         } else {
-            m::theme_name_placeholder()
+            m::theme_name_placeholder
         };
-        let name = cx.new(|cx| {
-            InputState::new(window, cx)
-                .placeholder(placeholder)
-                .default_value(initial_name)
-        });
+        let name =
+            cx.new(|cx| crate::locale::input(placeholder, window, cx).default_value(initial_name));
         let query = cx.new(|cx| crate::locale::input(m::filter_colors, window, cx));
         let picker = cx.new(|_| ColorPicker::new(to_gpui(BLACK)));
         let hex = cx.new(|cx| InputState::new(window, cx));
