@@ -219,6 +219,7 @@ impl State {
         if thread.active_turn_id.is_none()
             || picked.is_none()
             || blank
+            || self.routes.contains_key(message_id)
             || hoshi_core::is_compact_command(text)
             || self.thread_ops.contains_key(thread_id)
         {
@@ -244,11 +245,6 @@ impl State {
         };
         self.queue_message(thread_id, message);
         if restarts && free {
-            if let Some(queued) = self.queued.get_mut(thread_id)
-                && let Some(message) = queued.pop_back()
-            {
-                queued.push_front(message);
-            }
             let interrupt = Command::TurnInterrupt {
                 thread_id: thread_id.clone(),
             };
@@ -259,47 +255,63 @@ impl State {
         true
     }
 
-    /// Carries out `command`, a message to the idle thread, on `to` instead of on the provider
-    /// the user has picked for their next one, which stays picked.
-    pub(crate) fn run_on(
+    /// Sends a message that runs on `to`, or where its thread is, instead of on what the user
+    /// picked for their next one, which stays picked. The route holds though the message waits
+    /// on its way, as for git work.
+    pub(crate) fn send_routed(
         &mut self,
-        thread_id: &str,
+        message_id: &str,
         to: Option<Box<ModelChoice>>,
-        command: Command,
+        send: Command,
     ) -> Result<(), CommandError> {
-        let shown = self.model.thread(thread_id).map(|thread| {
-            thread
-                .pending_model
-                .clone()
-                .unwrap_or_else(|| Box::new(ModelChoice::of(thread)))
-        });
-        self.set_pick(thread_id, to)?;
-        let result = self.run_command(command);
-        let kept = self
-            .model
-            .thread(thread_id)
-            .and_then(|thread| shown.filter(|shown| shown.provider != thread.provider));
-        self.set_pick(thread_id, kept)?;
-        result
+        self.routes.insert(message_id.to_owned(), to);
+        let sent = self.run_command(send);
+        if sent.is_err() {
+            self.routes.remove(message_id);
+        }
+        sent
     }
 
-    fn set_pick(
+    /// Whether the message moves its idle thread to another provider.
+    pub(crate) fn moves_thread(&self, thread_id: &str, message_id: &str) -> bool {
+        let Some(thread) = self.model.thread(thread_id) else {
+            return false;
+        };
+        let to = match self.routes.get(message_id) {
+            Some(route) => route.as_deref(),
+            None => thread.pending_model.as_deref(),
+        };
+        thread.active_turn_id.is_none() && to.is_some_and(|to| to.provider != thread.provider)
+    }
+
+    /// Has the thread run on `choice` from its next turn, as picking it does.
+    pub(crate) fn choose(
         &mut self,
         thread_id: &str,
-        choice: Option<Box<ModelChoice>>,
+        choice: ModelChoice,
     ) -> Result<(), CommandError> {
-        let changed = self
-            .model
-            .thread(thread_id)
-            .is_some_and(|thread| thread.pending_model != choice);
-        if !changed {
+        if self.shown_choice(thread_id).as_ref() == Some(&choice) {
             return Ok(());
         }
-        let picked = Event::ThreadModelPending {
+        self.decide_and_commit(Command::ThreadModelSet {
             thread_id: thread_id.to_owned(),
-            choice: choice.map(|choice| *choice),
-        };
-        self.commit(&[picked], &now())
+            provider: choice.provider,
+            model: choice.model,
+            effort: choice.effort,
+            fast_mode: choice.fast_mode,
+            ultracode: choice.ultracode,
+        })
+    }
+
+    /// What the user's next message runs on, as the composer shows it.
+    pub(crate) fn shown_choice(&self, thread_id: &str) -> Option<ModelChoice> {
+        self.model.thread(thread_id).map(|thread| {
+            thread
+                .pending_model
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(|| ModelChoice::of(thread))
+        })
     }
 
     /// Starts a turn of its own for a message taken out of the idle thread's queue.
@@ -341,17 +353,13 @@ impl State {
         message: QueuedMessage,
         to: Box<ModelChoice>,
     ) -> Result<(), CommandError> {
-        let moves = self
-            .model
-            .thread(thread_id)
-            .is_some_and(|thread| thread.provider != to.provider);
         let send = Command::MessageSend {
             thread_id: thread_id.to_owned(),
             message_id: message.id.clone(),
             text: message.text.clone(),
             attachments: message.attachments.clone(),
         };
-        let sent = self.run_on(thread_id, moves.then_some(to), send);
+        let sent = self.send_routed(&message.id, Some(to), send);
         if sent.is_err() {
             self.queued
                 .entry(thread_id.to_owned())

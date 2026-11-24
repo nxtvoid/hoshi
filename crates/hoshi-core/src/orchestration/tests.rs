@@ -1075,6 +1075,11 @@ fn another_provider_picked_while_a_first_turn_runs_without_a_session_waits_too()
         "the turn goes on where it started"
     );
     finish_turn(&mut model, "m1");
+    run(&mut model, switch_to("copilot")).unwrap();
+    assert!(
+        model.thread("t").unwrap().pending_model.is_some(),
+        "picked again, it still waits"
+    );
     run(&mut model, send("m2", "two")).unwrap();
 
     let thread = model.thread("t").unwrap();

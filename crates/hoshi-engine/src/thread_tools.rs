@@ -299,12 +299,8 @@ impl State {
             text: message,
             attachments: Vec::new(),
         };
-        if steered {
-            self.run_command(send)
-        } else {
-            self.run_on(&thread_id, None, send)
-        }
-        .map_err(|error| error.to_string())?;
+        self.send_routed(&message_id, None, send)
+            .map_err(|error| error.to_string())?;
         Ok(json!({
             "threadId": thread_id,
             "messageId": message_id,

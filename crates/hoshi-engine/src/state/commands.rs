@@ -36,13 +36,12 @@ impl State {
             }
             Command::MessageSend {
                 ref thread_id,
+                ref message_id,
                 ref text,
                 ..
             } => {
                 let switching = !hoshi_core::is_compact_command(text)
-                    && self.model.thread(thread_id).is_some_and(|thread| {
-                        thread.active_turn_id.is_none() && thread.pending_model.is_some()
-                    });
+                    && self.moves_thread(thread_id, message_id);
                 if switching {
                     self.refuse_ending_background_work(thread_id)?;
                 }
@@ -281,8 +280,38 @@ impl State {
         Ok(())
     }
 
-    /// Carries out a command `prepare` already went through, or one the engine itself made.
+    /// Carries out a command `prepare` already went through, or one the engine itself made. A
+    /// routed message runs on its route, and what the user picked stays picked.
     pub(crate) fn run_prepared(&mut self, command: Command) -> Result<(), CommandError> {
+        let routed = match &command {
+            Command::MessageSend {
+                thread_id,
+                message_id,
+                ..
+            } => self
+                .routes
+                .remove(message_id)
+                .map(|to| (thread_id.clone(), to)),
+            _ => None,
+        };
+        let Some((thread_id, to)) = routed else {
+            return self.carry_out(command);
+        };
+        let (Some(picked), Some(thread)) =
+            (self.shown_choice(&thread_id), self.model.thread(&thread_id))
+        else {
+            return self.carry_out(command);
+        };
+        let to = to.map_or_else(|| ModelChoice::of(thread), |to| *to);
+        self.choose(&thread_id, to)?;
+        let sent = self.carry_out(command);
+        if let Err(error) = self.choose(&thread_id, picked) {
+            eprintln!("hoshi: failed to keep what was picked for the next message: {error}");
+        }
+        sent
+    }
+
+    fn carry_out(&mut self, command: Command) -> Result<(), CommandError> {
         let interrupt = match &command {
             Command::TurnInterrupt { thread_id } => Some(thread_id.clone()),
             _ => None,
@@ -555,6 +584,9 @@ impl State {
         }
         let result = first.map_or(Ok(()), |command| self.run_command(command));
         for command in held {
+            if self.queue_to_switch(&command) {
+                continue;
+            }
             if let Err(error) = self.run_command(command) {
                 eprintln!("hoshi: failed to send a message held for git work: {error}");
             }

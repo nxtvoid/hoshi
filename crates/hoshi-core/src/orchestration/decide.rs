@@ -426,6 +426,7 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
             let has_conversation = thread.active_turn_id.is_some()
+                || thread.pending_model.is_some()
                 || thread.session_id.is_some()
                 || !thread.provider_sessions.is_empty();
             if thread.provider != provider && has_conversation {

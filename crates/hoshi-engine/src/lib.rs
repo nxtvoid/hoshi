@@ -299,6 +299,9 @@ struct State {
     /// Messages sent while a thread's turn was ending, too late to join it, oldest first.
     /// Each starts a turn of its own once the running one ends.
     queued: HashMap<String, VecDeque<QueuedMessage>>,
+    /// What messages on their way run on, by message id, whatever is picked for the user's next
+    /// one; `None` for where their thread is.
+    routes: HashMap<String, Option<Box<ModelChoice>>>,
     /// The server agents call to delegate tasks; `None` when it couldn't start.
     mcp: Option<McpServer>,
     /// Tasks delegated to child threads, by child thread id, until their answer goes back.
@@ -628,6 +631,7 @@ impl Engine {
             codex_sign_in: None,
             session_moves: HashMap::new(),
             queued: HashMap::new(),
+            routes: HashMap::new(),
             mcp: None,
             delegations: HashMap::new(),
             after_compaction: HashMap::new(),

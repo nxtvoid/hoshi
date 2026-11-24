@@ -503,6 +503,94 @@ fn a_message_goes_where_it_was_sent_though_another_provider_is_picked_since() {
 }
 
 #[test]
+fn each_message_takes_the_model_picked_for_it() {
+    let (setup, held) = working("switch-models", false);
+    let pick = |model: &str| {
+        setup
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: CODEX.into(),
+                model: Some(model.into()),
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap()
+    };
+    pick("a");
+    setup.dispatch("m2", "Go on.").unwrap();
+    pick("b");
+    setup.dispatch("m3", "And then this.").unwrap();
+    pick("c");
+    held.ends(TurnOutcome::Completed);
+    setup.ended(3);
+
+    let ran = |turn: usize| setup.codex.request(turn).model;
+    assert_eq!(ran(0).as_deref(), Some("a"));
+    assert_eq!(ran(1).as_deref(), Some("b"));
+    let thread = setup.thread("t");
+    assert_eq!(thread.model.as_deref(), Some("c"), "for the next message");
+    assert_eq!(thread.pending_model, None);
+}
+
+#[test]
+fn messages_that_stop_a_turn_keep_their_order() {
+    let (setup, held) = working("switch-order", true);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.dispatch("m3", "And then this.").unwrap();
+    assert_eq!(setup.waiting(), ["m2", "m3"]);
+
+    held.ends(TurnOutcome::Interrupted);
+    setup.ended(3);
+    assert!(setup.codex.request(0).prompt.contains("Go on."));
+}
+
+#[test]
+fn messages_held_for_git_work_keep_where_they_go() {
+    let setup = local("switch-held", Scripted::new(CLAUDE));
+    setup.send("t", "m1", "Remember APPLE.");
+    setup.pick("t", CODEX).unwrap();
+    let (op, cwd) = {
+        let mut state = lock(&setup.engine.state);
+        let cwd = state.cwd("t").unwrap();
+        (state.begin_op("t", &[&cwd]).unwrap(), cwd)
+    };
+    assert!(!cwd.is_empty());
+    let send = Command::MessageSend {
+        thread_id: "t".into(),
+        message_id: "agent".into(),
+        text: "From another agent.".into(),
+        attachments: Vec::new(),
+    };
+    lock(&setup.engine.state)
+        .send_routed("agent", None, send)
+        .unwrap();
+    lock(&setup.engine.state).end_op(op, None).unwrap();
+    setup.ended(1);
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CLAUDE);
+    assert_eq!(thread.pending_model.unwrap().provider, CODEX);
+}
+
+#[test]
+fn a_message_held_for_git_work_while_a_turn_runs_waits_to_switch() {
+    let (setup, held) = working("switch-held-running", false);
+    setup.pick("t", CODEX).unwrap();
+    let op = lock(&setup.engine.state).begin_op("t", &[]).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    lock(&setup.engine.state).end_op(op, None).unwrap();
+
+    assert_eq!(setup.waiting(), ["m2"]);
+    assert!(setup.engine.thread_item("t", "m2").unwrap().is_none());
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+    assert_eq!(setup.thread("t").provider, CODEX);
+}
+
+#[test]
 fn a_turn_that_restarts_to_switch_is_stopped_for_the_message() {
     let (setup, held) = working("switch-restarts", true);
     setup.pick("t", CODEX).unwrap();

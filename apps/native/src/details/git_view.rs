@@ -198,19 +198,19 @@ impl ThreadDetails {
             .into_any_element()
     }
 
-    /// The `⋯` at the end of the branch row: every git action, each with why it can't run.
+    /// The `⋯` at the end of the branch row: every git action, each with why it can't run, while `status` says
+    /// what they would do, and the branch to copy.
     pub(super) fn git_menu(
         &self,
         branch: Option<String>,
-        status: &GitStatus,
+        status: Option<&GitStatus>,
         pull_request_open: bool,
         working: bool,
         colors: &Colors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let draft = self.prefs.draft_pull_requests;
-        let blockers = git::menu_blockers(status);
-        let forge = status.forge;
+        let actions = status.map(|status| (git::menu_blockers(status), status.forge));
         let busy = working
             || self
                 .shown_thread
@@ -233,6 +233,16 @@ impl ThreadDetails {
                 .debug_selector(|| "details-git-arrow".into())
             })
             .menu(move |menu, _, _| {
+                let copy = branch.map(|branch| {
+                    MenuOption::new("details-git-copy-branch", m::copy_branch_menu())
+                        .icon(IconName::Copy)
+                        .on_select(move |_, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()))
+                        })
+                });
+                let Some((blockers, forge)) = actions else {
+                    return menu.items(copy);
+                };
                 let action = |action: GitAction| {
                     let this = this.clone();
                     move |window: &mut Window, cx: &mut App| {
@@ -293,15 +303,7 @@ impl ThreadDetails {
                         .on_select(action(GitAction::CreatePullRequest)),
                     )
                 })
-                .when_some(branch, |menu, branch| {
-                    menu.item(
-                        MenuOption::new("details-git-copy-branch", m::copy_branch_menu())
-                            .icon(IconName::Copy)
-                            .on_select(move |_, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()))
-                            }),
-                    )
-                })
+                .items(copy)
                 .separator()
                 .item(
                     MenuOption::checkbox("details-git-draft", m::git_draft_pull_requests(), draft)

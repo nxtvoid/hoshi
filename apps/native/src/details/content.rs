@@ -276,7 +276,8 @@ impl ThreadDetails {
             let clean = status
                 .as_ref()
                 .is_some_and(|status| !status.has_changes && git_row.is_none());
-            let menu = status.as_ref().filter(|_| running.is_none()).map(|status| {
+            let status = status.as_ref().filter(|_| running.is_none());
+            let menu = (status.is_some() || thread.branch.is_some()).then(|| {
                 self.git_menu(
                     thread.branch.clone(),
                     status,

@@ -225,7 +225,7 @@ fn the_git_menu_drops_under_the_whole_branch_row(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn the_branch_is_copied_from_its_menu(cx: &mut TestAppContext) {
+fn the_branch_is_copied_from_its_menu_though_git_actions_are_not_known(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-copy-branch", 1200.);
     let workspace = h
         .details
@@ -238,6 +238,10 @@ fn the_branch_is_copied_from_its_menu(cx: &mut TestAppContext) {
             thread_id: "t".into(),
             branch: Some("feature".into()),
         });
+        cx.notify();
+    });
+    h.details.update(&mut h.cx, |details, cx| {
+        details.statuses.remove("t");
         cx.notify();
     });
     redraw(&mut h.cx);
