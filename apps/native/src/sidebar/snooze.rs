@@ -289,7 +289,8 @@ impl Sidebar {
         cx.notify();
     }
 
-    pub(super) fn custom_snooze_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// Drawn by the sidebar, or by the window while the sidebar is closed.
+    pub(crate) fn custom_snooze_dialog(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (form, _) = self.custom_snooze.as_ref()?;
         let weak = form.downgrade();
         Some(

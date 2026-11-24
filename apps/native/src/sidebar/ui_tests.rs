@@ -224,66 +224,6 @@ fn a_right_click_on_the_rail_opens_the_project_menu(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn continue_with_moves_the_thread_to_another_providers_model(cx: &mut TestAppContext) {
-    let mut h = harness(cx, "sidebar-continue-with");
-    let model = |slug: &str| hoshi_core::ModelInfo {
-        slug: slug.into(),
-        name: slug.into(),
-        short_name: slug.into(),
-        legacy: false,
-        is_new: false,
-        update_required: false,
-        efforts: Vec::new(),
-        default_effort: None,
-        fast_mode: false,
-        ultracode: false,
-    };
-    let catalog = |provider: String, slug: &str| hoshi_core::ProviderModels {
-        provider,
-        models: vec![model(slug)],
-        ..Default::default()
-    };
-    let open_menu = |h: &mut Harness| {
-        let row = center(h, "thread-a");
-        h.cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
-        h.cx.simulate_mouse_up(row, MouseButton::Right, Modifiers::none());
-        redraw(&mut h.cx);
-    };
-    open_menu(&mut h);
-    assert!(
-        h.cx.debug_bounds("menu-item-thread-continue-with")
-            .is_none(),
-        "no other provider, no switch"
-    );
-    h.cx.simulate_keystrokes("escape");
-    h.workspace.update(&mut h.cx, |workspace, cx| {
-        workspace.models = vec![
-            catalog(hoshi_core::default_provider(), "opus"),
-            catalog("codex".into(), "gpt"),
-        ];
-        cx.notify();
-    });
-    redraw(&mut h.cx);
-
-    open_menu(&mut h);
-    let submenu = center(&mut h, "menu-item-thread-continue-with");
-    h.cx.simulate_click(submenu, Modifiers::none());
-    redraw(&mut h.cx);
-    assert!(
-        h.cx.debug_bounds("menu-item-continue-with-claudeCode-opus")
-            .is_none()
-    );
-    let pick = center(&mut h, "menu-item-continue-with-codex-gpt");
-    h.cx.simulate_click(pick, Modifiers::none());
-    wait_for(&mut h, "the thread to move to codex", |h| {
-        h.workspace.read_with(&h.cx, |workspace, _| {
-            let thread = workspace.model.thread("a").unwrap();
-            thread.provider == "codex" && thread.model.as_deref() == Some("gpt")
-        })
-    });
-}
-
-#[gpui_kit::test]
 fn alt_down_steps_through_the_listed_threads(cx: &mut TestAppContext) {
     let mut h = harness(cx, "sidebar-step");
     let open = |h: &mut Harness| {

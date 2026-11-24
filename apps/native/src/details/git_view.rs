@@ -156,7 +156,7 @@ impl ThreadDetails {
                                 .flex()
                                 .items_center()
                                 .justify_center()
-                                .text_size(px(10.))
+                                .text_size(rems(0.625))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(colors.foreground)
                                 .child(left.to_string()),
@@ -201,6 +201,7 @@ impl ThreadDetails {
     /// The `⋯` at the end of the branch row: every git action, each with why it can't run.
     pub(super) fn git_menu(
         &self,
+        branch: Option<String>,
         status: &GitStatus,
         pull_request_open: bool,
         working: bool,
@@ -260,7 +261,7 @@ impl ThreadDetails {
                 .item(
                     MenuOption::new("details-git-push", m::git_push())
                         .when_some(forge, |option, forge| {
-                            option.leading(div().mr_1().child(forge_mark(forge, &menu_colors)))
+                            option.leading(forge_mark(forge, &menu_colors))
                         })
                         .when(forge.is_none(), |option| option.icon(IconName::CloudUpload))
                         .disabled(busy || blockers.push.is_some())
@@ -280,7 +281,7 @@ impl ThreadDetails {
                             },
                         )
                         .when_some(forge, |option, forge| {
-                            option.leading(div().mr_1().child(forge_mark(forge, &menu_colors)))
+                            option.leading(forge_mark(forge, &menu_colors))
                         })
                         .when(forge.is_none(), |option| {
                             option.icon(IconName::GitPullRequest)
@@ -290,6 +291,15 @@ impl ThreadDetails {
                             option.tooltip(blocker_tooltip(blocker))
                         })
                         .on_select(action(GitAction::CreatePullRequest)),
+                    )
+                })
+                .when_some(branch, |menu, branch| {
+                    menu.item(
+                        MenuOption::new("details-git-copy-branch", m::copy_branch_menu())
+                            .icon(IconName::Copy)
+                            .on_select(move |_, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()))
+                            }),
                     )
                 })
                 .separator()

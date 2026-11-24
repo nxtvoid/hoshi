@@ -63,121 +63,12 @@ impl Sidebar {
                 )
             }
             MenuTarget::Thread(thread_id) => {
-                let workspace = self.workspace.read(cx);
-                let thread = workspace.model.thread(thread_id)?.clone();
-                let has_draft = workspace.drafts.contains_key(thread_id)
-                    && self.shown_thread.as_deref() != Some(thread_id.as_str());
-                let pull_request = workspace.pull_requests.get(thread_id).cloned();
-                let can_clean = merged_cleanup(&thread, pull_request.as_ref()).is_some();
-                let can_release = thread.worktree_path.is_some()
-                    && !thread.worktree_released
-                    && !thread.worktree_adopted;
-                let snoozed = is_snoozed(&workspace.model, &thread, Utc::now());
-                let presets = workspace.settings.general.snooze_presets.clone();
-                let others =
-                    crate::provider_switch::other_models(&workspace.models, &thread.provider);
-                let switch = (!others.is_empty()).then(|| self.workspace.clone());
+                let thread_id = thread_id.clone();
+                let sidebar = cx.entity();
+                self.workspace.read(cx).model.thread(&thread_id)?;
                 Some(
-                    context_menu(id, open.position, on_close, move |menu, _, _| {
-                        let item = |key: &'static str, label: String, action: ThreadAction| {
-                            let (this, id) = (this.clone(), thread.id.clone());
-                            MenuOption::new(key, label).on_select(move |window, cx| {
-                                this.update(cx, |this, cx| {
-                                    this.thread_action(id.clone(), action, window, cx)
-                                })
-                                .ok();
-                            })
-                        };
-                        let menu = menu.item(item(
-                            "thread-pin",
-                            if thread.pinned {
-                                m::unpin_thread()
-                            } else {
-                                m::pin_thread()
-                            },
-                            ThreadAction::Pin(!thread.pinned),
-                        ));
-                        let menu = if thread.archived {
-                            menu
-                        } else if snoozed {
-                            menu.item(item("thread-wake", m::wake_thread(), ThreadAction::Wake))
-                        } else {
-                            let (this, id) = (this.clone(), thread.id.clone());
-                            menu.submenu(
-                                "thread-snooze",
-                                m::snooze_menu(),
-                                None,
-                                move |menu, _, _| snooze_menu(menu, this, id, &presets),
-                            )
-                        };
-                        let menu = menu
-                            .item(item("thread-fork", m::fork_thread(), ThreadAction::Fork))
-                            .item(item(
-                                "thread-archive",
-                                if thread.archived {
-                                    m::unarchive_thread()
-                                } else {
-                                    m::archive_thread()
-                                },
-                                ThreadAction::Archive(!thread.archived),
-                            ))
-                            .item(item(
-                                "thread-title",
-                                m::regenerate_title(),
-                                ThreadAction::RegenerateTitle,
-                            ));
-                        let menu = match switch {
-                            Some(workspace) => {
-                                let id = thread.id.clone();
-                                menu.submenu(
-                                    "thread-continue-with",
-                                    m::continue_with(),
-                                    Some(IconName::ArrowRightLeft),
-                                    move |menu, _, cx| {
-                                        crate::provider_switch::continue_with_menu(
-                                            menu, workspace, &id, cx,
-                                        )
-                                    },
-                                )
-                            }
-                            None => menu,
-                        };
-                        let menu = if has_draft {
-                            menu.item(item(
-                                "thread-discard-draft",
-                                m::discard_draft(),
-                                ThreadAction::DiscardDraft,
-                            ))
-                        } else {
-                            menu
-                        };
-                        let menu = if can_clean || can_release {
-                            let menu = menu.separator();
-                            let menu = if can_clean {
-                                menu.item(item(
-                                    "thread-clean-up",
-                                    m::clean_up_thread(),
-                                    ThreadAction::CleanUp,
-                                ))
-                            } else {
-                                menu
-                            };
-                            if can_release {
-                                menu.item(item(
-                                    "thread-release",
-                                    m::release_worktree(),
-                                    ThreadAction::Release,
-                                ))
-                            } else {
-                                menu
-                            }
-                        } else {
-                            menu
-                        };
-                        menu.separator().item(
-                            item("thread-delete", m::delete_thread(), ThreadAction::Delete)
-                                .destructive(),
-                        )
+                    context_menu(id, open.position, on_close, move |menu, _, cx| {
+                        thread_menu(menu, &sidebar, &thread_id, cx)
                     })
                     .into_any_element(),
                 )
@@ -248,4 +139,124 @@ impl Sidebar {
         };
         Some(dialog.into_any_element())
     }
+}
+
+/// What can be done with a thread.
+pub(crate) fn thread_menu(
+    menu: PopoverMenu,
+    sidebar: &Entity<Sidebar>,
+    thread_id: &str,
+    cx: &App,
+) -> PopoverMenu {
+    let state = sidebar.read(cx);
+    let this = sidebar.downgrade();
+    let workspace = state.workspace.read(cx);
+    let Some(thread) = workspace.model.thread(thread_id).cloned() else {
+        return menu;
+    };
+    let has_draft = workspace.drafts.contains_key(thread_id)
+        && state.shown_thread.as_deref() != Some(thread_id);
+    let can_clean = merged_cleanup(&thread, workspace.pull_requests.get(thread_id)).is_some();
+    let can_release =
+        thread.worktree_path.is_some() && !thread.worktree_released && !thread.worktree_adopted;
+    let snoozed = is_snoozed(&workspace.model, &thread, Utc::now());
+    let presets = workspace.settings.general.snooze_presets.clone();
+    let item = |key: &'static str, label: String, icon: IconName, action: ThreadAction| {
+        let (this, id) = (this.clone(), thread.id.clone());
+        MenuOption::new(key, label)
+            .icon(icon)
+            .on_select(move |window, cx| {
+                this.update(cx, |this, cx| {
+                    this.thread_action(id.clone(), action, window, cx)
+                })
+                .ok();
+            })
+    };
+    let (pin, pin_icon) = if thread.pinned {
+        (m::unpin_thread(), IconName::PinOff)
+    } else {
+        (m::pin_thread(), IconName::Pin)
+    };
+    let (archive, archive_icon) = if thread.archived {
+        (m::unarchive_thread(), IconName::ArchiveRestore)
+    } else {
+        (m::archive_thread(), IconName::Archive)
+    };
+    let menu = menu.item(item(
+        "thread-pin",
+        pin,
+        pin_icon,
+        ThreadAction::Pin(!thread.pinned),
+    ));
+    let menu = if thread.archived {
+        menu
+    } else if snoozed {
+        menu.item(item(
+            "thread-wake",
+            m::wake_thread(),
+            IconName::AlarmClockOff,
+            ThreadAction::Wake,
+        ))
+    } else {
+        let (this, id) = (this.clone(), thread.id.clone());
+        menu.submenu(
+            "thread-snooze",
+            m::snooze_menu(),
+            Some(IconName::AlarmClock),
+            move |menu, _, _| snooze_menu(menu, this, id, &presets),
+        )
+    };
+    menu.item(item(
+        "thread-fork",
+        m::fork_thread(),
+        IconName::GitFork,
+        ThreadAction::Fork,
+    ))
+    .item(item(
+        "thread-archive",
+        archive,
+        archive_icon,
+        ThreadAction::Archive(!thread.archived),
+    ))
+    .item(item(
+        "thread-title",
+        m::regenerate_title(),
+        IconName::Sparkles,
+        ThreadAction::RegenerateTitle,
+    ))
+    .when(has_draft, |menu| {
+        menu.item(item(
+            "thread-discard-draft",
+            m::discard_draft(),
+            IconName::X,
+            ThreadAction::DiscardDraft,
+        ))
+    })
+    .when(can_clean || can_release, |menu| menu.separator())
+    .when(can_clean, |menu| {
+        menu.item(item(
+            "thread-clean-up",
+            m::clean_up_thread(),
+            IconName::BrushCleaning,
+            ThreadAction::CleanUp,
+        ))
+    })
+    .when(can_release, |menu| {
+        menu.item(item(
+            "thread-release",
+            m::release_worktree(),
+            IconName::FolderX,
+            ThreadAction::Release,
+        ))
+    })
+    .separator()
+    .item(
+        item(
+            "thread-delete",
+            m::delete_thread(),
+            IconName::Trash,
+            ThreadAction::Delete,
+        )
+        .destructive(),
+    )
 }

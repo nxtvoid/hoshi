@@ -16,6 +16,9 @@ use gpui_kit::*;
 use std::rc::Rc;
 use std::time::Instant;
 
+/// From an item to its submenu: past the menu's padding and border, then a gap.
+const SUBMENU_OFFSET: f32 = 9.;
+
 type SelectHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 pub(super) type MenuBuilder = Box<dyn FnOnce(PopoverMenu, &mut Window, &mut App) -> PopoverMenu>;
 
@@ -752,7 +755,7 @@ fn item_row_inner(
     if disabled {
         return row.into_any_element();
     }
-    highlight_on_pointer(row, state, index)
+    highlight_on_pointer(row.cursor_pointer(), state, index)
         .on_click({
             let (state, metas) = (state.clone(), metas.clone());
             move |event, window, cx| {
@@ -805,7 +808,7 @@ fn submenu_row(
         })
         .side(Side::Right)
         .align(Align::Start)
-        .side_offset(px(0.))
+        .side_offset(px(SUBMENU_OFFSET))
         .align_offset(px(-3.))
         .open_on_hover(true)
         .submenu_of(state.downgrade(), popup_focus.clone(), focus_request)
@@ -815,6 +818,7 @@ fn submenu_row(
                 let row = div()
                     .id("submenu-trigger")
                     .debug_selector(move || format!("menu-item-{id}"))
+                    .cursor_pointer()
                     .flex()
                     .flex_1()
                     .items_center()

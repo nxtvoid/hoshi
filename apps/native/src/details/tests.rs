@@ -225,6 +225,32 @@ fn the_git_menu_drops_under_the_whole_branch_row(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_branch_is_copied_from_its_menu(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-copy-branch", 1200.);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.model.apply(&hoshi_core::Event::ThreadBranchSet {
+            thread_id: "t".into(),
+            branch: Some("feature".into()),
+        });
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    for selector in ["details-git-arrow", "menu-item-details-git-copy-branch"] {
+        let bounds = h.cx.debug_bounds(selector).expect(selector);
+        h.cx.simulate_click(bounds.center(), Modifiers::default());
+        redraw(&mut h.cx);
+    }
+    let copied = h.cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied.as_deref(), Some("feature"));
+}
+
+#[gpui_kit::test]
 fn closing_the_card_holds_for_that_thread_only_and_across_restarts(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-closed", 1200.);
     let workspace = h

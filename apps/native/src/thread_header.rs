@@ -1,17 +1,25 @@
-//! The open thread in the title bar: where it lives, its title, and its branch and pull request.
+//! The open thread in the title bar: where it lives, its title with what can be done with it, and
+//! its branch and pull request while the details card doesn't show them.
 
 use crate::details::Surface;
 use crate::sections::View;
-use crate::sidebar::{Sidebar, initials, project_mark, pull_request_mark};
+use crate::sidebar::{
+    Sidebar, checks_color, initials, project_mark, pull_request_mark, thread_menu,
+};
 use crate::{HoshiWindow, m};
 use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use hoshi_core::{ChecksState, Thread};
-use hoshi_ui::prelude::{DragRegion as _, IconName, Side, Tooltip, WithTooltip as _};
+use hoshi_core::Thread;
+use hoshi_ui::prelude::{
+    Align, DragRegion as _, IconName, Popover, Side, Tooltip, WithTooltip as _,
+};
 use hoshi_ui::theme::{ActiveTheme as _, Colors};
 use std::time::Duration;
 
+/// Around the title, so its hover has room.
+const TITLE_PADDING: f32 = 6.;
+const MENU_WIDTH: f32 = 224.;
 const COPIED: Duration = Duration::from_millis(1500);
 
 actions!(thread_header, [TogglePanel]);
@@ -51,12 +59,13 @@ impl HoshiWindow {
             .h_full()
             .flex()
             .items_center()
-            .gap_2()
-            .when(self.sidebar_open, |this| this.pl_3())
-            .when(!self.sidebar_open, |this| this.pl_2());
+            .gap_2();
+        let padding = px(if self.sidebar_open { 12. } else { 8. });
         let Some(thread) = thread else {
-            return heading.child(drag_space());
+            return heading.pl(padding).child(drag_space());
         };
+        let card =
+            self.details.read(cx).shows_card(cx) && !self.panel.read(cx).is_maximized(&thread.id);
         let from_inbox = self.sidebar.read(cx).view() == View::Inbox;
         let in_subagent = self
             .subagents
@@ -67,10 +76,17 @@ impl HoshiWindow {
         } else {
             thread.title.clone().into()
         };
+        let crumb = from_inbox
+            .then(|| self.place_crumb(&thread, &colors, cx))
+            .flatten();
+        let title_first = crumb.is_none() && in_subagent.is_none();
         heading
-            .when(from_inbox, |this| {
-                this.children(self.place_crumb(&thread, &colors, cx))
+            .pl(if title_first {
+                padding - px(TITLE_PADDING)
+            } else {
+                padding
             })
+            .children(crumb)
             .when(in_subagent.is_some(), |this| {
                 this.child(
                     crumb_button("leave-subagents", &colors)
@@ -83,9 +99,9 @@ impl HoshiWindow {
                 )
                 .child(slash(&colors))
             })
-            .child(
-                div()
-                    .id("thread-title-drag")
+            .child(match in_subagent {
+                Some(subagent) => div()
+                    .id("subagent-title-drag")
                     .drag_region()
                     .h_full()
                     .min_w_0()
@@ -95,9 +111,13 @@ impl HoshiWindow {
                     .truncate()
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
-                    .child(in_subagent.unwrap_or(title)),
-            )
-            .children(self.git_chip(&thread, &colors, window, cx))
+                    .child(subagent)
+                    .into_any_element(),
+                None => self.title_menu(&thread, title, &colors).into_any_element(),
+            })
+            .when(!card, |this| {
+                this.children(self.git_chip(&thread, &colors, window, cx))
+            })
             .child(drag_space())
     }
 
@@ -138,7 +158,7 @@ impl HoshiWindow {
             .rounded(px(4.))
             .bg(colors.muted)
             .text_color(colors.muted_foreground)
-            .text_size(px(8.))
+            .text_size(rems(0.5))
             .font_weight(FontWeight::SEMIBOLD)
             .child(project_mark(
                 icon,
@@ -170,6 +190,28 @@ impl HoshiWindow {
                 .child(slash(colors))
                 .into_any_element(),
         )
+    }
+
+    /// The thread's title, opening what can be done with it.
+    fn title_menu(
+        &self,
+        thread: &Thread,
+        title: SharedString,
+        colors: &Colors,
+    ) -> impl IntoElement + use<> {
+        let (thread_id, sidebar) = (thread.id.clone(), self.sidebar.clone());
+        let colors = colors.clone();
+        let menu = Popover::new("thread-title-menu")
+            .min_w(px(MENU_WIDTH))
+            .align(Align::Start)
+            .trigger(move |open| title_button(title, open, &colors))
+            .menu(move |menu, _, cx| thread_menu(menu, &sidebar, &thread_id, cx));
+        div()
+            .min_w_0()
+            .max_w(relative(0.4))
+            .flex()
+            .flex_col()
+            .child(menu)
     }
 
     /// The branch, copied on click, and the pull request, opened in the panel, as one chip.
@@ -242,11 +284,9 @@ impl HoshiWindow {
         });
         let pull_request = pull_request.map(|pull_request| {
             let (icon, color) = pull_request_mark(&pull_request, colors);
-            let checks = pull_request.checks.map(|checks| match checks {
-                ChecksState::Passing => colors.pr_open,
-                ChecksState::Failing => colors.status_error,
-                ChecksState::Pending => colors.status_waiting,
-            });
+            let checks = pull_request
+                .checks
+                .map(|checks| checks_color(checks, colors));
             let thread_id = thread.id.clone();
             segment("header-pull-request", colors)
                 .rounded_r_full()
@@ -277,6 +317,32 @@ impl HoshiWindow {
                 .children(pull_request),
         )
     }
+}
+
+fn title_button(title: SharedString, open: bool, colors: &Colors) -> impl IntoElement + use<> {
+    let hover = colors.foreground.opacity(0.05);
+    div()
+        .id("thread-title")
+        .debug_selector(|| "thread-title".into())
+        .h_7()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_1()
+        .px(px(TITLE_PADDING))
+        .rounded_md()
+        .cursor_pointer()
+        .text_sm()
+        .font_weight(FontWeight::MEDIUM)
+        .when(open, |this| this.bg(hover))
+        .hover(move |style| style.bg(hover))
+        .child(div().min_w_0().truncate().child(title))
+        .child(
+            Icon::new(IconName::ChevronDown)
+                .size_3p5()
+                .flex_none()
+                .text_color(colors.muted_foreground),
+        )
 }
 
 fn drag_space() -> impl IntoElement {
@@ -336,7 +402,7 @@ mod tests {
         AppContext as _, Bounds, Entity, Modifiers, Point, TestAppContext, VisualTestContext,
         WindowBounds, WindowOptions, px, size,
     };
-    use hoshi_core::{AccessMode, Command, PullRequest, ThreadWorkspace};
+    use hoshi_core::{AccessMode, Command, Event, PullRequest, ThreadWorkspace};
     use std::sync::Arc;
 
     fn redraw(cx: &mut VisualTestContext) {
@@ -472,23 +538,99 @@ mod tests {
         );
     }
 
-    #[gpui_kit::test]
-    fn the_pull_request_in_the_chip_opens_in_the_panel(cx: &mut TestAppContext) {
-        let (mut cx, shown) = open_thread(cx);
-        assert!(cx.debug_bounds("header-pull-request").is_none());
+    fn add_pull_request(cx: &mut VisualTestContext, shown: &Entity<HoshiWindow>) {
         let workspace = cx.read(|cx| shown.read(cx).workspace.clone());
-        workspace.update(&mut cx, |workspace, cx| {
+        workspace.update(cx, |workspace, cx| {
             workspace.pull_requests.insert("t".into(), pull_request());
             cx.notify();
         });
+        redraw(cx);
+    }
+
+    fn click(cx: &mut VisualTestContext, selector: &'static str) {
+        let bounds = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} isn't shown"));
+        cx.simulate_click(bounds.center(), Modifiers::default());
+        redraw(cx);
+    }
+
+    fn close_card(cx: &mut VisualTestContext, shown: &Entity<HoshiWindow>) {
+        let details = cx.read(|cx| shown.read(cx).details.clone());
+        assert!(cx.read(|cx| details.read(cx).is_inline()));
+        details.update(cx, |details, cx| details.set_open(false, cx));
+        redraw(cx);
+    }
+
+    #[gpui_kit::test]
+    fn the_chip_shows_only_while_the_card_does_not(cx: &mut TestAppContext) {
+        let (mut cx, shown) = open_thread(cx);
+        add_pull_request(&mut cx, &shown);
+        assert!(cx.debug_bounds("details-pr-checks").is_some());
+        assert!(cx.debug_bounds("header-pull-request").is_none());
+
+        close_card(&mut cx, &shown);
+        assert!(cx.debug_bounds("header-pull-request").is_some());
+
+        let details = cx.read(|cx| shown.read(cx).details.clone());
+        details.update(&mut cx, |details, cx| details.set_open(true, cx));
         redraw(&mut cx);
-        let pill = cx
-            .debug_bounds("header-pull-request")
-            .expect("the pull request");
+        assert!(cx.debug_bounds("header-pull-request").is_none());
+    }
+
+    #[gpui_kit::test]
+    fn the_pull_request_in_the_chip_opens_in_the_panel(cx: &mut TestAppContext) {
+        let (mut cx, shown) = open_thread(cx);
+        add_pull_request(&mut cx, &shown);
+        close_card(&mut cx, &shown);
         let panel = cx.read(|cx| shown.read(cx).panel.clone());
         assert!(!cx.read(|cx| panel.read(cx).is_open("t")));
-        cx.simulate_click(pill.center(), Modifiers::default());
-        redraw(&mut cx);
+        click(&mut cx, "header-pull-request");
         assert!(cx.read(|cx| panel.read(cx).is_open("t")));
+    }
+
+    #[gpui_kit::test]
+    fn the_title_opens_what_can_be_done_with_the_thread(cx: &mut TestAppContext) {
+        let (mut cx, _) = open_thread(cx);
+        assert!(cx.debug_bounds("menu-item-thread-pin").is_none());
+        click(&mut cx, "thread-title");
+        assert!(cx.debug_bounds("menu-item-thread-pin").is_some());
+        assert!(cx.debug_bounds("menu-item-thread-delete").is_some());
+    }
+
+    #[gpui_kit::test]
+    fn a_custom_snooze_opens_from_the_title_with_the_sidebar_closed(cx: &mut TestAppContext) {
+        let (mut cx, shown) = open_thread(cx);
+        shown.update(&mut cx, |this, cx| this.toggle_sidebar(cx));
+        redraw(&mut cx);
+        click(&mut cx, "thread-title");
+        click(&mut cx, "menu-item-thread-snooze");
+        click(&mut cx, "menu-item-snooze-custom");
+        assert_eq!(
+            cx.update(|window, cx| hoshi_ui::DialogLayer::open_count(window, cx)),
+            1
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_long_title_leaves_room_for_the_chip(cx: &mut TestAppContext) {
+        let (mut cx, shown) = open_thread(cx);
+        add_pull_request(&mut cx, &shown);
+        close_card(&mut cx, &shown);
+        let workspace = cx.read(|cx| shown.read(cx).workspace.clone());
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.model.apply(&Event::ThreadTitleSet {
+                thread_id: "t".into(),
+                title: "A very long title ".repeat(30),
+            });
+            cx.notify();
+        });
+        redraw(&mut cx);
+        let title = cx.debug_bounds("thread-title").expect("the title");
+        let chip = cx.debug_bounds("header-pull-request").expect("the chip");
+        let details = cx.debug_bounds("toggle-terminal");
+        assert!(title.right() <= chip.left(), "{title:?} covers {chip:?}");
+        assert!(title.size.width < px(480.), "{title:?}");
+        assert!(details.is_none_or(|details| chip.right() <= details.left()));
     }
 }
