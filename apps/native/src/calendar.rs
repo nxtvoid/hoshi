@@ -172,7 +172,7 @@ impl RenderOnce for MonthCalendar {
             .gap(px(2.))
             .children(weekday_headers().map(|name| {
                 cell()
-                    .text_size(px(11.))
+                    .text_size(rems(0.6875))
                     .text_color(colors.muted_foreground)
                     .child(name)
             }));

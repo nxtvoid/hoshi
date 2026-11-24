@@ -438,7 +438,7 @@ pub(super) fn tag(text: String, colors: &Colors) -> Div {
         .px_1()
         .bg(colors.primary)
         .text_color(colors.primary_foreground)
-        .text_size(px(10.))
+        .text_size(rems(0.625))
         .font_weight(FontWeight::MEDIUM)
         .child(text)
 }
@@ -466,7 +466,7 @@ pub(crate) fn model_options<H: PickerHost>(
                         .gap_1()
                         .pt_1p5()
                         .pb_1()
-                        .text_size(px(10.))
+                        .text_size(rems(0.625))
                         .child(effort_meter(
                             index + 1,
                             levels,
@@ -509,7 +509,7 @@ pub(crate) fn model_options<H: PickerHost>(
                                 .border_1()
                                 .border_color(colors.border)
                                 .px_1()
-                                .text_size(px(10.))
+                                .text_size(rems(0.625))
                                 .child(m::effort_default_tag()),
                         )
                     })

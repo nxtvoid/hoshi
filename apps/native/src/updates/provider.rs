@@ -193,7 +193,7 @@ pub fn update_status(
                             .bg(colors.muted)
                             .text_color(colors.muted_foreground)
                             .text_size(rems(0.6875))
-                            .line_height(px(16.))
+                            .line_height(rems(1.))
                             .font_family(mono)
                             .child(output),
                     )

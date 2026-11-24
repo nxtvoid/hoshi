@@ -715,7 +715,7 @@ impl ThemeImport {
                                 div()
                                     .min_h_8()
                                     .text_xs()
-                                    .line_height(px(16.))
+                                    .line_height(rems(1.))
                                     .line_clamp(2)
                                     .text_color(colors.muted_foreground)
                                     .child(if extension.description.is_empty() {

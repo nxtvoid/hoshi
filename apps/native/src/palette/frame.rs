@@ -10,7 +10,7 @@ use gpui_kit::component::Icon;
 use gpui_kit::{
     AnyElement, FontWeight, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _,
     SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, div, img, px,
-    svg,
+    rems, svg,
 };
 use std::path::PathBuf;
 
@@ -284,7 +284,7 @@ fn branch(name: &str, worktree: bool, mono: &SharedString) -> impl IntoElement {
                 .max_w(px(160.))
                 .truncate()
                 .font_family(mono.clone())
-                .text_size(px(11.))
+                .text_size(rems(0.6875))
                 .child(name.to_owned()),
         )
 }
@@ -425,7 +425,7 @@ pub fn row(
                 .border_color(colors.border)
                 .px_1p5()
                 .py(px(2.))
-                .text_size(px(11.))
+                .text_size(rems(0.6875))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(muted)
                 .hover(|this| this.bg(colors.muted).text_color(colors.foreground))
@@ -499,7 +499,7 @@ pub fn heading(label: &str, colors: &Colors) -> AnyElement {
         .px(px(10.))
         .pt_2()
         .pb_1()
-        .text_size(px(11.))
+        .text_size(rems(0.6875))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(colors.muted_foreground)
         .child(SharedString::from(label.to_uppercase()))

@@ -511,7 +511,7 @@ fn tree_rows(
                                 .min_w_0()
                                 .truncate()
                                 .font_family(tree.mono.clone())
-                                .text_size(px(11.))
+                                .text_size(rems(0.6875))
                                 .text_color(colors.muted_foreground)
                                 .child(name.clone()),
                         )
@@ -615,7 +615,7 @@ fn stat(
             .flex_none()
             .gap_1()
             .font_family(mono.clone())
-            .text_size(px(11.))
+            .text_size(rems(0.6875))
             .child(
                 div()
                     .text_color(colors.pr_open)

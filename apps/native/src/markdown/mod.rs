@@ -266,7 +266,7 @@ fn render_code_block(node: &MarkdownNode, _: &mut Window, cx: &mut App) -> AnyEl
                                 .flex_none()
                                 .text_color(tint(&colors)),
                         )
-                        .child(div().truncate().text_size(px(11.)).child(label)),
+                        .child(div().truncate().text_size(rems(0.6875)).child(label)),
                 )
                 .child(CopyButton::new(
                     ("copy-code", at),

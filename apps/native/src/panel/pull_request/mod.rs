@@ -851,7 +851,7 @@ fn chip(colors: &Colors) -> Div {
 
 fn section_title(text: String, colors: &Colors) -> Div {
     div()
-        .text_size(px(11.))
+        .text_size(rems(0.6875))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(colors.muted_foreground)
         .child(text.to_uppercase())
