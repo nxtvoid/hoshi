@@ -1,15 +1,19 @@
+use super::rows::{BESIDE_ROW, icon};
+use crate::composer::CROWDED_PERCENT;
 use crate::m;
 use crate::usage::limits::{
-    LimitTone, even_pace_left, format_span, limit_tone, remaining_percent, reset_moment,
-    reset_when, time_to_reset, window_label,
+    ExtraTexts, LimitTone, even_pace_left, extra_left_percent, extra_texts, format_span,
+    limit_tone, moment_short, remaining_percent, reset_moment, reset_short, reset_when,
+    short_window_label, time_left_percent, time_to_reset, window_label,
 };
 use chrono::{DateTime, Local, TimeZone, Utc};
 use gpui_kit::*;
-use hoshi_core::{Thread, UsageLimits, UsageWindow};
+use hoshi_core::{ExtraUsage, SpendUnit, Thread, UsageLimits, UsageWindow, UsageWindowKind};
 use hoshi_ui::prelude::*;
 
-const LABEL_WIDTH: f32 = 112.;
+const LABEL_WIDTH: f32 = 60.;
 const VALUE_WIDTH: f32 = 32.;
+const NOTE_WIDTH: f32 = 42.;
 
 /// The provider whose limits the thread spends: the one its turn runs on, else the one its next
 /// message runs on.
@@ -21,55 +25,94 @@ pub fn provider_of(thread: &Thread) -> &str {
         .map_or(thread.provider.as_str(), |choice| choice.provider.as_str())
 }
 
-/// One row per window of `limits`: what is left, and on hover when it resets.
-pub fn section(limits: &UsageLimits, colors: &Colors) -> Div {
-    div().flex().flex_col().py_1().children(
-        limits
-            .windows
-            .iter()
-            .enumerate()
-            .map(|(index, window)| usage_row(index, window, colors)),
-    )
+/// The thread's context as its row shows it: how full, what its tooltip says, and the button
+/// that compacts it.
+pub struct ContextMeter {
+    pub percent: f32,
+    pub lines: Vec<String>,
+    pub compact: AnyElement,
 }
 
-fn usage_row(index: usize, window: &UsageWindow, colors: &Colors) -> impl IntoElement + use<> {
-    let left = remaining_percent(window);
-    let tone = match limit_tone(left) {
-        LimitTone::Low => colors.status_error,
-        LimitTone::Warning => colors.warning,
-        LimitTone::Normal => colors.foreground.opacity(0.8),
-    };
-    let hover = colors.foreground.opacity(0.05);
-    let window = window.clone();
+/// One row per window of `limits`: what is left, where even spending would be, and when it
+/// resets; then the plan's extra usage, and how full the thread's context is.
+pub fn section(
+    limits: Option<&UsageLimits>,
+    context: Option<ContextMeter>,
+    colors: &Colors,
+) -> Div {
+    let now = Local::now();
     div()
-        .id(("details-usage", index))
-        .debug_selector(move || format!("details-usage-{index}"))
+        .flex()
+        .flex_col()
+        .children(limits.into_iter().flat_map(|limits| {
+            limits
+                .windows
+                .iter()
+                .enumerate()
+                .map(|(index, window)| usage_row(index, window, &now, colors))
+        }))
+        .children(
+            limits
+                .and_then(|limits| limits.extra_usage.as_ref())
+                .map(|extra| extra_row(extra, &now, colors)),
+        )
+        .children(context.map(|context| context_row(context, colors)))
+}
+
+fn window_icon(window: &UsageWindow) -> IconName {
+    match (window.kind, &window.model) {
+        (UsageWindowKind::Session, _) => IconName::Timer,
+        (UsageWindowKind::Weekly, Some(_)) => IconName::Sparkles,
+        (UsageWindowKind::Weekly, None) => IconName::Calendar,
+    }
+}
+
+/// A row of the box: icon, name, a bar with an optional mark on it, the value and a note.
+#[allow(clippy::too_many_arguments)]
+fn meter(
+    id: impl Into<ElementId>,
+    name: IconName,
+    label: String,
+    fill: Option<f32>,
+    mark: Option<f32>,
+    value: String,
+    note: Option<AnyElement>,
+    tone: Hsla,
+    colors: &Colors,
+) -> Stateful<Div> {
+    let hover = colors.foreground.opacity(0.05);
+    div()
+        .id(id)
         .flex()
         .flex_none()
-        .h_6()
+        .h(px(30.))
         .items_center()
-        .gap_3()
+        .gap(px(10.))
         .rounded_lg()
         .px(px(10.))
         .text_xs()
         .hover(move |style| style.bg(hover))
+        .child(icon(name, colors))
         .child(
             div()
                 .w(px(LABEL_WIDTH))
                 .flex_none()
                 .truncate()
-                .text_color(colors.muted_foreground)
-                .child(window_label(&window)),
+                .text_size(px(13.))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors.foreground.opacity(0.8))
+                .child(label),
         )
-        .child(
-            div()
+        .child(match fill {
+            None => div().flex_1().min_w_0(),
+            Some(fill) => div()
                 .relative()
                 .flex_1()
                 .min_w_0()
                 .h(px(3.))
                 .rounded_full()
                 .bg(colors.muted_foreground.opacity(0.25))
-                .when(left > 0, |this| {
+                .when(fill > 0., |this| {
                     this.child(
                         div()
                             .absolute()
@@ -77,34 +120,182 @@ fn usage_row(index: usize, window: &UsageWindow, colors: &Colors) -> impl IntoEl
                             .bottom_0()
                             .left_0()
                             .min_w(px(6.))
-                            .w(relative(f32::from(left) / 100.))
+                            .w(relative(fill.min(1.)))
                             .rounded_full()
                             .bg(tone),
                     )
+                })
+                .when_some(mark, |this, mark| {
+                    this.child(
+                        div()
+                            .absolute()
+                            .top(px(-4.))
+                            .left(relative(mark.clamp(0., 1.)))
+                            .w(px(1.5))
+                            .h(px(11.))
+                            .rounded_full()
+                            .bg(colors.muted_foreground),
+                    )
                 }),
-        )
+        })
         .child(
             div()
-                .w(px(VALUE_WIDTH))
+                .min_w(px(VALUE_WIDTH))
                 .flex_none()
                 .flex()
                 .justify_end()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(tone)
-                .child(m::usage_percent(left)),
+                .child(value),
         )
-        .with_tooltip(
-            Tooltip::element(move |_, _| {
-                let lines = tooltip_lines(&window, &Local::now());
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .children(lines.into_iter().map(|line| div().child(line)))
-            })
-            .side(Side::Left)
-            .side_offset(px(16.)),
+        .child(
+            div()
+                .w(px(NOTE_WIDTH))
+                .flex_none()
+                .flex()
+                .justify_end()
+                .text_color(colors.muted_foreground)
+                .children(note),
         )
+}
+
+fn usage_row(
+    index: usize,
+    window: &UsageWindow,
+    now: &DateTime<Local>,
+    colors: &Colors,
+) -> impl IntoElement + use<> {
+    let left = remaining_percent(window);
+    let tone = match limit_tone(left) {
+        LimitTone::Low => colors.status_error,
+        LimitTone::Warning => colors.warning,
+        LimitTone::Normal => colors.foreground.opacity(0.8),
+    };
+    let pace = time_left_percent(window, now.with_timezone(&Utc)).map(|pace| pace / 100.);
+    let window = window.clone();
+    meter(
+        ("details-usage", index),
+        window_icon(&window),
+        short_window_label(&window),
+        Some(f32::from(left) / 100.),
+        pace,
+        m::usage_percent(left),
+        reset_short(&window, now).map(|reset| reset.into_any_element()),
+        tone,
+        colors,
+    )
+    .debug_selector(move || format!("details-usage-{index}"))
+    .with_tooltip(
+        Tooltip::element(move |_, _| {
+            let lines = tooltip_lines(&window, &Local::now());
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .children(lines.into_iter().map(|line| div().child(line)))
+        })
+        .side(Side::Left)
+        .side_offset(px(BESIDE_ROW)),
+    )
+}
+
+fn context_row(context: ContextMeter, colors: &Colors) -> impl IntoElement + use<> {
+    let ContextMeter {
+        percent: used,
+        lines,
+        compact,
+    } = context;
+    let tone = if used > CROWDED_PERCENT {
+        colors.warning
+    } else {
+        colors.foreground.opacity(0.8)
+    };
+    meter(
+        "details-context",
+        IconName::Gauge,
+        m::usage_context(),
+        Some(used / 100.),
+        None,
+        m::usage_percent(used.round() as u8),
+        Some(compact),
+        tone,
+        colors,
+    )
+    .debug_selector(|| "details-context".into())
+    .with_tooltip(
+        Tooltip::element(move |_, _| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .children(lines.iter().cloned().map(|line| div().child(line)))
+        })
+        .side(Side::Left)
+        .side_offset(px(BESIDE_ROW)),
+    )
+}
+
+/// The plan's extra usage: what is left of its cap on a bar, else the credits left or what was
+/// spent, without one.
+fn extra_row(
+    extra: &ExtraUsage,
+    now: &DateTime<Local>,
+    colors: &Colors,
+) -> impl IntoElement + use<> {
+    let left = extra_left_percent(extra);
+    let ExtraTexts {
+        shown,
+        note,
+        detail,
+    } = extra_texts(extra, now.with_timezone(&Utc));
+    let tone = match left.map(limit_tone) {
+        Some(LimitTone::Low) => colors.status_error,
+        Some(LimitTone::Warning) => colors.warning,
+        _ => colors.foreground.opacity(0.8),
+    };
+    let (name, label, what) = match extra.unit {
+        SpendUnit::Money { .. } => (
+            IconName::CreditCard,
+            m::usage_extra_short(),
+            m::usage_extra(),
+        ),
+        SpendUnit::Credits { .. } => (IconName::Coins, m::usage_credits(), m::usage_credits()),
+    };
+    let side = match (left, extra.resets_at.as_deref()) {
+        (Some(_), Some(at)) => moment_short(at, now),
+        (None, _) if extra.balance.is_none() && !extra.unlimited => Some(m::usage_extra_spent()),
+        _ => None,
+    };
+    let amount = match &note {
+        Some(note) => m::usage_amount_note(shown.clone(), note.clone()),
+        None => shown.clone(),
+    };
+    let lines: Vec<String> = std::iter::once(m::usage_tooltip_amount(amount, what))
+        .chain((!detail.is_empty()).then_some(detail))
+        .collect();
+    meter(
+        "details-extra",
+        name,
+        label,
+        left.map(|left| f32::from(left) / 100.),
+        None,
+        shown,
+        side.map(|side| side.into_any_element()),
+        tone,
+        colors,
+    )
+    .debug_selector(|| "details-extra".into())
+    .with_tooltip(
+        Tooltip::element(move |_, _| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .children(lines.iter().cloned().map(|line| div().child(line)))
+        })
+        .side(Side::Left)
+        .side_offset(px(BESIDE_ROW)),
+    )
 }
 
 fn tooltip_lines<Tz: TimeZone>(window: &UsageWindow, now: &DateTime<Tz>) -> Vec<String>

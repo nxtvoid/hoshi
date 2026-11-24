@@ -77,6 +77,8 @@ pub struct Browsers {
     minis: HashMap<String, Placement>,
     /// The scale of the screen each page shows on, as last sent.
     scales: HashMap<String, f32>,
+    /// The last page each thread's browser showed on each local port.
+    visits: HashMap<(String, u16), String>,
     requests: Sender<(String, Request)>,
 }
 
@@ -110,6 +112,7 @@ impl Browsers {
             failed: HashSet::new(),
             minis: HashMap::new(),
             scales: HashMap::new(),
+            visits: HashMap::new(),
             requests,
         }
     }
@@ -128,6 +131,7 @@ impl Browsers {
             failed: HashSet::new(),
             minis: HashMap::new(),
             scales: HashMap::new(),
+            visits: HashMap::new(),
             requests,
         };
         (browsers, SentRequests(sent))
@@ -150,7 +154,15 @@ impl Browsers {
         self.failed.remove(thread_id);
         self.minis.remove(thread_id);
         self.scales.remove(thread_id);
+        self.visits.retain(|(thread, _), _| thread != thread_id);
         cx.notify();
+    }
+
+    /// The last page the thread's browser showed on the local `port`.
+    pub fn last_visit(&self, thread_id: &str, port: u16) -> Option<&str> {
+        self.visits
+            .get(&(thread_id.to_owned(), port))
+            .map(String::as_str)
     }
 
     pub fn page(&self, thread_id: &str) -> Option<&ShownPage> {
@@ -246,6 +258,10 @@ impl Browsers {
             before.and_then(|before| before.agent_at)
         };
         let fitted = page.fitted.or(before.and_then(|before| before.fitted));
+        if let Some(port) = local_port(&page.url) {
+            self.visits
+                .insert((thread_id.clone(), port), page.url.clone());
+        }
         if page.by_agent {
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(AGENT_SHOWN).await;
@@ -550,9 +566,34 @@ fn decode_jpeg(jpeg: &[u8]) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
 }
 
+/// The port of a page on this machine, as `http://localhost:5173/main` names it.
+pub fn local_port(url: &str) -> Option<u16> {
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let (name, port) = host.rsplit_once(':')?;
+    matches!(name, "localhost" | "127.0.0.1" | "[::1]" | "0.0.0.0")
+        .then(|| port.parse().ok())
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Browsers, decode_jpeg};
+    use super::{Browsers, decode_jpeg, local_port};
+
+    #[test]
+    fn a_local_page_tells_its_port() {
+        assert_eq!(
+            local_port("http://localhost:18400/main/bodega"),
+            Some(18400)
+        );
+        assert_eq!(local_port("http://127.0.0.1:5173"), Some(5173));
+        assert_eq!(local_port("https://[::1]:8443/?q=1"), Some(8443));
+        assert_eq!(local_port("http://localhost/main"), None);
+        assert_eq!(local_port("https://example.com:8080/"), None);
+        assert_eq!(local_port("about:blank"), None);
+    }
 
     #[test]
     fn a_page_hears_of_its_screen_s_scale_once_per_change() {

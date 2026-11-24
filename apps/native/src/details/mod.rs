@@ -24,17 +24,17 @@ pub use agents::track_pending_tasks;
 use agents::{AgentKind, AgentState, ThreadAgent, busy_threads, subagent_calls, thread_agents};
 use chrono::Utc;
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, Sizable as _};
+use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::*;
 use hoshi_core::{
     ChangesSummary, CommandError, Editor, GitAction, GitActionRequest, GitActionResult, GitStatus,
-    LocalServer, PullRequestState, Thread, ThreadItem, ThreadStatus, UsageLimits,
+    LocalServer, PullRequestState, Thread, ThreadItem, UsageLimits,
 };
 use hoshi_ui::prelude::*;
 use prefs::{Prefs, editor_label, open_shortcut, open_target};
 use rows::{
-    CARD_CLEARANCE, CARD_GAP, CARD_WIDTH, INLINE_MIN_WIDTH, diff_count, editor_icon, error_line,
-    icon, row, row_static, section_label, separator, split_arrow, split_primary, split_row,
+    CARD_CLEARANCE, CARD_GAP, CARD_WIDTH, INLINE_MIN_WIDTH, SHADOW_ROOM, diff_count, editor_icon,
+    error_line, icon, panel, panel_header, row, row_static,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +42,15 @@ use std::time::{Duration, Instant};
 
 /// How long a finished action's result stays in place of the button.
 const DONE_FOR: Duration = Duration::from_secs(10);
+/// How long the main git action waits, undoable, before it runs.
+const UNDO_FOR: Duration = Duration::from_secs(3);
+
+/// The main git action, pressed and waiting [`UNDO_FOR`] before it runs.
+struct PendingGit {
+    request: GitActionRequest,
+    label: git::Label,
+    started: Instant,
+}
 /// While a turn adds items, the checkout is read again at most this often.
 const ACTIVITY_EVERY: Duration = Duration::from_secs(1);
 
@@ -95,8 +104,10 @@ pub struct ThreadDetails {
     workspace: Entity<Workspace>,
     inline: bool,
     popover_open: bool,
-    branch_menu_open: bool,
     editor_anchor: PopoverAnchor,
+    branch_anchor: PopoverAnchor,
+    agents_anchor: PopoverAnchor,
+    servers_anchor: PopoverAnchor,
     home: Option<PathBuf>,
     prefs: Prefs,
     prefs_saving: Option<Task<()>>,
@@ -106,9 +117,8 @@ pub struct ThreadDetails {
     changes: HashMap<String, ChangesSummary>,
     statuses: HashMap<String, GitStatus>,
     chat_folders: HashMap<String, String>,
-    /// The local branches, read when the branch menu opens.
-    branches: Option<Vec<String>>,
     running: HashMap<String, Instant>,
+    pending_git: HashMap<String, PendingGit>,
     done: HashMap<String, GitActionResult>,
     fresh: Option<Freshness>,
     refresh_pending: bool,
@@ -120,9 +130,7 @@ pub struct ThreadDetails {
     subject_changes: u64,
     /// Grows with each engine call the card runs, so only the latest one tells its failure.
     runs: u64,
-    previous_agents_open: bool,
     subagent_calls: Option<SubagentCalls>,
-    servers_expanded: bool,
     stopping: Option<(u32, u16)>,
     error: Option<String>,
     server_error: Option<String>,
@@ -191,8 +199,10 @@ impl ThreadDetails {
             workspace,
             inline: true,
             editor_anchor: PopoverAnchor::new(),
+            branch_anchor: PopoverAnchor::new(),
+            agents_anchor: PopoverAnchor::new(),
+            servers_anchor: PopoverAnchor::new(),
             popover_open: false,
-            branch_menu_open: false,
             home,
             prefs,
             prefs_saving: None,
@@ -200,8 +210,8 @@ impl ThreadDetails {
             changes: HashMap::new(),
             statuses: HashMap::new(),
             chat_folders: HashMap::new(),
-            branches: None,
             running: HashMap::new(),
+            pending_git: HashMap::new(),
             done: HashMap::new(),
             fresh: None,
             refresh_pending: false,
@@ -210,9 +220,7 @@ impl ThreadDetails {
             shown_subject: None,
             subject_changes: 0,
             runs: 0,
-            previous_agents_open: false,
             subagent_calls: None,
-            servers_expanded: false,
             stopping: None,
             error: None,
             server_error: None,
@@ -245,31 +253,26 @@ impl Render for ThreadDetails {
         let subject = self.subject(cx);
         let open = self.is_open(cx);
         let card = subject.filter(|_| open && self.inline).map(|subject| {
-            let colors = cx.hoshi().clone();
             let content = self.subject_content(&subject, window, cx);
             div()
                 .absolute()
                 .size_full()
-                .p(px(CARD_GAP))
+                .p(px(CARD_GAP - SHADOW_ROOM))
                 .flex()
                 .flex_col()
                 .items_end()
                 .child(
                     div()
                         .id("thread-details")
-                        .debug_selector(|| "thread-details-card".into())
                         .occlude()
-                        .w(px(CARD_WIDTH))
-                        .max_h_full()
-                        .overflow_y_scroll()
-                        .p(px(6.))
-                        .rounded_2xl()
-                        .border_1()
-                        .border_color(colors.border.opacity(0.6))
-                        .bg(colors.popover.opacity(0.85))
-                        .shadow_lg()
+                        .p(px(SHADOW_ROOM))
                         .child(crate::browser::obstacle(crate::browser::Obstacle::Details))
-                        .child(content),
+                        .child(
+                            div()
+                                .debug_selector(|| "thread-details-card".into())
+                                .w(px(CARD_WIDTH))
+                                .child(content),
+                        ),
                 )
         });
         div()

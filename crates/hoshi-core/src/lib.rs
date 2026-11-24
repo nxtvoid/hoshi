@@ -71,9 +71,9 @@ pub use pull_request::{
 pub use request::{ApprovalDecision, Question, QuestionOption, RequestResponse, RequestStatus};
 pub use server::{LocalServer, ServerOrigin, ThreadServers};
 pub use settings::{
-    AppSettings, BrowserSettings, ClaudeCodeSettings, CodexSettings, CopilotSettings,
-    FavoriteModel, GeneralSettings, IDLE_COMPACTION_TOKENS, IdleCompaction, LinkTarget,
-    NewThreadModel, NewThreadSettings, NewThreadWorkspace, PageColorScheme, PageSize,
+    AppSettings, BrowserSettings, ClaudeCodeSettings, CodexSettings, ContextMeterPlace,
+    CopilotSettings, FavoriteModel, GeneralSettings, IDLE_COMPACTION_TOKENS, IdleCompaction,
+    LinkTarget, NewThreadModel, NewThreadSettings, NewThreadWorkspace, PageColorScheme, PageSize,
     ProviderSettings, SearchEngine, StartupView, SubagentEffort, ThreadTitleSettings,
 };
 pub use snooze::{

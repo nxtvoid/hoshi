@@ -38,12 +38,22 @@ impl ThreadDetails {
         );
     }
 
-    pub(super) fn switch_branch(&mut self, branch: String, cx: &mut Context<Self>) {
+    pub(super) fn compact_context(&mut self, cx: &mut Context<Self>) {
         let Some(thread_id) = self.shown_thread.clone() else {
             return;
         };
         let engine = self.engine(cx);
-        self.run(move || engine.switch_branch(&thread_id, &branch), cx);
+        self.run(
+            move || {
+                engine.dispatch(hoshi_core::Command::MessageSend {
+                    thread_id,
+                    message_id: uuid::Uuid::new_v4().to_string(),
+                    text: crate::composer::COMPACT_COMMAND.to_owned(),
+                    attachments: Vec::new(),
+                })
+            },
+            cx,
+        );
     }
 
     /// Runs an engine call in the background, telling its failure under the card, opened for it.
@@ -75,27 +85,6 @@ impl ThreadDetails {
                 })
                 .ok();
             }
-        })
-        .detach();
-    }
-
-    pub(super) fn set_branch_menu(&mut self, open: bool, cx: &mut Context<Self>) {
-        self.branch_menu_open = open;
-        cx.notify();
-        let Some(thread_id) = self.shown_thread.clone().filter(|_| open) else {
-            return;
-        };
-        let engine = self.engine(cx);
-        cx.spawn(async move |this, cx| {
-            let branches = cx
-                .background_spawn(async move { engine.thread_branches(&thread_id) })
-                .await
-                .unwrap_or_default();
-            this.update(cx, |this, cx| {
-                this.branches = Some(branches);
-                cx.notify();
-            })
-            .ok();
         })
         .detach();
     }
@@ -139,9 +128,11 @@ impl ThreadDetails {
     }
 
     /// Runs a git action, asking first when it would push straight to the default branch.
+    /// With `undoable`, the action waits [`UNDO_FOR`] first, showing as that label.
     pub(super) fn start_git(
         &mut self,
         request: GitActionRequest,
+        undoable: Option<git::Label>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -152,7 +143,10 @@ impl ThreadDetails {
             return;
         };
         if !git::pushes_to_default_branch(status, request.action) {
-            self.run_git(thread_id, request, window, cx);
+            match undoable {
+                Some(label) => self.delay_git(thread_id, request, label, window, cx),
+                None => self.run_git(thread_id, request, window, cx),
+            }
             return;
         }
         let branch = status.branch.clone().unwrap_or_default();
@@ -197,6 +191,50 @@ impl ThreadDetails {
         });
     }
 
+    fn delay_git(
+        &mut self,
+        thread_id: String,
+        request: GitActionRequest,
+        label: git::Label,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.running.contains_key(&thread_id) {
+            return;
+        }
+        let started = Instant::now();
+        self.pending_git.insert(
+            thread_id.clone(),
+            PendingGit {
+                request,
+                label,
+                started,
+            },
+        );
+        self.done.remove(&thread_id);
+        cx.notify();
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(UNDO_FOR).await;
+            this.update_in(cx, |this, window, cx| {
+                let due = this
+                    .pending_git
+                    .get(&thread_id)
+                    .is_some_and(|pending| pending.started == started);
+                if let Some(pending) = due.then(|| this.pending_git.remove(&thread_id)).flatten() {
+                    this.run_git(thread_id, pending.request, window, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(super) fn undo_git(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        if self.pending_git.remove(thread_id).is_some() {
+            cx.notify();
+        }
+    }
+
     pub(super) fn run_git(
         &mut self,
         thread_id: String,
@@ -204,6 +242,7 @@ impl ThreadDetails {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.pending_git.remove(&thread_id);
         if self.running.contains_key(&thread_id) {
             return;
         }

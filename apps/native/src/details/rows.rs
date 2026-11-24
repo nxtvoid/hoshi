@@ -1,17 +1,23 @@
 use super::prefs::{EditorMark, editor_mark};
 use gpui_kit::component::Icon;
 use gpui_kit::*;
-use hoshi_core::Editor;
+use hoshi_core::{Editor, ForgeKind};
 use hoshi_ui::assets::brand;
 use hoshi_ui::prelude::*;
 
 pub const CARD_WIDTH: f32 = 280.;
 pub const CARD_GAP: f32 = 12.;
 pub const CARD_CLEARANCE: f32 = 32.;
+/// Room around the floating boxes for their shadows, inside the card's gap.
+pub const SHADOW_ROOM: f32 = 8.;
 /// Below this chat width the card would crowd the chat, so it becomes a popover.
 pub const INLINE_MIN_WIDTH: f32 = CARD_WIDTH + CARD_GAP + CARD_CLEARANCE * 2. + 560.;
 
 const ROW_TEXT: f32 = 13.;
+/// How far a tooltip on the left of a row stands from it, so it clears the box.
+pub const BESIDE_ROW: f32 = 16.;
+/// How far a menu on the left of a box stands from its edge, as a row's tooltip does.
+pub const BESIDE_BOX: f32 = 11.;
 
 /// A row of the card: one line, an icon, its text, and a hover tint.
 pub fn row(id: impl Into<ElementId>, colors: &Colors) -> Stateful<Div> {
@@ -39,72 +45,31 @@ pub fn row_static(id: impl Into<ElementId>, colors: &Colors) -> Stateful<Div> {
         .text_color(colors.foreground.opacity(0.8))
 }
 
-/// The part of a split row that runs its action.
-pub fn split_primary(id: impl Into<ElementId>, colors: &Colors) -> Stateful<Div> {
-    let hover = colors.foreground.opacity(0.05);
-    div()
-        .id(id)
-        .flex()
-        .flex_1()
-        .h_8()
-        .min_w_0()
-        .items_center()
-        .gap(px(10.))
-        .rounded_l_lg()
-        .px(px(10.))
-        .text_size(px(ROW_TEXT))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(colors.foreground.opacity(0.8))
-        .cursor_pointer()
-        .hover(move |style| style.bg(hover))
-}
-
-/// A row whose main part runs an action and whose arrow opens alternatives.
-pub fn split_row(
+/// A small square button at the end of a row.
+pub fn icon_button(
     id: impl Into<ElementId>,
-    primary: impl IntoElement,
-    menu: Option<AnyElement>,
+    content: impl IntoElement,
+    open: bool,
     colors: &Colors,
 ) -> Stateful<Div> {
-    let hover = colors.foreground.opacity(0.02);
-    let divider = colors.border.opacity(0.7);
-    div()
-        .id(id)
-        .group("split")
-        .flex()
-        .flex_none()
-        .w_full()
-        .items_center()
-        .rounded_lg()
-        .hover(move |style| style.bg(hover))
-        .child(primary)
-        .when_some(menu, |this, menu| {
-            this.child(
-                div()
-                    .h_4()
-                    .w_px()
-                    .flex_none()
-                    .group_hover("split", move |style| style.bg(divider)),
-            )
-            .child(menu)
-        })
-}
-
-/// The arrow of a split row, which opens its menu.
-pub fn split_arrow(id: impl Into<ElementId>, open: bool, colors: &Colors) -> Stateful<Div> {
     let hover = colors.foreground.opacity(0.05);
-    div()
-        .id(id)
-        .flex()
-        .flex_none()
-        .size_8()
-        .items_center()
-        .justify_center()
-        .rounded_r_lg()
+    icon_slot(id, content)
         .cursor_pointer()
         .when(open, |this| this.bg(hover))
         .hover(move |style| style.bg(hover))
-        .child(icon(IconName::ChevronDown, colors))
+}
+
+/// Where an icon button sits, without its press: for one that can't be pressed now.
+pub fn icon_slot(id: impl Into<ElementId>, content: impl IntoElement) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .size_6()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .child(content)
 }
 
 /// The editor's own mark, as the editors show it.
@@ -124,6 +89,23 @@ pub fn editor_icon(editor: Editor, colors: &Colors) -> AnyElement {
     }
 }
 
+/// The forge's own mark, as the project palette shows it.
+pub fn forge_mark(forge: ForgeKind, colors: &Colors) -> AnyElement {
+    match forge {
+        ForgeKind::Github => Icon::new(IconName::Github)
+            .size_4()
+            .flex_none()
+            .text_color(colors.foreground)
+            .into_any_element(),
+        ForgeKind::Bitbucket => svg()
+            .path(brand::BITBUCKET)
+            .size_4()
+            .flex_none()
+            .text_color(colors.link)
+            .into_any_element(),
+    }
+}
+
 pub fn icon(name: IconName, colors: &Colors) -> Icon {
     Icon::new(name)
         .size_4()
@@ -131,24 +113,40 @@ pub fn icon(name: IconName, colors: &Colors) -> Icon {
         .text_color(colors.muted_foreground)
 }
 
-pub fn separator(colors: &Colors) -> Div {
+/// One of the card's boxes. Floating over the chat it carries its own surface and shadow;
+/// inside the popover only its border.
+pub fn panel(floating: bool, colors: &Colors) -> Div {
     div()
+        .flex()
+        .flex_col()
         .flex_none()
-        .mx(px(10.))
-        .my_1()
-        .h_px()
-        .bg(colors.border.opacity(0.7))
+        .gap(px(2.))
+        .p_1()
+        .rounded_xl()
+        .border_1()
+        .border_color(colors.border.opacity(0.6))
+        .when(floating, |this| {
+            this.bg(colors.popover.opacity(0.85)).shadow_lg()
+        })
 }
 
-pub fn section_label(text: impl Into<SharedString>, colors: &Colors) -> Div {
+/// A box's title, with what it holds on the right.
+pub fn panel_header(
+    title: impl Into<SharedString>,
+    detail: Option<String>,
+    colors: &Colors,
+) -> Div {
     div()
+        .flex()
         .flex_none()
-        .px(px(10.))
-        .pt_1()
-        .pb(px(2.))
+        .h_7()
+        .items_center()
+        .gap_2()
+        .px_2()
         .text_xs()
         .text_color(colors.muted_foreground)
-        .child(text.into())
+        .child(div().flex_1().min_w_0().truncate().child(title.into()))
+        .children(detail.map(|detail| div().flex_none().child(detail)))
 }
 
 /// `+12 −3`, as the card shows a diff's size.

@@ -9,6 +9,9 @@ pub(crate) use model_picker::{
 };
 mod chips;
 mod context;
+pub use context::{
+    COMPACT_COMMAND, CROWDED_PERCENT, arc, compaction_threshold, context_percent, worth_compacting,
+};
 mod delegated_request;
 mod footer;
 mod handoff;

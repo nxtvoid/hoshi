@@ -330,6 +330,7 @@ mod tests {
                 color_scheme: PageColorScheme::Dark,
             },
             usage_limits_in_details: true,
+            context_meter: hoshi_core::ContextMeterPlace::Composer,
             onboarding_completed_at: Some("2026-11-09T08:00:00.000Z".into()),
         };
 
