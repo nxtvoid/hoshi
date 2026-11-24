@@ -773,12 +773,19 @@ impl TextWrapper {
         if self.font_overrides.is_empty() {
             return;
         }
+        // A replacement maps every override inside it onto the inserted text; the first keeps it.
+        let mut end = 0;
         self.font_overrides = self
             .font_overrides
             .iter()
             .filter_map(|(r, over)| {
                 let r = crate::input::decorations::adjust_range_for_edit(r, range, new_len);
-                (!r.is_empty()).then_some((r, *over))
+                let r = r.start.max(end)..r.end;
+                if r.is_empty() {
+                    return None;
+                }
+                end = r.end;
+                Some((r, *over))
             })
             .collect();
     }
@@ -2394,6 +2401,16 @@ mod tests {
         wrapper.adjust_font_overrides(&(3..3), 2);
         wrapper.adjust_font_overrides(&(8..12), 0);
         assert_eq!(&*wrapper.font_overrides, &[(2..7, bold())]);
+    }
+
+    #[test]
+    fn font_overrides_a_replacement_covers_stay_disjoint() {
+        let mut wrapper = TextWrapper::new(test_font(), px(14.), None);
+        wrapper.font_overrides = Rc::from([(2..5, bold()), (6..8, bold()), (9..12, bold())]);
+        wrapper.adjust_font_overrides(&(0..20), 20);
+        assert_eq!(&*wrapper.font_overrides, &[(0..20, bold())]);
+        let runs = font_runs(&test_font(), &wrapper.font_overrides, 4..7).unwrap();
+        assert_eq!(runs.iter().map(|run| run.len).sum::<usize>(), 3);
     }
 
     /// Bold runs shape wider than the base font, so rows measured without them overflow.

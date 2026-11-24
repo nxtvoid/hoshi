@@ -17,7 +17,7 @@ composer can show bold, italic, inline code and strikethrough without their mark
 - `src/input/editor/decorations.rs`: `InputBaseState<TextareaMode>::set_decorations` replaces them
   whole and `decorations` reads them back. Their ranges follow edits like the editor's
   collections (`adjust_annotations` in `kind.rs`), so `set_value("")` clears them.
-- `display_map/text_wrapper.rs`: soft wrap measures the font weight and style decorations paint (`set_font_overrides`, fed each prepaint in `element.rs`), so bold text wraps instead of overflowing.
+- `display_map/text_wrapper.rs`: soft wrap measures the font weight and style decorations paint (`set_font_overrides`, fed each prepaint in `element.rs`), so bold text wraps instead of overflowing. Edits keep those overrides disjoint (`adjust_font_overrides`): a replacement over several of them keeps one, since overlapping runs overrun the line DirectWrite shapes.
 - `src/input/base/inline_tokens.rs`: `set_tokens` swaps the tokens keeping text, selections and
   undo history; it rejects a token through any caret with `InlineTokenError::SplitsSelection` and
   bumps the document revision so the token layout is measured again. Undo of an edit inside a
