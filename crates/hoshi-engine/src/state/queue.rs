@@ -33,29 +33,25 @@ impl State {
         let Some(message) = self.take_held(thread_id) else {
             return;
         };
-        let picked = self
+        let message = QueuedMessage {
+            to: message
+                .to
+                .clone()
+                .or_else(|| self.shown_choice(thread_id).map(Box::new)),
+            ..message
+        };
+        let moves = self
             .model
             .thread(thread_id)
-            .and_then(|thread| thread.pending_model.clone());
-        if picked.is_some() && self.holds_off_switch(thread_id) {
-            self.queue_message(
-                thread_id,
-                QueuedMessage {
-                    to: picked,
-                    ..message
-                },
-            );
+            .is_some_and(|thread| message.moves(thread));
+        if moves && self.holds_off_switch(thread_id) {
+            self.queue_message(thread_id, message);
             return;
         }
-        let message_id = message.id;
-        let send = Command::MessageSend {
-            thread_id: thread_id.to_owned(),
-            message_id: message_id.clone(),
-            text: message.text,
-            attachments: message.attachments,
-        };
-        if let Err(error) = self.run_command(send) {
+        let message_id = message.id.clone();
+        if let Err(error) = self.start_queued(thread_id, message) {
             eprintln!("hoshi: failed to send a message after compacting: {error}");
+            self.show_queue(thread_id);
             return;
         }
         self.release_queue_after(thread_id, Some(&message_id));
@@ -329,15 +325,38 @@ impl State {
         })
     }
 
-    /// Starts a turn of its own for a message taken out of the idle thread's queue.
+    /// Starts a turn of its own for a message taken out of the idle thread's queue; one that
+    /// can't start waits there for the user.
     pub(crate) fn start_queued(
         &mut self,
         thread_id: &str,
         message: QueuedMessage,
     ) -> Result<(), CommandError> {
-        if let Some(to) = message.to.clone() {
-            return self.start_switching(thread_id, message, to);
+        let started = match message.to.clone() {
+            Some(to) => {
+                let send = Command::MessageSend {
+                    thread_id: thread_id.to_owned(),
+                    message_id: message.id.clone(),
+                    text: message.text.clone(),
+                    attachments: message.attachments.clone(),
+                };
+                self.send_routed(&message.id, Some(to), send)
+            }
+            None => self.start_kept(thread_id, message.clone()),
+        };
+        if started.is_err() {
+            self.queued
+                .entry(thread_id.to_owned())
+                .or_default()
+                .push_front(message);
+            self.hold_queue(thread_id);
+            self.save_recovery(thread_id);
         }
+        started
+    }
+
+    /// Starts the turn of a message the transcript already has.
+    fn start_kept(&mut self, thread_id: &str, message: QueuedMessage) -> Result<(), CommandError> {
         let now = now();
         let kept = self
             .store
@@ -361,6 +380,7 @@ impl State {
             &now,
         );
         let started = self.commit(&events, &now);
+        let runs_on = self.model.thread(thread_id).map(RunsOn::of);
         if let (true, Some(picked)) = (moves, picked)
             && let Err(error) = self.choose(thread_id, picked)
         {
@@ -376,34 +396,8 @@ impl State {
             &message.id,
             message.text,
             message.attachments,
-            None,
+            runs_on,
         );
         Ok(())
-    }
-
-    /// Sends a message that waited to move its thread to `to`; one that can't go waits in the
-    /// queue for the user.
-    fn start_switching(
-        &mut self,
-        thread_id: &str,
-        message: QueuedMessage,
-        to: Box<ModelChoice>,
-    ) -> Result<(), CommandError> {
-        let send = Command::MessageSend {
-            thread_id: thread_id.to_owned(),
-            message_id: message.id.clone(),
-            text: message.text.clone(),
-            attachments: message.attachments.clone(),
-        };
-        let sent = self.send_routed(&message.id, Some(to), send);
-        if sent.is_err() {
-            self.queued
-                .entry(thread_id.to_owned())
-                .or_default()
-                .push_front(message);
-            self.hold_queue(thread_id);
-            self.save_recovery(thread_id);
-        }
-        sent
     }
 }

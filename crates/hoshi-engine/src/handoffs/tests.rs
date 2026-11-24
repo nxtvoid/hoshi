@@ -610,7 +610,8 @@ fn a_queued_message_runs_where_it_was_sent_though_one_before_moved_the_thread() 
     setup.pick("t", CLAUDE).unwrap();
     held.refuses.store(true, Ordering::SeqCst);
     setup.dispatch("m3", "And this, Claude.").unwrap();
-    assert_eq!(setup.waiting(), ["m2", "m3"]);
+    setup.dispatch("m4", "Then that.").unwrap();
+    assert_eq!(setup.waiting(), ["m2", "m3", "m4"]);
     setup.pick("t", CODEX).unwrap();
 
     held.ends(TurnOutcome::Completed);
@@ -624,12 +625,76 @@ fn a_queued_message_runs_where_it_was_sent_though_one_before_moved_the_thread() 
     let thread = setup.thread("t");
     assert_eq!(thread.provider, CLAUDE);
     assert_eq!(thread.pending_model.unwrap().provider, CODEX);
-    let handoff = held.requests.lock().unwrap()[1].handoff.clone().unwrap();
+    let text = handoff_text(&held.requests.lock().unwrap()[1]);
+    assert!(text.contains("item=codex-1:answer;"), "{text}");
     assert!(
-        handoff.render().contains("item=codex-1:answer;"),
-        "{}",
-        handoff.render()
+        !text.contains("item=m3;") && !text.contains("item=m4;"),
+        "{text}"
     );
+}
+
+#[test]
+fn a_queued_message_takes_the_model_it_was_sent_on() {
+    let (setup, held) = working("switch-back-model", false);
+    let pick = |provider: &str, model: &str| {
+        setup
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: provider.into(),
+                model: Some(model.into()),
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap()
+    };
+    pick(CLAUDE, "a");
+    pick(CODEX, "x");
+    setup.dispatch("m2", "Go on.").unwrap();
+    pick(CLAUDE, "a");
+    held.refuses.store(true, Ordering::SeqCst);
+    setup.dispatch("m3", "And this, Claude.").unwrap();
+    pick(CODEX, "x");
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+    pick(CLAUDE, "b");
+    setup.ended(1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while held.sinks.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "m3 never reached Claude");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let ran = held.requests.lock().unwrap()[1].model.clone();
+    assert_eq!(ran.as_deref(), Some("a"));
+    let thread = setup.thread("t");
+    assert_eq!(thread.model.as_deref(), Some("b"), "for the next message");
+}
+
+#[test]
+fn a_message_held_to_compact_first_goes_where_it_was_sent() {
+    let (setup, held) = working("switch-compact", false);
+    held.report(ProviderOutput::SessionStarted {
+        session_id: "s".into(),
+    });
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+    setup.pick("t", CODEX).unwrap();
+    setup
+        .engine
+        .compact_then_send("t", "m2", "Go on.".into(), Vec::new())
+        .unwrap();
+    assert_eq!(setup.thread("t").provider, CLAUDE, "compacting stays");
+    setup.pick("t", CLAUDE).unwrap();
+    (held.sinks.lock().unwrap()[1])(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Completed,
+    });
+    setup.ended(2);
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(thread.pending_model.unwrap().provider, CLAUDE);
 }
 
 #[test]

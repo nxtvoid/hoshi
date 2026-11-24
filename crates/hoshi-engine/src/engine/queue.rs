@@ -146,6 +146,7 @@ impl Engine {
             state.release_queue_after(thread_id, Some(message_id));
             return Ok(());
         }
+        let to = state.shown_choice(thread_id).map(Box::new);
         state.hold_until_compacted(
             thread_id,
             QueuedMessage {
@@ -154,7 +155,7 @@ impl Engine {
                 attachments,
                 from_user: true,
                 held: false,
-                to: None,
+                to,
                 sent_on: None,
             },
         );

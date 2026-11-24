@@ -352,8 +352,8 @@ struct QueuedMessage {
     /// It waits for the user to go on with the thread, as after its turn failed.
     #[serde(default)]
     held: bool,
-    /// The provider picked for it while another one's turn ran. The transcript takes it once
-    /// its turn starts there.
+    /// What was picked for it, sent while another provider's turn ran or the thread compacts.
+    /// The transcript takes it once its turn starts there.
     #[serde(default)]
     to: Option<Box<ModelChoice>>,
     /// Where the thread was when a message of the user's that its transcript has was queued, for it to run there
