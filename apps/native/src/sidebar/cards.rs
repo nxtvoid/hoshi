@@ -2,7 +2,7 @@
 //! pill. One thread card serves every row, as the web's shared handle does: once it shows, moving
 //! to another row moves it there at once.
 
-use super::{Problem, Sidebar, pull_request_problem};
+use super::{Problem, Sidebar, checks_color, pull_request_problem};
 use crate::m;
 use crate::sections::{self, Logins, relative_time};
 use chrono::Utc;
@@ -433,6 +433,14 @@ fn pull_request_turn(pull_request: &PullRequest) -> Option<Turn> {
     }
 }
 
+pub(crate) fn checks_label(checks: ChecksState) -> String {
+    match checks {
+        ChecksState::Passing => m::checks_passing(),
+        ChecksState::Failing => m::checks_failing(),
+        ChecksState::Pending => m::checks_pending(),
+    }
+}
+
 pub(crate) fn pull_request_summary(
     pull_request: &PullRequest,
     logins: &Logins,
@@ -462,11 +470,9 @@ pub(crate) fn pull_request_summary(
         Some(Problem::ChangesRequested) => (colors.warning, m::pr_problem_changes_requested()),
         None => (state_color, state_label),
     };
-    let checks = pull_request.checks.map(|checks| match checks {
-        ChecksState::Passing => (m::checks_passing(), colors.pr_open),
-        ChecksState::Failing => (m::checks_failing(), colors.status_error),
-        ChecksState::Pending => (m::checks_pending(), colors.status_waiting),
-    });
+    let checks = pull_request
+        .checks
+        .map(|checks| (checks_label(checks), checks_color(checks, colors)));
     let others = sections::is_others(pull_request, logins);
     let turn = (!others).then(|| pull_request_turn(pull_request)).flatten();
     let updated = m::pr_updated(relative_time(&pull_request.updated_at, Utc::now()));

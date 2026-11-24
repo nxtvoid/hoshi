@@ -208,8 +208,8 @@ impl State {
                 }
                 self.deliver_task_result(thread_id, outcome);
             }
-            self.start_next_queued(thread_id);
             self.send_after_compaction(thread_id);
+            self.start_next_queued(thread_id);
             self.deliver_pending_wakes(thread_id);
             if compacts_when_idle {
                 self.schedule_idle_compaction(thread_id);
@@ -390,13 +390,7 @@ impl State {
         if joined {
             return;
         }
-        let held = self.queue_holds(thread_id);
-        self.queued
-            .entry(thread_id.to_owned())
-            .or_default()
-            .push_back(QueuedMessage { held, ..message });
-        self.save_recovery(thread_id);
-        self.show_queue(thread_id);
+        self.queue_message(thread_id, message);
         // The turn may have ended between the message's events and this call.
         if !self.turns.contains_key(thread_id) {
             self.start_next_queued(thread_id);

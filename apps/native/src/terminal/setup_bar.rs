@@ -260,8 +260,8 @@ impl Render for WorktreeSetupBar {
                                 .pr_1p5()
                                 .overflow_hidden()
                                 .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(px(11.))
-                                .line_height(px(16.))
+                                .text_size(rems(0.6875))
+                                .line_height(rems(1.))
                                 .text_color(colors.muted_foreground)
                                 .children(
                                     run.output

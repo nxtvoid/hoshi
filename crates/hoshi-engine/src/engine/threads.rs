@@ -208,7 +208,9 @@ impl Engine {
         {
             return Ok(());
         }
-        state.run_command(command)?;
+        if !state.queue_to_switch(&command) {
+            state.run_command(command)?;
+        }
         if let Some((thread_id, message_id)) = sent_to {
             state.release_queue_after(&thread_id, Some(&message_id));
         }

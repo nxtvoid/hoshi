@@ -474,13 +474,15 @@ pub(super) fn record_subagent(transcript: &str, output: ProviderOutput, now: &st
 
 /// Starts a turn for a message sent while the previous turn was ending, too late to join
 /// it; `message` is its item, as kept. When the turn runs on another model or effort, a line
-/// saying so goes where the turn starts, since the message stays where it was sent. Nothing
-/// when the thread is gone or busy again.
+/// saying so goes where the turn starts, since the message stays where it was sent. With
+/// `moves` it runs on the provider picked; otherwise it goes on where the thread is, and the
+/// pick waits for the user's next message. Nothing when the thread is gone or busy again.
 pub fn start_queued_turn(
     model: &ReadModel,
     thread_id: &str,
     message_id: &str,
     message: Option<&ThreadItem>,
+    moves: bool,
     now: &str,
 ) -> Vec<Event> {
     let compacts = matches!(
@@ -498,7 +500,7 @@ pub fn start_queued_turn(
     };
     let mut events = queued_turn(model, thread_id, message_id, shown, now);
     let switch = model.threads.get(thread_id).and_then(|thread| {
-        let to = shown.then(|| runs_on(thread))?;
+        let to = (shown && !moves).then(|| ModelChoice::of(thread))?;
         turn_switch(thread, &to)
     });
     if let (false, Some(switch)) = (events.is_empty(), switch) {
@@ -516,11 +518,26 @@ pub fn start_queued_turn(
     if compacts && !events.is_empty() {
         events.push(compaction_started(thread_id, message_id, now));
     }
+    if let (true, Some(thread)) = (moves && !events.is_empty(), model.threads.get(thread_id)) {
+        let to = runs_on(thread);
+        for event in &mut events {
+            if let Event::TurnStarted {
+                model: Some(on), ..
+            } = event
+            {
+                on.clone_from(&to);
+            }
+        }
+        if let Some(switch) = switch_provider(thread, message_id) {
+            events.insert(0, switch);
+        }
+    }
     events
 }
 
 /// A queued message's turn, which records what it runs on when `records` says the message
-/// shows as the user's.
+/// shows as the user's. It goes on where the thread is: a provider picked since waits for the
+/// user's next message.
 pub(super) fn queued_turn(
     model: &ReadModel,
     thread_id: &str,
@@ -528,16 +545,7 @@ pub(super) fn queued_turn(
     records: bool,
     now: &str,
 ) -> Vec<Event> {
-    let mut events = start_idle_turn(model, thread_id, message_id, records, now);
-    if !events.is_empty()
-        && let Some(switch) = model
-            .threads
-            .get(thread_id)
-            .and_then(|thread| switch_provider(thread, message_id))
-    {
-        events.insert(0, switch);
-    }
-    events
+    start_idle_turn(model, thread_id, message_id, records, now)
 }
 
 /// Starts a turn hoshi sends by itself to go on with the thread, opening with `text` marked
@@ -601,7 +609,7 @@ pub(super) fn start_idle_turn(
             thread_id: thread_id.to_owned(),
             turn_id: message_id.to_owned(),
             at: now.to_owned(),
-            model: records.then(|| runs_on(thread)),
+            model: records.then(|| ModelChoice::of(thread)),
         }],
         _ => Vec::new(),
     }

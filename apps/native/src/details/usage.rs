@@ -11,9 +11,10 @@ use gpui_kit::*;
 use hoshi_core::{ExtraUsage, SpendUnit, Thread, UsageLimits, UsageWindow, UsageWindowKind};
 use hoshi_ui::prelude::*;
 
-const LABEL_WIDTH: f32 = 60.;
-const VALUE_WIDTH: f32 = 32.;
-const NOTE_WIDTH: f32 = 42.;
+/// The columns of the meters, in rems.
+const LABEL_WIDTH: f32 = 3.75;
+const VALUE_WIDTH: f32 = 2.;
+const NOTE_WIDTH: f32 = 2.625;
 
 /// The provider whose limits the thread spends: the one its turn runs on, else the one its next
 /// message runs on.
@@ -87,7 +88,7 @@ fn meter(
         .id(id)
         .flex()
         .flex_none()
-        .h(px(30.))
+        .h(rems(1.875))
         .items_center()
         .gap(px(10.))
         .rounded_lg()
@@ -97,10 +98,10 @@ fn meter(
         .child(icon(name, colors))
         .child(
             div()
-                .w(px(LABEL_WIDTH))
+                .w(rems(LABEL_WIDTH))
                 .flex_none()
                 .truncate()
-                .text_size(px(13.))
+                .text_sm()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(colors.foreground.opacity(0.8))
                 .child(label),
@@ -142,7 +143,7 @@ fn meter(
         })
         .child(
             div()
-                .min_w(px(VALUE_WIDTH))
+                .min_w(rems(VALUE_WIDTH))
                 .flex_none()
                 .flex()
                 .justify_end()
@@ -152,7 +153,7 @@ fn meter(
         )
         .child(
             div()
-                .w(px(NOTE_WIDTH))
+                .w(rems(NOTE_WIDTH))
                 .flex_none()
                 .flex()
                 .justify_end()

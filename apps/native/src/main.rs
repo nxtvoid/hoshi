@@ -35,7 +35,6 @@ mod palette;
 mod panel;
 #[cfg(test)]
 mod perf_tests;
-mod provider_switch;
 mod providers;
 mod pull_request_update;
 mod sections;
@@ -695,6 +694,12 @@ impl Render for HoshiWindow {
                             .when(thread_open, |this| this.child(self.panel.clone())),
                     ),
             )
+            .when(!self.sidebar_open, |this| {
+                this.children(
+                    self.sidebar
+                        .update(cx, |sidebar, cx| sidebar.custom_snooze_dialog(cx)),
+                )
+            })
             .children(self.palette.as_ref().map(|(palette, _)| palette.clone()))
             .children(markdown::hover_card::render(window, cx))
             .when_some(self.settings.clone(), |this, view| {

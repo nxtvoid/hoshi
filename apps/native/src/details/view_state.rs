@@ -48,10 +48,14 @@ impl ThreadDetails {
         }
     }
 
+    /// Whether the card floats over the chat, rather than waiting in its popover.
+    pub fn shows_card(&self, cx: &App) -> bool {
+        self.inline && self.is_open(cx) && self.subject(cx).is_some()
+    }
+
     /// What the floating card takes from the chat's lanes while it shows.
     pub fn lane_room(&self, cx: &App) -> LaneRoom {
-        let card = self.inline && self.is_open(cx) && self.subject(cx).is_some();
-        if card {
+        if self.shows_card(cx) {
             LaneRoom {
                 right: px(CARD_WIDTH + CARD_GAP + CARD_CLEARANCE),
                 gutter: px(CARD_CLEARANCE),

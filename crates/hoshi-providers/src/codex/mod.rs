@@ -315,6 +315,10 @@ impl ProviderAdapter for CodexAdapter {
         true
     }
 
+    fn restarts_to_switch(&self) -> bool {
+        true
+    }
+
     fn usage_limits(&self) -> Option<UsageLimits> {
         self.query(&std::env::temp_dir(), |connection| {
             let limits = connection

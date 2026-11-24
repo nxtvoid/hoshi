@@ -233,24 +233,9 @@ impl PickerHost for Composer {
 }
 
 impl Composer {
-    /// The models the target can move to: once a thread has a session, only its provider's.
-    fn picker_catalogs(&self, cx: &App) -> Vec<ProviderModels> {
-        let workspace = self.workspace.read(cx);
-        let locked = workspace
-            .open_thread_id(cx)
-            .and_then(|id| workspace.model.thread(&id))
-            .filter(|thread| thread.session_id.is_some())
-            .map(|thread| thread.provider.clone());
-        workspace
-            .models
-            .iter()
-            .filter(|catalog| {
-                locked
-                    .as_ref()
-                    .is_none_or(|locked| catalog.provider == *locked)
-            })
-            .cloned()
-            .collect()
+    /// The models the target can move to; a started thread moves with its next turn.
+    pub(super) fn picker_catalogs(&self, cx: &App) -> Vec<ProviderModels> {
+        self.workspace.read(cx).models.clone()
     }
 
     fn current_listing(&self, cx: &App) -> Listing {

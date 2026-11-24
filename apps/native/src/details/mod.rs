@@ -18,6 +18,8 @@ mod view_state;
 
 use crate::m;
 use crate::sections::relative_time;
+use crate::sidebar::cards::checks_label;
+use crate::sidebar::{checks_color, pull_request_mark};
 use crate::state::Workspace;
 use crate::usage::limits::{SectionState, section_state};
 pub use agents::track_pending_tasks;
@@ -334,12 +336,7 @@ fn pull_request_row(
     watching: bool,
     colors: &Colors,
 ) -> Stateful<Div> {
-    let (name, color) = match pull_request.state {
-        PullRequestState::Open => (IconName::GitPullRequest, colors.pr_open),
-        PullRequestState::Draft => (IconName::GitPullRequestDraft, colors.muted_foreground),
-        PullRequestState::Merged => (IconName::GitMerge, colors.pr_merged),
-        PullRequestState::Closed => (IconName::GitPullRequestClosed, colors.status_error),
-    };
+    let (name, color) = pull_request_mark(pull_request, colors);
     row("details-pull-request", colors)
         .child(Icon::new(name).size_4().flex_none().text_color(color))
         .child(div().flex_none().child(format!("#{}", pull_request.number)))
@@ -359,6 +356,25 @@ fn pull_request_row(
                     .flex_none()
                     .child(icon(IconName::Eye, colors))
                     .with_tooltip(Tooltip::new(m::pr_watching_tooltip())),
+            )
+        })
+        .when_some(pull_request.checks, |this, checks| {
+            this.child(
+                div()
+                    .id("details-pr-checks")
+                    .debug_selector(|| "details-pr-checks".into())
+                    .flex_none()
+                    .size_4()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .size_1p5()
+                            .rounded_full()
+                            .bg(checks_color(checks, colors)),
+                    )
+                    .with_tooltip(Tooltip::new(checks_label(checks))),
             )
         })
 }

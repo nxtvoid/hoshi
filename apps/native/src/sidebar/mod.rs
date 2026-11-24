@@ -9,6 +9,7 @@ mod worktree_setup;
 mod actions;
 mod heading;
 mod menus;
+pub(crate) use menus::thread_menu;
 mod rail_view;
 mod thread_list;
 mod thread_row;
@@ -468,6 +469,15 @@ pub(crate) fn pull_request_mark(pull_request: &PullRequest, colors: &Colors) -> 
         None => state_color,
     };
     (icon, color)
+}
+
+/// The color a pull request's checks show in.
+pub(crate) fn checks_color(checks: ChecksState, colors: &Colors) -> Hsla {
+    match checks {
+        ChecksState::Passing => colors.pr_open,
+        ChecksState::Failing => colors.status_error,
+        ChecksState::Pending => colors.status_waiting,
+    }
 }
 
 /// What holds an open pull request back, the worst first.

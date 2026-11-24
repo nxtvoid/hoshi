@@ -299,6 +299,9 @@ struct State {
     /// Messages sent while a thread's turn was ending, too late to join it, oldest first.
     /// Each starts a turn of its own once the running one ends.
     queued: HashMap<String, VecDeque<QueuedMessage>>,
+    /// What messages on their way run on, by message id, whatever is picked for the user's next
+    /// one; `None` for where their thread is.
+    routes: HashMap<String, Option<Box<ModelChoice>>>,
     /// The server agents call to delegate tasks; `None` when it couldn't start.
     mcp: Option<McpServer>,
     /// Tasks delegated to child threads, by child thread id, until their answer goes back.
@@ -349,6 +352,24 @@ struct QueuedMessage {
     /// It waits for the user to go on with the thread, as after its turn failed.
     #[serde(default)]
     held: bool,
+    /// What was picked for it, sent while another provider's turn ran or the thread compacts.
+    /// The transcript takes it once its turn starts there.
+    #[serde(default)]
+    to: Option<Box<ModelChoice>>,
+    /// Where the thread was when a message of the user's that its transcript has was queued, for it to run there
+    /// though one queued before moved the thread.
+    #[serde(default)]
+    sent_on: Option<Box<ModelChoice>>,
+}
+
+impl QueuedMessage {
+    /// Whether its turn moves `thread` to another provider.
+    fn moves(&self, thread: &hoshi_core::Thread) -> bool {
+        self.to
+            .as_ref()
+            .or(self.sent_on.as_ref())
+            .is_some_and(|on| on.provider != thread.provider)
+    }
 }
 
 fn held_message(thread_id: &str, message: &QueuedMessage) -> HeldMessage {
@@ -624,6 +645,7 @@ impl Engine {
             codex_sign_in: None,
             session_moves: HashMap::new(),
             queued: HashMap::new(),
+            routes: HashMap::new(),
             mcp: None,
             delegations: HashMap::new(),
             after_compaction: HashMap::new(),
@@ -1214,6 +1236,7 @@ fn sync_pull_requests(state: Weak<Mutex<State>>) {
                 secret_requests::forget_old(&secrets);
             }
             lock(&shared).compact_idle_threads(unix_millis());
+            lock(&shared).start_waiting_switches();
             lock(&shared).resume_limited_threads(unix_millis());
             let jobs = lock(&shared).due_pull_request_jobs();
             for job in jobs {

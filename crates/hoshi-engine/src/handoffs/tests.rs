@@ -4,9 +4,10 @@ use hoshi_core::{
     AccessMode, BackgroundTask, Event, ProviderModels, ProviderOutput, RequestResponse,
     ThreadWorkspace,
 };
-use hoshi_providers::{OutputSink, RunningTurn, TurnRequest};
+use hoshi_providers::{OutputSink, RunningTurn, TurnAttachment, TurnRequest};
 use hoshi_store::Store;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -321,8 +322,503 @@ fn a_handoff_that_leaves_no_room_fails_the_turn_and_waits_for_the_next() {
     assert_eq!(setup.thread("t").pending_handoffs.len(), 1);
 }
 
+/// An agent whose turns report only what the test has them report.
+struct Held {
+    name: &'static str,
+    restarts: bool,
+    interrupted: Arc<AtomicBool>,
+    /// Its turns no longer take messages.
+    refuses: Arc<AtomicBool>,
+    requests: Mutex<Vec<TurnRequest>>,
+    sinks: Mutex<Vec<OutputSink>>,
+}
+
+struct HeldTurn {
+    interrupted: Arc<AtomicBool>,
+    refuses: Arc<AtomicBool>,
+}
+
+impl RunningTurn for HeldTurn {
+    fn interrupt(&self) {
+        self.interrupted.store(true, Ordering::SeqCst);
+    }
+
+    fn respond(&self, _request_id: &str, _response: &RequestResponse) {}
+
+    fn steer(
+        &self,
+        _message_id: &str,
+        _text: &str,
+        _attachments: &[TurnAttachment],
+        _now: bool,
+    ) -> bool {
+        !self.refuses.load(Ordering::SeqCst)
+    }
+
+    fn lingers(&self) -> bool {
+        true
+    }
+}
+
+impl ProviderAdapter for Held {
+    fn provider(&self) -> &'static str {
+        self.name
+    }
+
+    fn models(&self) -> ProviderModels {
+        ProviderModels::default()
+    }
+
+    fn restarts_to_switch(&self) -> bool {
+        self.restarts
+    }
+
+    fn start_turn(
+        &self,
+        request: TurnRequest,
+        sink: OutputSink,
+    ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+        self.requests.lock().unwrap().push(request);
+        self.sinks.lock().unwrap().push(sink);
+        Ok(Box::new(HeldTurn {
+            interrupted: self.interrupted.clone(),
+            refuses: self.refuses.clone(),
+        }))
+    }
+}
+
+impl Held {
+    fn report(&self, output: ProviderOutput) {
+        (self.sinks.lock().unwrap()[0])(output);
+    }
+
+    fn says(&self, item_id: &str) {
+        self.report(ProviderOutput::AssistantMessage {
+            item_id: item_id.into(),
+            text: "Still on it.".into(),
+        });
+    }
+
+    fn background(&self, tasks: &[&str]) {
+        self.report(ProviderOutput::BackgroundTasks {
+            tasks: tasks
+                .iter()
+                .map(|task| BackgroundTask {
+                    task_id: (*task).into(),
+                    tool_call_id: None,
+                    description: "dev server".into(),
+                    started_at: 0,
+                })
+                .collect(),
+            waiting: false,
+        });
+    }
+
+    fn ends(&self, outcome: TurnOutcome) {
+        self.report(ProviderOutput::TurnCompleted { outcome });
+    }
+}
+
+/// Thread `t` with its first turn still running, on an agent of which `restarts` tells how its
+/// turns give way.
+fn working(name: &str, restarts: bool) -> (Setup, Arc<Held>) {
+    let setup = local(name, Scripted::new(CLAUDE));
+    let held = Arc::new(Held {
+        name: CLAUDE,
+        restarts,
+        interrupted: Arc::default(),
+        refuses: Arc::default(),
+        requests: Mutex::default(),
+        sinks: Mutex::default(),
+    });
+    setup
+        .engine
+        .set_adapters(vec![held.clone(), setup.codex.clone()]);
+    setup.dispatch("m1", "Remember APPLE.").unwrap();
+    (setup, held)
+}
+
+impl Setup {
+    fn dispatch(&self, message_id: &str, text: &str) -> Result<(), CommandError> {
+        self.engine.dispatch(Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: message_id.into(),
+            text: text.into(),
+            attachments: Vec::new(),
+        })
+    }
+
+    fn ended(&self, turns: usize) {
+        let ended = self
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::TurnCompleted { .. }));
+        assert_eq!(ended.take(turns).count(), turns);
+    }
+
+    fn waiting(&self) -> Vec<String> {
+        self.engine
+            .thread_queue("t")
+            .messages
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect()
+    }
+}
+
 #[test]
-fn a_kept_process_with_background_work_holds_off_a_switch() {
+fn a_message_for_another_provider_waits_for_the_turn_and_takes_all_it_said() {
+    let (setup, held) = working("switch-waits", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+
+    assert_eq!(setup.waiting(), ["m2"]);
+    assert!(setup.engine.thread_item("t", "m2").unwrap().is_none());
+    assert!(!held.interrupted.load(Ordering::SeqCst));
+    assert_eq!(setup.thread("t").provider, CLAUDE);
+
+    held.says("late");
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+
+    assert!(setup.waiting().is_empty());
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(thread.pending_model, None);
+    let text = handoff_text(&setup.codex.request(0));
+    assert!(
+        text.contains("item=m1;") && text.contains("item=late;"),
+        "{text}"
+    );
+    assert!(!text.contains("item=m2;"), "{text}");
+}
+
+#[test]
+fn a_message_goes_where_it_was_sent_though_another_provider_is_picked_since() {
+    let (setup, held) = working("switch-kept", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.pick("t", CLAUDE).unwrap();
+    setup.dispatch("m3", "And this, Claude.").unwrap();
+    assert_eq!(setup.waiting(), ["m2"], "m3 joins the running turn");
+
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(
+        thread.pending_model.unwrap().provider,
+        CLAUDE,
+        "the next message goes back"
+    );
+}
+
+#[test]
+fn each_message_takes_the_model_picked_for_it() {
+    let (setup, held) = working("switch-models", false);
+    let pick = |model: &str| {
+        setup
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: CODEX.into(),
+                model: Some(model.into()),
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap()
+    };
+    pick("a");
+    setup.dispatch("m2", "Go on.").unwrap();
+    pick("b");
+    setup.dispatch("m3", "And then this.").unwrap();
+    pick("c");
+    held.ends(TurnOutcome::Completed);
+    setup.ended(3);
+
+    let ran = |turn: usize| setup.codex.request(turn).model;
+    assert_eq!(ran(0).as_deref(), Some("a"));
+    assert_eq!(ran(1).as_deref(), Some("b"));
+    let thread = setup.thread("t");
+    assert_eq!(thread.model.as_deref(), Some("c"), "for the next message");
+    assert_eq!(thread.pending_model, None);
+}
+
+#[test]
+fn messages_that_stop_a_turn_keep_their_order() {
+    let (setup, held) = working("switch-order", true);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.dispatch("m3", "And then this.").unwrap();
+    assert_eq!(setup.waiting(), ["m2", "m3"]);
+
+    held.ends(TurnOutcome::Interrupted);
+    setup.ended(3);
+    assert!(setup.codex.request(0).prompt.contains("Go on."));
+}
+
+#[test]
+fn messages_held_for_git_work_keep_where_they_go() {
+    let setup = local("switch-held", Scripted::new(CLAUDE));
+    setup.send("t", "m1", "Remember APPLE.");
+    setup.pick("t", CODEX).unwrap();
+    let (op, cwd) = {
+        let mut state = lock(&setup.engine.state);
+        let cwd = state.cwd("t").unwrap();
+        (state.begin_op("t", &[&cwd]).unwrap(), cwd)
+    };
+    assert!(!cwd.is_empty());
+    let send = Command::MessageSend {
+        thread_id: "t".into(),
+        message_id: "agent".into(),
+        text: "From another agent.".into(),
+        attachments: Vec::new(),
+    };
+    lock(&setup.engine.state)
+        .send_routed("agent", None, send)
+        .unwrap();
+    lock(&setup.engine.state).end_op(op, None).unwrap();
+    setup.ended(1);
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CLAUDE);
+    assert_eq!(thread.pending_model.unwrap().provider, CODEX);
+}
+
+#[test]
+fn a_message_held_for_git_work_while_a_turn_runs_waits_to_switch() {
+    let (setup, held) = working("switch-held-running", false);
+    setup.pick("t", CODEX).unwrap();
+    let op = lock(&setup.engine.state).begin_op("t", &[]).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    lock(&setup.engine.state).end_op(op, None).unwrap();
+
+    assert_eq!(setup.waiting(), ["m2"]);
+    assert!(setup.engine.thread_item("t", "m2").unwrap().is_none());
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+    assert_eq!(setup.thread("t").provider, CODEX);
+}
+
+#[test]
+fn a_queued_message_runs_where_it_was_sent_though_one_before_moved_the_thread() {
+    let (setup, held) = working("switch-back", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.pick("t", CLAUDE).unwrap();
+    held.refuses.store(true, Ordering::SeqCst);
+    setup.dispatch("m3", "And this, Claude.").unwrap();
+    setup.dispatch("m4", "Then that.").unwrap();
+    assert_eq!(setup.waiting(), ["m2", "m3", "m4"]);
+    setup.pick("t", CODEX).unwrap();
+
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while held.sinks.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "m3 never reached Claude");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CLAUDE);
+    assert_eq!(thread.pending_model.unwrap().provider, CODEX);
+    let text = handoff_text(&held.requests.lock().unwrap()[1]);
+    assert!(text.contains("item=codex-1:answer;"), "{text}");
+    assert!(
+        !text.contains("item=m3;") && !text.contains("item=m4;"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_queued_message_takes_the_model_it_was_sent_on() {
+    let (setup, held) = working("switch-back-model", false);
+    let pick = |provider: &str, model: &str| {
+        setup
+            .engine
+            .dispatch(Command::ThreadModelSet {
+                thread_id: "t".into(),
+                provider: provider.into(),
+                model: Some(model.into()),
+                effort: None,
+                fast_mode: false,
+                ultracode: false,
+            })
+            .unwrap()
+    };
+    pick(CLAUDE, "a");
+    pick(CODEX, "x");
+    setup.dispatch("m2", "Go on.").unwrap();
+    pick(CLAUDE, "a");
+    held.refuses.store(true, Ordering::SeqCst);
+    setup.dispatch("m3", "And this, Claude.").unwrap();
+    pick(CODEX, "x");
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+    pick(CLAUDE, "b");
+    setup.ended(1);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while held.sinks.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "m3 never reached Claude");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let ran = held.requests.lock().unwrap()[1].model.clone();
+    assert_eq!(ran.as_deref(), Some("a"));
+    let thread = setup.thread("t");
+    assert_eq!(thread.model.as_deref(), Some("b"), "for the next message");
+}
+
+#[test]
+fn a_message_held_to_compact_first_goes_where_it_was_sent() {
+    let (setup, held) = working("switch-compact", false);
+    held.report(ProviderOutput::SessionStarted {
+        session_id: "s".into(),
+    });
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+    setup.pick("t", CODEX).unwrap();
+    setup
+        .engine
+        .compact_then_send("t", "m2", "Go on.".into(), Vec::new())
+        .unwrap();
+    assert_eq!(setup.thread("t").provider, CLAUDE, "compacting stays");
+    setup.dispatch("m3", "And then this.").unwrap();
+    assert_eq!(setup.waiting(), ["m3"]);
+    setup.pick("t", CLAUDE).unwrap();
+    (held.sinks.lock().unwrap()[1])(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Completed,
+    });
+    setup.ended(3);
+
+    assert!(setup.codex.request(0).prompt.contains("Go on."));
+    assert!(setup.codex.request(1).prompt.contains("And then this."));
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(thread.pending_model.unwrap().provider, CLAUDE);
+}
+
+#[test]
+fn a_message_held_for_git_work_keeps_the_provider_picked_when_sent() {
+    let setup = local("switch-held-pick", Scripted::new(CLAUDE));
+    setup.send("t", "m1", "Remember APPLE.");
+    setup.pick("t", CODEX).unwrap();
+    let op = lock(&setup.engine.state).begin_op("t", &[]).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.pick("t", CLAUDE).unwrap();
+    lock(&setup.engine.state).end_op(op, None).unwrap();
+    setup.ended(1);
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(thread.pending_model.unwrap().provider, CLAUDE);
+}
+
+#[test]
+fn a_message_held_to_compact_first_keeps_its_place_while_background_work_holds_it_off() {
+    let (setup, held) = working("switch-compact-background", false);
+    held.report(ProviderOutput::SessionStarted {
+        session_id: "s".into(),
+    });
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+    setup.pick("t", CODEX).unwrap();
+    setup
+        .engine
+        .compact_then_send("t", "m2", "Go on.".into(), Vec::new())
+        .unwrap();
+    setup.dispatch("m3", "And then this.").unwrap();
+    let sinks = &held.sinks;
+    (sinks.lock().unwrap()[1])(ProviderOutput::BackgroundTasks {
+        tasks: vec![BackgroundTask {
+            task_id: "server".into(),
+            tool_call_id: None,
+            description: "dev server".into(),
+            started_at: 0,
+        }],
+        waiting: false,
+    });
+    (sinks.lock().unwrap()[1])(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Completed,
+    });
+    setup.ended(1);
+
+    assert_eq!(setup.waiting(), ["m2", "m3"]);
+    assert_eq!(setup.thread("t").provider, CLAUDE);
+}
+
+#[test]
+fn a_turn_that_restarts_to_switch_is_stopped_for_the_message() {
+    let (setup, held) = working("switch-restarts", true);
+    setup.pick("t", CODEX).unwrap();
+    assert!(
+        !held.interrupted.load(Ordering::SeqCst),
+        "a pick alone waits"
+    );
+    setup.dispatch("m2", "Go on.").unwrap();
+    assert!(held.interrupted.load(Ordering::SeqCst));
+
+    held.ends(TurnOutcome::Interrupted);
+    setup.ended(2);
+
+    assert_eq!(setup.thread("t").provider, CODEX);
+    assert!(setup.waiting().is_empty());
+}
+
+#[test]
+fn a_message_for_another_provider_waits_for_what_the_turn_left_running() {
+    let (setup, held) = working("switch-background", true);
+    held.background(&["server"]);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    assert!(
+        !held.interrupted.load(Ordering::SeqCst),
+        "stopping it would not free the thread"
+    );
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+
+    assert_eq!(setup.waiting(), ["m2"]);
+    assert_eq!(
+        setup.engine.send_queued_now("t", "m2"),
+        Err(CommandError::BackgroundWorkRunning {
+            thread_id: "t".into()
+        })
+    );
+    assert_eq!(setup.waiting(), ["m2"]);
+
+    held.background(&[]);
+    lock(&setup.engine.state).start_waiting_switches();
+    assert_eq!(setup.waiting(), ["m2"], "its agent may still wake");
+    lock(&setup.engine.state)
+        .lingering
+        .get_mut("t")
+        .unwrap()
+        .heard_at -= std::time::Duration::from_secs(60);
+    lock(&setup.engine.state).start_waiting_switches();
+    setup.ended(1);
+
+    assert_eq!(setup.thread("t").provider, CODEX);
+}
+
+#[test]
+fn a_message_taken_out_of_the_queue_never_reaches_the_transcript() {
+    let (setup, held) = working("switch-removed", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.engine.remove_queued_message("t", "m2").unwrap();
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+
+    assert!(setup.engine.thread_item("t", "m2").unwrap().is_none());
+    assert_eq!(setup.thread("t").provider, CLAUDE);
+}
+
+#[test]
+fn a_kept_process_with_background_work_holds_off_a_message_for_another_provider() {
     let setup = local(
         "background",
         Scripted {
@@ -331,14 +827,17 @@ fn a_kept_process_with_background_work_holds_off_a_switch() {
         },
     );
     setup.send("t", "m1", "Start the server.");
+    setup.pick("t", CODEX).unwrap();
 
     assert_eq!(
-        setup.pick("t", CODEX),
+        setup.dispatch("m2", "Go on."),
         Err(CommandError::BackgroundWorkRunning {
             thread_id: "t".into()
         })
     );
-    assert_eq!(setup.thread("t").pending_model, None);
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CLAUDE);
+    assert_eq!(thread.pending_model.unwrap().provider, CODEX);
 }
 
 #[test]

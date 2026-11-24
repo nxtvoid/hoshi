@@ -564,6 +564,30 @@ fn a_trigger_that_goes_away_closes_its_popover(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_pointer_crosses_the_gap_to_a_submenu_without_closing_it(cx: &mut TestAppContext) {
+    let (mut cx, _) = open_window(cx, Setup::new(Content::Submenu));
+    click(&mut cx, "trigger");
+    let more = cx.debug_bounds("menu-item-more").expect("the submenu row");
+    cx.simulate_mouse_move(more.center(), None, Modifiers::none());
+    cx.executor().advance_clock(Duration::from_millis(400));
+    redraw(&mut cx);
+    let deep = cx
+        .debug_bounds("menu-item-deep")
+        .expect("the submenu opens");
+    assert!(
+        deep.left() - more.right() > px(10.),
+        "a gap between the menu and its submenu"
+    );
+    let mut x = more.center().x;
+    while x < deep.center().x {
+        cx.simulate_mouse_move(point(x, more.center().y), None, Modifiers::none());
+        redraw(&mut cx);
+        x += px(2.);
+    }
+    assert!(cx.debug_bounds("menu-item-deep").is_some());
+}
+
+#[gpui_kit::test]
 fn the_right_arrow_opens_a_submenu_and_its_item_closes_both(cx: &mut TestAppContext) {
     let (mut cx, view) = open_window(cx, Setup::new(Content::Submenu));
     click(&mut cx, "trigger");

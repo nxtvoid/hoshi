@@ -276,10 +276,17 @@ impl ThreadDetails {
             let clean = status
                 .as_ref()
                 .is_some_and(|status| !status.has_changes && git_row.is_none());
-            let menu = status
-                .as_ref()
-                .filter(|_| running.is_none())
-                .map(|status| self.git_menu(status, pull_request_open, working, &colors, cx));
+            let status = status.as_ref().filter(|_| running.is_none());
+            let menu = (status.is_some() || thread.branch.is_some()).then(|| {
+                self.git_menu(
+                    thread.branch.clone(),
+                    status,
+                    pull_request_open,
+                    working,
+                    &colors,
+                    cx,
+                )
+            });
             place = place.child(self.branch_row(branch, &thread, clean, menu, &colors));
         }
         if let Some(pull_request) = &pull_request {

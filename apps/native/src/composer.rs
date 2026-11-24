@@ -1,8 +1,8 @@
 mod attachments;
 pub(crate) use attachments::format_size;
 pub(crate) use footer::{
-    ACCESS_MODES, access_description, access_label, effective_effort, effort_label, fit_choice,
-    model_options, workspace_option,
+    ACCESS_MODES, access_description, access_label, effective_effort, effort_label, model_options,
+    workspace_option,
 };
 pub(crate) use model_picker::{
     ModelTab, PickerHost, PickerList, default_tab, provider_mark, provider_tint,
@@ -678,10 +678,19 @@ impl Composer {
             })
     }
 
+    /// The next message moves the thread to another provider.
+    fn switches_provider(&self, cx: &App) -> bool {
+        let workspace = self.workspace.read(cx);
+        workspace
+            .open_thread_id(cx)
+            .and_then(|id| workspace.model.thread(&id))
+            .is_some_and(|thread| thread.pending_model.is_some())
+    }
+
     fn sync_placeholder(
         &mut self,
         request: Option<&ThreadItem>,
-        working: bool,
+        steers: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -690,7 +699,7 @@ impl Composer {
             Some(ItemContent::Approval { .. }) => m::request_approval_placeholder(),
             Some(ItemContent::Questions { .. }) => m::request_question_placeholder(),
             Some(ItemContent::ProposedPlan { .. }) => m::request_plan_placeholder(),
-            _ if working => m::composer_steer_placeholder(),
+            _ if steers => m::composer_steer_placeholder(),
             _ => m::composer_placeholder(),
         }
         .into();
@@ -711,7 +720,8 @@ impl Render for Composer {
             .then(|| self.delegated_request(cx))
             .flatten();
         let working = self.working(cx);
-        self.sync_placeholder(request.as_ref(), working, window, cx);
+        let steers = working && !self.switches_provider(cx);
+        self.sync_placeholder(request.as_ref(), steers, window, cx);
         let shown = request
             .as_ref()
             .or(delegated.as_ref().map(|(request, _)| request));

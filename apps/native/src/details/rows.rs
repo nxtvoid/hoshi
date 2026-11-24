@@ -13,7 +13,6 @@ pub const SHADOW_ROOM: f32 = 8.;
 /// Below this chat width the card would crowd the chat, so it becomes a popover.
 pub const INLINE_MIN_WIDTH: f32 = CARD_WIDTH + CARD_GAP + CARD_CLEARANCE * 2. + 560.;
 
-const ROW_TEXT: f32 = 13.;
 /// How far a tooltip on the left of a row stands from it, so it clears the box.
 pub const BESIDE_ROW: f32 = 16.;
 /// How far a menu on the left of a box stands from its edge, as a row's tooltip does.
@@ -40,7 +39,7 @@ pub fn row_static(id: impl Into<ElementId>, colors: &Colors) -> Stateful<Div> {
         .gap(px(10.))
         .rounded_lg()
         .px(px(10.))
-        .text_size(px(ROW_TEXT))
+        .text_sm()
         .font_weight(FontWeight::MEDIUM)
         .text_color(colors.foreground.opacity(0.8))
 }

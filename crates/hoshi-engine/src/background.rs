@@ -16,6 +16,8 @@ const WAITING_NEXT: &str = "End your turn; it stays open until they finish.";
 const IDLE_LIMIT: Duration = Duration::from_secs(30 * 60);
 /// and while commands it runs in the background have not ended.
 const BACKGROUND_IDLE_LIMIT: Duration = Duration::from_secs(4 * 60 * 60);
+/// How long after its commands ended its agent may still wake for them.
+const WAKE_GRACE: Duration = Duration::from_secs(5);
 
 /// A process whose turn completed, kept for the commands it left running.
 pub(crate) struct Lingering {
@@ -69,9 +71,26 @@ impl Lingering {
                 .as_ref()
                 .is_some_and(|background| !background.tasks.is_empty())
     }
+
+    /// The commands it ran just ended, so its agent may wake for them.
+    fn may_wake(&self) -> bool {
+        self.ended
+            && self
+                .heard_at
+                .elapsed()
+                .is_ok_and(|silent| silent < WAKE_GRACE)
+    }
 }
 
 impl State {
+    /// Whether moving the thread to another provider would end what its agent left running, or
+    /// cut the turn it is about to wake for.
+    pub(crate) fn holds_off_switch(&self, thread_id: &str) -> bool {
+        self.lingering
+            .get(thread_id)
+            .is_some_and(|lingering| lingering.runs_background_work() || lingering.may_wake())
+    }
+
     /// The agent process of the thread: its turn's, or the one kept between turns.
     fn agent_process(&self, thread_id: &str) -> Option<&dyn RunningTurn> {
         match self.turns.get(thread_id) {

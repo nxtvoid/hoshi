@@ -27,7 +27,7 @@ impl ThreadDetails {
             .rounded_lg()
             .pr_1()
             .pl(px(10.))
-            .text_size(px(13.))
+            .text_sm()
             .font_weight(FontWeight::MEDIUM)
             .text_color(colors.foreground.opacity(0.8))
             .child(icon(IconName::Folder, colors))
@@ -47,7 +47,7 @@ impl ThreadDetails {
                         .border_1()
                         .border_color(colors.border)
                         .px(px(6.))
-                        .text_size(px(10.))
+                        .text_size(rems(0.625))
                         .font_weight(FontWeight::NORMAL)
                         .text_color(colors.muted_foreground)
                         .child(badge),

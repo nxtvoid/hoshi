@@ -140,10 +140,13 @@ impl Engine {
             attachments: attachments.clone(),
         };
         if busy {
-            state.run_command(send)?;
+            if !state.queue_to_switch(&send) {
+                state.run_command(send)?;
+            }
             state.release_queue_after(thread_id, Some(message_id));
             return Ok(());
         }
+        let to = state.shown_choice(thread_id).map(Box::new);
         state.hold_until_compacted(
             thread_id,
             QueuedMessage {
@@ -152,6 +155,8 @@ impl Engine {
                 attachments,
                 from_user: true,
                 held: false,
+                to,
+                sent_on: None,
             },
         );
         let compacted = state.run_command(Command::MessageSend {

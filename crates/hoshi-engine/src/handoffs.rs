@@ -90,8 +90,17 @@ impl State {
                     before,
                 } => {
                     fresh = true;
+                    // The message this turn starts with may sit before what was said while it
+                    // waited in the queue, as may others that still wait.
                     let items = own.get_or_insert_with(|| {
-                        self.store.thread_items(thread_id).unwrap_or_default()
+                        let waits = |id: &str| {
+                            self.queued
+                                .get(thread_id)
+                                .is_some_and(|queued| queued.iter().any(|message| message.id == id))
+                        };
+                        let mut items = self.store.thread_items(thread_id).unwrap_or_default();
+                        items.retain(|item| item.id != turn_id && !waits(&item.id));
+                        items
                     });
                     let position = |id: &str| items.iter().position(|item| item.id == id);
                     let start = since.as_deref().and_then(position).unwrap_or(0);
