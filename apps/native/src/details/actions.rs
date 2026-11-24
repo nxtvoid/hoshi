@@ -229,7 +229,7 @@ impl ThreadDetails {
             cx.background_executor().timer(UNDO_FOR).await;
             let id = thread_id.clone();
             let status = cx
-                .background_spawn(async move { engine.git_status(&id).ok() })
+                .background_spawn(async move { engine.git_status(&id) })
                 .await;
             this.update_in(cx, |this, window, cx| {
                 let due = this
@@ -240,12 +240,17 @@ impl ThreadDetails {
                 else {
                     return;
                 };
-                if let Some(status) = status {
-                    this.statuses.insert(thread_id.clone(), status);
-                }
-                if this.thread_working(&thread_id, cx) {
-                    if this.shown_thread.as_deref() == Some(thread_id.as_str()) {
-                        this.error = Some(m::git_error_busy());
+                let shown = this.shown_thread.as_deref() == Some(thread_id.as_str());
+                let refused = match status {
+                    Ok(status) => {
+                        this.statuses.insert(thread_id.clone(), status);
+                        this.thread_working(&thread_id, cx).then(m::git_error_busy)
+                    }
+                    Err(error) => Some(error_message(&error)),
+                };
+                if let Some(refused) = refused {
+                    if shown {
+                        this.error = Some(refused);
                     }
                     cx.notify();
                     return;

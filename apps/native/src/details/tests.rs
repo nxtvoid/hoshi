@@ -457,6 +457,52 @@ fn a_waiting_push_asks_again_if_the_checkout_moved_to_the_default_branch(cx: &mu
 }
 
 #[gpui_kit::test]
+fn a_waiting_git_action_that_cannot_read_the_checkout_does_not_run(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-undo-unread", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+    h.details.update_in(&mut h.cx, |details, window, cx| {
+        let request = GitActionRequest {
+            action: GitAction::CommitPush,
+            message: Some("Note three and four".into()),
+            ..details.quick_request(GitAction::CommitPush)
+        };
+        details.start_git(request, Some(super::git::Label::CommitPush), window, cx)
+    });
+    let project = h.details.read_with(&h.cx, |details, cx| {
+        details
+            .workspace
+            .read(cx)
+            .model
+            .project("p")
+            .map(|project| PathBuf::from(&project.workspace_root))
+            .unwrap()
+    });
+    std::fs::rename(project.join(".git"), project.join(".git-away")).unwrap();
+
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    wait_for(&mut h, "the countdown to end", |details| {
+        details.pending_git.is_empty()
+    });
+    h.details.read_with(&h.cx, |details, _| {
+        assert!(details.running.is_empty() && details.done.is_empty());
+        assert!(details.error.is_some(), "it says why it didn't run");
+    });
+    std::fs::rename(project.join(".git-away"), project.join(".git")).unwrap();
+    assert!(
+        Process::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&project)
+            .output()
+            .is_ok_and(|output| !output.stdout.is_empty()),
+        "nothing was committed"
+    );
+}
+
+#[gpui_kit::test]
 fn a_disabled_git_action_says_why_on_hover(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-git-why", 1200.);
     h.details
