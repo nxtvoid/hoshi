@@ -19,12 +19,14 @@ pub use languages::{
 };
 pub use marks::{Mark, mark_shortcut};
 
-use crate::components::{Align, Popover, PopoverChange, PopoverFocus, Side};
+use crate::components::{
+    Align, Popover, PopoverChange, PopoverFocus, Side, code_editor, text_area, text_input,
+};
 use crate::theme::ActiveTheme;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::input::{
-    Editor, InlineToken, InlineTokenContext, InlineTokenSpan, Input, InputContent, InputEvent,
-    InputState, TextDecoration, Textarea, TextareaState,
+    InlineToken, InlineTokenContext, InlineTokenSpan, InputContent, InputEvent, InputState,
+    TextDecoration, Textarea, TextareaState,
 };
 use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -1067,7 +1069,7 @@ impl RichEditor {
                                     .flex_1()
                                     .min_w_0()
                                     .text_sm()
-                                    .child(Input::new(&search).appearance(false)),
+                                    .child(text_input(&search).appearance(false)),
                             ),
                     )
                     .child(if rows.is_empty() {
@@ -1098,7 +1100,7 @@ impl RichEditor {
         kind: &BlockKind,
         own_font: Option<&(SharedString, Pixels)>,
     ) -> Textarea {
-        let mut textarea = Textarea::new(state)
+        let mut textarea = text_area(state)
             .appearance(false)
             .xsmall()
             .ml(px(-4.))
@@ -1331,7 +1333,7 @@ impl Render for RichEditor {
                     };
                     let line_height = window.rem_size() * 1.25;
                     let height = line_height * block.input.rows(cx) as f32;
-                    let mut editor = Editor::new(state)
+                    let mut editor = code_editor(state)
                         .appearance(false)
                         .xsmall()
                         .ml(px(-4.))

@@ -1,4 +1,5 @@
 use crate::m;
+use crate::moment;
 use chrono::{DateTime, TimeZone, Utc};
 use hoshi_core::{
     BankedGrant, BankedResetFailure, BankedResetSpend, BankedResets, ExtraUsage,
@@ -187,18 +188,11 @@ where
         .ok()?
         .with_timezone(&now.timezone());
     let days = (at.date_naive() - now.date_naive()).num_days();
-    let time = "%-I:%M %p";
     Some(match days {
-        ..=0 => (ResetDay::Today, at.format(time).to_string()),
-        1 => (ResetDay::Tomorrow, at.format(time).to_string()),
-        2..7 => (
-            ResetDay::Other,
-            at.format(&format!("%a {time}")).to_string(),
-        ),
-        _ => (
-            ResetDay::Other,
-            at.format(&format!("%b %-d, {time}")).to_string(),
-        ),
+        ..=0 => (ResetDay::Today, moment::time(&at)),
+        1 => (ResetDay::Tomorrow, moment::time(&at)),
+        2..7 => (ResetDay::Other, moment::weekday_time(&at)),
+        _ => (ResetDay::Other, moment::day_time(&at)),
     })
 }
 
@@ -337,9 +331,9 @@ where
         .ok()?
         .with_timezone(&now.timezone());
     Some(if span.days < 7 {
-        at.format("%a").to_string()
+        moment::weekday(&at)
     } else {
-        at.format("%b %-d").to_string()
+        moment::day(&at)
     })
 }
 

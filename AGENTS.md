@@ -3,7 +3,7 @@
 ## Layout
 
 - `apps/native` - The app, drawn natively with GPUI (`gpui-kit`). Renders state; holds no business logic. Its binary is `hoshi`; its installers are configured under `[package.metadata.packager]` in its `Cargo.toml`.
-  - `messages/en.json` - UI text, turned by `build.rs` into one `m::<key>()` function per message.
+  - `messages/en.json`, `messages/es.json` - UI text, turned by `build.rs` into one `m::<key>()` function per message that picks the locale shown (`src/locale.rs`).
   - `icons`, `linux` - App icons (release and `dev`) and the Linux desktop entry and metainfo the `.deb` installs.
 - `crates/hoshi-ui` - Reusable native components and the theme (`assets/globals.css`, read by `theme.rs`). Components here know nothing about the app: no engine, no `hoshi-core` types, no stores; text and state come in from the caller.
 - `crates/hoshi-app` - The home folder, settings and engine start.
@@ -56,7 +56,8 @@ The repo is indexed by [CodeGraph](https://github.com/colbymchenry/codegraph). O
 
 ## Localization
 
-- The UI is in English; more locales come later. Every user-visible string goes through `apps/native/messages/en.json`: add the key there and render `m::<key>()`. Never hard-code UI text in a component.
+- The UI is in English and Spanish. Every user-visible string goes through `apps/native/messages`: add the key to every locale's file, with the same parameters (the build fails otherwise), and render `m::<key>()`. Never hard-code UI text in a component.
+- Text kept outside a render (a placeholder, a label set once) follows a language change through `locale::input`, `locale::textarea` or `LocaleChanged`. Dates and times go through `moment.rs`, joined lists through `m::list_of_two` and `m::list_of_many`.
 - Keys are `snake_case` and describe the meaning, not the screen (`no_project_selected`, not `sidebar_text_1`).
 - Rust outside the app never writes UI text of its own (labels, errors, statuses). It sends codes and data; the app picks the message. Agent output passes through untranslated.
 

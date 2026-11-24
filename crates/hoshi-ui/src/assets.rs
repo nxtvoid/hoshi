@@ -70,6 +70,7 @@ gpui_kit::assets::icon_assets!(
         Inbox,
         Infinity,
         KeyRound,
+        Languages,
         Link,
         ListChecks,
         ListTodo,

@@ -19,9 +19,11 @@ mod fork;
 mod format;
 mod home;
 mod html_page;
+mod locale;
 mod look;
 mod markdown;
 mod minimap;
+mod moment;
 mod notifications;
 mod onboarding;
 mod request_rows;
@@ -787,6 +789,8 @@ fn main() {
                 look::init(Some(&home), window, cx);
                 let settings_path = hoshi_app::home::settings_path(&home);
                 let settings = hoshi_app::settings::load(&settings_path);
+                locale::show(settings.general.language, cx);
+                edit_menu::label_text_fields(cx);
                 let workspace = cx.new(|cx| {
                     let mut workspace = Workspace::new(engine, notifications, cx);
                     workspace.settings = settings;

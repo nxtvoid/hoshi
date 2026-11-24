@@ -71,7 +71,7 @@ impl Sidebar {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(Input::new(&self.search).appearance(false)),
+                                    .child(text_input(&self.search).appearance(false)),
                             )
                             .when(!searching, |this| {
                                 this.child(

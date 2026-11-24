@@ -80,8 +80,9 @@ pub fn nav_groups() -> [(Option<String>, &'static [Section]); 3] {
 }
 
 /// Every setting a search can find, with the section that holds it.
-fn search_items() -> [(String, Section); 33] {
+fn search_items() -> [(String, Section); 34] {
     [
+        (m::language(), Section::General),
         (m::startup_view(), Section::General),
         (m::notifications_setting(), Section::General),
         (m::theme(), Section::Appearance),

@@ -16,7 +16,7 @@ use crate::settings::Section;
 use crate::state::Workspace;
 use add_project::AddProject;
 use frame::{Entry, Frame, Mark, Row, Target};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::*;
 use hoshi_ui::prelude::*;
@@ -432,7 +432,7 @@ impl Palette {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.input).appearance(false)),
+                    .child(text_input(&self.input).appearance(false)),
             )
             .children(submit)
     }

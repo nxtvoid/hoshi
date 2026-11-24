@@ -505,8 +505,8 @@ pub fn summary_text(parts: &[SummaryPart]) -> String {
     let sentence = match phrases.as_slice() {
         [] => String::new(),
         [one] => one.clone(),
-        [first, second] => format!("{first} and {second}"),
-        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+        [first, second] => crate::m::list_of_two(first, second),
+        [rest @ .., last] => crate::m::list_of_many(last, rest.join(", ")),
     };
     let mut chars = sentence.chars();
     match chars.next() {

@@ -79,8 +79,8 @@ yourself before a larger change. The short version:
 - `crates/hoshi-core` is pure: commands in, events out, no I/O.
 - Provider specifics stay in their adapter in `crates/hoshi-providers`.
 - `apps/native` renders state and holds no business logic.
-- Every user-visible string goes through `apps/native/messages/en.json`; every color is a theme
-  token.
+- Every user-visible string goes through `apps/native/messages`, in every language; every color is
+  a theme token.
 - No real personal data in code, tests or pull requests: invent names, paths and repositories.
 
 ## Security

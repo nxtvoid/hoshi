@@ -31,6 +31,17 @@ pub enum ContextMeterPlace {
     Composer,
 }
 
+/// The language of the app's own text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Language {
+    /// The system's, or English when hoshi doesn't have it.
+    #[default]
+    System,
+    English,
+    Spanish,
+}
+
 /// What the app shows when it opens.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +55,7 @@ pub enum StartupView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GeneralSettings {
+    pub language: Language,
     pub startup_view: StartupView,
     /// Idle threads untouched for this many days move to Inactive.
     pub inactive_after_days: u32,
@@ -71,6 +83,7 @@ pub struct GeneralSettings {
 impl Default for GeneralSettings {
     fn default() -> Self {
         Self {
+            language: Language::System,
             startup_view: StartupView::Inbox,
             inactive_after_days: 3,
             notifications: true,

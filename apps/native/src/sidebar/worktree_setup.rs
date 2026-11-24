@@ -2,7 +2,7 @@
 //! agent waits for it, with a way to share the setup as text and take one someone shared.
 
 use crate::m;
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::*;
 use hoshi_core::{Command, CommandError, Project, WorktreeSetup};
@@ -112,15 +112,13 @@ impl WorktreeSetupForm {
             wait: false,
         });
         let files = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            crate::locale::textarea(m::worktree_setup_files_placeholder, window, cx)
                 .auto_grow(3, 8)
-                .placeholder(m::worktree_setup_files_placeholder())
                 .default_value(setup.files.join("\n"))
         });
         let command = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            crate::locale::textarea(m::worktree_setup_placeholder, window, cx)
                 .auto_grow(3, 8)
-                .placeholder(m::worktree_setup_placeholder())
                 .default_value(setup.command.clone())
         });
         let subscriptions = vec![
@@ -241,9 +239,8 @@ impl WorktreeSetupForm {
 
     fn start_import(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            crate::locale::textarea(m::worktree_setup_import_placeholder, window, cx)
                 .auto_grow(4, 10)
-                .placeholder(m::worktree_setup_import_placeholder())
         });
         self._subscriptions
             .push(cx.observe(&text, |_, _, cx| cx.notify()));
@@ -346,7 +343,7 @@ impl WorktreeSetupForm {
                         div()
                             .font_family(mono.clone())
                             .text_xs()
-                            .child(Textarea::new(&self.files)),
+                            .child(text_area(&self.files)),
                     )
                     .when(!invalid.is_empty(), |this| {
                         this.child(
@@ -370,7 +367,7 @@ impl WorktreeSetupForm {
                         div()
                             .font_family(mono)
                             .text_xs()
-                            .child(Textarea::new(&self.command)),
+                            .child(text_area(&self.command)),
                     )
                     .child(hint(m::worktree_setup_command_hint())),
             )
@@ -428,7 +425,7 @@ impl WorktreeSetupForm {
                         .text_color(colors.muted_foreground)
                         .child(m::worktree_setup_import_description()),
                 )
-                .child(div().font_family(mono).text_xs().child(Textarea::new(text)))
+                .child(div().font_family(mono).text_xs().child(text_area(text)))
                 .when(written, |this| {
                     this.child(
                         div()

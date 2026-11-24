@@ -4,7 +4,7 @@
 use crate::m;
 use gpui_kit::base::TextSelection;
 use gpui_kit::*;
-use hoshi_ui::prelude::{MenuOption, PopoverMenu, context_menu};
+use hoshi_ui::prelude::{EditLabels, EditLabelsProvider, MenuOption, PopoverMenu, context_menu};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +84,16 @@ fn label(action: EditAction) -> String {
         EditAction::Paste => m::edit_paste(),
         EditAction::SelectAll => m::edit_select_all(),
     }
+}
+
+/// Gives the text fields' own menus the app's labels.
+pub fn label_text_fields(cx: &mut App) {
+    cx.set_global(EditLabelsProvider(|| EditLabels {
+        cut: m::edit_cut().into(),
+        copy: m::edit_copy().into(),
+        paste: m::edit_paste().into(),
+        select_all: m::edit_select_all().into(),
+    }));
 }
 
 pub type RunEdit = Rc<dyn Fn(EditAction, &mut Window, &mut App)>;

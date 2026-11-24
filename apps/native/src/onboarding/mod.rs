@@ -1,4 +1,4 @@
-//! The first-run setup: one page that picks a theme, gets the agents' CLIs ready and adds the
+//! The first-run setup: one page that picks a theme and language, gets the agents' CLIs ready and adds the
 //! first projects. It opens once for a new user; anyone who already used hoshi gets it marked
 //! done instead.
 

@@ -26,7 +26,7 @@ use crate::updates::UpdatesButton;
 use cards::{CardTarget, Cards, anchor};
 use chrono::{DateTime, Utc};
 use gpui_kit::component::Selectable as _;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -162,7 +162,7 @@ const CLOCK_EVERY: Duration = Duration::from_secs(30);
 
 impl Sidebar {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder(m::search_threads()));
+        let search = cx.new(|cx| crate::locale::input(m::search_threads, window, cx));
         let subscriptions = vec![
             cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {

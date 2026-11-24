@@ -308,7 +308,7 @@ impl SettingsView {
                             .border_color(colors.border)
                             .text_color(colors.muted_foreground)
                             .child(Icon::new(IconName::Search).size_4().flex_none())
-                            .child(div().flex_1().child(Input::new(&search).appearance(false))),
+                            .child(div().flex_1().child(text_input(&search).appearance(false))),
                     )
                     .map(|this| {
                         if count == 0 && !loading {

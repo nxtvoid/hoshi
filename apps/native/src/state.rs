@@ -811,6 +811,16 @@ impl Workspace {
         })
     }
 
+    /// Shows the app in `language` from now on, and saves it.
+    pub fn set_language(&mut self, language: hoshi_core::Language, cx: &mut Context<Self>) {
+        if self.settings.general.language == language {
+            return;
+        }
+        self.settings.general.language = language;
+        crate::locale::show(language, cx);
+        self.save_settings(cx);
+    }
+
     /// Saves the settings and hands the engine what changed.
     fn save_settings(&mut self, cx: &mut Context<Self>) {
         if let Some(path) = self.settings_path.clone() {

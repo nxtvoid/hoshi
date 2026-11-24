@@ -1,6 +1,7 @@
-//! The first-run page: the theme, the agents and the first projects, then one button to start.
+//! The first-run page: the theme and language, the agents and the first projects, then one button to start.
 
 use super::agent::{Setup, none_ready};
+use crate::locale::{LANGUAGES, language_label};
 use crate::look;
 use crate::m;
 use crate::settings::appearance::{scheme_icon, scheme_label};
@@ -211,8 +212,17 @@ impl Onboarding {
         cx.stop_propagation();
     }
 
-    fn look_band(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn general_band(&self, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.hoshi().clone();
+        let rows = div()
+            .flex()
+            .flex_col()
+            .child(self.theme_row(&colors, cx))
+            .child(self.language_row(&colors, cx));
+        band(m::onboarding_band_general(), rows, &colors)
+    }
+
+    fn theme_row(&self, colors: &Colors, cx: &mut Context<Self>) -> Div {
         let preference = look::appearance(cx).preference;
         let options = [
             ThemePreference::System,
@@ -250,34 +260,33 @@ impl Onboarding {
                 .child(Icon::new(scheme_icon(option)).size_3p5())
                 .child(scheme_label(option))
         });
-        let row = div()
+        let segments = div()
             .flex()
-            .items_center()
-            .gap_3()
-            .min_h(px(40.))
-            .child(row_icon(
-                Icon::new(IconName::Palette)
-                    .size_4()
-                    .text_color(colors.muted_foreground),
-            ))
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(m::onboarding_theme()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .gap(px(2.))
-                    .p(px(2.))
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(colors.border)
-                    .children(options),
-            );
-        band(m::onboarding_band_look(), row, &colors)
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded_lg()
+            .border_1()
+            .border_color(colors.border)
+            .children(options);
+        setting_row(IconName::Palette, m::onboarding_theme(), segments, colors)
+    }
+
+    fn language_row(&self, colors: &Colors, cx: &mut Context<Self>) -> Div {
+        let language = self.workspace.read(cx).settings.general.language;
+        let select = Select::new("onboarding-language", language_label(language))
+            .align(Align::End)
+            .options(LANGUAGES.map(|option| {
+                let workspace = self.workspace.clone();
+                SelectOption::new(
+                    SharedString::from(format!("onboarding-language-{option:?}")),
+                    language_label(option),
+                    option == language,
+                )
+                .on_select(move |_, cx| {
+                    workspace.update(cx, |workspace, cx| workspace.set_language(option, cx));
+                })
+            }));
+        setting_row(IconName::Languages, m::language(), select, colors)
     }
 
     fn footer(&self, cx: &mut Context<Self>) -> Div {
@@ -386,7 +395,7 @@ impl Render for Onboarding {
                             .mt_10()
                             .border_t_1()
                             .border_color(colors.border)
-                            .child(self.look_band(cx))
+                            .child(self.general_band(cx))
                             .child(self.agents_band(cx))
                             .child(self.projects_band(cx)),
                     )
@@ -416,6 +425,25 @@ pub(super) fn band(title: String, content: impl IntoElement, colors: &Colors) ->
         )
         .child(div().flex_1().min_w_0().child(content))
         .into_any_element()
+}
+
+fn setting_row(icon: IconName, title: String, control: impl IntoElement, colors: &Colors) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .min_h(px(40.))
+        .child(row_icon(
+            Icon::new(icon).size_4().text_color(colors.muted_foreground),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .child(title),
+        )
+        .child(control)
 }
 
 /// The column every row's icon, logo or checkbox sits in, so names line up down the page.

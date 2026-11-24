@@ -15,7 +15,7 @@ use crate::themes::vscode::{
     extension_themes, humanize_theme_name, pair_vscode_themes, parse_theme_import,
     resolve_theme_label_collisions,
 };
-use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
+use gpui_kit::component::input::{EditorState, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -148,8 +148,7 @@ impl EventEmitter<ThemeImportEvent> for ThemeImport {}
 
 impl ThemeImport {
     pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let query =
-            cx.new(|cx| InputState::new(window, cx).placeholder(m::search_themes_placeholder()));
+        let query = cx.new(|cx| crate::locale::input(m::search_themes_placeholder, window, cx));
         let json = cx.new(|cx| {
             EditorState::new(window, cx)
                 .language("json")
@@ -808,7 +807,7 @@ impl ThemeImport {
                     .child(
                         div()
                             .flex_1()
-                            .child(Input::new(&self.query).appearance(false)),
+                            .child(text_input(&self.query).appearance(false)),
                     ),
             )
             .when(!self.searching || self.results.is_some(), |this| {
@@ -963,7 +962,7 @@ impl ThemeImport {
                         div()
                             .font_family(mono)
                             .text_xs()
-                            .child(Editor::new(&self.json).h(px(240.))),
+                            .child(code_editor(&self.json).h(px(240.))),
                     ),
             )
             .child(
