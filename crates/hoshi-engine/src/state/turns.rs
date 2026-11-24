@@ -208,8 +208,8 @@ impl State {
                 }
                 self.deliver_task_result(thread_id, outcome);
             }
-            self.start_next_queued(thread_id);
             self.send_after_compaction(thread_id);
+            self.start_next_queued(thread_id);
             self.deliver_pending_wakes(thread_id);
             if compacts_when_idle {
                 self.schedule_idle_compaction(thread_id);

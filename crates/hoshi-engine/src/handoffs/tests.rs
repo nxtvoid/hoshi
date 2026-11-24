@@ -686,12 +686,16 @@ fn a_message_held_to_compact_first_goes_where_it_was_sent() {
         .compact_then_send("t", "m2", "Go on.".into(), Vec::new())
         .unwrap();
     assert_eq!(setup.thread("t").provider, CLAUDE, "compacting stays");
+    setup.dispatch("m3", "And then this.").unwrap();
+    assert_eq!(setup.waiting(), ["m3"]);
     setup.pick("t", CLAUDE).unwrap();
     (held.sinks.lock().unwrap()[1])(ProviderOutput::TurnCompleted {
         outcome: TurnOutcome::Completed,
     });
-    setup.ended(2);
+    setup.ended(3);
 
+    assert!(setup.codex.request(0).prompt.contains("Go on."));
+    assert!(setup.codex.request(1).prompt.contains("And then this."));
     let thread = setup.thread("t");
     assert_eq!(thread.provider, CODEX);
     assert_eq!(thread.pending_model.unwrap().provider, CLAUDE);
@@ -711,6 +715,39 @@ fn a_message_held_for_git_work_keeps_the_provider_picked_when_sent() {
     let thread = setup.thread("t");
     assert_eq!(thread.provider, CODEX);
     assert_eq!(thread.pending_model.unwrap().provider, CLAUDE);
+}
+
+#[test]
+fn a_message_held_to_compact_first_keeps_its_place_while_background_work_holds_it_off() {
+    let (setup, held) = working("switch-compact-background", false);
+    held.report(ProviderOutput::SessionStarted {
+        session_id: "s".into(),
+    });
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+    setup.pick("t", CODEX).unwrap();
+    setup
+        .engine
+        .compact_then_send("t", "m2", "Go on.".into(), Vec::new())
+        .unwrap();
+    setup.dispatch("m3", "And then this.").unwrap();
+    let sinks = &held.sinks;
+    (sinks.lock().unwrap()[1])(ProviderOutput::BackgroundTasks {
+        tasks: vec![BackgroundTask {
+            task_id: "server".into(),
+            tool_call_id: None,
+            description: "dev server".into(),
+            started_at: 0,
+        }],
+        waiting: false,
+    });
+    (sinks.lock().unwrap()[1])(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Completed,
+    });
+    setup.ended(1);
+
+    assert_eq!(setup.waiting(), ["m2", "m3"]);
+    assert_eq!(setup.thread("t").provider, CLAUDE);
 }
 
 #[test]

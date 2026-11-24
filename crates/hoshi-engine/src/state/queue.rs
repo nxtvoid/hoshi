@@ -46,6 +46,12 @@ impl State {
             .is_some_and(|thread| message.moves(thread));
         if moves && self.holds_off_switch(thread_id) {
             self.queue_message(thread_id, message);
+            // It was sent before what queued while the thread compacted.
+            if let Some(queued) = self.queued.get_mut(thread_id) {
+                queued.rotate_right(1);
+            }
+            self.save_recovery(thread_id);
+            self.show_queue(thread_id);
             return;
         }
         let message_id = message.id.clone();
