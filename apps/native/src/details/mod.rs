@@ -265,6 +265,8 @@ impl Render for ThreadDetails {
                     div()
                         .id("thread-details")
                         .occlude()
+                        .max_h_full()
+                        .overflow_y_scroll()
                         .p(px(SHADOW_ROOM))
                         .child(crate::browser::obstacle(crate::browser::Obstacle::Details))
                         .child(
