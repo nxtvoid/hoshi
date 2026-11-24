@@ -135,7 +135,7 @@ mod tests {
     use super::*;
     use hoshi_core::{
         AccessMode, BrowserSettings, ClaudeCodeSettings, CodexSettings, CopilotSettings, Effort,
-        FavoriteModel, GeneralSettings, IdleCompaction, LinkTarget, NewThreadModel,
+        FavoriteModel, GeneralSettings, IdleCompaction, Language, LinkTarget, NewThreadModel,
         NewThreadSettings, NewThreadWorkspace, PageColorScheme, PageSize, ProviderSettings,
         SearchEngine, SnoozeDay, SnoozePreset, StartupView, SubagentEffort, ThreadTitleSettings,
     };
@@ -302,6 +302,7 @@ mod tests {
                 workspace: Some(NewThreadWorkspace::Local),
             },
             general: GeneralSettings {
+                language: Language::Spanish,
                 startup_view: StartupView::LastProject,
                 inactive_after_days: 7,
                 notifications: false,

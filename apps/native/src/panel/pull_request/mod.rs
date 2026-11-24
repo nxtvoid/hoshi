@@ -10,7 +10,7 @@ use crate::m;
 use crate::state::Workspace;
 pub use actions::PullRequestForge;
 use actions::forge_error_message;
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, TextareaState};
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{Icon, Sizable as _};
 use gpui_kit::*;
@@ -698,7 +698,7 @@ impl PullRequestSurface {
                     .px_2p5()
                     .py_1p5()
                     .text_xs()
-                    .child(Textarea::new(state).appearance(false).xsmall()),
+                    .child(text_area(state).appearance(false).xsmall()),
             )
             .child(
                 div()

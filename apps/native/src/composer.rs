@@ -23,6 +23,7 @@ mod request_panel;
 mod suggestions;
 mod trigger;
 
+use crate::locale::{self, LocaleChanged};
 use crate::m;
 use crate::requests::QuestionProgress;
 use crate::state::Workspace;
@@ -126,6 +127,18 @@ pub struct Composer {
     _subscriptions: Vec<Subscription>,
 }
 
+fn label_languages(editor: &mut RichEditor, window: &mut Window, cx: &mut Context<RichEditor>) {
+    editor.set_language_labels(
+        LanguageLabels {
+            plain: m::code_language_plain().into(),
+            none: m::code_language_none().into(),
+        },
+        m::code_language_search(),
+        window,
+        cx,
+    );
+}
+
 impl Composer {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let placeholder: SharedString = m::composer_placeholder().into();
@@ -133,15 +146,9 @@ impl Composer {
         let editor = cx.new(|cx| {
             let mut editor = RichEditor::new(window, cx);
             editor.set_placeholder(placeholder.clone(), window, cx);
-            editor.set_language_labels(
-                LanguageLabels {
-                    plain: m::code_language_plain().into(),
-                    none: m::code_language_none().into(),
-                },
-                m::code_language_search(),
-                window,
-                cx,
-            );
+            label_languages(&mut editor, window, cx);
+            cx.observe_global_in::<LocaleChanged>(window, label_languages)
+                .detach();
             let opening = pasting.clone();
             editor.set_paste_handler(move |item, window, cx| {
                 pasting
@@ -168,7 +175,7 @@ impl Composer {
                 cx.stop_propagation();
             }
         });
-        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder(m::search_models()));
+        let model_search = cx.new(|cx| locale::input(m::search_models, window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&editor, window, Self::on_editor),
             cx.subscribe_in(

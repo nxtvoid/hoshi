@@ -14,7 +14,7 @@ use crate::themes::model::{
     find_theme, standard_colors, theme_modes, update_color_family,
 };
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hoshi_ui::prelude::*;
@@ -280,7 +280,7 @@ impl ThemeEditor {
                 .placeholder(placeholder)
                 .default_value(initial_name)
         });
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder(m::filter_colors()));
+        let query = cx.new(|cx| crate::locale::input(m::filter_colors, window, cx));
         let picker = cx.new(|_| ColorPicker::new(to_gpui(BLACK)));
         let hex = cx.new(|cx| InputState::new(window, cx));
         let rgb = cx.new(|cx| InputState::new(window, cx));
@@ -671,7 +671,7 @@ impl ThemeEditor {
                                     .flex_1()
                                     .gap_1()
                                     .child(caption(m::color_hex()))
-                                    .child(Input::new(&hex)),
+                                    .child(text_input(&hex)),
                             )
                             .child(
                                 div()
@@ -680,7 +680,7 @@ impl ThemeEditor {
                                     .flex_1()
                                     .gap_1()
                                     .child(caption(m::color_rgb()))
-                                    .child(Input::new(&rgb)),
+                                    .child(text_input(&rgb)),
                             ),
                     )
             });
@@ -710,7 +710,7 @@ impl ThemeEditor {
                     .font_family(mono)
                     .text_xs()
                     .when(!valid, |this| this.text_color(colors.destructive))
-                    .child(Input::new(&field)),
+                    .child(text_input(&field)),
             )
             .into_any_element()
     }
@@ -888,7 +888,7 @@ impl Render for ThemeEditor {
                             .pr_1p5()
                             .child(row(
                                 label(m::theme_name()),
-                                Input::new(&self.name).into_any_element(),
+                                text_input(&self.name).into_any_element(),
                             ))
                             .when_some(self.error.clone(), |this, error| {
                                 this.child(
@@ -934,7 +934,7 @@ impl Render for ThemeEditor {
                                                     div()
                                                         .flex_1()
                                                         .min_w_0()
-                                                        .child(Input::new(&self.query)),
+                                                        .child(text_input(&self.query)),
                                                 )
                                             })
                                             .child(

@@ -1,4 +1,5 @@
 use super::SettingsView;
+use crate::locale::{LANGUAGES, language_label};
 use crate::m;
 use gpui_kit::*;
 use hoshi_core::StartupView;
@@ -24,8 +25,24 @@ impl SettingsView {
                 .on_select(self.setter(cx, move |settings| settings.general.startup_view = view))
             }));
 
+        let language = Select::new("settings-language", language_label(general.language)).options(
+            LANGUAGES.map(|language| {
+                SelectOption::new(
+                    SharedString::from(format!("language-{language:?}")),
+                    language_label(language),
+                    language == general.language,
+                )
+                .on_select(self.setter(cx, move |settings| settings.general.language = language))
+            }),
+        );
+
         let mut page = vec![
             SettingsGroup::new()
+                .child(
+                    SettingsRow::new(m::language())
+                        .description(m::language_description())
+                        .control(language),
+                )
                 .child(
                     SettingsRow::new(m::startup_view())
                         .description(m::startup_view_description())

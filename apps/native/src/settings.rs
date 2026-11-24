@@ -13,10 +13,11 @@ mod theme_editor;
 mod theme_import;
 mod threads;
 
+use crate::locale;
 use crate::m;
 use crate::state::Workspace;
 use gpui_kit::component::Icon;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hoshi_core::{AppSettings, ForgeAccount};
@@ -68,7 +69,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Self {
         let settings = workspace.read(cx).settings.clone();
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder(m::search_settings()));
+        let search = cx.new(|cx| locale::input(m::search_settings, window, cx));
         let projects_folder = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(home_dir())
@@ -115,16 +116,15 @@ impl SettingsView {
                 .placeholder(m::codex_home_placeholder())
                 .default_value(settings.providers.codex.home.clone().unwrap_or_default())
         });
-        let model_search = cx.new(|cx| InputState::new(window, cx).placeholder(m::search_models()));
+        let model_search = cx.new(|cx| locale::input(m::search_models, window, cx));
         let custom_search_url = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("https://example.com/search?q=%s")
                 .default_value(settings.browser.custom_search_url.clone())
         });
         let title_instructions = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            locale::textarea(m::thread_titles_instructions_placeholder, window, cx)
                 .auto_grow(3, 8)
-                .placeholder(m::thread_titles_instructions_placeholder())
                 .default_value(settings.thread_titles.instructions.clone())
         });
         let snooze_options =
@@ -288,6 +288,7 @@ impl SettingsView {
         if previous == next.settings {
             return;
         }
+        locale::show(next.settings.general.language, cx);
         let providers_changed = previous.providers != next.settings.providers;
         let workspace = self.workspace.downgrade();
         cx.spawn(async move |this, cx| {
@@ -494,7 +495,7 @@ impl SettingsView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(&self.search).appearance(false)),
+                            .child(text_input(&self.search).appearance(false)),
                     ),
             )
             .child(body)
@@ -640,11 +641,13 @@ fn home_dir() -> String {
 
 /// A text field as wide as the web's.
 fn field(state: &Entity<InputState>, width: Pixels) -> impl IntoElement {
-    div().w(width).child(Input::new(state))
+    div().w(width).child(text_input(state))
 }
 
 fn text_area(state: &Entity<TextareaState>, disabled: bool) -> impl IntoElement {
-    div().mt_3().child(Textarea::new(state).disabled(disabled))
+    div()
+        .mt_3()
+        .child(hoshi_ui::text_area(state).disabled(disabled))
 }
 
 #[cfg(test)]

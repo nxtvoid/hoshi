@@ -2,6 +2,7 @@
 //! refused, and the lines an open thread shows while snoozed and once it woke.
 
 use crate::m;
+use crate::moment;
 use crate::state::Workspace;
 use chrono::{TimeZone, Utc, Weekday};
 use gpui_kit::component::Icon;
@@ -61,12 +62,11 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let at = choice.until.with_timezone(zone);
-    let format = if choice.shows_weekday {
-        "%a %-I:%M %p"
+    if choice.shows_weekday {
+        moment::weekday_time(&at)
     } else {
-        "%-I:%M %p"
-    };
-    at.format(format).to_string()
+        moment::time(&at)
+    }
 }
 
 /// "45m", "3h", "2d" or "now".

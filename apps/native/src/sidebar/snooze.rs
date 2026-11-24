@@ -9,7 +9,7 @@ use crate::sections::{Section, SectionId};
 use crate::snooze::{choice_label, choice_time, error_message, show_failure, unit_label};
 use crate::toast::{self, Toast, ToastAction};
 use chrono::{DateTime, Days, Local, NaiveDate, SecondsFormat, Utc};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 use hoshi_core::{
     Command, CustomSnooze, SnoozeChoice, SnoozePreset, SnoozeUnit, custom_snooze_until, is_snoozed,
@@ -440,8 +440,8 @@ impl CustomSnoozeForm {
         };
         let until = custom_snooze_until(&input, &Local::now())?.with_timezone(&Local);
         Some(m::custom_snooze_resolved(
-            until.format("%a, %b %-d"),
-            until.format("%-I:%M %p"),
+            crate::moment::weekday_day(&until),
+            crate::moment::time(&until),
         ))
     }
 
@@ -527,7 +527,7 @@ impl Render for CustomSnoozeForm {
                         .text_color(colors.muted_foreground)
                         .child(m::custom_snooze_time()),
                 )
-                .child(div().w(px(80.)).child(Input::new(&self.time)))
+                .child(div().w(px(80.)).child(text_input(&self.time)))
                 .child(div().flex_1())
                 .when_some(self.resolved(cx), |this, resolved| {
                     this.child(
@@ -565,7 +565,7 @@ impl Render for CustomSnoozeForm {
                 .gap_3()
                 .child(field(
                     m::custom_snooze_amount(),
-                    Input::new(&self.amount).into_any_element(),
+                    text_input(&self.amount).into_any_element(),
                 ))
                 .child(field(m::custom_snooze_unit(), unit.into_any_element()))
         };

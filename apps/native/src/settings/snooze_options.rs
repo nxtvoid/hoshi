@@ -5,7 +5,7 @@ use crate::m;
 use crate::snooze::{choice_label, choice_time, weekday_name};
 use crate::state::Workspace;
 use chrono::{DateTime, Local, TimeZone, Weekday};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 use hoshi_core::{
     MAX_SNOOZE_MINUTES, MAX_SNOOZE_PRESETS, SnoozeChoice, SnoozeDay, SnoozeLabel, SnoozePreset,
@@ -481,7 +481,7 @@ impl SnoozeOptions {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(px(64.)).child(Input::new(&row.amount)))
+                    .child(div().w(px(64.)).child(text_input(&row.amount)))
                     .child(unit)
             }
             SnoozePreset::At { day, .. } => {
@@ -507,7 +507,7 @@ impl SnoozeOptions {
                     .items_center()
                     .gap_2()
                     .child(day)
-                    .child(div().w(px(80.)).child(Input::new(&row.time)))
+                    .child(div().w(px(80.)).child(text_input(&row.time)))
             }
         };
         let (text, color) = match row.error {

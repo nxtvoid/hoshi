@@ -1,6 +1,5 @@
 use super::SettingsView;
 use crate::m;
-use gpui_kit::component::input::Input;
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -174,7 +173,7 @@ impl SettingsView {
                     .flex_col()
                     .gap_1()
                     .child(label(m::bitbucket_email()))
-                    .child(Input::new(&form.email)),
+                    .child(text_input(&form.email)),
             )
             .child(
                 div()
@@ -182,7 +181,7 @@ impl SettingsView {
                     .flex_col()
                     .gap_1()
                     .child(label(m::bitbucket_api_token()))
-                    .child(Input::new(&form.token)),
+                    .child(text_input(&form.token)),
             )
             .when_some(form.error.clone(), |this, error| {
                 this.child(

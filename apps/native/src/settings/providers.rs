@@ -7,7 +7,7 @@ use crate::usage::limits::plan_label;
 use chrono::Utc;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::InputState;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use hoshi_core::{
@@ -427,7 +427,7 @@ impl SettingsView {
             split = split.child(
                 SettingsRow::new(m::codex_home())
                     .description(m::codex_home_description())
-                    .child(div().mt_3().child(Input::new(&self.codex.home))),
+                    .child(div().mt_3().child(text_input(&self.codex.home))),
             );
         }
         split
@@ -746,7 +746,7 @@ impl SettingsView {
         };
         SettingsRow::new(m::binary_path())
             .description(description)
-            .child(div().mt_3().child(Input::new(state)))
+            .child(div().mt_3().child(text_input(state)))
     }
 
     fn health_check_row(&self, cx: &mut Context<Self>) -> SettingsRow {

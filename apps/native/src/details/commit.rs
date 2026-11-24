@@ -1,7 +1,7 @@
 use super::ThreadDetails;
 use super::git::on_default_branch;
 use crate::m;
-use gpui_kit::component::input::{Textarea, TextareaState};
+use gpui_kit::component::input::TextareaState;
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::*;
 use hoshi_core::{DiffFile, DiffScope, GitAction, GitActionRequest, GitStatus};
@@ -233,7 +233,7 @@ pub fn open(
                             .px_2p5()
                             .py_1p5()
                             .text_sm()
-                            .child(Textarea::new(&state.message).appearance(false)),
+                            .child(text_area(&state.message).appearance(false)),
                     ),
             )
             .footer(

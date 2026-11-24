@@ -28,6 +28,7 @@ mod shimmer;
 mod spinner;
 mod status_dot;
 mod switch;
+mod text_field;
 mod tooltip;
 mod window_controls;
 mod wizard;
@@ -75,6 +76,7 @@ pub use shimmer::Shimmer;
 pub use spinner::spinner;
 pub use status_dot::{Status, StatusDot};
 pub use switch::Switch;
+pub use text_field::{EditLabels, EditLabelsProvider, code_editor, text_area, text_input};
 pub use tooltip::{TOOLTIP_PRIORITY, Tooltip, TooltipProvider, TooltipTrigger, WithTooltip};
 pub use window_controls::{DragRegion, WindowControls};
 pub use wizard::{

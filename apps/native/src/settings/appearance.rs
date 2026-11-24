@@ -15,7 +15,7 @@ use crate::themes::model::{
     choose_half, choose_theme, find_theme, half_owners, remove_themes, selection_without,
     serialize_theme_file, theme_colors_for, theme_modes,
 };
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -51,7 +51,7 @@ struct Removal {
 
 impl AppearanceState {
     pub(super) fn new(window: &mut Window, cx: &mut Context<SettingsView>) -> Self {
-        let font_search = cx.new(|cx| InputState::new(window, cx).placeholder(m::search_fonts()));
+        let font_search = cx.new(|cx| crate::locale::input(m::search_fonts, window, cx));
         let subscriptions = vec![cx.subscribe(&font_search, |_, _, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 cx.notify();

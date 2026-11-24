@@ -2,7 +2,7 @@ use super::{RightPanel, SurfaceKind, SurfaceView, new_id};
 use crate::browser::{Browsers, BrowsersEvent, PAGE_SIZES, PageFit, PageView, ViewportChanged};
 use crate::m;
 use crate::state::Workspace;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{Selectable as _, Sizable as _};
 use gpui_kit::*;
 use hoshi_ui::prelude::*;
@@ -192,7 +192,7 @@ impl BrowserSurface {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .child(Input::new(&self.address).small()),
+                    .child(text_input(&self.address).small()),
             )
             .child(self.size_menu(has_page, cx))
             .child(

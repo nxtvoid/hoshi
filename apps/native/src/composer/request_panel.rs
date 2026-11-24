@@ -7,7 +7,7 @@ use crate::requests::{
     toggle_option,
 };
 use crate::tool_calls::tool_target;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme as _, Icon};
 use gpui_kit::*;
 use hoshi_core::{
@@ -527,7 +527,7 @@ impl Composer {
                 &colors,
             ))
             .child(muted_note(reason.to_owned(), &colors))
-            .child(Input::new(&field))
+            .child(text_input(&field))
             .child(
                 div()
                     .text_size(rems(0.6875))

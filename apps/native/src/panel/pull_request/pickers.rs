@@ -3,7 +3,7 @@ use super::{PullRequestSurface, label_color};
 use crate::m;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 use hoshi_core::{PullRequest, PullRequestAction, PullRequestDetail, PullRequestLabel};
 use hoshi_ui::prelude::*;
@@ -33,7 +33,7 @@ pub struct LabelPicker {
 
 impl ReviewerPicker {
     pub fn new(window: &mut Window, cx: &mut Context<PullRequestSurface>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder(m::search_people()));
+        let query = cx.new(|cx| crate::locale::input(m::search_people, window, cx));
         let changes = cx.subscribe(&query, |this: &mut PullRequestSurface, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 this.search_reviewers(cx);
@@ -52,7 +52,7 @@ impl ReviewerPicker {
 
 impl LabelPicker {
     pub fn new(window: &mut Window, cx: &mut Context<PullRequestSurface>) -> Self {
-        let query = cx.new(|cx| InputState::new(window, cx).placeholder(m::filter_labels()));
+        let query = cx.new(|cx| crate::locale::input(m::filter_labels, window, cx));
         let changes = cx.subscribe(&query, |_: &mut PullRequestSurface, _, event, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -122,7 +122,7 @@ fn picker_frame(query: &Entity<InputState>, list: Vec<AnyElement>, colors: &Colo
                 .border_color(colors.input)
                 .px_2()
                 .text_xs()
-                .child(Input::new(query).appearance(false).small()),
+                .child(text_input(query).appearance(false).small()),
         )
         .child(
             div()

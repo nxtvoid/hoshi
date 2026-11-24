@@ -7,7 +7,6 @@ use crate::m;
 use crate::sections::relative_time;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Icon;
-use gpui_kit::component::input::Input;
 use gpui_kit::*;
 use hoshi_core::{
     ChecksState, MergeMethod, PullRequest, PullRequestAction, PullRequestDetail, PullRequestState,
@@ -233,7 +232,7 @@ impl PullRequestSurface {
                 .debug_selector(|| "pr-title-input".into())
                 .text_base()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(Input::new(title))
+                .child(text_input(title))
                 .into_any_element();
         }
         let editable = detail.is_some_and(|detail| detail.can_edit);

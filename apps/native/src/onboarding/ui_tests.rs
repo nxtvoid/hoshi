@@ -11,7 +11,7 @@ use gpui_kit::{
     Render, Styled as _, Subscription, TestAppContext, VisualTestContext, Window, WindowBounds,
     WindowOptions, div, px, size,
 };
-use hoshi_core::ProviderAccountStatus;
+use hoshi_core::{Language, ProviderAccountStatus};
 use hoshi_engine::RecentFolder;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -199,6 +199,32 @@ fn starting_adds_the_recent_folders_and_saves_the_setup_done(cx: &mut TestAppCon
     assert!(shown.is_some());
     let saved = hoshi_app::settings::load(&h.settings_path);
     assert_eq!(saved.onboarding_completed_at, shown);
+}
+
+#[gpui_kit::test]
+fn picking_a_language_shows_and_saves_it_without_leaving_the_setup(cx: &mut TestAppContext) {
+    let mut h = harness(cx);
+    set_accounts(&mut h, &[("claudeCode", ProviderAccountStatus::Ready)]);
+    let english = crate::m::onboarding_start();
+    let exits = |h: &Harness| h.host.read_with(&h.cx, |host, _| host.exits.len());
+
+    click(&mut h, "select-trigger");
+    h.cx.simulate_keystrokes("escape");
+    h.cx.run_until_parked();
+    assert_eq!(exits(&h), 0, "escape only closes the menu");
+
+    click(&mut h, "select-trigger");
+    h.cx.simulate_keystrokes("end enter");
+    h.cx.run_until_parked();
+
+    assert_eq!(exits(&h), 0, "enter only picks the language");
+    assert_ne!(crate::m::onboarding_start(), english);
+    let saved = hoshi_app::settings::load(&h.settings_path);
+    assert_eq!(saved.general.language, Language::Spanish);
+
+    h.cx.simulate_keystrokes("escape");
+    h.cx.run_until_parked();
+    assert_eq!(exits(&h), 1, "the page has its keys back");
 }
 
 #[gpui_kit::test]

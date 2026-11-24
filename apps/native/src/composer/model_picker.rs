@@ -6,7 +6,7 @@ use super::footer::{FooterMenu, Target, effective_effort, effort_label, model_op
 use crate::m;
 use crate::state::{ModelChoice, Workspace};
 use gpui_kit::component::Icon;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::InputState;
 use gpui_kit::*;
 use hoshi_core::{FavoriteModel, ModelInfo, ProviderModels};
 use hoshi_ui::assets::brand;
@@ -519,7 +519,7 @@ impl PickerList {
                             .flex_1()
                             .min_w_0()
                             .text_sm()
-                            .child(Input::new(search).appearance(false)),
+                            .child(text_input(search).appearance(false)),
                     ),
             )
             .child(

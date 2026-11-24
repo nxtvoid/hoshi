@@ -74,8 +74,8 @@ pub use server::{LocalServer, ServerOrigin, ThreadServers};
 pub use settings::{
     AppSettings, BrowserSettings, ClaudeCodeSettings, CodexSettings, ContextMeterPlace,
     CopilotSettings, FavoriteModel, GeneralSettings, IDLE_COMPACTION_TOKENS, IdleCompaction,
-    LinkTarget, NewThreadModel, NewThreadSettings, NewThreadWorkspace, PageColorScheme, PageSize,
-    ProviderSettings, SearchEngine, StartupView, SubagentEffort, ThreadTitleSettings,
+    Language, LinkTarget, NewThreadModel, NewThreadSettings, NewThreadWorkspace, PageColorScheme,
+    PageSize, ProviderSettings, SearchEngine, StartupView, SubagentEffort, ThreadTitleSettings,
 };
 pub use snooze::{
     CustomSnooze, MAX_SNOOZE_MINUTES, MAX_SNOOZE_PRESETS, SnoozeAmount, SnoozeChoice, SnoozeDay,
