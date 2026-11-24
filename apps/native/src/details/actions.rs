@@ -224,8 +224,13 @@ impl ThreadDetails {
         );
         self.done.remove(&thread_id);
         cx.notify();
+        let engine = self.engine(cx);
         cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(UNDO_FOR).await;
+            let id = thread_id.clone();
+            let status = cx
+                .background_spawn(async move { engine.git_status(&id).ok() })
+                .await;
             this.update_in(cx, |this, window, cx| {
                 let due = this
                     .pending_git
@@ -235,6 +240,9 @@ impl ThreadDetails {
                 else {
                     return;
                 };
+                if let Some(status) = status {
+                    this.statuses.insert(thread_id.clone(), status);
+                }
                 if this.thread_working(&thread_id, cx) {
                     if this.shown_thread.as_deref() == Some(thread_id.as_str()) {
                         this.error = Some(m::git_error_busy());

@@ -295,6 +295,8 @@ struct Shared {
     /// Each server's probe, by process, port and when the process started, so a pid used
     /// again is asked again.
     probes: Mutex<HashMap<ProbeKey, Probe>>,
+    /// Held from a scan to its notifications, so they go out in the order they were made.
+    publishing: Mutex<()>,
     prober: fn(u16) -> Answer,
 }
 
@@ -321,6 +323,7 @@ impl Servers {
                 watching: Mutex::default(),
                 scanner: Mutex::new(Scanner { platform, own_pid }),
                 probes: Mutex::default(),
+                publishing: Mutex::default(),
                 prober,
             }),
         }
@@ -333,6 +336,7 @@ impl Servers {
             *watching.viewers.entry(thread_id.to_owned()).or_default() += 1;
             !std::mem::replace(&mut watching.ticking, true)
         };
+        let publishing = guard(&self.shared.publishing);
         let mut found = guard(&self.shared.scanner).scan();
         mark_web(&self.shared, &mut found);
         let servers = found.remove(thread_id).unwrap_or_default();
@@ -342,6 +346,7 @@ impl Servers {
                 watching.sent.insert(thread_id.to_owned(), servers.clone());
             }
         }
+        drop(publishing);
         if start {
             let shared = self.shared.clone();
             thread::spawn(move || tick(&shared));
@@ -424,8 +429,11 @@ fn tick(shared: &Arc<Shared>) {
     }
 }
 
-/// Scans and tells each watched thread whose servers changed.
+/// Scans and tells each watched thread whose servers changed. The notify callback only
+/// hands the update on, never calling back into [`Servers`], so holding `publishing` through
+/// it can't deadlock.
 fn publish(shared: &Arc<Shared>) {
+    let _publishing = guard(&shared.publishing);
     let mut found = guard(&shared.scanner).scan();
     mark_web(shared, &mut found);
     let changed: Vec<ThreadServers> = {

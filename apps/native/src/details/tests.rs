@@ -89,6 +89,7 @@ fn harness(cx: &mut TestAppContext, name: &str, width: f32) -> Harness {
         .unwrap();
     cx.update(|cx| {
         gpui_kit::init(cx);
+        hoshi_ui::DialogLayer::init(cx);
         hoshi_ui::theme::apply(ThemeMode::Dark, cx);
     });
     let workspace = cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)));
@@ -411,6 +412,48 @@ fn the_main_git_action_waits_a_moment_in_which_it_can_be_undone(cx: &mut TestApp
         details.done.contains_key("t")
     });
     assert!(h.cx.debug_bounds("details-git-pending").is_none());
+}
+
+#[gpui_kit::test]
+fn a_waiting_push_asks_again_if_the_checkout_moved_to_the_default_branch(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-undo-default", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+    h.details.update_in(&mut h.cx, |details, window, cx| {
+        let request = GitActionRequest {
+            action: GitAction::CommitPush,
+            message: Some("Note three and four".into()),
+            ..details.quick_request(GitAction::CommitPush)
+        };
+        details.start_git(request, Some(super::git::Label::CommitPush), window, cx)
+    });
+    let project = h.details.read_with(&h.cx, |details, cx| {
+        details
+            .workspace
+            .read(cx)
+            .model
+            .project("p")
+            .map(|project| PathBuf::from(&project.workspace_root))
+            .unwrap()
+    });
+    git(&project, &["checkout", "-q", "main"]);
+
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    wait_for(&mut h, "the fresh checkout", |details| {
+        details.pending_git.is_empty() && details.statuses["t"].branch.as_deref() == Some("main")
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    redraw(&mut h.cx);
+    h.details.read_with(&h.cx, |details, _| {
+        assert!(details.running.is_empty() && details.done.is_empty());
+        assert!(
+            details.statuses["t"].has_changes,
+            "on main it asks first instead of committing and pushing"
+        );
+    });
 }
 
 #[gpui_kit::test]
