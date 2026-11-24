@@ -246,10 +246,18 @@ impl State {
                 self.run_command(Command::ThreadDelete { thread_id: task })?;
             }
         }
-        if let Command::MessageSend { thread_id, .. } = &command
-            && let Some(held) = self.thread_ops.get_mut(thread_id)
+        if let Command::MessageSend {
+            thread_id,
+            message_id,
+            ..
+        } = &command
+            && self.thread_ops.contains_key(thread_id)
         {
-            held.push(command);
+            let picked = self.shown_choice(thread_id).map(Box::new);
+            self.routes.entry(message_id.clone()).or_insert(picked);
+            if let Some(held) = self.thread_ops.get_mut(thread_id) {
+                held.push(command);
+            }
             return Ok(());
         }
         let restoring = match &command {
@@ -498,6 +506,7 @@ impl State {
                         from_user: task_result.is_none() && pull_request_update.is_none(),
                         held: false,
                         to: None,
+                        sent_on: None,
                     });
                     joining = Some(thread_id.clone());
                     if let Some((thread_id, provisional)) = titled.first() {

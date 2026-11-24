@@ -129,7 +129,7 @@ fn compact_shows_its_compaction_at_once_and_ends_it_with_the_turn() {
             model_switch: None,
         },
     };
-    let started = start_queued_turn(&model, "t", "c3", Some(&queued), NOW);
+    let started = start_queued_turn(&model, "t", "c3", Some(&queued), false, NOW);
     assert_eq!(compaction_status(&started), Some(CompactionStatus::Running));
 }
 
@@ -357,7 +357,7 @@ fn a_message_to_a_busy_thread_joins_its_turn() {
         model.thread("t").unwrap().active_turn_id.as_deref(),
         Some("m1")
     );
-    assert!(start_queued_turn(&model, "t", "m2", None, NOW).is_empty());
+    assert!(start_queued_turn(&model, "t", "m2", None, false, NOW).is_empty());
 
     record(
         &mut model,
@@ -367,7 +367,7 @@ fn a_message_to_a_busy_thread_joins_its_turn() {
         },
     );
     assert!(matches!(
-        start_queued_turn(&model, "t", "m2", None, NOW).as_slice(),
+        start_queued_turn(&model, "t", "m2", None, false, NOW).as_slice(),
         [Event::TurnStarted { turn_id, .. }] if turn_id == "m2"
     ));
 }
@@ -1022,7 +1022,7 @@ fn only_the_users_message_moves_the_thread_to_the_provider_they_picked() {
     let mut model = model_with_conversation();
     run(&mut model, switch_to_copilot()).unwrap();
     let turns: [fn(&ReadModel) -> Vec<Event>; 4] = [
-        |model| start_queued_turn(model, "t", "x1", None, NOW),
+        |model| start_queued_turn(model, "t", "x1", None, false, NOW),
         |model| start_resumed_turn(model, "t", "x2", "go on", Resumption::Restart, NOW),
         |model| send_task_result(model, "t", "child", "x3", "done", NOW).unwrap(),
         |model| {
@@ -1234,7 +1234,7 @@ fn only_a_turn_the_user_s_message_opens_records_what_it_runs_on() {
             model_switch: None,
         },
     };
-    let late = start_queued_turn(&model, "t", "q2", Some(&kept), NOW);
+    let late = start_queued_turn(&model, "t", "q2", Some(&kept), false, NOW);
     let marked = late.iter().find_map(|event| match event {
         Event::ItemAdded {
             item:

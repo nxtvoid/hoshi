@@ -776,7 +776,7 @@ pub(super) fn message_events(
 
 /// What a turn the user's message starts now runs on: the provider they picked for it, else the
 /// thread's own.
-fn runs_on(thread: &Thread) -> ModelChoice {
+pub(super) fn runs_on(thread: &Thread) -> ModelChoice {
     thread
         .pending_model
         .as_deref()
@@ -825,7 +825,7 @@ pub(super) fn rewind_point(thread: &Thread, task_result: bool) -> Option<Rewind>
 /// Moves the thread to the provider the user picked as message `message_id` starts a turn:
 /// the current provider's session is kept for a switch back, the picked one's resumed if
 /// the thread has one, and the next turn hands it what it did not see.
-fn switch_provider(thread: &Thread, message_id: &str) -> Option<Event> {
+pub(super) fn switch_provider(thread: &Thread, message_id: &str) -> Option<Event> {
     let to = thread
         .pending_model
         .as_deref()

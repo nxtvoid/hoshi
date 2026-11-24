@@ -327,14 +327,20 @@ struct Held {
     name: &'static str,
     restarts: bool,
     interrupted: Arc<AtomicBool>,
+    /// Its turns no longer take messages.
+    refuses: Arc<AtomicBool>,
+    requests: Mutex<Vec<TurnRequest>>,
     sinks: Mutex<Vec<OutputSink>>,
 }
 
-struct HeldTurn(Arc<AtomicBool>);
+struct HeldTurn {
+    interrupted: Arc<AtomicBool>,
+    refuses: Arc<AtomicBool>,
+}
 
 impl RunningTurn for HeldTurn {
     fn interrupt(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.interrupted.store(true, Ordering::SeqCst);
     }
 
     fn respond(&self, _request_id: &str, _response: &RequestResponse) {}
@@ -346,7 +352,7 @@ impl RunningTurn for HeldTurn {
         _attachments: &[TurnAttachment],
         _now: bool,
     ) -> bool {
-        true
+        !self.refuses.load(Ordering::SeqCst)
     }
 
     fn lingers(&self) -> bool {
@@ -369,11 +375,15 @@ impl ProviderAdapter for Held {
 
     fn start_turn(
         &self,
-        _request: TurnRequest,
+        request: TurnRequest,
         sink: OutputSink,
     ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+        self.requests.lock().unwrap().push(request);
         self.sinks.lock().unwrap().push(sink);
-        Ok(Box::new(HeldTurn(self.interrupted.clone())))
+        Ok(Box::new(HeldTurn {
+            interrupted: self.interrupted.clone(),
+            refuses: self.refuses.clone(),
+        }))
     }
 }
 
@@ -417,6 +427,8 @@ fn working(name: &str, restarts: bool) -> (Setup, Arc<Held>) {
         name: CLAUDE,
         restarts,
         interrupted: Arc::default(),
+        refuses: Arc::default(),
+        requests: Mutex::default(),
         sinks: Mutex::default(),
     });
     setup
@@ -588,6 +600,52 @@ fn a_message_held_for_git_work_while_a_turn_runs_waits_to_switch() {
     held.ends(TurnOutcome::Completed);
     setup.ended(2);
     assert_eq!(setup.thread("t").provider, CODEX);
+}
+
+#[test]
+fn a_queued_message_runs_where_it_was_sent_though_one_before_moved_the_thread() {
+    let (setup, held) = working("switch-back", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.pick("t", CLAUDE).unwrap();
+    held.refuses.store(true, Ordering::SeqCst);
+    setup.dispatch("m3", "And this, Claude.").unwrap();
+    assert_eq!(setup.waiting(), ["m2", "m3"]);
+    setup.pick("t", CODEX).unwrap();
+
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while held.sinks.lock().unwrap().len() < 2 {
+        assert!(Instant::now() < deadline, "m3 never reached Claude");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CLAUDE);
+    assert_eq!(thread.pending_model.unwrap().provider, CODEX);
+    let handoff = held.requests.lock().unwrap()[1].handoff.clone().unwrap();
+    assert!(
+        handoff.render().contains("item=codex-1:answer;"),
+        "{}",
+        handoff.render()
+    );
+}
+
+#[test]
+fn a_message_held_for_git_work_keeps_the_provider_picked_when_sent() {
+    let setup = local("switch-held-pick", Scripted::new(CLAUDE));
+    setup.send("t", "m1", "Remember APPLE.");
+    setup.pick("t", CODEX).unwrap();
+    let op = lock(&setup.engine.state).begin_op("t", &[]).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.pick("t", CLAUDE).unwrap();
+    lock(&setup.engine.state).end_op(op, None).unwrap();
+    setup.ended(1);
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(thread.pending_model.unwrap().provider, CLAUDE);
 }
 
 #[test]

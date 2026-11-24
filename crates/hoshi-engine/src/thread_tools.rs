@@ -521,6 +521,7 @@ mod tests {
                 from_user: true,
                 held: false,
                 to: None,
+                sent_on: None,
             });
         assert!(refused(json!({ "until": later })).contains("message from the user waiting"));
         lock(&engine.state).queued.clear();

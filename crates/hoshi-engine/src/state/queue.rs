@@ -148,8 +148,11 @@ impl State {
         let Some(next) = queued.iter().position(|message| !message.held) else {
             return;
         };
-        let switches = queued[next].to.is_some();
-        if switches && self.holds_off_switch(thread_id) {
+        let moves = self
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| queued[next].moves(thread));
+        if moves && self.holds_off_switch(thread_id) {
             return;
         }
         let Some(message) = self
@@ -172,11 +175,12 @@ impl State {
         let waiting: Vec<String> = self
             .queued
             .iter()
-            .filter(|(_, queued)| {
-                queued
-                    .iter()
-                    .find(|message| !message.held)
-                    .is_some_and(|message| message.to.is_some())
+            .filter(|(thread_id, queued)| {
+                let next = queued.iter().find(|message| !message.held);
+                self.model
+                    .thread(thread_id)
+                    .zip(next)
+                    .is_some_and(|(thread, next)| next.to.is_some() || next.moves(thread))
             })
             .map(|(thread_id, _)| thread_id.clone())
             .collect();
@@ -187,10 +191,19 @@ impl State {
 
     pub(crate) fn queue_message(&mut self, thread_id: &str, message: QueuedMessage) {
         let held = self.queue_holds(thread_id);
+        let sent_on = self
+            .model
+            .thread(thread_id)
+            .filter(|_| message.from_user && message.to.is_none())
+            .map(|thread| Box::new(ModelChoice::of(thread)));
         self.queued
             .entry(thread_id.to_owned())
             .or_default()
-            .push_back(QueuedMessage { held, ..message });
+            .push_back(QueuedMessage {
+                held,
+                sent_on,
+                ..message
+            });
         self.save_recovery(thread_id);
         self.show_queue(thread_id);
     }
@@ -211,15 +224,15 @@ impl State {
         let Some(thread) = self.model.thread(thread_id) else {
             return false;
         };
-        let picked = thread
-            .pending_model
-            .clone()
-            .filter(|to| to.provider != thread.provider);
+        let picked = match self.routes.get(message_id) {
+            Some(route) => route.clone(),
+            None => thread.pending_model.clone(),
+        }
+        .filter(|to| to.provider != thread.provider);
         let blank = text.trim().is_empty() && attachments.is_empty();
         if thread.active_turn_id.is_none()
             || picked.is_none()
             || blank
-            || self.routes.contains_key(message_id)
             || hoshi_core::is_compact_command(text)
             || self.thread_ops.contains_key(thread_id)
         {
@@ -235,6 +248,7 @@ impl State {
                     .as_ref()
                     .is_none_or(|background| background.tasks.is_empty())
         });
+        self.routes.remove(message_id);
         let message = QueuedMessage {
             id: message_id.clone(),
             text: text.trim().to_owned(),
@@ -242,6 +256,7 @@ impl State {
             from_user: true,
             held: false,
             to: picked,
+            sent_on: None,
         };
         self.queue_message(thread_id, message);
         if restarts && free {
@@ -329,11 +344,32 @@ impl State {
             .thread_item(thread_id, &message.id)
             .ok()
             .flatten();
-        let events = start_queued_turn(&self.model, thread_id, &message.id, kept.as_ref(), &now);
+        let moves = self
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| message.moves(thread));
+        let picked = self.shown_choice(thread_id);
+        if let (true, Some(sent_on)) = (moves, message.sent_on) {
+            self.choose(thread_id, *sent_on)?;
+        }
+        let events = start_queued_turn(
+            &self.model,
+            thread_id,
+            &message.id,
+            kept.as_ref(),
+            moves,
+            &now,
+        );
+        let started = self.commit(&events, &now);
+        if let (true, Some(picked)) = (moves, picked)
+            && let Err(error) = self.choose(thread_id, picked)
+        {
+            eprintln!("hoshi: failed to keep what was picked for the next message: {error}");
+        }
+        started?;
         if events.is_empty() {
             return Ok(());
         }
-        self.commit(&events, &now)?;
         start_turn(
             self,
             thread_id,

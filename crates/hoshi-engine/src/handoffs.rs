@@ -95,7 +95,12 @@ impl State {
                     });
                     let position = |id: &str| items.iter().position(|item| item.id == id);
                     let start = since.as_deref().and_then(position).unwrap_or(0);
-                    let end = position(before).unwrap_or(items.len());
+                    // A message that waited in the queue sits before what was said meanwhile.
+                    let last = items.last().is_some_and(|item| item.id == *before);
+                    let end = match position(before) {
+                        Some(_) if before == turn_id => items.len() - usize::from(last),
+                        position => position.unwrap_or(items.len()),
+                    };
                     let forking = thread
                         .pending_handoffs
                         .iter()

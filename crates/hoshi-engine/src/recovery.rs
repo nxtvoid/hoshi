@@ -930,8 +930,8 @@ impl State {
                 .position(|message| message.id == message_id && message.from_user)
         });
         let moves = at
-            .and_then(|at| self.queued.get(thread_id)?.get(at)?.to.as_deref())
-            .is_some_and(|to| to.provider != thread.provider);
+            .and_then(|at| self.queued.get(thread_id)?.get(at))
+            .is_some_and(|message| message.moves(thread));
         if moves {
             self.refuse_ending_background_work(thread_id)?;
         }

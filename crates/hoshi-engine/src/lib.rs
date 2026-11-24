@@ -356,6 +356,20 @@ struct QueuedMessage {
     /// its turn starts there.
     #[serde(default)]
     to: Option<Box<ModelChoice>>,
+    /// Where the thread was when a message of the user's that its transcript has was queued, for it to run there
+    /// though one queued before moved the thread.
+    #[serde(default)]
+    sent_on: Option<Box<ModelChoice>>,
+}
+
+impl QueuedMessage {
+    /// Whether its turn moves `thread` to another provider.
+    fn moves(&self, thread: &hoshi_core::Thread) -> bool {
+        self.to
+            .as_ref()
+            .or(self.sent_on.as_ref())
+            .is_some_and(|on| on.provider != thread.provider)
+    }
 }
 
 fn held_message(thread_id: &str, message: &QueuedMessage) -> HeldMessage {

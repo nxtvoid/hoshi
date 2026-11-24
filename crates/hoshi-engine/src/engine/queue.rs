@@ -155,6 +155,7 @@ impl Engine {
                 from_user: true,
                 held: false,
                 to: None,
+                sent_on: None,
             },
         );
         let compacted = state.run_command(Command::MessageSend {

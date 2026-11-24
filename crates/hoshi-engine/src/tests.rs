@@ -1025,6 +1025,7 @@ fn removing_a_project_forgets_what_the_engine_kept_for_its_threads() {
             from_user: true,
             held: false,
             to: None,
+            sent_on: None,
         };
         state
             .queued
@@ -1847,6 +1848,7 @@ fn a_running_turn_can_be_snoozed_but_not_a_message_the_user_queued() {
             from_user: false,
             held: false,
             to: None,
+            sent_on: None,
         });
     snooze(&harness.engine, later).unwrap();
 
