@@ -99,7 +99,7 @@ pub fn state_look(state: PullRequestState, colors: &Colors) -> (IconName, Hsla, 
     }
 }
 
-fn check_look(state: ChecksState, colors: &Colors) -> (IconName, Hsla) {
+pub fn check_look(state: ChecksState, colors: &Colors) -> (IconName, Hsla) {
     match state {
         ChecksState::Passing => (IconName::CircleCheck, colors.pr_open),
         ChecksState::Failing => (IconName::CircleX, colors.status_error),
