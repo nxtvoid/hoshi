@@ -293,12 +293,17 @@ impl State {
             .to_owned();
         let (thread_id, steered) = (thread.id.clone(), thread.active_turn_id.is_some());
         let message_id = delegation::new_id();
-        self.run_command(Command::MessageSend {
+        let send = Command::MessageSend {
             thread_id: thread_id.clone(),
             message_id: message_id.clone(),
             text: message,
             attachments: Vec::new(),
-        })
+        };
+        if steered {
+            self.run_command(send)
+        } else {
+            self.run_on(&thread_id, None, send)
+        }
         .map_err(|error| error.to_string())?;
         Ok(json!({
             "threadId": thread_id,
@@ -519,6 +524,7 @@ mod tests {
                 attachments: Vec::new(),
                 from_user: true,
                 held: false,
+                to: None,
             });
         assert!(refused(json!({ "until": later })).contains("message from the user waiting"));
         lock(&engine.state).queued.clear();

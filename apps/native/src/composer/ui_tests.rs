@@ -1277,6 +1277,85 @@ fn picking_a_permission_closes_its_menu(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_picker_lists_every_provider_of_a_started_thread(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "picker-providers");
+    let catalog = |provider: String, slug: &str| hoshi_core::ProviderModels {
+        provider,
+        models: vec![hoshi_core::ModelInfo {
+            slug: slug.into(),
+            name: slug.into(),
+            short_name: slug.into(),
+            legacy: false,
+            is_new: false,
+            update_required: false,
+            efforts: Vec::new(),
+            default_effort: None,
+            fast_mode: false,
+            ultracode: false,
+        }],
+        ..Default::default()
+    };
+    let started = Event::SessionAttached {
+        thread_id: "t".into(),
+        session_id: "s".into(),
+    };
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.models = vec![
+            catalog(hoshi_core::default_provider(), "opus"),
+            catalog("codex".into(), "gpt"),
+        ];
+        workspace.model.apply(&started);
+        cx.notify();
+    });
+    let listed = |h: &mut Harness| {
+        h.composer.read_with(&h.cx, |composer, cx| {
+            composer
+                .picker_catalogs(cx)
+                .into_iter()
+                .map(|catalog| catalog.provider)
+                .collect::<Vec<_>>()
+        })
+    };
+    let every = vec![hoshi_core::default_provider(), "codex".to_owned()];
+    assert_eq!(listed(&mut h), every);
+
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.model.apply(&Event::TurnStarted {
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            at: "2026-11-13T10:00:00Z".into(),
+            model: None,
+        });
+        cx.notify();
+    });
+    assert_eq!(listed(&mut h), every, "while its agent works too");
+
+    h.cx.update(|window, cx| {
+        h.composer.update(cx, |composer, cx| {
+            super::model_picker::PickerHost::pick_model(
+                composer,
+                "codex".into(),
+                "gpt".into(),
+                window,
+                cx,
+            )
+        })
+    });
+    h.cx.run_until_parked();
+    let engine = h
+        .workspace
+        .read_with(&h.cx, |workspace, _| workspace.engine.clone());
+    let thread = engine
+        .snapshot()
+        .threads
+        .into_iter()
+        .find(|thread| thread.id == "t")
+        .unwrap();
+    assert_eq!(thread.provider, "codex");
+    assert_eq!(thread.model.as_deref(), Some("gpt"));
+}
+
+#[gpui_kit::test]
 fn a_pending_provider_switch_shows_in_the_composer_until_cancelled(cx: &mut TestAppContext) {
     let mut h = harness(cx, "handoff");
     redraw(&mut h);

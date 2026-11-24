@@ -33,6 +33,20 @@ impl State {
         let Some(message) = self.take_held(thread_id) else {
             return;
         };
+        let picked = self
+            .model
+            .thread(thread_id)
+            .and_then(|thread| thread.pending_model.clone());
+        if picked.is_some() && self.holds_off_switch(thread_id) {
+            self.queue_message(
+                thread_id,
+                QueuedMessage {
+                    to: picked,
+                    ..message
+                },
+            );
+            return;
+        }
         let message_id = message.id;
         let send = Command::MessageSend {
             thread_id: thread_id.to_owned(),
@@ -53,6 +67,7 @@ impl State {
         let thread = self.model.thread(thread_id)?;
         let busy = thread.active_turn_id.is_some()
             || thread.archived
+            || thread.pending_model.is_some()
             || self.snoozed(thread_id)
             || thread.parent_thread_id.is_some()
             || self.lingering.contains_key(thread_id)
@@ -130,20 +145,172 @@ impl State {
         let Some(queued) = self.queued.get_mut(thread_id).filter(|_| idle) else {
             return;
         };
-        let Some(message) = queued
-            .iter()
-            .position(|message| !message.held)
-            .and_then(|next| queued.remove(next))
+        let Some(next) = queued.iter().position(|message| !message.held) else {
+            return;
+        };
+        let switches = queued[next].to.is_some();
+        if switches && self.holds_off_switch(thread_id) {
+            return;
+        }
+        let Some(message) = self
+            .queued
+            .get_mut(thread_id)
+            .and_then(|queued| queued.remove(next))
         else {
             return;
         };
         self.save_recovery(thread_id);
-        self.start_queued(thread_id, message);
+        if let Err(error) = self.start_queued(thread_id, message) {
+            eprintln!("hoshi: failed to start a queued message: {error}");
+        }
         self.show_queue(thread_id);
     }
 
+    /// Starts the messages that waited to move their thread to another provider until what its
+    /// agent left running ended.
+    pub(crate) fn start_waiting_switches(&mut self) {
+        let waiting: Vec<String> = self
+            .queued
+            .iter()
+            .filter(|(_, queued)| {
+                queued
+                    .iter()
+                    .find(|message| !message.held)
+                    .is_some_and(|message| message.to.is_some())
+            })
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in waiting {
+            self.start_next_queued(&thread_id);
+        }
+    }
+
+    pub(crate) fn queue_message(&mut self, thread_id: &str, message: QueuedMessage) {
+        let held = self.queue_holds(thread_id);
+        self.queued
+            .entry(thread_id.to_owned())
+            .or_default()
+            .push_back(QueuedMessage { held, ..message });
+        self.save_recovery(thread_id);
+        self.show_queue(thread_id);
+    }
+
+    /// Queues the user's message to a thread whose turn runs, when they picked another provider
+    /// for it: it waits for the turn to end, which is stopped first when its provider's turns
+    /// are restarted to move. `false` when the message goes as usual.
+    pub(crate) fn queue_to_switch(&mut self, command: &Command) -> bool {
+        let Command::MessageSend {
+            thread_id,
+            message_id,
+            text,
+            attachments,
+        } = command
+        else {
+            return false;
+        };
+        let Some(thread) = self.model.thread(thread_id) else {
+            return false;
+        };
+        let picked = thread
+            .pending_model
+            .clone()
+            .filter(|to| to.provider != thread.provider);
+        let blank = text.trim().is_empty() && attachments.is_empty();
+        if thread.active_turn_id.is_none()
+            || picked.is_none()
+            || blank
+            || hoshi_core::is_compact_command(text)
+            || self.thread_ops.contains_key(thread_id)
+        {
+            return false;
+        }
+        let restarts = self
+            .adapter_for(&thread.provider)
+            .is_some_and(|adapter| adapter.restarts_to_switch());
+        let free = self.turns.get(thread_id).is_some_and(|turn| {
+            !turn.compacting
+                && turn
+                    .background
+                    .as_ref()
+                    .is_none_or(|background| background.tasks.is_empty())
+        });
+        let message = QueuedMessage {
+            id: message_id.clone(),
+            text: text.trim().to_owned(),
+            attachments: attachments.clone(),
+            from_user: true,
+            held: false,
+            to: picked,
+        };
+        self.queue_message(thread_id, message);
+        if restarts && free {
+            if let Some(queued) = self.queued.get_mut(thread_id)
+                && let Some(message) = queued.pop_back()
+            {
+                queued.push_front(message);
+            }
+            let interrupt = Command::TurnInterrupt {
+                thread_id: thread_id.clone(),
+            };
+            if let Err(error) = self.run_command(interrupt) {
+                eprintln!("hoshi: failed to stop a turn to move its thread: {error}");
+            }
+        }
+        true
+    }
+
+    /// Carries out `command`, a message to the idle thread, on `to` instead of on the provider
+    /// the user has picked for their next one, which stays picked.
+    pub(crate) fn run_on(
+        &mut self,
+        thread_id: &str,
+        to: Option<Box<ModelChoice>>,
+        command: Command,
+    ) -> Result<(), CommandError> {
+        let shown = self.model.thread(thread_id).map(|thread| {
+            thread
+                .pending_model
+                .clone()
+                .unwrap_or_else(|| Box::new(ModelChoice::of(thread)))
+        });
+        self.set_pick(thread_id, to)?;
+        let result = self.run_command(command);
+        let kept = self
+            .model
+            .thread(thread_id)
+            .and_then(|thread| shown.filter(|shown| shown.provider != thread.provider));
+        self.set_pick(thread_id, kept)?;
+        result
+    }
+
+    fn set_pick(
+        &mut self,
+        thread_id: &str,
+        choice: Option<Box<ModelChoice>>,
+    ) -> Result<(), CommandError> {
+        let changed = self
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| thread.pending_model != choice);
+        if !changed {
+            return Ok(());
+        }
+        let picked = Event::ThreadModelPending {
+            thread_id: thread_id.to_owned(),
+            choice: choice.map(|choice| *choice),
+        };
+        self.commit(&[picked], &now())
+    }
+
     /// Starts a turn of its own for a message taken out of the idle thread's queue.
-    pub(crate) fn start_queued(&mut self, thread_id: &str, message: QueuedMessage) {
+    pub(crate) fn start_queued(
+        &mut self,
+        thread_id: &str,
+        message: QueuedMessage,
+    ) -> Result<(), CommandError> {
+        if let Some(to) = message.to.clone() {
+            return self.start_switching(thread_id, message, to);
+        }
         let now = now();
         let kept = self
             .store
@@ -152,12 +319,9 @@ impl State {
             .flatten();
         let events = start_queued_turn(&self.model, thread_id, &message.id, kept.as_ref(), &now);
         if events.is_empty() {
-            return;
+            return Ok(());
         }
-        if let Err(error) = self.commit(&events, &now) {
-            eprintln!("hoshi: failed to start a queued message: {error}");
-            return;
-        }
+        self.commit(&events, &now)?;
         start_turn(
             self,
             thread_id,
@@ -166,5 +330,36 @@ impl State {
             message.attachments,
             None,
         );
+        Ok(())
+    }
+
+    /// Sends a message that waited to move its thread to `to`; one that can't go waits in the
+    /// queue for the user.
+    fn start_switching(
+        &mut self,
+        thread_id: &str,
+        message: QueuedMessage,
+        to: Box<ModelChoice>,
+    ) -> Result<(), CommandError> {
+        let moves = self
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| thread.provider != to.provider);
+        let send = Command::MessageSend {
+            thread_id: thread_id.to_owned(),
+            message_id: message.id.clone(),
+            text: message.text.clone(),
+            attachments: message.attachments.clone(),
+        };
+        let sent = self.run_on(thread_id, moves.then_some(to), send);
+        if sent.is_err() {
+            self.queued
+                .entry(thread_id.to_owned())
+                .or_default()
+                .push_front(message);
+            self.hold_queue(thread_id);
+            self.save_recovery(thread_id);
+        }
+        sent
     }
 }

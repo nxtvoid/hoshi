@@ -297,6 +297,12 @@ pub trait ProviderAdapter: Send + Sync {
         false
     }
 
+    /// Whether a running turn is stopped so a message can move its thread to another provider
+    /// at once; otherwise the message waits for the turn to end.
+    fn restarts_to_switch(&self) -> bool {
+        false
+    }
+
     /// The context window of `model`, `None` for the default one, when known before a turn
     /// reports it.
     fn context_window(&self, _model: Option<&str>) -> Option<u64> {

@@ -670,8 +670,21 @@ impl State {
                     touched.push(thread_id);
                 }
                 Event::ThreadRewound { thread_id, .. } => {
-                    self.queued.remove(thread_id);
-                    self.recovery.held.remove(thread_id);
+                    let queued = self.queued.remove(thread_id).unwrap_or_default();
+                    let unsent: VecDeque<_> = queued
+                        .into_iter()
+                        .filter(|message| message.to.is_some())
+                        .map(|message| QueuedMessage {
+                            held: true,
+                            ..message
+                        })
+                        .collect();
+                    if unsent.is_empty() {
+                        self.recovery.held.remove(thread_id);
+                    } else {
+                        self.recovery.held.insert(thread_id.to_owned());
+                        self.queued.insert(thread_id.to_owned(), unsent);
+                    }
                     self.recovery.held_wakes.remove(thread_id);
                     self.recovery.limits.remove(thread_id);
                     self.recovery.ended.remove(thread_id);
@@ -721,7 +734,7 @@ impl State {
     }
 
     /// The messages queued for the thread wait for the user, and so does what comes next.
-    fn hold_queue(&mut self, thread_id: &str) {
+    pub(crate) fn hold_queue(&mut self, thread_id: &str) {
         self.recovery.held.insert(thread_id.to_owned());
         for message in self.queued.get_mut(thread_id).into_iter().flatten() {
             message.held = true;
@@ -916,6 +929,12 @@ impl State {
                 .iter()
                 .position(|message| message.id == message_id && message.from_user)
         });
+        let moves = at
+            .and_then(|at| self.queued.get(thread_id)?.get(at)?.to.as_deref())
+            .is_some_and(|to| to.provider != thread.provider);
+        if moves {
+            self.refuse_ending_background_work(thread_id)?;
+        }
         let Some(message) = at.and_then(|at| self.queued.get_mut(thread_id)?.remove(at)) else {
             return Err(CommandError::QueuedMessageNotFound {
                 thread_id: thread_id.to_owned(),
@@ -928,9 +947,9 @@ impl State {
             message.held = false;
         }
         self.save_recovery(thread_id);
-        self.start_queued(thread_id, message);
+        let started = self.start_queued(thread_id, message);
         self.show_queue(thread_id);
-        Ok(())
+        started
     }
 
     /// Takes messages out of the thread's queue, `None` for all of them; the transcript shows
@@ -945,7 +964,7 @@ impl State {
                 thread_id: thread_id.to_owned(),
             });
         }
-        let removed: Vec<String> = match message_id {
+        let removed: Vec<QueuedMessage> = match message_id {
             Some(message_id) => {
                 let queued = self.queued.get_mut(thread_id);
                 let message = queued.and_then(|queued| {
@@ -958,16 +977,22 @@ impl State {
                         message_id: message_id.to_owned(),
                     });
                 };
-                vec![message.id]
+                vec![message]
             }
             None => self
                 .queued
                 .remove(thread_id)
                 .into_iter()
                 .flatten()
-                .map(|message| message.id)
                 .collect(),
         };
+        let (unsent, sent): (Vec<_>, Vec<_>) = removed
+            .into_iter()
+            .partition(|message| message.to.is_some());
+        for attachment in unsent.iter().flat_map(|message| &message.attachments) {
+            self.attachments.remove(attachment);
+        }
+        let removed = sent.into_iter().map(|message| message.id).collect();
         if self.queued.get(thread_id).is_some_and(VecDeque::is_empty) {
             self.queued.remove(thread_id);
         }

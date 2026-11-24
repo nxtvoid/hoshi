@@ -997,20 +997,65 @@ fn switching_back_resumes_the_provider_s_session_and_hands_it_only_what_it_misse
 }
 
 #[test]
-fn another_provider_is_refused_while_a_turn_runs_and_the_current_one_drops_the_pick() {
+fn another_provider_picked_while_a_turn_runs_waits_for_the_next_turn() {
     let mut model = model_with_conversation();
     run(&mut model, send("m2", "two")).unwrap();
 
-    assert_eq!(
-        run(&mut model, switch_to_copilot()).unwrap_err(),
-        CommandError::ThreadBusy {
-            thread_id: "t".into()
-        }
-    );
+    run(&mut model, switch_to_copilot()).unwrap();
+    run(&mut model, send("steer", "and this")).unwrap();
+    let thread = model.thread("t").unwrap();
+    assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
+    assert_eq!(thread.active_turn_id.as_deref(), Some("m2"));
+    assert_eq!(thread.pending_model.as_ref().unwrap().provider, "copilot");
+
     finish_turn(&mut model, "m2");
+    run(&mut model, send("m3", "three")).unwrap();
+
+    let thread = model.thread("t").unwrap();
+    assert_eq!(thread.provider, "copilot");
+    assert_eq!(thread.pending_model, None);
+    assert_eq!(thread.provider_sessions[0].seen_before, "m3");
+}
+
+#[test]
+fn only_the_users_message_moves_the_thread_to_the_provider_they_picked() {
+    let mut model = model_with_conversation();
+    run(&mut model, switch_to_copilot()).unwrap();
+    let turns: [fn(&ReadModel) -> Vec<Event>; 4] = [
+        |model| start_queued_turn(model, "t", "x1", None, NOW),
+        |model| start_resumed_turn(model, "t", "x2", "go on", Resumption::Restart, NOW),
+        |model| send_task_result(model, "t", "child", "x3", "done", NOW).unwrap(),
+        |model| {
+            let update = crate::PullRequestUpdate::default();
+            send_pull_request_update(model, "t", "x4", "news", update, NOW).unwrap()
+        },
+    ];
+    for (index, start) in turns.into_iter().enumerate() {
+        for event in start(&model) {
+            model.apply(&event);
+        }
+        let turn = format!("x{}", index + 1);
+        let thread = model.thread("t").unwrap();
+        assert_eq!(thread.active_turn_id.as_deref(), Some(turn.as_str()));
+        assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
+        assert_eq!(thread.pending_model.as_ref().unwrap().provider, "copilot");
+        finish_turn(&mut model, &turn);
+    }
+    run(&mut model, send("m2", "/compact")).unwrap();
+    assert_eq!(model.thread("t").unwrap().provider, crate::DEFAULT_PROVIDER);
+    finish_turn(&mut model, "m2");
+
+    run(&mut model, send("m3", "over there")).unwrap();
+    assert_eq!(model.thread("t").unwrap().provider, "copilot");
+}
+
+#[test]
+fn the_current_provider_drops_the_pick() {
+    let mut model = model_with_conversation();
+
     run(&mut model, switch_to_copilot()).unwrap();
     run(&mut model, switch_to(crate::DEFAULT_PROVIDER)).unwrap();
-    run(&mut model, send("m3", "three")).unwrap();
+    run(&mut model, send("m2", "two")).unwrap();
 
     let thread = model.thread("t").unwrap();
     assert_eq!(thread.provider, crate::DEFAULT_PROVIDER);
@@ -1019,16 +1064,22 @@ fn another_provider_is_refused_while_a_turn_runs_and_the_current_one_drops_the_p
 }
 
 #[test]
-fn another_provider_is_refused_while_a_first_turn_runs_without_a_session() {
+fn another_provider_picked_while_a_first_turn_runs_without_a_session_waits_too() {
     let mut model = model_with_thread();
     run(&mut model, send("m1", "one")).unwrap();
 
+    run(&mut model, switch_to_copilot()).unwrap();
     assert_eq!(
-        run(&mut model, switch_to_copilot()).unwrap_err(),
-        CommandError::ThreadBusy {
-            thread_id: "t".into()
-        }
+        model.thread("t").unwrap().provider,
+        crate::DEFAULT_PROVIDER,
+        "the turn goes on where it started"
     );
+    finish_turn(&mut model, "m1");
+    run(&mut model, send("m2", "two")).unwrap();
+
+    let thread = model.thread("t").unwrap();
+    assert_eq!(thread.provider, "copilot");
+    assert_eq!(thread.pending_handoffs.len(), 1);
 }
 
 fn model_switch_of(events: &[Event]) -> Option<(Option<Effort>, Option<Effort>)> {
@@ -1146,8 +1197,7 @@ fn only_a_turn_the_user_s_message_opens_records_what_it_runs_on() {
     finish_turn(&mut model, "m3");
 
     run(&mut model, switch_to_copilot()).unwrap();
-    let queued = start_queued_turn(&model, "t", "q1", None, NOW);
-    apply(&mut model, &queued);
+    run(&mut model, send("q1", "over there")).unwrap();
     assert_eq!(last(&model).unwrap().provider, "copilot");
     finish_turn(&mut model, "q1");
 
@@ -1214,9 +1264,7 @@ fn a_message_that_moves_provider_shows_the_handoff_alone() {
     run(&mut model, send("m2", "two")).unwrap();
     finish_turn(&mut model, "m2");
     run(&mut model, switch_to_copilot()).unwrap();
-    for event in start_resumed_turn(&model, "t", "r1", "go on", Resumption::Restart, NOW) {
-        model.apply(&event);
-    }
+    run(&mut model, send("r1", "over there")).unwrap();
     finish_turn(&mut model, "r1");
     assert_eq!(model.threads["t"].provider, "copilot");
 

@@ -34,10 +34,15 @@ impl State {
                         .into(),
                 })
             }
-            Command::MessageSend { ref thread_id, .. } => {
-                let switching = self.model.thread(thread_id).is_some_and(|thread| {
-                    thread.active_turn_id.is_none() && thread.pending_model.is_some()
-                });
+            Command::MessageSend {
+                ref thread_id,
+                ref text,
+                ..
+            } => {
+                let switching = !hoshi_core::is_compact_command(text)
+                    && self.model.thread(thread_id).is_some_and(|thread| {
+                        thread.active_turn_id.is_none() && thread.pending_model.is_some()
+                    });
                 if switching {
                     self.refuse_ending_background_work(thread_id)?;
                 }
@@ -48,20 +53,6 @@ impl State {
                 Err(CommandError::MessageQueued {
                     thread_id: thread_id.clone(),
                 })
-            }
-            Command::ThreadModelSet {
-                ref thread_id,
-                ref provider,
-                ..
-            } => {
-                if self
-                    .model
-                    .thread(thread_id)
-                    .is_some_and(|thread| thread.provider != *provider)
-                {
-                    self.refuse_ending_background_work(thread_id)?;
-                }
-                Ok(command)
             }
             Command::ThreadCreate {
                 thread_id,
@@ -477,6 +468,7 @@ impl State {
                         attachments: attachments.clone(),
                         from_user: task_result.is_none() && pull_request_update.is_none(),
                         held: false,
+                        to: None,
                     });
                     joining = Some(thread_id.clone());
                     if let Some((thread_id, provisional)) = titled.first() {

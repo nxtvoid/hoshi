@@ -425,11 +425,9 @@ pub fn decide(model: &ReadModel, command: Command, now: &str) -> Result<Vec<Even
             let Some(thread) = model.threads.get(&thread_id) else {
                 return Err(CommandError::ThreadNotFound { thread_id });
             };
-            if thread.provider != provider && thread.active_turn_id.is_some() {
-                return Err(CommandError::ThreadBusy { thread_id });
-            }
-            let has_conversation =
-                thread.session_id.is_some() || !thread.provider_sessions.is_empty();
+            let has_conversation = thread.active_turn_id.is_some()
+                || thread.session_id.is_some()
+                || !thread.provider_sessions.is_empty();
             if thread.provider != provider && has_conversation {
                 let choice = Some(ModelChoice {
                     provider,
@@ -722,9 +720,9 @@ pub(super) fn message_events(
             title: title_from(&text, &attachments),
         });
     }
-    let switch = thread
-        .active_turn_id
-        .is_none()
+    let compacts = crate::is_compact_command(&text);
+    let shown = matches!(origin, Origin::User) && !compacts;
+    let switch = (thread.active_turn_id.is_none() && shown)
         .then(|| switch_provider(thread, &message_id))
         .flatten();
     let rewind = match switch {
@@ -733,8 +731,6 @@ pub(super) fn message_events(
     };
     // Only a turn the transcript opens with the user's message records what it runs on, so a
     // change shows over that message rather than over one hoshi sent unseen.
-    let compacts = crate::is_compact_command(&text);
-    let shown = matches!(origin, Origin::User) && !compacts;
     let runs_on = (thread.active_turn_id.is_none() && shown).then(|| runs_on(thread));
     let model_switch = runs_on.as_ref().and_then(|to| turn_switch(thread, to));
     events.extend(switch);
@@ -777,9 +773,9 @@ pub(super) fn message_events(
     Ok(events)
 }
 
-/// What a turn starting now runs on: the provider the user picked for the next message, else
-/// the thread's own.
-pub(super) fn runs_on(thread: &Thread) -> ModelChoice {
+/// What a turn the user's message starts now runs on: the provider they picked for it, else the
+/// thread's own.
+fn runs_on(thread: &Thread) -> ModelChoice {
     thread
         .pending_model
         .as_deref()
@@ -828,7 +824,7 @@ pub(super) fn rewind_point(thread: &Thread, task_result: bool) -> Option<Rewind>
 /// Moves the thread to the provider the user picked as message `message_id` starts a turn:
 /// the current provider's session is kept for a switch back, the picked one's resumed if
 /// the thread has one, and the next turn hands it what it did not see.
-pub(super) fn switch_provider(thread: &Thread, message_id: &str) -> Option<Event> {
+fn switch_provider(thread: &Thread, message_id: &str) -> Option<Event> {
     let to = thread
         .pending_model
         .as_deref()

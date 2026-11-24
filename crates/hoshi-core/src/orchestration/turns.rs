@@ -498,7 +498,7 @@ pub fn start_queued_turn(
     };
     let mut events = queued_turn(model, thread_id, message_id, shown, now);
     let switch = model.threads.get(thread_id).and_then(|thread| {
-        let to = shown.then(|| runs_on(thread))?;
+        let to = shown.then(|| ModelChoice::of(thread))?;
         turn_switch(thread, &to)
     });
     if let (false, Some(switch)) = (events.is_empty(), switch) {
@@ -520,7 +520,8 @@ pub fn start_queued_turn(
 }
 
 /// A queued message's turn, which records what it runs on when `records` says the message
-/// shows as the user's.
+/// shows as the user's. It goes on where the thread is: a provider picked since waits for the
+/// user's next message.
 pub(super) fn queued_turn(
     model: &ReadModel,
     thread_id: &str,
@@ -528,16 +529,7 @@ pub(super) fn queued_turn(
     records: bool,
     now: &str,
 ) -> Vec<Event> {
-    let mut events = start_idle_turn(model, thread_id, message_id, records, now);
-    if !events.is_empty()
-        && let Some(switch) = model
-            .threads
-            .get(thread_id)
-            .and_then(|thread| switch_provider(thread, message_id))
-    {
-        events.insert(0, switch);
-    }
-    events
+    start_idle_turn(model, thread_id, message_id, records, now)
 }
 
 /// Starts a turn hoshi sends by itself to go on with the thread, opening with `text` marked
@@ -601,7 +593,7 @@ pub(super) fn start_idle_turn(
             thread_id: thread_id.to_owned(),
             turn_id: message_id.to_owned(),
             at: now.to_owned(),
-            model: records.then(|| runs_on(thread)),
+            model: records.then(|| ModelChoice::of(thread)),
         }],
         _ => Vec::new(),
     }

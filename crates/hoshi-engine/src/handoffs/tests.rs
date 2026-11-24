@@ -4,9 +4,10 @@ use hoshi_core::{
     AccessMode, BackgroundTask, Event, ProviderModels, ProviderOutput, RequestResponse,
     ThreadWorkspace,
 };
-use hoshi_providers::{OutputSink, RunningTurn, TurnRequest};
+use hoshi_providers::{OutputSink, RunningTurn, TurnAttachment, TurnRequest};
 use hoshi_store::Store;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -321,8 +322,255 @@ fn a_handoff_that_leaves_no_room_fails_the_turn_and_waits_for_the_next() {
     assert_eq!(setup.thread("t").pending_handoffs.len(), 1);
 }
 
+/// An agent whose turns report only what the test has them report.
+struct Held {
+    name: &'static str,
+    restarts: bool,
+    interrupted: Arc<AtomicBool>,
+    sinks: Mutex<Vec<OutputSink>>,
+}
+
+struct HeldTurn(Arc<AtomicBool>);
+
+impl RunningTurn for HeldTurn {
+    fn interrupt(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    fn respond(&self, _request_id: &str, _response: &RequestResponse) {}
+
+    fn steer(
+        &self,
+        _message_id: &str,
+        _text: &str,
+        _attachments: &[TurnAttachment],
+        _now: bool,
+    ) -> bool {
+        true
+    }
+
+    fn lingers(&self) -> bool {
+        true
+    }
+}
+
+impl ProviderAdapter for Held {
+    fn provider(&self) -> &'static str {
+        self.name
+    }
+
+    fn models(&self) -> ProviderModels {
+        ProviderModels::default()
+    }
+
+    fn restarts_to_switch(&self) -> bool {
+        self.restarts
+    }
+
+    fn start_turn(
+        &self,
+        _request: TurnRequest,
+        sink: OutputSink,
+    ) -> Result<Box<dyn RunningTurn>, TurnFailure> {
+        self.sinks.lock().unwrap().push(sink);
+        Ok(Box::new(HeldTurn(self.interrupted.clone())))
+    }
+}
+
+impl Held {
+    fn report(&self, output: ProviderOutput) {
+        (self.sinks.lock().unwrap()[0])(output);
+    }
+
+    fn says(&self, item_id: &str) {
+        self.report(ProviderOutput::AssistantMessage {
+            item_id: item_id.into(),
+            text: "Still on it.".into(),
+        });
+    }
+
+    fn background(&self, tasks: &[&str]) {
+        self.report(ProviderOutput::BackgroundTasks {
+            tasks: tasks
+                .iter()
+                .map(|task| BackgroundTask {
+                    task_id: (*task).into(),
+                    tool_call_id: None,
+                    description: "dev server".into(),
+                    started_at: 0,
+                })
+                .collect(),
+            waiting: false,
+        });
+    }
+
+    fn ends(&self, outcome: TurnOutcome) {
+        self.report(ProviderOutput::TurnCompleted { outcome });
+    }
+}
+
+/// Thread `t` with its first turn still running, on an agent of which `restarts` tells how its
+/// turns give way.
+fn working(name: &str, restarts: bool) -> (Setup, Arc<Held>) {
+    let setup = local(name, Scripted::new(CLAUDE));
+    let held = Arc::new(Held {
+        name: CLAUDE,
+        restarts,
+        interrupted: Arc::default(),
+        sinks: Mutex::default(),
+    });
+    setup
+        .engine
+        .set_adapters(vec![held.clone(), setup.codex.clone()]);
+    setup.dispatch("m1", "Remember APPLE.").unwrap();
+    (setup, held)
+}
+
+impl Setup {
+    fn dispatch(&self, message_id: &str, text: &str) -> Result<(), CommandError> {
+        self.engine.dispatch(Command::MessageSend {
+            thread_id: "t".into(),
+            message_id: message_id.into(),
+            text: text.into(),
+            attachments: Vec::new(),
+        })
+    }
+
+    fn ended(&self, turns: usize) {
+        let ended = self
+            .events
+            .iter()
+            .filter(|event| matches!(event, Event::TurnCompleted { .. }));
+        assert_eq!(ended.take(turns).count(), turns);
+    }
+
+    fn waiting(&self) -> Vec<String> {
+        self.engine
+            .thread_queue("t")
+            .messages
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect()
+    }
+}
+
 #[test]
-fn a_kept_process_with_background_work_holds_off_a_switch() {
+fn a_message_for_another_provider_waits_for_the_turn_and_takes_all_it_said() {
+    let (setup, held) = working("switch-waits", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+
+    assert_eq!(setup.waiting(), ["m2"]);
+    assert!(setup.engine.thread_item("t", "m2").unwrap().is_none());
+    assert!(!held.interrupted.load(Ordering::SeqCst));
+    assert_eq!(setup.thread("t").provider, CLAUDE);
+
+    held.says("late");
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+
+    assert!(setup.waiting().is_empty());
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(thread.pending_model, None);
+    let text = handoff_text(&setup.codex.request(0));
+    assert!(
+        text.contains("item=m1;") && text.contains("item=late;"),
+        "{text}"
+    );
+    assert!(!text.contains("item=m2;"), "{text}");
+}
+
+#[test]
+fn a_message_goes_where_it_was_sent_though_another_provider_is_picked_since() {
+    let (setup, held) = working("switch-kept", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.pick("t", CLAUDE).unwrap();
+    setup.dispatch("m3", "And this, Claude.").unwrap();
+    assert_eq!(setup.waiting(), ["m2"], "m3 joins the running turn");
+
+    held.ends(TurnOutcome::Completed);
+    setup.ended(2);
+
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CODEX);
+    assert_eq!(
+        thread.pending_model.unwrap().provider,
+        CLAUDE,
+        "the next message goes back"
+    );
+}
+
+#[test]
+fn a_turn_that_restarts_to_switch_is_stopped_for_the_message() {
+    let (setup, held) = working("switch-restarts", true);
+    setup.pick("t", CODEX).unwrap();
+    assert!(
+        !held.interrupted.load(Ordering::SeqCst),
+        "a pick alone waits"
+    );
+    setup.dispatch("m2", "Go on.").unwrap();
+    assert!(held.interrupted.load(Ordering::SeqCst));
+
+    held.ends(TurnOutcome::Interrupted);
+    setup.ended(2);
+
+    assert_eq!(setup.thread("t").provider, CODEX);
+    assert!(setup.waiting().is_empty());
+}
+
+#[test]
+fn a_message_for_another_provider_waits_for_what_the_turn_left_running() {
+    let (setup, held) = working("switch-background", true);
+    held.background(&["server"]);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    assert!(
+        !held.interrupted.load(Ordering::SeqCst),
+        "stopping it would not free the thread"
+    );
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+
+    assert_eq!(setup.waiting(), ["m2"]);
+    assert_eq!(
+        setup.engine.send_queued_now("t", "m2"),
+        Err(CommandError::BackgroundWorkRunning {
+            thread_id: "t".into()
+        })
+    );
+    assert_eq!(setup.waiting(), ["m2"]);
+
+    held.background(&[]);
+    lock(&setup.engine.state).start_waiting_switches();
+    assert_eq!(setup.waiting(), ["m2"], "its agent may still wake");
+    lock(&setup.engine.state)
+        .lingering
+        .get_mut("t")
+        .unwrap()
+        .heard_at -= std::time::Duration::from_secs(60);
+    lock(&setup.engine.state).start_waiting_switches();
+    setup.ended(1);
+
+    assert_eq!(setup.thread("t").provider, CODEX);
+}
+
+#[test]
+fn a_message_taken_out_of_the_queue_never_reaches_the_transcript() {
+    let (setup, held) = working("switch-removed", false);
+    setup.pick("t", CODEX).unwrap();
+    setup.dispatch("m2", "Go on.").unwrap();
+    setup.engine.remove_queued_message("t", "m2").unwrap();
+    held.ends(TurnOutcome::Completed);
+    setup.ended(1);
+
+    assert!(setup.engine.thread_item("t", "m2").unwrap().is_none());
+    assert_eq!(setup.thread("t").provider, CLAUDE);
+}
+
+#[test]
+fn a_kept_process_with_background_work_holds_off_a_message_for_another_provider() {
     let setup = local(
         "background",
         Scripted {
@@ -331,14 +579,17 @@ fn a_kept_process_with_background_work_holds_off_a_switch() {
         },
     );
     setup.send("t", "m1", "Start the server.");
+    setup.pick("t", CODEX).unwrap();
 
     assert_eq!(
-        setup.pick("t", CODEX),
+        setup.dispatch("m2", "Go on."),
         Err(CommandError::BackgroundWorkRunning {
             thread_id: "t".into()
         })
     );
-    assert_eq!(setup.thread("t").pending_model, None);
+    let thread = setup.thread("t");
+    assert_eq!(thread.provider, CLAUDE);
+    assert_eq!(thread.pending_model.unwrap().provider, CODEX);
 }
 
 #[test]

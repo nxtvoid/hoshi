@@ -24,7 +24,7 @@ pub struct Thread {
     pub resume_at: Option<String>,
     /// Its agent asked to be woken on its pull request's news.
     pub watching_pull_request: bool,
-    /// The agent CLI it runs on. Once it has a session, another one the user picks waits in
+    /// The agent CLI it runs on. Once it worked, another one the user picks waits in
     /// `pending_model` for the next message.
     #[serde(default = "crate::default_provider")]
     pub provider: String,

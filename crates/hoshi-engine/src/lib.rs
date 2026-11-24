@@ -349,6 +349,10 @@ struct QueuedMessage {
     /// It waits for the user to go on with the thread, as after its turn failed.
     #[serde(default)]
     held: bool,
+    /// The provider picked for it while another one's turn ran. The transcript takes it once
+    /// its turn starts there.
+    #[serde(default)]
+    to: Option<Box<ModelChoice>>,
 }
 
 fn held_message(thread_id: &str, message: &QueuedMessage) -> HeldMessage {
@@ -1214,6 +1218,7 @@ fn sync_pull_requests(state: Weak<Mutex<State>>) {
                 secret_requests::forget_old(&secrets);
             }
             lock(&shared).compact_idle_threads(unix_millis());
+            lock(&shared).start_waiting_switches();
             lock(&shared).resume_limited_threads(unix_millis());
             let jobs = lock(&shared).due_pull_request_jobs();
             for job in jobs {
