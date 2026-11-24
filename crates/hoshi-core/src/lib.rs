@@ -36,7 +36,8 @@ pub use handoff::{
     history_section, item_text, transcript_turns, turn_point,
 };
 pub use idle_compaction::{
-    IDLE_COMPACTION_LEAD_MS, compaction_before_expiry, compacts_on_return, is_compact_command,
+    IDLE_COMPACTION_LEAD_MS, compaction_before_expiry, compaction_threshold, compacts_on_return,
+    is_compact_command, worth_compacting,
 };
 pub use model::{DEFAULT_PROVIDER, ModelInfo, ProviderModels, default_provider};
 pub use orchestration::{

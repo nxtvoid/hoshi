@@ -566,16 +566,26 @@ fn decode_jpeg(jpeg: &[u8]) -> Option<Arc<RenderImage>> {
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])))
 }
 
-/// The port of a page on this machine, as `http://localhost:5173/main` names it.
+/// The port of a page on this machine, as `http://localhost:5173/main` names it, or the
+/// scheme's own when it names none.
 pub fn local_port(url: &str) -> Option<u16> {
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))?;
+    let (rest, default) = match url.strip_prefix("http://") {
+        Some(rest) => (rest, 80),
+        None => (url.strip_prefix("https://")?, 443),
+    };
     let host = rest.split(['/', '?', '#']).next()?;
-    let (name, port) = host.rsplit_once(':')?;
-    matches!(name, "localhost" | "127.0.0.1" | "[::1]" | "0.0.0.0")
-        .then(|| port.parse().ok())
-        .flatten()
+    let (name, port) = match host.strip_prefix('[').and_then(|ipv6| ipv6.split_once(']')) {
+        Some((_, after)) => (&host[..host.len() - after.len()], after.strip_prefix(':')),
+        None => match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        },
+    };
+    let port = match port {
+        Some(port) => port.parse().ok()?,
+        None => default,
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "[::1]" | "0.0.0.0").then_some(port)
 }
 
 #[cfg(test)]
@@ -590,7 +600,8 @@ mod tests {
         );
         assert_eq!(local_port("http://127.0.0.1:5173"), Some(5173));
         assert_eq!(local_port("https://[::1]:8443/?q=1"), Some(8443));
-        assert_eq!(local_port("http://localhost/main"), None);
+        assert_eq!(local_port("http://localhost/main"), Some(80));
+        assert_eq!(local_port("https://[::1]/"), Some(443));
         assert_eq!(local_port("https://example.com:8080/"), None);
         assert_eq!(local_port("about:blank"), None);
     }

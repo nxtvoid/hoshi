@@ -7,6 +7,19 @@ pub const IDLE_COMPACTION_LEAD_MS: u64 = 2 * 60 * 1000;
 
 const COMPACT_COMMAND: &str = "/compact";
 
+/// The context size from which compacting is worth a turn: half the window, or the size an
+/// idle thread compacts at when that comes first.
+pub fn compaction_threshold(usage: &ContextUsage) -> u64 {
+    let half = usage.max_tokens.filter(|max| *max > 0).map(|max| max / 2);
+    half.map_or(IDLE_COMPACTION_TOKENS, |half| {
+        half.min(IDLE_COMPACTION_TOKENS)
+    })
+}
+
+pub fn worth_compacting(usage: &ContextUsage) -> bool {
+    usage.used_tokens >= compaction_threshold(usage)
+}
+
 /// Whether `text` is the `/compact` command, which hoshi sends without showing it.
 pub fn is_compact_command(text: &str) -> bool {
     let text = text.trim();
@@ -45,7 +58,9 @@ pub fn compaction_before_expiry(
 
 #[cfg(test)]
 mod tests {
-    use super::{IDLE_COMPACTION_LEAD_MS, compaction_before_expiry, compacts_on_return};
+    use super::{
+        IDLE_COMPACTION_LEAD_MS, compaction_before_expiry, compacts_on_return, worth_compacting,
+    };
     use crate::{ContextUsage, IdleCompaction};
 
     fn usage(used_tokens: u64, cache_expires_at: Option<u64>) -> ContextUsage {
@@ -108,5 +123,21 @@ mod tests {
             None
         );
         assert_eq!(compaction_before_expiry(mode, None), None);
+    }
+
+    #[test]
+    fn compacting_is_worth_it_from_half_the_window_or_the_idle_size_whichever_comes_first() {
+        let usage = |used_tokens, max_tokens| ContextUsage {
+            used_tokens,
+            max_tokens,
+            cache_ttl_secs: None,
+            cache_expires_at: None,
+        };
+        assert!(!worth_compacting(&usage(99_999, Some(200_000))));
+        assert!(worth_compacting(&usage(100_000, Some(200_000))));
+        assert!(!worth_compacting(&usage(199_999, Some(1_000_000))));
+        assert!(worth_compacting(&usage(200_000, Some(1_000_000))));
+        assert!(!worth_compacting(&usage(150_000, None)));
+        assert!(worth_compacting(&usage(200_000, None)));
     }
 }

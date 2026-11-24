@@ -275,6 +275,8 @@ struct Watching {
     ticking: bool,
 }
 
+type ProbeKey = (u32, u16, Option<u64>);
+
 /// What is known of whether a server speaks HTTP.
 #[derive(Debug, Clone, Copy)]
 enum Probe {
@@ -290,8 +292,9 @@ struct Shared {
     notify: Notify,
     watching: Mutex<Watching>,
     scanner: Mutex<Scanner>,
-    /// Each server's probe, by process and port.
-    probes: Mutex<HashMap<(u32, u16), Probe>>,
+    /// Each server's probe, by process, port and when the process started, so a pid used
+    /// again is asked again.
+    probes: Mutex<HashMap<ProbeKey, Probe>>,
     prober: fn(u16) -> Answer,
 }
 
@@ -451,10 +454,10 @@ fn publish(shared: &Arc<Shared>) {
 /// failed read also gives, forgets nothing, so a hiccup never has every server asked again.
 fn mark_web(shared: &Arc<Shared>, found: &mut HashMap<String, Vec<LocalServer>>) {
     let now = Instant::now();
-    let listening: HashSet<(u32, u16)> = found
+    let listening: HashSet<ProbeKey> = found
         .values()
         .flatten()
-        .map(|server| (server.pid, server.port))
+        .map(|server| (server.pid, server.port, server.started_at))
         .collect();
     let mut ask = Vec::new();
     {
@@ -463,7 +466,7 @@ fn mark_web(shared: &Arc<Shared>, found: &mut HashMap<String, Vec<LocalServer>>)
             probes.retain(|key, _| listening.contains(key));
         }
         for server in found.values_mut().flat_map(|servers| servers.iter_mut()) {
-            let key = (server.pid, server.port);
+            let key = (server.pid, server.port, server.started_at);
             let probe = probes.entry(key).or_insert(Probe::Asking {
                 since: now,
                 next: now,
@@ -486,7 +489,7 @@ fn mark_web(shared: &Arc<Shared>, found: &mut HashMap<String, Vec<LocalServer>>)
 }
 
 /// Probes one server and keeps what it told; a web server is published at once.
-fn ask_server(shared: &Arc<Shared>, key: (u32, u16)) {
+fn ask_server(shared: &Arc<Shared>, key: ProbeKey) {
     let answer = (shared.prober)(key.1);
     let web = {
         let mut probes = guard(&shared.probes);

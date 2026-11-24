@@ -28,7 +28,9 @@ pub fn provider_of(thread: &Thread) -> &str {
 /// The thread's context as its row shows it: how full, what its tooltip says, and the button
 /// that compacts it.
 pub struct ContextMeter {
-    pub percent: f32,
+    /// `None` when the window's size is unknown: the row then tells the tokens alone.
+    pub percent: Option<f32>,
+    pub value: String,
     pub lines: Vec<String>,
     pub compact: AnyElement,
 }
@@ -201,11 +203,12 @@ fn usage_row(
 
 fn context_row(context: ContextMeter, colors: &Colors) -> impl IntoElement + use<> {
     let ContextMeter {
-        percent: used,
+        percent,
+        value,
         lines,
         compact,
     } = context;
-    let tone = if used > CROWDED_PERCENT {
+    let tone = if percent.is_some_and(|used| used > CROWDED_PERCENT) {
         colors.warning
     } else {
         colors.foreground.opacity(0.8)
@@ -214,9 +217,9 @@ fn context_row(context: ContextMeter, colors: &Colors) -> impl IntoElement + use
         "details-context",
         IconName::Gauge,
         m::usage_context(),
-        Some(used / 100.),
+        percent.map(|used| used / 100.),
         None,
-        m::usage_percent(used.round() as u8),
+        value,
         Some(compact),
         tone,
         colors,

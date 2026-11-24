@@ -357,6 +357,55 @@ fn the_main_git_action_waits_a_moment_in_which_it_can_be_undone(cx: &mut TestApp
     });
 
     press(&mut h);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.model.apply(&hoshi_core::Event::TurnStarted {
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            at: "2026-11-16T10:00:00Z".into(),
+            model: None,
+        });
+        cx.notify();
+    });
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    redraw(&mut h.cx);
+    h.details.read_with(&h.cx, |details, _| {
+        assert!(details.pending_git.is_empty() && details.running.is_empty());
+        assert!(details.error.is_some(), "it says why it didn't run");
+        assert!(
+            details.statuses["t"].has_changes,
+            "a turn started: nothing ran"
+        );
+    });
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.model.apply(&hoshi_core::Event::TurnCompleted {
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            outcome: hoshi_core::TurnOutcome::Completed,
+            at: "2026-11-16T10:01:00Z".into(),
+        });
+        cx.notify();
+    });
+
+    press(&mut h);
+    let arrow =
+        h.cx.debug_bounds("details-git-arrow")
+            .expect("the git menu's arrow shows");
+    h.cx.simulate_click(arrow.center(), Modifiers::default());
+    redraw(&mut h.cx);
+    let commit =
+        h.cx.debug_bounds("menu-item-details-git-commit")
+            .expect("the commit item shows");
+    h.cx.simulate_click(commit.center(), Modifiers::default());
+    redraw(&mut h.cx);
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.pending_git.contains_key("t")),
+        "the menu's actions wait for the one counting down"
+    );
+
     h.cx.executor().advance_clock(super::UNDO_FOR);
     wait_for(&mut h, "the commit", |details| {
         details.done.contains_key("t")
@@ -1070,6 +1119,24 @@ fn the_compact_button_shows_whether_or_not_compacting_is_worth_it_yet(cx: &mut T
             "the button shows at {used_tokens} tokens"
         );
     }
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.context_usages.insert(
+            "t".into(),
+            hoshi_core::ContextUsage {
+                used_tokens: 42_000,
+                max_tokens: None,
+                cache_ttl_secs: None,
+                cache_expires_at: None,
+            },
+        );
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(
+        h.cx.debug_bounds("details-context").is_some(),
+        "an unknown window still shows the tokens used"
+    );
 
     workspace.update(&mut h.cx, |workspace, cx| {
         workspace.set_context_meter(hoshi_core::ContextMeterPlace::Composer, cx)

@@ -1,12 +1,13 @@
 //! Whether a server speaks HTTP, so a browser can open it. The request asks for a version
-//! no server supports, so each one turns it down in its parser: the app never sees it, no
-//! route runs and nothing compiles.
+//! no server supports and carries a header without a colon, so each server turns it down in
+//! its parser, whichever of the two it checks first: the app never sees it, no route runs and
+//! nothing compiles.
 
 use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
-const PROBE: &[u8] = b"GET / HTTP/9.9\r\nHost: localhost\r\n\r\n";
+const PROBE: &[u8] = b"GET / HTTP/9.9\r\nHost localhost\r\n\r\n";
 const CONNECT_WAIT: Duration = Duration::from_millis(300);
 const ANSWER_WAIT: Duration = Duration::from_millis(500);
 

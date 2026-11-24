@@ -6,7 +6,7 @@ use crate::format::compact_number;
 use crate::m;
 use gpui_kit::component::hover_card::HoverCard;
 use gpui_kit::*;
-use hoshi_core::{Command, ContextUsage, IDLE_COMPACTION_TOKENS, compacts_on_return};
+use hoshi_core::{Command, ContextUsage, compacts_on_return};
 use hoshi_ui::prelude::*;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -19,19 +19,6 @@ pub(super) const CHECK_EVERY: Duration = Duration::from_secs(30);
 pub fn context_percent(usage: &ContextUsage) -> Option<f32> {
     let max = usage.max_tokens.filter(|max| *max > 0)?;
     Some((usage.used_tokens as f32 / max as f32 * 100.).min(100.))
-}
-
-/// The context size from which compacting is worth a turn: half the window, or the size an
-/// idle thread compacts at when that comes first.
-pub fn compaction_threshold(usage: &ContextUsage) -> u64 {
-    let half = usage.max_tokens.filter(|max| *max > 0).map(|max| max / 2);
-    half.map_or(IDLE_COMPACTION_TOKENS, |half| {
-        half.min(IDLE_COMPACTION_TOKENS)
-    })
-}
-
-pub fn worth_compacting(usage: &ContextUsage) -> bool {
-    usage.used_tokens >= compaction_threshold(usage)
 }
 
 pub use hoshi_core::is_compact_command;
@@ -310,7 +297,7 @@ pub fn arc(
 
 #[cfg(test)]
 mod tests {
-    use super::{context_percent, is_compact_command, worth_compacting};
+    use super::{context_percent, is_compact_command};
     use hoshi_core::ContextUsage;
 
     fn usage(
@@ -332,16 +319,6 @@ mod tests {
         assert_eq!(context_percent(&usage(50, Some(0), None)), None);
         assert_eq!(context_percent(&usage(50, Some(200), None)), Some(25.));
         assert_eq!(context_percent(&usage(300, Some(200), None)), Some(100.));
-    }
-
-    #[test]
-    fn compacting_is_worth_it_from_half_the_window_or_the_idle_size_whichever_comes_first() {
-        assert!(!worth_compacting(&usage(99_999, Some(200_000), None)));
-        assert!(worth_compacting(&usage(100_000, Some(200_000), None)));
-        assert!(!worth_compacting(&usage(199_999, Some(1_000_000), None)));
-        assert!(worth_compacting(&usage(200_000, Some(1_000_000), None)));
-        assert!(!worth_compacting(&usage(150_000, None, None)));
-        assert!(worth_compacting(&usage(200_000, None, None)));
     }
 
     #[test]

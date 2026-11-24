@@ -449,6 +449,7 @@
   "git_error_forge_unauthorized": "Sign in to the forge in Settings to open pull requests.",
   "git_error_forge_unavailable": "This project's repository isn't on a connected forge.",
   "git_error_busy": "Stop the agent before running git actions.",
+  "git_detached_head": "Detached HEAD",
   "git_default_branch_title": "Push to {branch}?",
   "git_default_branch_description": "This pushes straight to \"{branch}\". You can continue on this branch or move the changes to a new branch and run the same action there.",
   "git_default_branch_confirm": "Push to {branch}",

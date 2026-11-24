@@ -210,6 +210,11 @@ impl ThreadDetails {
         let draft = self.prefs.draft_pull_requests;
         let blockers = git::menu_blockers(status);
         let forge = status.forge;
+        let busy = working
+            || self
+                .shown_thread
+                .as_ref()
+                .is_some_and(|thread_id| self.pending_git.contains_key(thread_id));
         let this = cx.weak_entity();
         let trigger_colors = colors.clone();
         let menu_colors = colors.clone();
@@ -242,7 +247,7 @@ impl ThreadDetails {
                 menu.item(
                     MenuOption::new("details-git-commit", m::git_commit_menu())
                         .icon(IconName::GitCommitHorizontal)
-                        .disabled(working || blockers.commit.is_some())
+                        .disabled(busy || blockers.commit.is_some())
                         .when_some(blockers.commit, |option, blocker| {
                             option.tooltip(blocker_tooltip(blocker))
                         })
@@ -258,7 +263,7 @@ impl ThreadDetails {
                             option.leading(div().mr_1().child(forge_mark(forge, &menu_colors)))
                         })
                         .when(forge.is_none(), |option| option.icon(IconName::CloudUpload))
-                        .disabled(working || blockers.push.is_some())
+                        .disabled(busy || blockers.push.is_some())
                         .when_some(blockers.push, |option, blocker| {
                             option.tooltip(blocker_tooltip(blocker))
                         })
@@ -280,7 +285,7 @@ impl ThreadDetails {
                         .when(forge.is_none(), |option| {
                             option.icon(IconName::GitPullRequest)
                         })
-                        .disabled(working || blockers.create_pull_request.is_some())
+                        .disabled(busy || blockers.create_pull_request.is_some())
                         .when_some(blockers.create_pull_request, |option, blocker| {
                             option.tooltip(blocker_tooltip(blocker))
                         })

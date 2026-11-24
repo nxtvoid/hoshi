@@ -265,7 +265,14 @@ impl ThreadDetails {
         let mut place = panel(self.inline, &colors)
             .debug_selector(|| "details-place".into())
             .child(self.folder_row(&path, worktree_badge(&thread), &colors, cx));
-        if let Some(branch) = thread.branch.clone() {
+        let detached = status
+            .as_ref()
+            .is_some_and(|status| status.branch.is_none());
+        let branch = thread
+            .branch
+            .clone()
+            .or_else(|| detached.then(m::git_detached_head));
+        if let Some(branch) = branch {
             let clean = status
                 .as_ref()
                 .is_some_and(|status| !status.has_changes && git_row.is_none());
@@ -302,26 +309,34 @@ impl ThreadDetails {
                 this.child(error_line(error, &colors))
             });
         let limits = self.usage_limits(usage::provider_of(&thread), cx);
-        let context = context_usage.and_then(|usage| {
-            let percent = crate::composer::context_percent(&usage)?;
-            let worth = crate::composer::worth_compacting(&usage);
-            let mut lines = vec![m::context_window_usage(
-                compact_number(usage.max_tokens.unwrap_or_default()),
-                percent.round() as u32,
-                compact_number(usage.used_tokens),
-            )];
+        let context = context_usage.map(|usage| {
+            let percent = crate::composer::context_percent(&usage);
+            let worth = hoshi_core::worth_compacting(&usage);
+            let used = compact_number(usage.used_tokens);
+            let mut lines = vec![match percent {
+                Some(percent) => m::context_window_usage(
+                    compact_number(usage.max_tokens.unwrap_or_default()),
+                    percent.round() as u32,
+                    &used,
+                ),
+                None => m::context_tokens_used(&used),
+            }];
             if working {
                 lines.push(m::error_thread_busy());
             } else if !worth {
                 lines.push(m::compact_context_from(compact_number(
-                    crate::composer::compaction_threshold(&usage),
+                    hoshi_core::compaction_threshold(&usage),
                 )));
             }
-            Some(usage::ContextMeter {
+            usage::ContextMeter {
                 percent,
+                value: match percent {
+                    Some(percent) => m::usage_percent(percent.round() as u8),
+                    None => used,
+                },
                 lines,
                 compact: self.compact_button(worth, working, &colors, cx),
-            })
+            }
         });
         let usage = self.usage_panel(limits, context, &colors);
         let agents = self.agents_panel(agents, parent, &colors, cx);

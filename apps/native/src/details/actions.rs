@@ -139,6 +139,17 @@ impl ThreadDetails {
         let Some(thread_id) = self.shown_thread.clone() else {
             return;
         };
+        self.start_git_in(thread_id, request, undoable, window, cx);
+    }
+
+    fn start_git_in(
+        &mut self,
+        thread_id: String,
+        request: GitActionRequest,
+        undoable: Option<git::Label>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(status) = self.statuses.get(&thread_id) else {
             return;
         };
@@ -220,13 +231,30 @@ impl ThreadDetails {
                     .pending_git
                     .get(&thread_id)
                     .is_some_and(|pending| pending.started == started);
-                if let Some(pending) = due.then(|| this.pending_git.remove(&thread_id)).flatten() {
-                    this.run_git(thread_id, pending.request, window, cx);
+                let Some(pending) = due.then(|| this.pending_git.remove(&thread_id)).flatten()
+                else {
+                    return;
+                };
+                if this.thread_working(&thread_id, cx) {
+                    if this.shown_thread.as_deref() == Some(thread_id.as_str()) {
+                        this.error = Some(m::git_error_busy());
+                    }
+                    cx.notify();
+                    return;
                 }
+                this.start_git_in(thread_id, pending.request, None, window, cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    fn thread_working(&self, thread_id: &str, cx: &App) -> bool {
+        self.workspace
+            .read(cx)
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| thread.active_turn_id.is_some())
     }
 
     pub(super) fn undo_git(&mut self, thread_id: &str, cx: &mut Context<Self>) {
