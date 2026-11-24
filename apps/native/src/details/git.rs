@@ -120,6 +120,14 @@ pub fn quick_action(status: &GitStatus, pull_request_open: bool) -> QuickAction 
     QuickAction::blocked(Blocker::UpToDate)
 }
 
+/// Whether the card offers the action as a row: not when there is simply nothing to do.
+pub fn offers(quick: &QuickAction) -> bool {
+    !matches!(
+        quick.blocker,
+        Some(Blocker::UpToDate | Blocker::Clean | Blocker::NoCommits | Blocker::NoRemote)
+    )
+}
+
 /// Why each menu entry can't run now; `None` when it can.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MenuBlockers {
@@ -179,6 +187,11 @@ pub fn label_text(label: Label, draft: bool) -> String {
         Label::CreatePullRequest => m::git_create_pr(),
         Label::Pull => m::git_pull(),
     }
+}
+
+/// Whether the action sends something to the forge, so its row shows which one.
+pub fn reaches_forge(label: Label) -> bool {
+    !matches!(label, Label::Commit | Label::Pull)
 }
 
 pub fn label_icon(label: Label) -> IconName {
@@ -269,6 +282,7 @@ mod tests {
 
     fn status() -> GitStatus {
         GitStatus {
+            forge: None,
             branch: Some("hoshi/login".into()),
             default_branch: Some("main".into()),
             has_remote: true,

@@ -73,20 +73,6 @@ pub fn worktrees(dir: &str) -> Option<Vec<String>> {
     Some(paths)
 }
 
-/// The local branches of the repository at `dir`, by name.
-pub fn local_branches(dir: &str) -> Vec<String> {
-    stdout(dir, &["branch", "--format=%(refname:short)"])
-        .map(|output| {
-            output
-                .lines()
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// Checks out an existing `branch` in a new worktree at `path`, as it was before it was
 /// removed.
 pub fn restore_worktree(repository: &str, path: &str, branch: &str) -> Result<(), String> {
@@ -475,12 +461,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn lists_local_branches_and_switches_between_them() {
+    fn switches_between_branches() {
         let repo = temp_repository("switch");
         let dir = repo.to_string_lossy().into_owned();
         stdout(&dir, &["branch", "feat/x"]).unwrap();
 
-        assert_eq!(local_branches(&dir), ["feat/x", "main"]);
         switch(&dir, "feat/x").unwrap();
         assert_eq!(current_branch(&dir).as_deref(), Some("feat/x"));
         assert!(switch(&dir, "missing").is_err());

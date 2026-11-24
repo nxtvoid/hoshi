@@ -1,20 +1,22 @@
 use super::*;
+use rows::icon_button;
 
 impl ThreadDetails {
+    /// The folder the thread works in, with the editor that opens it at the end.
     pub(super) fn folder_row(
         &self,
         path: &str,
         badge: Option<String>,
         colors: &Colors,
-    ) -> impl IntoElement {
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let folder = path
             .split(['\\', '/'])
             .rfind(|part| !part.is_empty())
             .unwrap_or(path)
             .to_owned();
-        let hover = colors.foreground.opacity(0.05);
         let reveal = PathBuf::from(path);
-        div()
+        let base = div()
             .id("details-folder")
             .flex()
             .flex_none()
@@ -50,31 +52,22 @@ impl ThreadDetails {
                         .text_color(colors.muted_foreground)
                         .child(badge),
                 )
-            })
-            .child(
-                div()
-                    .id("details-reveal")
+            });
+        let Some(editor) = self.open_target() else {
+            return base
+                .child(
+                    icon_button(
+                        "details-reveal",
+                        icon(IconName::FolderOpen, colors),
+                        false,
+                        colors,
+                    )
                     .ml_auto()
-                    .flex()
-                    .flex_none()
-                    .size_6()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .hover(move |style| style.bg(hover))
-                    .child(icon(IconName::FolderOpen, colors))
                     .on_click(move |_, _, cx| cx.reveal_path(&reveal))
                     .with_tooltip(Tooltip::new(m::show_in_folder())),
-            )
-    }
-
-    pub(super) fn editor_row(
-        &self,
-        editor: Editor,
-        colors: &Colors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+                )
+                .into_any_element();
+        };
         let installed = self.editors.clone().unwrap_or_default();
         let this = cx.weak_entity();
         let arrow_colors = colors.clone();
@@ -84,10 +77,16 @@ impl ThreadDetails {
             .align(Align::End)
             .match_trigger_width()
             .trigger(move |open| {
-                split_arrow("details-editor-arrow", open, &arrow_colors)
-                    .debug_selector(|| "details-editor-arrow".into())
+                icon_button(
+                    "details-editor-arrow",
+                    icon(IconName::ChevronDown, &arrow_colors),
+                    open,
+                    &arrow_colors,
+                )
+                .debug_selector(|| "details-editor-arrow".into())
             })
             .menu(move |menu, _, _| {
+                let reveal = reveal.clone();
                 menu.items(installed.into_iter().enumerate().map(|(index, choice)| {
                     let this = this.clone();
                     MenuOption::new(("details-editor", index), editor_label(choice))
@@ -97,128 +96,65 @@ impl ThreadDetails {
                             this.update(cx, |this, cx| this.open_in(choice, cx)).ok();
                         })
                 }))
-            });
-        split_row(
-            "details-editor",
-            split_primary("details-open-editor", colors)
-                .child(editor_icon(editor, colors))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .child(m::open_in_editor(editor_label(editor))),
+                .separator()
+                .item(
+                    MenuOption::new("details-reveal", m::show_in_folder())
+                        .icon(IconName::FolderOpen)
+                        .on_select(move |_, cx| cx.reveal_path(&reveal)),
                 )
-                .on_click(cx.listener(move |this, _, _, cx| this.open_in(editor, cx))),
-            Some(menu.into_any_element()),
-            colors,
-        )
-        .debug_selector(|| "details-editor-row".into())
-        .child(self.editor_anchor.area())
+            });
+        base.debug_selector(|| "details-editor-row".into())
+            .child(
+                icon_button(
+                    "details-open-editor",
+                    editor_icon(editor, colors),
+                    false,
+                    colors,
+                )
+                .ml_auto()
+                .on_click(cx.listener(move |this, _, _, cx| this.open_in(editor, cx)))
+                .with_tooltip(Tooltip::new(m::open_in_editor(editor_label(editor)))),
+            )
+            .child(menu)
+            .child(self.editor_anchor.area())
+            .into_any_element()
     }
 
+    /// The branch the thread works on, whether its checkout is clean, and `actions` at the end.
     pub(super) fn branch_row(
         &self,
         branch: String,
         thread: &Thread,
+        clean: bool,
+        actions: Option<AnyElement>,
         colors: &Colors,
-        cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mono = cx.theme().mono_font_family.clone();
-        let worktree = thread.worktree_path.is_some();
-        let build = {
-            let colors = colors.clone();
-            let branch = branch.clone();
-            move |open: bool, enabled: bool| {
-                let base = if enabled {
-                    row("details-branch", &colors)
+        let anchored = actions.is_some();
+        row_static("details-branch", colors)
+            .debug_selector(|| "details-branch-row".into())
+            .relative()
+            .when(anchored, |this| this.pr_1())
+            .child(icon(
+                if thread.worktree_path.is_some() {
+                    IconName::GitFork
                 } else {
-                    row_static("details-branch", &colors).opacity(0.6)
-                };
-                base.when(open, |this| this.bg(colors.foreground.opacity(0.05)))
-                    .child(icon(
-                        if worktree {
-                            IconName::GitFork
-                        } else {
-                            IconName::GitBranch
-                        },
-                        &colors,
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(mono)
-                            .text_xs()
-                            .child(branch),
-                    )
-                    .child(icon(IconName::ChevronDown, &colors))
-            }
-        };
-        if thread.status == ThreadStatus::Working {
-            return build(false, false)
-                .with_tooltip(Tooltip::new(m::error_thread_busy()))
-                .into_any_element();
-        }
-        let others: Option<Vec<String>> = self.branches.as_ref().map(|branches| {
-            branches
-                .iter()
-                .filter(|name| **name != branch)
-                .cloned()
-                .collect()
-        });
-        let this = cx.weak_entity();
-        let muted = colors.muted_foreground;
-        div()
-            .flex()
-            .flex_col()
-            .child(
-                Popover::new("details-branch-menu")
-                    .align(Align::End)
-                    .open(self.branch_menu_open)
-                    .on_open_change(cx.listener(|this, change: &PopoverChange, _, cx| {
-                        this.set_branch_menu(change.open, cx)
-                    }))
-                    .trigger(move |open| build(open, true))
-                    .menu(move |menu, _, _| {
-                        let empty = others.as_ref().is_some_and(Vec::is_empty);
-                        menu.max_list_height(px(288.))
-                            .heading(m::switch_branch())
-                            .when(empty, |menu| {
-                                menu.child(
-                                    div()
-                                        .px_2()
-                                        .py_1p5()
-                                        .text_xs()
-                                        .text_color(muted)
-                                        .child(m::no_other_branches()),
-                                )
-                            })
-                            .items(
-                                others
-                                    .into_iter()
-                                    .flatten()
-                                    .enumerate()
-                                    .map(|(index, name)| {
-                                        let this = this.clone();
-                                        MenuOption::new(
-                                            ("details-branch-option", index),
-                                            name.clone(),
-                                        )
-                                        .mono()
-                                        .on_select(
-                                            move |_, cx| {
-                                                let name = name.clone();
-                                                this.update(cx, |this, cx| {
-                                                    this.switch_branch(name, cx)
-                                                })
-                                                .ok();
-                                            },
-                                        )
-                                    }),
-                            )
-                    }),
-            )
+                    IconName::GitBranch
+                },
+                colors,
+            ))
+            .child(div().flex_1().min_w_0().truncate().child(branch))
+            .when(clean, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(colors.muted_foreground)
+                        .child(m::checkout_clean()),
+                )
+            })
+            .children(actions)
+            .when(anchored, |this| this.child(self.branch_anchor.area()))
             .into_any_element()
     }
 }

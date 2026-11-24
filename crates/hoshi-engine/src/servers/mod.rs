@@ -2,16 +2,18 @@
 //! inherit the thread's id from the agent or shell that started them, even once detached,
 //! so a listener's owner is read from its process's environment.
 
+mod probe;
 mod procfs;
 #[cfg(windows)]
 mod windows;
 
 use crate::{Notification, Notify};
 use hoshi_core::{CommandError, LocalServer, ServerOrigin, ThreadServers};
-use std::collections::{BTreeMap, HashMap};
+use probe::Answer;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) const THREAD_VARIABLE: &str = "HOSHI_THREAD_ID";
 pub(crate) const TERMINAL_VARIABLE: &str = "HOSHI_TERMINAL_ID";
@@ -20,6 +22,10 @@ const STOP_GRACE: Duration = Duration::from_secs(3);
 const STOP_POLL: Duration = Duration::from_millis(250);
 /// How much earlier than its command a server may seem to start, as the two clocks tell it.
 const START_SLACK_MS: u64 = 2_000;
+/// How often a server that didn't answer the probe is asked again, while it may be starting.
+const PROBE_AGAIN_AFTER: Duration = Duration::from_secs(2);
+/// After this long without an answer a server is taken for one no browser opens.
+const PROBE_GIVE_UP_AFTER: Duration = Duration::from_secs(30);
 
 /// What the agent of `thread_id` starts with. A hoshi run from a terminal of another hoshi
 /// would otherwise pass that terminal's id on to its agents.
@@ -148,6 +154,7 @@ pub(crate) fn attribute(seen: &Seen, own_pid: u32) -> HashMap<String, Vec<LocalS
                 process_name: process.name.clone(),
                 origin: owner.origin,
                 started_at: process.started_at,
+                web: false,
             });
     }
     for servers in threads.values_mut() {
@@ -268,10 +275,29 @@ struct Watching {
     ticking: bool,
 }
 
+type ProbeKey = (u32, u16, Option<u64>);
+
+/// What is known of whether a server speaks HTTP.
+#[derive(Debug, Clone, Copy)]
+enum Probe {
+    Known(bool),
+    Asking {
+        since: Instant,
+        next: Instant,
+        busy: bool,
+    },
+}
+
 struct Shared {
     notify: Notify,
     watching: Mutex<Watching>,
     scanner: Mutex<Scanner>,
+    /// Each server's probe, by process, port and when the process started, so a pid used
+    /// again is asked again.
+    probes: Mutex<HashMap<ProbeKey, Probe>>,
+    /// Held from a scan to its notifications, so they go out in the order they were made.
+    publishing: Mutex<()>,
+    prober: fn(u16) -> Answer,
 }
 
 /// Scans while a view watches some thread's servers, and tells it when they change.
@@ -282,15 +308,23 @@ pub struct Servers {
 
 impl Servers {
     pub fn new(notify: Notify) -> Self {
-        Self::with_platform(notify, platform(), std::process::id())
+        Self::with_platform(notify, platform(), std::process::id(), probe::probe)
     }
 
-    fn with_platform(notify: Notify, platform: Box<dyn Platform>, own_pid: u32) -> Self {
+    fn with_platform(
+        notify: Notify,
+        platform: Box<dyn Platform>,
+        own_pid: u32,
+        prober: fn(u16) -> Answer,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
                 notify,
                 watching: Mutex::default(),
                 scanner: Mutex::new(Scanner { platform, own_pid }),
+                probes: Mutex::default(),
+                publishing: Mutex::default(),
+                prober,
             }),
         }
     }
@@ -302,16 +336,17 @@ impl Servers {
             *watching.viewers.entry(thread_id.to_owned()).or_default() += 1;
             !std::mem::replace(&mut watching.ticking, true)
         };
-        let servers = guard(&self.shared.scanner)
-            .scan()
-            .remove(thread_id)
-            .unwrap_or_default();
+        let publishing = guard(&self.shared.publishing);
+        let mut found = guard(&self.shared.scanner).scan();
+        mark_web(&self.shared, &mut found);
+        let servers = found.remove(thread_id).unwrap_or_default();
         {
             let mut watching = guard(&self.shared.watching);
             if watching.viewers.contains_key(thread_id) {
                 watching.sent.insert(thread_id.to_owned(), servers.clone());
             }
         }
+        drop(publishing);
         if start {
             let shared = self.shared.clone();
             thread::spawn(move || tick(&shared));
@@ -378,7 +413,7 @@ impl Servers {
     }
 }
 
-fn tick(shared: &Shared) {
+fn tick(shared: &Arc<Shared>) {
     loop {
         thread::sleep(SCAN_EVERY);
         {
@@ -394,9 +429,13 @@ fn tick(shared: &Shared) {
     }
 }
 
-/// Scans and tells each watched thread whose servers changed.
-fn publish(shared: &Shared) {
+/// Scans and tells each watched thread whose servers changed. The notify callback only
+/// hands the update on, never calling back into [`Servers`], so holding `publishing` through
+/// it can't deadlock.
+fn publish(shared: &Arc<Shared>) {
+    let _publishing = guard(&shared.publishing);
     let mut found = guard(&shared.scanner).scan();
+    mark_web(shared, &mut found);
     let changed: Vec<ThreadServers> = {
         let mut watching = guard(&shared.watching);
         let threads: Vec<String> = watching.viewers.keys().cloned().collect();
@@ -414,6 +453,79 @@ fn publish(shared: &Shared) {
     };
     for update in changed {
         (shared.notify)(Notification::Servers(update));
+    }
+}
+
+/// Marks the servers known to speak HTTP and asks the ones not known yet, each on a thread
+/// of its own so a slow one never holds the scan back. What is no longer listening is
+/// forgotten, as its pid and port may come back as another server; an empty scan, which a
+/// failed read also gives, forgets nothing, so a hiccup never has every server asked again.
+fn mark_web(shared: &Arc<Shared>, found: &mut HashMap<String, Vec<LocalServer>>) {
+    let now = Instant::now();
+    let listening: HashSet<ProbeKey> = found
+        .values()
+        .flatten()
+        .map(|server| (server.pid, server.port, server.started_at))
+        .collect();
+    let mut ask = Vec::new();
+    {
+        let mut probes = guard(&shared.probes);
+        if !listening.is_empty() {
+            probes.retain(|key, _| listening.contains(key));
+        }
+        for server in found.values_mut().flat_map(|servers| servers.iter_mut()) {
+            let key = (server.pid, server.port, server.started_at);
+            let probe = probes.entry(key).or_insert(Probe::Asking {
+                since: now,
+                next: now,
+                busy: false,
+            });
+            match probe {
+                Probe::Known(web) => server.web = *web,
+                Probe::Asking { next, busy, .. } if !*busy && *next <= now => {
+                    *busy = true;
+                    ask.push(key);
+                }
+                Probe::Asking { .. } => {}
+            }
+        }
+    }
+    for key in ask {
+        let shared = shared.clone();
+        thread::spawn(move || ask_server(&shared, key));
+    }
+}
+
+/// Probes one server and keeps what it told; a web server is published at once.
+fn ask_server(shared: &Arc<Shared>, key: ProbeKey) {
+    let answer = (shared.prober)(key.1);
+    let web = {
+        let mut probes = guard(&shared.probes);
+        let Some(Probe::Asking { since, .. }) = probes.get(&key).copied() else {
+            return;
+        };
+        let now = Instant::now();
+        let settled = match answer {
+            Answer::Web => Some(true),
+            Answer::Other => Some(false),
+            Answer::Silent if now.duration_since(since) >= PROBE_GIVE_UP_AFTER => Some(false),
+            Answer::Silent => None,
+        };
+        probes.insert(
+            key,
+            match settled {
+                Some(web) => Probe::Known(web),
+                None => Probe::Asking {
+                    since,
+                    next: now + PROBE_AGAIN_AFTER,
+                    busy: false,
+                },
+            },
+        );
+        settled == Some(true)
+    };
+    if web {
+        publish(shared);
     }
 }
 
@@ -490,6 +602,7 @@ mod tests {
                 process_name: Some("java".into()),
                 origin: ServerOrigin::Agent,
                 started_at: Some(1_000),
+                web: false,
             }]
         );
         assert_eq!(threads["t2"][0].port, 3000);
@@ -601,7 +714,10 @@ mod tests {
             listener(5173, 21),
             listener(9000, 22),
         ]));
-        let servers = Servers::with_platform(notify, Box::new(Fake { seen: seen.clone() }), 1);
+        let servers =
+            Servers::with_platform(notify, Box::new(Fake { seen: seen.clone() }), 1, |_| {
+                Answer::Other
+            });
         let left = || -> Vec<u16> { guard(&seen).iter().map(|listener| listener.port).collect() };
 
         servers.stop_agent_servers_since("t1", 10_000);
@@ -619,7 +735,10 @@ mod tests {
             }
         });
         let seen = Arc::new(Mutex::new(vec![listener(8080, 20)]));
-        let servers = Servers::with_platform(notify, Box::new(Fake { seen: seen.clone() }), 1);
+        let servers =
+            Servers::with_platform(notify, Box::new(Fake { seen: seen.clone() }), 1, |_| {
+                Answer::Other
+            });
 
         assert_eq!(servers.watch("t1")[0].port, 8080);
         assert!(matches!(
@@ -633,5 +752,36 @@ mod tests {
         assert!(update.servers.is_empty());
         servers.unwatch("t1");
         assert!(guard(&servers.shared.watching).viewers.is_empty());
+    }
+
+    #[test]
+    fn a_server_that_speaks_http_is_told_as_web_once_probed() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let notify: Notify = Arc::new(move |notification| {
+            if let Notification::Servers(update) = notification {
+                let _ = sender.send(update);
+            }
+        });
+        let seen = Arc::new(Mutex::new(vec![listener(8080, 20), listener(5173, 21)]));
+        let servers = Servers::with_platform(notify, Box::new(Fake { seen }), 1, |port| {
+            if port == 8080 {
+                Answer::Web
+            } else {
+                Answer::Other
+            }
+        });
+
+        assert!(
+            servers.watch("t1").iter().all(|server| !server.web),
+            "nothing is web before its probe answers"
+        );
+        let update = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        let web: Vec<(u16, bool)> = update
+            .servers
+            .iter()
+            .map(|server| (server.port, server.web))
+            .collect();
+        assert_eq!(web, [(5173, false), (8080, true)]);
+        servers.unwatch("t1");
     }
 }

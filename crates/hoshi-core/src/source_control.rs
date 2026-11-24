@@ -1,3 +1,4 @@
+use crate::ForgeKind;
 use serde::{Deserialize, Serialize};
 
 /// What a thread's checkout allows: whether there is something to commit, push or pull.
@@ -12,6 +13,9 @@ pub struct GitStatus {
     pub has_upstream: bool,
     /// Whether `origin` is configured.
     pub has_remote: bool,
+    /// The forge `origin` is on; `None` without one or on a host no forge adapter serves.
+    #[serde(default)]
+    pub forge: Option<ForgeKind>,
     /// Commits the branch has that its upstream lacks.
     pub ahead: u32,
     /// Commits its upstream has that the branch lacks.

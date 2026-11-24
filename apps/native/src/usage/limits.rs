@@ -307,6 +307,42 @@ pub fn window_label(window: &UsageWindow) -> String {
     }
 }
 
+/// A window's name where room is short: a model's own window goes by the model alone.
+pub fn short_window_label(window: &UsageWindow) -> String {
+    match (window.kind, &window.model) {
+        (UsageWindowKind::Weekly, Some(model)) => model.clone(),
+        _ => window_label(window),
+    }
+}
+
+/// When a window resets, in a few characters: the time left within a day, else the weekday
+/// within a week, else the date.
+pub fn reset_short<Tz: TimeZone>(window: &UsageWindow, now: &DateTime<Tz>) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    moment_short(window.resets_at.as_deref()?, now)
+}
+
+/// An RFC 3339 time as [`reset_short`] words it.
+pub fn moment_short<Tz: TimeZone>(at: &str, now: &DateTime<Tz>) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let span = Span::of(millis_until(Some(at), now.with_timezone(&Utc))?);
+    if span.days == 0 {
+        return Some(format_span(span));
+    }
+    let at = DateTime::parse_from_rfc3339(at)
+        .ok()?
+        .with_timezone(&now.timezone());
+    Some(if span.days < 7 {
+        at.format("%a").to_string()
+    } else {
+        at.format("%b %-d").to_string()
+    })
+}
+
 pub fn plan_label(plan: ProviderPlan) -> String {
     match plan {
         ProviderPlan::Pro => m::provider_plan_pro(),

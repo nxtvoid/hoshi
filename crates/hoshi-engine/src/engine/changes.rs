@@ -127,12 +127,6 @@ impl Engine {
         editors::installed()
     }
 
-    /// The local branches of a thread's repository.
-    pub fn thread_branches(&self, thread_id: &str) -> Result<Vec<String>, CommandError> {
-        let cwd = self.repository_cwd(thread_id)?;
-        Ok(git::local_branches(&cwd))
-    }
-
     /// What the thread's working tree changed and has not committed.
     pub fn thread_changes(&self, thread_id: &str) -> Result<ChangesSummary, CommandError> {
         let cwd = self.repository_cwd(thread_id)?;

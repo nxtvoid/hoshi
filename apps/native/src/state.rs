@@ -765,6 +765,19 @@ impl Workspace {
         }
     }
 
+    /// Shows the thread's context window in its card or under the composer, and saves it.
+    pub fn set_context_meter(
+        &mut self,
+        place: hoshi_core::ContextMeterPlace,
+        cx: &mut Context<Self>,
+    ) {
+        if self.settings.context_meter == place {
+            return;
+        }
+        self.settings.context_meter = place;
+        self.save_settings(cx);
+    }
+
     /// Reads the usage limits the thread's card shows again; the engine hands them over as it
     /// reads them. A failed read is tried once more soon, unless it was that try.
     fn read_usage_limits(&mut self, retry: bool, cx: &mut Context<Self>) -> Task<()> {

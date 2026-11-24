@@ -28,8 +28,12 @@ pub fn status(dir: &str) -> Result<GitStatus, String> {
         ],
     )?;
     let mut status = parse_status(&output);
-    status.has_remote = git::stdout(dir, &["remote"])
-        .is_ok_and(|remotes| remotes.lines().any(|remote| remote.trim() == "origin"));
+    let origin = git::origin_url(dir);
+    status.has_remote = origin.is_some();
+    status.forge = origin
+        .as_deref()
+        .and_then(hoshi_forge::parse_remote)
+        .map(|repository| repository.forge);
     if let Some(branch) = status.branch.clone() {
         let base = base_branch(dir, &branch);
         status.default_branch = base.as_ref().map(|(name, _)| name.clone());
@@ -259,6 +263,35 @@ pub fn split_message(message: &str) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_status_tells_the_forge_origin_is_on() {
+        let repo = git::tests::temp_repository("forge");
+        let dir = repo.to_string_lossy().into_owned();
+        let forge = |url: Option<&str>| {
+            let _ = git::stdout(&dir, &["remote", "remove", "origin"]);
+            if let Some(url) = url {
+                git::stdout(&dir, &["remote", "add", "origin", url]).unwrap();
+            }
+            let status = status(&dir).unwrap();
+            (status.has_remote, status.forge)
+        };
+
+        assert_eq!(forge(None), (false, None));
+        assert_eq!(
+            forge(Some("git@github.com:acme/shop.git")),
+            (true, Some(hoshi_core::ForgeKind::Github))
+        );
+        assert_eq!(
+            forge(Some("https://bitbucket.org/acme/shop.git")),
+            (true, Some(hoshi_core::ForgeKind::Bitbucket))
+        );
+        assert_eq!(
+            forge(Some("https://git.example.com/acme/shop.git")),
+            (true, None)
+        );
+        let _ = std::fs::remove_dir_all(&repo);
+    }
 
     #[test]
     fn reads_the_branch_its_counts_and_whether_anything_changed() {

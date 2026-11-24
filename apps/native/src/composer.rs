@@ -9,6 +9,7 @@ pub(crate) use model_picker::{
 };
 mod chips;
 mod context;
+pub use context::{COMPACT_COMMAND, CROWDED_PERCENT, arc, context_percent};
 mod delegated_request;
 mod footer;
 mod handoff;

@@ -120,10 +120,6 @@ impl ThreadDetails {
         }
         self.shown_thread = thread.clone();
         self.popover_open = false;
-        self.branch_menu_open = false;
-        self.branches = None;
-        self.previous_agents_open = false;
-        self.servers_expanded = false;
         self.error = None;
         self.server_error = None;
         let Some(thread_id) = thread else {

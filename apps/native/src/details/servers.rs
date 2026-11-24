@@ -2,8 +2,25 @@ use crate::m;
 use hoshi_core::{LocalServer, ServerOrigin};
 use std::time::Duration;
 
-/// Rows shown before the rest folds behind "Show more".
-pub const SERVERS_SHOWN: usize = 4;
+/// Rows shown before the rest go in a menu.
+pub const SERVERS_SHOWN: usize = 3;
+
+/// The language whose icon shows what a server runs on, by its process; `None` when the
+/// process tells nothing known.
+pub fn runtime_language(process: Option<&str>) -> Option<&'static str> {
+    let name = process?.trim().to_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    Some(match name {
+        "node" | "nodejs" | "npm" | "npx" | "pnpm" | "yarn" | "bun" | "deno" => "javascript",
+        "uvicorn" | "gunicorn" | "hypercorn" | "flask" | "py" => "python",
+        "ruby" | "puma" | "rails" | "rackup" => "ruby",
+        "go" => "go",
+        "cargo" => "rust",
+        _ if name.starts_with("python") => "python",
+        _ if name.starts_with("docker") || name.starts_with("com.docker") => "dockerfile",
+        _ => return None,
+    })
+}
 
 /// How long a server has run, in its largest whole unit, such as "12 min".
 pub fn server_age(started_at: u64, now: u64) -> String {
@@ -59,7 +76,7 @@ pub fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{age_tick, server_age, server_detail, stops_from_row};
+    use super::{age_tick, runtime_language, server_age, server_detail, stops_from_row};
     use hoshi_core::{LocalServer, ServerOrigin};
     use std::time::Duration;
 
@@ -72,6 +89,7 @@ mod tests {
             process_name: Some("java".into()),
             origin: ServerOrigin::Agent,
             started_at: Some(NOW - 12 * 60_000 - 30_000),
+            web: true,
         }
     }
 
@@ -125,5 +143,18 @@ mod tests {
             ..server()
         };
         assert_eq!(server_detail(&unknown, NOW), "Agent · java");
+    }
+
+    #[test]
+    fn a_server_shows_the_runtime_its_process_names() {
+        assert_eq!(runtime_language(Some("node.exe")), Some("javascript"));
+        assert_eq!(runtime_language(Some("Python3.12")), Some("python"));
+        assert_eq!(
+            runtime_language(Some("com.docker.backend")),
+            Some("dockerfile")
+        );
+        assert_eq!(runtime_language(Some("puma")), Some("ruby"));
+        assert_eq!(runtime_language(Some("my-api")), None);
+        assert_eq!(runtime_language(None), None);
     }
 }

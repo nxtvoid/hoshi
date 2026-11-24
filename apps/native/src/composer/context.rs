@@ -11,8 +11,8 @@ use hoshi_ui::prelude::*;
 use std::f32::consts::{FRAC_PI_2, TAU};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const COMPACT_COMMAND: &str = "/compact";
-const CROWDED_PERCENT: f32 = 90.;
+pub const COMPACT_COMMAND: &str = "/compact";
+pub const CROWDED_PERCENT: f32 = 90.;
 /// How often a stale cache is looked for while the composer shows.
 pub(super) const CHECK_EVERY: Duration = Duration::from_secs(30);
 
@@ -132,6 +132,9 @@ impl Composer {
 
     pub(super) fn render_context_meter(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let workspace = self.workspace.read(cx);
+        if workspace.settings.context_meter != hoshi_core::ContextMeterPlace::Composer {
+            return None;
+        }
         let thread_id = workspace.open_thread_id(cx)?;
         let usage = *workspace.context_usages.get(&thread_id)?;
         let working = self.turn_running(&thread_id, cx);
@@ -268,7 +271,8 @@ fn ring(percent: f32) -> impl IntoElement {
     .size_3p5()
 }
 
-fn arc(
+/// A stroke along `fraction` of a circle, clockwise from the top.
+pub fn arc(
     center: Point<Pixels>,
     radius: Pixels,
     stroke: Pixels,

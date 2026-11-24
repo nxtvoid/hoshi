@@ -15,8 +15,20 @@ pub struct AppSettings {
     pub browser: BrowserSettings,
     /// The thread's card shows its provider's usage limits.
     pub usage_limits_in_details: bool,
+    /// Where the thread's context window shows.
+    pub context_meter: ContextMeterPlace,
     /// When the first-run setup was finished or skipped; `None` until then.
     pub onboarding_completed_at: Option<String>,
+}
+
+/// Where the thread's context window shows: its card, with the button that compacts it, or
+/// under the composer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextMeterPlace {
+    #[default]
+    Details,
+    Composer,
 }
 
 /// What the app shows when it opens.

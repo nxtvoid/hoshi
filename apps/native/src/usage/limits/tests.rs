@@ -1,8 +1,9 @@
 use super::{
     ExtraTexts, LimitTone, ResetDay, SectionState, Span, amount, banked_resets_for, even_pace_left,
     extra_left_percent, extra_texts, format_expiry, format_span, limit_tone, masked_email,
-    remaining_percent, reset_moment, restored_percent, section_state, session_spent,
-    spendable_resets, time_left_percent, time_to_expiry, time_to_reset, window_label,
+    remaining_percent, reset_moment, reset_short, restored_percent, section_state, session_spent,
+    short_window_label, spendable_resets, time_left_percent, time_to_expiry, time_to_reset,
+    window_label,
 };
 use chrono::{DateTime, FixedOffset, TimeZone, Utc};
 use hoshi_core::{
@@ -224,6 +225,34 @@ fn a_reset_reads_as_today_tomorrow_a_weekday_or_a_date() {
         Some((ResetDay::Other, "Nov 24, 9:00 AM".into()))
     );
     assert_eq!(reset_moment(&at("soon"), &now), None);
+}
+
+#[test]
+fn a_short_reset_is_the_time_left_within_a_day_then_the_weekday_then_the_date() {
+    let zone = FixedOffset::west_opt(3 * 3600).unwrap();
+    let now = now().with_timezone(&zone);
+    let at = |time: &str| window(UsageWindowKind::Session, None, Some(time));
+    assert_eq!(
+        reset_short(&at("2026-11-13T16:08:00Z"), &now).as_deref(),
+        Some("4h 8m")
+    );
+    assert_eq!(
+        reset_short(&at("2026-11-17T12:00:00Z"), &now).as_deref(),
+        Some("Tue")
+    );
+    assert_eq!(
+        reset_short(&at("2026-11-24T12:00:00Z"), &now).as_deref(),
+        Some("Nov 24")
+    );
+    assert_eq!(reset_short(&at("soon"), &now), None);
+}
+
+#[test]
+fn a_models_own_window_goes_by_the_model_alone_where_room_is_short() {
+    let model = window(UsageWindowKind::Weekly, Some("Fable"), None);
+    assert_eq!(short_window_label(&model), "Fable");
+    let session = window(UsageWindowKind::Session, None, None);
+    assert_eq!(short_window_label(&session), "Session");
 }
 
 #[test]

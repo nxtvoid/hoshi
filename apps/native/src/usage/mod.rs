@@ -12,8 +12,8 @@ use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::Icon;
 use gpui_kit::*;
 use hoshi_core::{
-    BankedGrant, BankedResetSpend, BankedResets, DEFAULT_PROVIDER, ExtraUsage, SpendUnit,
-    UsageLimits, UsageWindow,
+    BankedGrant, BankedResetSpend, BankedResets, ContextMeterPlace, DEFAULT_PROVIDER, ExtraUsage,
+    SpendUnit, UsageLimits, UsageWindow,
 };
 use hoshi_ui::prelude::*;
 use limits::{
@@ -1111,6 +1111,40 @@ impl UsageView {
             )
     }
 
+    /// Where the thread's context window shows: its card or under the composer.
+    fn context_meter(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let current = self.workspace.read(cx).settings.context_meter;
+        let label = |place: ContextMeterPlace| match place {
+            ContextMeterPlace::Details => m::context_meter_in_details(),
+            ContextMeterPlace::Composer => m::context_meter_under_composer(),
+        };
+        let places = [ContextMeterPlace::Details, ContextMeterPlace::Composer].map(|place| {
+            let workspace = self.workspace.downgrade();
+            SelectOption::new(
+                SharedString::from(format!("context-meter-{place:?}")),
+                label(place),
+                place == current,
+            )
+            .on_select(move |_, cx| {
+                workspace
+                    .update(cx, |workspace, cx| workspace.set_context_meter(place, cx))
+                    .ok();
+            })
+        });
+        div()
+            .debug_selector(|| "context-meter-setting".into())
+            .pt_3()
+            .child(
+                SettingsRow::new(m::context_meter_setting())
+                    .description(m::context_meter_setting_description())
+                    .control(
+                        Select::new("context-meter", label(current))
+                            .align(Align::End)
+                            .options(places),
+                    ),
+            )
+    }
+
     /// A provider whose limits only its own page shows.
     fn elsewhere(
         &self,
@@ -1354,6 +1388,7 @@ impl Render for UsageView {
                 .into_any_element(),
             );
         }
+        content.push(self.context_meter(cx).into_any_element());
         div()
             .flex()
             .flex_col()

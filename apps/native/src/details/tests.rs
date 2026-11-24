@@ -89,6 +89,7 @@ fn harness(cx: &mut TestAppContext, name: &str, width: f32) -> Harness {
         .unwrap();
     cx.update(|cx| {
         gpui_kit::init(cx);
+        hoshi_ui::DialogLayer::init(cx);
         hoshi_ui::theme::apply(ThemeMode::Dark, cx);
     });
     let workspace = cx.update(|cx| cx.new(|cx| Workspace::new(engine, notifications, cx)));
@@ -178,6 +179,36 @@ fn the_editor_menu_drops_under_its_whole_row(cx: &mut TestAppContext) {
     let arrow =
         h.cx.debug_bounds("details-editor-arrow")
             .expect("the arrow shows");
+    h.cx.simulate_click(arrow.center(), Modifiers::default());
+    redraw(&mut h.cx);
+
+    let menu = h.cx.debug_bounds("popover-popup").expect("the menu opens");
+    assert_eq!(menu.origin.x, row.origin.x, "menu: {menu:?}, row: {row:?}");
+    assert_eq!(
+        menu.size.width, row.size.width,
+        "menu: {menu:?}, row: {row:?}"
+    );
+    assert!(
+        menu.origin.y >= row.bottom(),
+        "menu: {menu:?}, row: {row:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_git_menu_drops_under_the_whole_branch_row(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-git-menu-width", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+
+    let row =
+        h.cx.debug_bounds("details-branch-row")
+            .expect("the branch row shows");
+    let arrow =
+        h.cx.debug_bounds("details-git-arrow")
+            .expect("the git menu's arrow shows");
     h.cx.simulate_click(arrow.center(), Modifiers::default());
     redraw(&mut h.cx);
 
@@ -292,6 +323,186 @@ fn the_git_action_commits_and_says_so_in_place_of_the_button(cx: &mut TestAppCon
 }
 
 #[gpui_kit::test]
+fn the_main_git_action_waits_a_moment_in_which_it_can_be_undone(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-undo", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+    let press = |h: &mut Harness| {
+        h.details.update_in(&mut h.cx, |details, window, cx| {
+            let quick = super::git::quick_action(&details.statuses["t"], false);
+            let request = GitActionRequest {
+                message: Some("Note three and four".into()),
+                ..details.quick_request(quick.action)
+            };
+            details.start_git(request, Some(quick.label), window, cx)
+        });
+        redraw(&mut h.cx);
+    };
+
+    press(&mut h);
+    assert!(h.cx.debug_bounds("details-git-pending").is_some());
+    let undo =
+        h.cx.debug_bounds("details-git-undo")
+            .expect("the undo button shows");
+    h.cx.simulate_click(undo.center(), Modifiers::default());
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-git-pending").is_none());
+    h.details.read_with(&h.cx, |details, _| {
+        assert!(details.pending_git.is_empty());
+        assert!(details.running.is_empty() && details.done.is_empty());
+        assert!(details.statuses["t"].has_changes, "nothing was committed");
+    });
+
+    press(&mut h);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.model.apply(&hoshi_core::Event::TurnStarted {
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            at: "2026-11-16T10:00:00Z".into(),
+            model: None,
+        });
+        cx.notify();
+    });
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    redraw(&mut h.cx);
+    h.details.read_with(&h.cx, |details, _| {
+        assert!(details.pending_git.is_empty() && details.running.is_empty());
+        assert!(details.error.is_some(), "it says why it didn't run");
+        assert!(
+            details.statuses["t"].has_changes,
+            "a turn started: nothing ran"
+        );
+    });
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.model.apply(&hoshi_core::Event::TurnCompleted {
+            thread_id: "t".into(),
+            turn_id: "turn".into(),
+            outcome: hoshi_core::TurnOutcome::Completed,
+            at: "2026-11-16T10:01:00Z".into(),
+        });
+        cx.notify();
+    });
+
+    press(&mut h);
+    let arrow =
+        h.cx.debug_bounds("details-git-arrow")
+            .expect("the git menu's arrow shows");
+    h.cx.simulate_click(arrow.center(), Modifiers::default());
+    redraw(&mut h.cx);
+    let commit =
+        h.cx.debug_bounds("menu-item-details-git-commit")
+            .expect("the commit item shows");
+    h.cx.simulate_click(commit.center(), Modifiers::default());
+    redraw(&mut h.cx);
+    assert!(
+        h.details
+            .read_with(&h.cx, |details, _| details.pending_git.contains_key("t")),
+        "the menu's actions wait for the one counting down"
+    );
+
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    wait_for(&mut h, "the commit", |details| {
+        details.done.contains_key("t")
+    });
+    assert!(h.cx.debug_bounds("details-git-pending").is_none());
+}
+
+#[gpui_kit::test]
+fn a_waiting_push_asks_again_if_the_checkout_moved_to_the_default_branch(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-undo-default", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+    h.details.update_in(&mut h.cx, |details, window, cx| {
+        let request = GitActionRequest {
+            action: GitAction::CommitPush,
+            message: Some("Note three and four".into()),
+            ..details.quick_request(GitAction::CommitPush)
+        };
+        details.start_git(request, Some(super::git::Label::CommitPush), window, cx)
+    });
+    let project = h.details.read_with(&h.cx, |details, cx| {
+        details
+            .workspace
+            .read(cx)
+            .model
+            .project("p")
+            .map(|project| PathBuf::from(&project.workspace_root))
+            .unwrap()
+    });
+    git(&project, &["checkout", "-q", "main"]);
+
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    wait_for(&mut h, "the fresh checkout", |details| {
+        details.pending_git.is_empty() && details.statuses["t"].branch.as_deref() == Some("main")
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    redraw(&mut h.cx);
+    h.details.read_with(&h.cx, |details, _| {
+        assert!(details.running.is_empty() && details.done.is_empty());
+        assert!(
+            details.statuses["t"].has_changes,
+            "on main it asks first instead of committing and pushing"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn a_waiting_git_action_that_cannot_read_the_checkout_does_not_run(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-undo-unread", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    wait_for(&mut h, "the checkout", |details| {
+        details.statuses.contains_key("t")
+    });
+    h.details.update_in(&mut h.cx, |details, window, cx| {
+        let request = GitActionRequest {
+            action: GitAction::CommitPush,
+            message: Some("Note three and four".into()),
+            ..details.quick_request(GitAction::CommitPush)
+        };
+        details.start_git(request, Some(super::git::Label::CommitPush), window, cx)
+    });
+    let project = h.details.read_with(&h.cx, |details, cx| {
+        details
+            .workspace
+            .read(cx)
+            .model
+            .project("p")
+            .map(|project| PathBuf::from(&project.workspace_root))
+            .unwrap()
+    });
+    std::fs::rename(project.join(".git"), project.join(".git-away")).unwrap();
+
+    h.cx.executor().advance_clock(super::UNDO_FOR);
+    wait_for(&mut h, "the countdown to end", |details| {
+        details.pending_git.is_empty()
+    });
+    h.details.read_with(&h.cx, |details, _| {
+        assert!(details.running.is_empty() && details.done.is_empty());
+        assert!(details.error.is_some(), "it says why it didn't run");
+    });
+    std::fs::rename(project.join(".git-away"), project.join(".git")).unwrap();
+    assert!(
+        Process::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&project)
+            .output()
+            .is_ok_and(|output| !output.stdout.is_empty()),
+        "nothing was committed"
+    );
+}
+
+#[gpui_kit::test]
 fn a_disabled_git_action_says_why_on_hover(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-git-why", 1200.);
     h.details
@@ -320,7 +531,7 @@ fn a_disabled_git_action_says_why_on_hover(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_long_list_of_previous_agents_draws_only_the_rows_in_view(cx: &mut TestAppContext) {
+fn many_previous_agents_stay_in_the_show_all_menu(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-many-agents", 1200.);
     let workspace = h
         .details
@@ -354,24 +565,106 @@ fn a_long_list_of_previous_agents_draws_only_the_rows_in_view(cx: &mut TestAppCo
         }
         cx.notify();
     });
-    h.details.update(&mut h.cx, |details, cx| {
-        details.previous_agents_open = true;
-        details.set_open(true, cx);
-    });
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
     redraw(&mut h.cx);
 
-    let drawn = (0..count)
-        .filter(|index| {
-            h.cx.debug_bounds(Box::leak(
-                format!("details-agent-call-{index}").into_boxed_str(),
-            ))
-            .is_some()
-        })
-        .count();
-    assert!(drawn > 0, "the first previous agents show");
+    let rows = |h: &mut Harness| {
+        (0..count)
+            .filter(|index| {
+                h.cx.debug_bounds(Box::leak(
+                    format!("details-agent-call-{index}").into_boxed_str(),
+                ))
+                .is_some()
+            })
+            .count()
+    };
+    assert_eq!(rows(&mut h), 0, "done agents get no row of their own");
+    assert!(h.cx.debug_bounds("details-agents-summary").is_some());
+
+    let show_all =
+        h.cx.debug_bounds("details-agents-show-all")
+            .expect("the show all button shows");
+    h.cx.simulate_click(show_all.center(), Modifiers::default());
+    redraw(&mut h.cx);
     assert!(
-        drawn < count,
-        "only the rows in view are drawn, not all {count}"
+        h.cx.debug_bounds("menu-item-details-agent-option-call-0")
+            .is_some(),
+        "the menu lists the previous agents"
+    );
+}
+
+#[gpui_kit::test]
+fn the_first_servers_get_a_row_and_the_rest_a_menu(cx: &mut TestAppContext) {
+    use hoshi_core::{LocalServer, ServerOrigin};
+    let mut h = harness(cx, "details-servers", 1200.);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    let servers: Vec<LocalServer> = [5173, 8080, 6006, 3000, 9229]
+        .into_iter()
+        .enumerate()
+        .map(|(index, port)| LocalServer {
+            port,
+            pid: 4000 + index as u32,
+            process_name: Some("node".into()),
+            origin: ServerOrigin::Terminal,
+            started_at: None,
+            web: true,
+        })
+        .collect();
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.servers.insert("t".into(), servers);
+        cx.notify();
+    });
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    redraw(&mut h.cx);
+
+    for shown in ["4000:5173", "4001:8080", "4002:6006"] {
+        let selector = format!("details-server-{shown}");
+        assert!(
+            h.cx.debug_bounds(Box::leak(selector.into_boxed_str()))
+                .is_some(),
+            "{shown} has a row"
+        );
+    }
+    assert!(h.cx.debug_bounds("details-server-4003:3000").is_none());
+    let panel =
+        h.cx.debug_bounds("details-servers")
+            .expect("the servers box shows");
+    let first =
+        h.cx.debug_bounds("details-server-4000:5173")
+            .expect("the first server shows");
+    h.cx.simulate_mouse_move(first.center(), None, Modifiers::default());
+    redraw(&mut h.cx);
+    h.cx.executor().advance_clock(Duration::from_millis(700));
+    redraw(&mut h.cx);
+    let tooltip = h.cx.debug_bounds("tooltip").expect("the detail shows");
+    assert!(
+        tooltip.right() < panel.left(),
+        "tooltip: {tooltip:?}, box: {panel:?}"
+    );
+
+    let more =
+        h.cx.debug_bounds("details-servers-more")
+            .expect("the rest fold behind +2 more");
+    h.cx.simulate_click(more.center(), Modifiers::default());
+    redraw(&mut h.cx);
+    assert!(
+        h.cx.debug_bounds("details-server-4003:3000").is_some(),
+        "the popover shows the servers past the first ones as rows"
+    );
+    assert!(
+        h.cx.debug_bounds("details-server-stop-4003:3000").is_some(),
+        "they can be stopped from there too"
+    );
+    let menu =
+        h.cx.debug_bounds("details-servers-more-list")
+            .expect("the popover shows");
+    assert!(
+        menu.right() < panel.left(),
+        "menu: {menu:?}, box: {panel:?}"
     );
 }
 
@@ -450,6 +743,49 @@ fn a_subagent_row_asks_to_show_its_call_in_the_transcript(cx: &mut TestAppContex
             item_id: "call-1".into(),
         }]
     );
+}
+
+#[gpui_kit::test]
+fn the_card_shows_the_plans_extra_usage_even_without_windows(cx: &mut TestAppContext) {
+    use hoshi_core::{ExtraUsage, SpendUnit, UsageLimits};
+    let mut h = harness(cx, "details-extra", 1200.);
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    let set_extra = |extra: Option<ExtraUsage>| {
+        move |workspace: &mut Workspace, cx: &mut Context<Workspace>| {
+            workspace.providers.usage_limits.insert(
+                hoshi_core::DEFAULT_PROVIDER.to_owned(),
+                UsageLimits {
+                    windows: Vec::new(),
+                    banked_resets: None,
+                    account: None,
+                    extra_usage: extra,
+                },
+            );
+            workspace.set_usage_limits_in_details(true, cx);
+        }
+    };
+    workspace.update(&mut h.cx, set_extra(None));
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage").is_none());
+
+    workspace.update(
+        &mut h.cx,
+        set_extra(Some(ExtraUsage {
+            unit: SpendUnit::Credits { exponent: 2 },
+            used: None,
+            limit: None,
+            balance: Some(51_250),
+            unlimited: false,
+            resets_at: None,
+        })),
+    );
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("details-usage").is_some());
+    assert!(h.cx.debug_bounds("details-extra").is_some());
 }
 
 #[gpui_kit::test]
@@ -844,5 +1180,59 @@ fn only_the_latest_launch_tells_its_failure(cx: &mut TestAppContext) {
     assert!(
         h.details
             .read_with(&h.cx, |details, _| details.error.is_none())
+    );
+}
+
+#[gpui_kit::test]
+fn the_compact_button_shows_whether_or_not_compacting_is_worth_it_yet(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-compact", 1200.);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    for used_tokens in [3_000, 150_000] {
+        workspace.update(&mut h.cx, |workspace, cx| {
+            workspace.context_usages.insert(
+                "t".into(),
+                hoshi_core::ContextUsage {
+                    used_tokens,
+                    max_tokens: Some(200_000),
+                    cache_ttl_secs: None,
+                    cache_expires_at: None,
+                },
+            );
+            cx.notify();
+        });
+        redraw(&mut h.cx);
+        assert!(
+            h.cx.debug_bounds("details-compact").is_some(),
+            "the button shows at {used_tokens} tokens"
+        );
+    }
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.context_usages.insert(
+            "t".into(),
+            hoshi_core::ContextUsage {
+                used_tokens: 42_000,
+                max_tokens: None,
+                cache_ttl_secs: None,
+                cache_expires_at: None,
+            },
+        );
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(
+        h.cx.debug_bounds("details-context").is_some(),
+        "an unknown window still shows the tokens used"
+    );
+
+    workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.set_context_meter(hoshi_core::ContextMeterPlace::Composer, cx)
+    });
+    redraw(&mut h.cx);
+    assert!(
+        h.cx.debug_bounds("details-context").is_none(),
+        "the context shows under the composer instead"
     );
 }

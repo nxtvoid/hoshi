@@ -19,6 +19,9 @@ pub struct LocalServer {
     pub origin: ServerOrigin,
     /// When the process started, in Unix milliseconds.
     pub started_at: Option<u64>,
+    /// It speaks HTTP, so a browser can open it; `false` until that is known.
+    #[serde(default)]
+    pub web: bool,
 }
 
 /// The servers a thread's agent and terminals left listening, by port.
