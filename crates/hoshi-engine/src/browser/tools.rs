@@ -581,7 +581,7 @@ impl Browsing {
                     delta_y,
                 } => page.scroll_at((*x, *y), (*delta_x, *delta_y)),
                 BrowserInput::Key { key } => page.press(key),
-                BrowserInput::Text { text } => page.insert_text(text),
+                BrowserInput::Text { text } => page.type_as_user(text),
             }
         })
     }

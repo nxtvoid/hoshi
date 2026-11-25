@@ -688,4 +688,40 @@ mod tests {
         redraw(&mut cx);
         assert!(sent.take().iter().any(|request| request.contains("Input")));
     }
+
+    #[gpui_kit::test]
+    fn tab_moves_within_the_page_and_the_page_keeps_the_focus(cx: &mut TestAppContext) {
+        let (workspace, panel, mut cx) = harness(false, cx);
+        let (browsers, sent) = crate::browser::Browsers::detached();
+        let browsers = cx.update(|_, cx| cx.new(|_| browsers));
+        workspace.update(&mut cx, |workspace, _| {
+            workspace.browsers = browsers.clone()
+        });
+        browsers.update(&mut cx, |b, cx| b.receive_page(agent_page(false), cx));
+        panel.update(&mut cx, |panel, cx| {
+            panel.open_surface("t", SurfaceKind::Browser, cx)
+        });
+        redraw(&mut cx);
+        let page = cx.debug_bounds("browser-page").unwrap();
+        cx.simulate_click(page.center(), Modifiers::none());
+        sent.take();
+
+        for (keys, sends) in [
+            ("tab", "\"Tab\""),
+            ("shift-tab", "\"Shift+Tab\""),
+            ("a", "Text"),
+        ] {
+            cx.simulate_keystrokes(keys);
+            redraw(&mut cx);
+            let inputs: Vec<String> = sent
+                .take()
+                .into_iter()
+                .filter(|request| request.contains("Input"))
+                .collect();
+            assert!(
+                inputs.len() == 1 && inputs[0].contains(sends),
+                "{keys}: {inputs:?}"
+            );
+        }
+    }
 }

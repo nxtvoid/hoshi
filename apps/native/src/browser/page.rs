@@ -62,6 +62,7 @@ pub fn key_input(keystroke: &Keystroke) -> Option<BrowserInput> {
     }
     let named = match keystroke.key.as_str() {
         "enter" => "Enter",
+        "tab" if modifiers.shift => "Shift+Tab",
         "tab" => "Tab",
         "escape" => "Escape",
         "backspace" => "Backspace",
@@ -157,6 +158,12 @@ mod tests {
             key("left"),
             Some(BrowserInput::Key {
                 key: "ArrowLeft".into()
+            })
+        );
+        assert_eq!(
+            key("shift-tab"),
+            Some(BrowserInput::Key {
+                key: "Shift+Tab".into()
             })
         );
         let mut typed = Keystroke::parse("shift-a").unwrap();

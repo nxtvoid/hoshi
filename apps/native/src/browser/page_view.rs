@@ -41,7 +41,7 @@ pub struct PageView {
     scale: Option<f32>,
     pressed: bool,
     wheel: Option<Wheel>,
-    _subscriptions: [Subscription; 2],
+    _subscriptions: [Subscription; 3],
 }
 
 impl EventEmitter<ViewportChanged> for PageView {}
@@ -63,6 +63,21 @@ impl PageView {
             }
         });
         browsers.update(cx, |browsers, _| browsers.view(&thread_id, true));
+        let focus = cx.focus_handle();
+        // The window's own Tab, which moves its focus, would come before the page's.
+        let tab = {
+            let focus = focus.clone();
+            let this = cx.weak_entity();
+            cx.intercept_keystrokes(move |event, window, cx| {
+                if event.keystroke.key != "tab" || !focus.is_focused(window) {
+                    return;
+                }
+                let sent = this.update(cx, |this, cx| this.press(&event.keystroke, cx));
+                if sent.unwrap_or(false) {
+                    cx.stop_propagation();
+                }
+            })
+        };
         Self {
             thread_id,
             browsers,
@@ -70,13 +85,13 @@ impl PageView {
             selector,
             radius: px(0.),
             scrolls: true,
-            focus: cx.focus_handle(),
+            focus,
             viewing: true,
             viewport: None,
             scale: None,
             pressed: false,
             wheel: None,
-            _subscriptions: [changes, release],
+            _subscriptions: [changes, release, tab],
         }
     }
 
@@ -182,11 +197,11 @@ impl PageView {
         .detach();
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    /// Sends the key to the page, if it takes it.
+    fn press(&self, keystroke: &Keystroke, cx: &App) -> bool {
         if self.browsers.read(cx).page(&self.thread_id).is_none() {
-            return;
+            return false;
         }
-        let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
         let paste = (modifiers.control || modifiers.platform)
             && !modifiers.alt
@@ -199,8 +214,15 @@ impl PageView {
         } else {
             key_input(keystroke)
         };
+        let sent = input.is_some();
         if let Some(input) = input {
             self.send(input, cx);
+        }
+        sent
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.press(&event.keystroke, cx) {
             cx.stop_propagation();
         }
     }
