@@ -1,19 +1,23 @@
-//! The headless browser agents drive, a page per thread, as t3code's server-side preview:
-//! real input events, the accessibility tree with refs to act on, screenshots and console.
+//! The headless browser agents drive, a page per thread: real input events, the accessibility
+//! tree with refs to act on, screenshots and console.
 
+mod act;
 mod cdp;
 pub(crate) mod html;
+mod keys;
 mod launch;
+mod refs;
 pub(crate) mod tools;
 
 pub use launch::find_browser;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use cdp::Connection;
+use cdp::{CALL_TIMEOUT, Connection};
 use launch::BrowserProcess;
+use refs::{Place, Refs, Tree, text_of};
 use serde_json::{Value, json};
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread;
@@ -21,6 +25,8 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_SIZE: (u32, u32) = (1280, 800);
 const CONSOLE_KEPT: usize = 200;
+/// Dialogs in a row dismissed for a page to go elsewhere.
+const MAX_DISMISSED: usize = 20;
 const READY_POLL: Duration = Duration::from_millis(100);
 const SCREENCAST_QUALITY: u8 = 85;
 /// The most device pixels per pixel a page paints at. The browser's own screen has it, as a
@@ -74,11 +80,16 @@ impl Browser {
             Arc::downgrade(&console),
             observer,
         );
+        let dialog = Arc::new(Mutex::new(None));
+        follow_dialogs(&self.connection, &session_id, Arc::downgrade(&dialog));
         let mut page = Page {
             connection: self.connection.clone(),
             target_id,
             session_id,
-            refs: HashMap::new(),
+            refs: Refs::default(),
+            dialog,
+            acted_at: None,
+            acted: false,
             console,
             size,
             zoom: 1.0,
@@ -87,6 +98,12 @@ impl Browser {
         for domain in ["Page.enable", "Runtime.enable", "DOM.enable"] {
             page.call(domain, json!({}))?;
         }
+        // Behind another thread's page it would count as hidden: its timers slow down and
+        // pointing at it takes seconds.
+        page.call(
+            "Emulation.setFocusEmulationEnabled",
+            json!({ "enabled": true }),
+        )?;
         page.resize(size)?;
         Ok(page)
     }
@@ -243,12 +260,82 @@ fn console_line(method: &str, params: &Value) -> String {
     format!("{kind}: {}", args.join(" "))
 }
 
+/// A dialog of the page's own: an alert, a confirm or a prompt.
+struct Dialog {
+    /// Tells it from the next one, which may open as it closes.
+    serial: u64,
+    kind: String,
+    message: String,
+    /// What a prompt offers as its answer.
+    offered: String,
+}
+
+impl Dialog {
+    fn says(&self) -> String {
+        format!(
+            "the page waits on a dialog ({}) that says {:?}: press Enter to accept it or Escape to dismiss it",
+            self.kind, self.message
+        )
+    }
+}
+
+/// Keeps `dialog` with the one the page shows. Leaving a page is accepted on its own, as
+/// whoever asked to leave meant it.
+fn follow_dialogs(
+    connection: &Arc<Connection>,
+    session: &str,
+    dialog: Weak<Mutex<Option<Dialog>>>,
+) {
+    let events = connection.subscribe();
+    let connection = Arc::downgrade(connection);
+    let session = session.to_owned();
+    thread::spawn(move || {
+        let mut serial = 0;
+        for event in events {
+            let Some(dialog) = dialog.upgrade() else {
+                return;
+            };
+            if event.session_id.as_deref() != Some(session.as_str()) {
+                continue;
+            }
+            match event.method.as_str() {
+                "Page.javascriptDialogOpening" if event.params["type"] == "beforeunload" => {
+                    let Some(connection) = connection.upgrade() else {
+                        return;
+                    };
+                    let _ = connection.call(
+                        "Page.handleJavaScriptDialog",
+                        json!({ "accept": true }),
+                        Some(&session),
+                    );
+                }
+                "Page.javascriptDialogOpening" => {
+                    serial += 1;
+                    *lock(&dialog) = Some(Dialog {
+                        serial,
+                        offered: text_of(&event.params["defaultPrompt"]),
+                        kind: text_of(&event.params["type"]),
+                        message: text_of(&event.params["message"]),
+                    });
+                }
+                "Page.javascriptDialogClosed" => *lock(&dialog) = None,
+                _ => {}
+            }
+        }
+    });
+}
+
 pub struct Page {
     connection: Arc<Connection>,
     target_id: String,
     session_id: String,
-    /// The last snapshot's refs, to the DOM nodes they name.
-    refs: HashMap<String, i64>,
+    refs: Refs,
+    /// The dialog the page shows, which holds it until answered.
+    dialog: Arc<Mutex<Option<Dialog>>>,
+    /// Where the agent last acted on an element.
+    acted_at: Option<(f64, f64)>,
+    /// Whether the agent's action reached the page.
+    acted: bool,
     console: Arc<Mutex<VecDeque<String>>>,
     size: (u32, u32),
     /// Page zoom: the page lays out at `size / zoom` CSS pixels and paints at `size`.
@@ -259,7 +346,49 @@ pub struct Page {
 
 impl Page {
     fn call(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.connection.call(method, params, Some(&self.session_id))
+        self.call_within(method, params, CALL_TIMEOUT)
+    }
+
+    /// Gives up at once while a dialog holds the page, which answers nothing until it closes.
+    fn call_within(&self, method: &str, params: Value, timeout: Duration) -> Result<Value, String> {
+        let held = || lock(&self.dialog).as_ref().map(Dialog::says);
+        if let Some(reason) = held() {
+            return Err(reason);
+        }
+        self.connection
+            .call_unless(method, params, Some(&self.session_id), timeout, held)
+            .map_err(|error| match error.as_str() {
+                "Session with given id not found." => "the page was closed".into(),
+                _ => error,
+            })
+    }
+
+    /// Accepts or dismisses the dialog the page shows; `false` when it shows none.
+    fn answer_dialog(&self, accept: bool) -> Result<bool, String> {
+        let Some((serial, offered)) = lock(&self.dialog)
+            .as_ref()
+            .map(|dialog| (dialog.serial, dialog.offered.clone()))
+        else {
+            return Ok(false);
+        };
+        self.connection.call(
+            "Page.handleJavaScriptDialog",
+            json!({ "accept": accept, "promptText": offered }),
+            Some(&self.session_id),
+        )?;
+        lock(&self.dialog).take_if(|dialog| dialog.serial == serial);
+        Ok(true)
+    }
+
+    /// Dismisses the dialogs that would hold the page back from going elsewhere.
+    fn dismiss_dialogs(&self) -> Result<(), String> {
+        for _ in 0..MAX_DISMISSED {
+            if !self.answer_dialog(false)? {
+                break;
+            }
+            thread::sleep(READY_POLL);
+        }
+        Ok(())
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -268,6 +397,7 @@ impl Page {
 
     /// Goes to `url` and waits until it loaded, or `timeout` passed.
     pub fn navigate(&mut self, url: &str, timeout: Duration) -> Result<(), String> {
+        self.dismiss_dialogs()?;
         let result = self.call("Page.navigate", json!({ "url": url }))?;
         if let Some(error) = result["errorText"]
             .as_str()
@@ -312,153 +442,30 @@ impl Page {
 
     /// The accessibility tree as indented lines, each element with a `ref` to act on.
     pub fn snapshot(&mut self, max_chars: usize) -> Result<String, String> {
-        let tree = self.call("Accessibility.getFullAXTree", json!({}))?;
-        let nodes = tree["nodes"].as_array().cloned().unwrap_or_default();
-        let (text, refs) = format_tree(&nodes, max_chars);
-        self.refs = refs;
+        let place = self.place()?;
+        let nodes = self.nodes()?;
+        let tree = Tree::new(&nodes);
+        self.refs.begin(&tree, place);
+        let text = format_tree(&tree, max_chars, &mut self.refs);
+        self.refs.trim();
         Ok(text)
     }
 
-    fn node(&self, reference: &str) -> Result<i64, String> {
-        self.refs.get(reference).copied().ok_or_else(|| {
-            format!("no element {reference} in the last snapshot: take a new snapshot")
+    /// The page's accessibility nodes, the root first.
+    fn nodes(&self) -> Result<Vec<Value>, String> {
+        let mut tree = self.call("Accessibility.getFullAXTree", json!({}))?;
+        match tree["nodes"].take() {
+            Value::Array(nodes) => Ok(nodes),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn place(&self) -> Result<Place, String> {
+        let value = self.evaluate("[String(performance.timeOrigin), location.href]")?;
+        Ok(Place {
+            document: text_of(&value[0]),
+            url: text_of(&value[1]),
         })
-    }
-
-    fn center(&self, reference: &str) -> Result<(f64, f64), String> {
-        let node = self.node(reference)?;
-        let _ = self.call(
-            "DOM.scrollIntoViewIfNeeded",
-            json!({ "backendNodeId": node }),
-        );
-        let model = self.call("DOM.getBoxModel", json!({ "backendNodeId": node }))?;
-        let quad: Vec<f64> = model["model"]["content"]
-            .as_array()
-            .ok_or("the element isn't shown")?
-            .iter()
-            .filter_map(Value::as_f64)
-            .collect();
-        if quad.len() < 8 {
-            return Err("the element isn't shown".into());
-        }
-        let x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4.0;
-        let y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4.0;
-        Ok((x, y))
-    }
-
-    fn mouse(&self, kind: &str, (x, y): (f64, f64), extra: Value) -> Result<(), String> {
-        let mut params = json!({ "type": kind, "x": x, "y": y });
-        if let (Some(params), Some(extra)) = (params.as_object_mut(), extra.as_object()) {
-            params.extend(extra.clone());
-        }
-        self.call("Input.dispatchMouseEvent", params).map(|_| ())
-    }
-
-    pub fn click(&self, reference: &str) -> Result<(), String> {
-        let point = self.center(reference)?;
-        self.click_at(point)
-    }
-
-    pub fn click_at(&self, point: (f64, f64)) -> Result<(), String> {
-        let press = json!({ "button": "left", "clickCount": 1 });
-        self.mouse("mouseMoved", point, json!({}))?;
-        self.mouse("mousePressed", point, press.clone())?;
-        self.mouse("mouseReleased", point, press)
-    }
-
-    pub fn hover(&self, reference: &str) -> Result<(), String> {
-        let point = self.center(reference)?;
-        self.mouse("mouseMoved", point, json!({}))
-    }
-
-    /// Scrolls by `delta` pixels, at the element when given, else at the page's center.
-    pub fn scroll(&self, reference: Option<&str>, delta: (f64, f64)) -> Result<(), String> {
-        let point = match reference {
-            Some(reference) => self.center(reference)?,
-            None => (f64::from(self.size.0) / 2.0, f64::from(self.size.1) / 2.0),
-        };
-        self.mouse(
-            "mouseWheel",
-            point,
-            json!({ "deltaX": delta.0, "deltaY": delta.1 }),
-        )
-    }
-
-    fn call_on(&self, reference: &str, function: &str, arguments: Value) -> Result<Value, String> {
-        let node = self.node(reference)?;
-        let resolved = self.call("DOM.resolveNode", json!({ "backendNodeId": node }))?;
-        let object = resolved["object"]["objectId"]
-            .as_str()
-            .ok_or("the element is gone")?;
-        let result = self.call(
-            "Runtime.callFunctionOn",
-            json!({
-                "objectId": object,
-                "functionDeclaration": function,
-                "arguments": arguments,
-                "returnByValue": true,
-                "awaitPromise": true,
-            }),
-        )?;
-        script_result(&result)
-    }
-
-    /// Types `text` into the element, after emptying it when `clear`.
-    pub fn type_text(&self, reference: &str, text: &str, clear: bool) -> Result<(), String> {
-        let node = self.node(reference)?;
-        self.call("DOM.focus", json!({ "backendNodeId": node }))?;
-        if clear {
-            self.call_on(
-                reference,
-                "function () { if ('value' in this) { this.value = ''; this.dispatchEvent(new Event('input', { bubbles: true })); } else if (this.isContentEditable) { this.textContent = ''; } }",
-                json!([]),
-            )?;
-        }
-        self.call("Input.insertText", json!({ "text": text }))
-            .map(|_| ())
-    }
-
-    /// Picks the options of a `<select>` whose value or text is among `values`.
-    pub fn select(&self, reference: &str, values: &[String]) -> Result<(), String> {
-        self.call_on(
-            reference,
-            "function (values) { for (const option of this.options ?? []) { option.selected = values.includes(option.value) || values.includes(option.text); } this.dispatchEvent(new Event('input', { bubbles: true })); this.dispatchEvent(new Event('change', { bubbles: true })); }",
-            json!([{ "value": values }]),
-        )
-        .map(|_| ())
-    }
-
-    /// Presses a key such as `Enter`, `Tab`, `Escape`, `ArrowDown` or a single character.
-    pub fn press(&self, key: &str) -> Result<(), String> {
-        let (code, text): (i64, Option<&str>) = match key {
-            "Enter" => (13, Some("\r")),
-            "Tab" => (9, None),
-            "Escape" => (27, None),
-            "Backspace" => (8, None),
-            "Delete" => (46, None),
-            "ArrowLeft" => (37, None),
-            "ArrowUp" => (38, None),
-            "ArrowRight" => (39, None),
-            "ArrowDown" => (40, None),
-            "Home" => (36, None),
-            "End" => (35, None),
-            "PageUp" => (33, None),
-            "PageDown" => (34, None),
-            " " | "Space" => (32, Some(" ")),
-            single if single.chars().count() == 1 => (0, Some(single)),
-            other => return Err(format!("hoshi can't press {other}")),
-        };
-        let key = if key == "Space" { " " } else { key };
-        let mut down = json!({ "type": "keyDown", "key": key, "windowsVirtualKeyCode": code });
-        if let Some(text) = text {
-            down["text"] = json!(text);
-        }
-        self.call("Input.dispatchKeyEvent", down)?;
-        self.call(
-            "Input.dispatchKeyEvent",
-            json!({ "type": "keyUp", "key": key, "windowsVirtualKeyCode": code }),
-        )
-        .map(|_| ())
     }
 
     /// Runs `expression` in the page and returns its value, awaiting a promise.
@@ -564,13 +571,9 @@ impl Page {
         let _ = self.call("Page.stopScreencast", json!({}));
     }
 
-    /// Where an element is, scrolled into view: to show what the agent acts on.
-    pub fn point_of(&self, reference: &str) -> Result<(f64, f64), String> {
-        self.center(reference)
-    }
-
     /// Back (`-1`) or forward (`1`) in the page's history.
     pub fn go(&mut self, delta: i32, timeout: Duration) -> Result<(), String> {
+        self.dismiss_dialogs()?;
         self.evaluate(&format!("history.go({delta})"))?;
         self.refs.clear();
         thread::sleep(READY_POLL);
@@ -578,6 +581,7 @@ impl Page {
     }
 
     pub fn reload(&mut self, timeout: Duration) -> Result<(), String> {
+        self.dismiss_dialogs()?;
         self.call("Page.reload", json!({}))?;
         self.refs.clear();
         thread::sleep(READY_POLL);
@@ -593,20 +597,6 @@ impl Page {
             thread::sleep(READY_POLL);
         }
         Ok(())
-    }
-
-    /// Types `text` where the focus is.
-    pub fn insert_text(&self, text: &str) -> Result<(), String> {
-        self.call("Input.insertText", json!({ "text": text }))
-            .map(|_| ())
-    }
-
-    pub fn scroll_at(&self, point: (f64, f64), delta: (f64, f64)) -> Result<(), String> {
-        self.mouse(
-            "mouseWheel",
-            point,
-            json!({ "deltaX": delta.0, "deltaY": delta.1 }),
-        )
     }
 
     /// Console errors kept so far.
@@ -650,28 +640,11 @@ const FLAGS: [&str; 6] = [
     "checked", "disabled", "expanded", "selected", "pressed", "focused",
 ];
 
-fn text_of(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-/// `Accessibility.getFullAXTree` as an outline like
-/// `- button "Save" [ref=e3]`, and the DOM node each ref names.
-fn format_tree(nodes: &[Value], max_chars: usize) -> (String, HashMap<String, i64>) {
-    let by_id: HashMap<&str, &Value> = nodes
-        .iter()
-        .filter_map(|node| Some((node["nodeId"].as_str()?, node)))
-        .collect();
+/// The accessibility tree as an outline like `- button "Save" [ref=e3]`.
+fn format_tree(tree: &Tree, max_chars: usize, refs: &mut Refs) -> String {
     let mut lines = String::new();
-    let mut refs = HashMap::new();
     let mut truncated = false;
-    let mut stack: Vec<(&Value, usize)> = nodes
-        .first()
-        .map(|root| vec![(root, 0)])
-        .unwrap_or_default();
+    let mut stack: Vec<(&Value, usize)> = tree.root().map(|root| (root, 0)).into_iter().collect();
     while let Some((node, depth)) = stack.pop() {
         if truncated {
             break;
@@ -700,10 +673,8 @@ fn format_tree(nodes: &[Value], max_chars: usize) -> (String, HashMap<String, i6
                         line.push_str(&format!(" [{flag}]"));
                     }
                 }
-                if let Some(backend) = node["backendDOMNodeId"].as_i64() {
-                    let reference = format!("e{}", refs.len() + 1);
+                if let Some(reference) = refs.give(tree, node) {
                     line.push_str(&format!(" [ref={reference}]"));
-                    refs.insert(reference, backend);
                 }
             }
             line.push('\n');
@@ -713,20 +684,14 @@ fn format_tree(nodes: &[Value], max_chars: usize) -> (String, HashMap<String, i6
             }
             lines.push_str(&line);
         }
-        let children: Vec<&Value> = node["childIds"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|id| by_id.get(id.as_str()?).copied())
-            .collect();
-        for child in children.into_iter().rev() {
+        for child in tree.children(node).rev() {
             stack.push((child, child_depth));
         }
     }
     if truncated {
         lines.push_str("[truncated: the page has more]\n");
     }
-    (lines, refs)
+    lines
 }
 
 #[cfg(test)]
@@ -757,14 +722,16 @@ mod tests {
             node("6", "StaticText", "Sign in", &[], None),
         ];
 
-        let (text, refs) = format_tree(&nodes, 10_000);
+        let tree = Tree::new(&nodes);
+        let mut refs = Refs::default();
+        let text = format_tree(&tree, 10_000, &mut refs);
 
         assert_eq!(
             text,
             "- heading \"Sign in\" [ref=e1]\n  - text: Sign in\n- button \"Save\" [ref=e2]\n- checkbox \"Remember me\" [checked] [ref=e3]\n"
         );
-        assert_eq!(refs["e2"], 14);
-        let (cut, _) = format_tree(&nodes, 40);
+        assert_eq!(refs.find("e2", &tree, &Place::default()), Ok(14));
+        let cut = format_tree(&tree, 40, &mut refs);
         assert!(cut.ends_with("[truncated: the page has more]\n"));
     }
 
