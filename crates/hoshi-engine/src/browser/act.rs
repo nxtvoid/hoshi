@@ -196,7 +196,7 @@ const PICK: &str = r#"function (value) {
   const before = el.value;
   const set = (value) => Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, value);
   if (el.type === 'datetime-local') value = value.replace(' ', 'T');
-  if (el.type === 'range' && (value === '' || Number.isNaN(Number(value)))) return false;
+  if (el.type === 'range' && !/^-?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/i.test(value)) return false;
   set(value);
   const taken = el.type === 'color' ? el.value.toLowerCase() === value.toLowerCase() : value === '' || el.value !== '';
   if (!taken) {
@@ -359,6 +359,7 @@ impl Page {
                             Err(lost) => return Err(lost.message()),
                         }
                     }
+                    waited |= last.is_some();
                     last = Some(point);
                     thread::sleep(ACTIONABLE_POLL);
                     continue;

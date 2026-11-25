@@ -617,6 +617,7 @@ fn every_kind_of_field_takes_text() {
         json!("fresh")
     );
     assert_eq!(rig.js("log"), json!(["2026-01-31"]));
+    assert!(rig.type_into("\"Level\"", " ", false).is_err());
     let refused = rig.type_into("\"Day\"", "31/01/2026", true).unwrap_err();
     assert!(refused.contains("doesn't take \"31/01/2026\""), "{refused}");
     assert_eq!(
