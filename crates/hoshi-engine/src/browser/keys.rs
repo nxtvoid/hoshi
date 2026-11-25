@@ -137,10 +137,16 @@ pub(super) fn chord(text: &str) -> Option<Chord> {
     };
     let bits = held.iter().fold(0, |bits, (bit, _)| bits | bit);
     if bits & SHIFT != 0
-        && let Some(letter) = single.filter(char::is_ascii_alphabetic)
+        && let Some(character) = single
     {
-        key.key = letter.to_ascii_uppercase().to_string();
-        key.text = Some(key.key.clone());
+        let shifted = SYMBOLS
+            .iter()
+            .find(|(alone, ..)| *alone == character)
+            .map_or(character.to_ascii_uppercase(), |(_, shifted, ..)| *shifted);
+        if key.text.as_deref() != Some(" ") {
+            key.key = shifted.to_string();
+            key.text = Some(key.key.clone());
+        }
     }
     if bits & (ALT | CONTROL | META) != 0 {
         key.text = None;
@@ -162,6 +168,12 @@ mod tests {
 
         let shifted = chord("Shift+a").unwrap();
         assert_eq!(shifted.key.text.as_deref(), Some("A"));
+        let at = chord("Shift+2").unwrap().key;
+        assert_eq!(
+            (at.text.as_deref(), at.code.as_str()),
+            (Some("@"), "Digit2")
+        );
+        assert_eq!(chord("Shift++").unwrap().key.text.as_deref(), Some("+"));
         assert_eq!(chord("Control+Shift+K").unwrap().held.len(), 2);
         assert_eq!(chord("Enter").unwrap().key.text.as_deref(), Some("\r"));
         assert_eq!(chord("ñ").unwrap().key.text.as_deref(), Some("ñ"));

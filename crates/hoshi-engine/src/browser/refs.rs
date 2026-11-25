@@ -85,9 +85,9 @@ impl Identity {
         }
     }
 
-    /// Whether what is around still starts the same, apart from a number, and keeps half of
-    /// what it said.
-    fn stays_around(&self, now: &Self) -> bool {
+    /// Whether what is around still starts the same, apart from a number, and whether it keeps
+    /// half of what it said.
+    fn compare_around(&self, now: &Self) -> (bool, bool) {
         let words = |pieces: &[String]| -> HashSet<String> {
             pieces
                 .iter()
@@ -103,8 +103,10 @@ impl Identity {
                 .cloned()
         };
         let (before, after) = (words(&self.around), words(&now.around));
-        start(&self.around) == start(&now.around)
-            && before.intersection(&after).count() * 2 >= before.len()
+        (
+            start(&self.around) == start(&now.around),
+            before.intersection(&after).count() * 2 >= before.len(),
+        )
     }
 }
 
@@ -274,12 +276,11 @@ struct Target {
 #[derive(Default)]
 pub(super) struct Refs {
     targets: HashMap<String, Target>,
+    /// The ref each node had in the latest snapshot.
     by_node: HashMap<i64, String>,
     given: usize,
     generation: u64,
     place: Place,
-    /// The nodes of the latest snapshot that aren't what their ref names any more.
-    reused: HashSet<i64>,
 }
 
 impl Refs {
@@ -288,15 +289,27 @@ impl Refs {
         if self.place.document != place.document {
             self.clear();
         }
-        self.reused = self
-            .by_node
-            .iter()
-            .filter(|(node, reference)| {
-                self.targets
-                    .get(*reference)
-                    .is_some_and(|target| self.locate(target, tree, &place.url) != Ok(**node))
-            })
-            .map(|(node, _)| *node)
+        let mut by_node = HashMap::new();
+        let mut contested = HashSet::new();
+        for (reference, target) in &self.targets {
+            let Ok(node) = self.locate(reference, target, tree, &place.url) else {
+                continue;
+            };
+            let stays = node == target.node;
+            match by_node.get(&node) {
+                Some((_, true)) if !stays => {}
+                Some((_, false)) if !stays => {
+                    contested.insert(node);
+                }
+                _ => {
+                    by_node.insert(node, (reference.clone(), stays));
+                }
+            }
+        }
+        self.by_node = by_node
+            .into_iter()
+            .filter(|(node, (_, stays))| *stays || !contested.contains(node))
+            .map(|(node, (reference, _))| (node, reference))
             .collect();
         self.place = place;
         self.generation += 1;
@@ -312,12 +325,7 @@ impl Refs {
     pub fn give(&mut self, tree: &Tree, node: &Value) -> Option<String> {
         let backend = node["backendDOMNodeId"].as_i64()?;
         let identity = tree.identity(backend)?;
-        let had = self
-            .by_node
-            .get(&backend)
-            .filter(|reference| self.targets.contains_key(*reference))
-            .filter(|_| !self.reused.contains(&backend));
-        let reference = match had {
+        let reference = match self.by_node.get(&backend) {
             Some(reference) => reference.clone(),
             None => {
                 self.given += 1;
@@ -384,7 +392,7 @@ impl Refs {
     /// The node `reference` names in the page as `tree` shows it now, at `place`.
     pub fn find(&self, reference: &str, tree: &Tree, place: &Place) -> Result<i64, Lost> {
         let target = self.target(reference, place)?;
-        self.locate(target, tree, &place.url).map_err(|now| {
+        self.locate(reference, target, tree, &place.url).map_err(|now| {
             let label = target.identity.label();
             match now {
                 Elsewhere::Reused(now) => Lost::Changed(format!(
@@ -404,12 +412,23 @@ impl Refs {
     }
 
     /// The node that is the target now.
-    fn locate(&self, target: &Target, tree: &Tree, url: &str) -> Result<i64, Elsewhere> {
+    fn locate(
+        &self,
+        reference: &str,
+        target: &Target,
+        tree: &Tree,
+        url: &str,
+    ) -> Result<i64, Elsewhere> {
         if ROOT_ROLES.contains(&target.identity.role.as_str()) {
             return Ok(target.node);
         }
         let now = tree.identity(target.node);
-        if now.as_ref() == Some(&target.identity) {
+        // A later snapshot told it from what its node is now.
+        let another = self
+            .by_node
+            .get(&target.node)
+            .is_some_and(|other| other != reference);
+        if now.as_ref() == Some(&target.identity) && !another {
             return Ok(target.node);
         }
         // Others that read as it did, when nothing did before: the element itself, moved.
@@ -426,16 +445,20 @@ impl Refs {
                 _ => Err(Elsewhere::Several),
             };
         };
-        let reused = self.was_elsewhere(&now, target, tree);
+        let reused = another || self.was_elsewhere(&now, target, tree);
         match alike[..] {
             [only] if reused || self.read_otherwise(only, target) => return Ok(only),
             [_, _, ..] if reused => return Err(Elsewhere::Several),
             _ if reused => return Err(Elsewhere::Reused(now)),
             _ => {}
         }
-        let same = now.name == target.identity.name && target.identity.stays_around(&now);
+        let (starts, keeps) = target.identity.compare_around(&now);
+        let same = now.name == target.identity.name && starts && keeps;
         let kind = now.role == target.identity.role;
-        if same || kind && !self.mates_changed(target, tree) {
+        let (mates, changed) = self.mates(target, tree);
+        // Among others like it, one whose surroundings are all new is another's.
+        let elsewhere = mates > 0 && !starts && !keeps;
+        if same || kind && !elsewhere && changed * 2 <= mates {
             Ok(target.node)
         } else {
             Err(Elsewhere::Reused(now))
@@ -462,9 +485,9 @@ impl Refs {
         })
     }
 
-    /// Whether most of the elements like `target` changed with it, as when a list scrolls or
-    /// sorts over the same nodes, rather than it alone.
-    fn mates_changed(&self, target: &Target, tree: &Tree) -> bool {
+    /// How many elements are like `target`, and how many of them changed with it, as most do
+    /// when a list scrolls or sorts over the same nodes.
+    fn mates(&self, target: &Target, tree: &Tree) -> (usize, usize) {
         let name = skeleton(&target.identity.name);
         let (mut mates, mut changed) = (0, 0);
         for other in self.targets.values() {
@@ -480,7 +503,7 @@ impl Refs {
                 changed += usize::from(now != other.identity);
             }
         }
-        changed * 2 > mates
+        (mates, changed)
     }
 }
 

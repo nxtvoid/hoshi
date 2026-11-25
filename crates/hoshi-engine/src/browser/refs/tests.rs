@@ -171,7 +171,37 @@ fn rows_scrolled_over_the_same_nodes_aren_t_the_ones_read() {
 }
 
 #[test]
-fn a_node_that_became_another_row_gets_a_ref_of_its_own() {
+fn a_row_that_took_another_s_place_alone_isn_t_the_one_read() {
+    let mut refs = Refs::default();
+    let given = read(
+        &mut refs,
+        &list(&[(&["Alpha"], "Delete", 10), (&["Beta"], "Delete", 11)]),
+    );
+    let now = list(&[(&["Gamma"], "Delete", 10), (&["Beta"], "Delete", 11)]);
+
+    assert_eq!(find(&refs, &given[0], &now), None);
+    assert_eq!(find(&refs, &given[1], &now), Some(11));
+}
+
+#[test]
+fn an_element_drawn_again_keeps_its_ref() {
+    let mut refs = Refs::default();
+    let given = read(
+        &mut refs,
+        &list(&[(&["Ana"], "Edit", 10), (&["Bea"], "Edit", 11)]),
+    );
+    let drawn = list(&[(&["Bea"], "Edit", 21), (&["Ana"], "Edit", 20)]);
+    assert_eq!(
+        read(&mut refs, &drawn),
+        [given[1].clone(), given[0].clone()]
+    );
+
+    let swapped = list(&[(&["Ana"], "Edit", 21), (&["Bea"], "Edit", 20)]);
+    assert_eq!(read(&mut refs, &swapped), given);
+}
+
+#[test]
+fn a_node_that_became_another_row_gets_that_row_s_ref() {
     let mut refs = Refs::default();
     let before = read(
         &mut refs,
@@ -181,7 +211,7 @@ fn a_node_that_became_another_row_gets_a_ref_of_its_own() {
 
     let after = read(&mut refs, &now);
 
-    assert_ne!(after[0], before[0]);
+    assert_eq!(after[0], before[1]);
     assert_eq!(find(&refs, &before[0], &now), None);
     assert_eq!(find(&refs, &after[0], &now), Some(10));
 }
@@ -217,8 +247,9 @@ fn old_refs_go_once_there_are_too_many() {
     let now = list(&[(&["Ana"], "Edit", 5)]);
     let latest = read(&mut refs, &now);
 
+    assert!(refs.targets.contains_key(&old[0]));
     refs.trim();
 
-    assert_eq!(find(&refs, &old[0], &now), None);
+    assert!(!refs.targets.contains_key(&old[0]));
     assert_eq!(find(&refs, &latest[0], &now), Some(5));
 }

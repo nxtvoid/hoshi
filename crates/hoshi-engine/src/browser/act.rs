@@ -22,6 +22,8 @@ const MAX_SETTLE: Duration = Duration::from_millis(600);
 const MAX_LOAD: Duration = Duration::from_secs(5);
 /// Where an element is scrolled to in turn while something covers it, as a sticky header.
 const ALIGNMENTS: [&str; 3] = ["center", "end", "start"];
+/// The page's objects held while a function runs on one.
+const OBJECTS: &str = "hoshi";
 /// Longer text is put in at once rather than key by key.
 const MAX_TYPED: usize = 64;
 
@@ -84,7 +86,7 @@ const AIM: &str = r#"function (align, enabled, any) {
     if (label && label.control === el && viaLabel(hit, label)) return true;
     const apart = (node) => node && node !== document.body && node !== document.documentElement;
     // Fields are often drawn by what holds them, or by what lies over them next to them.
-    if (field && apart(el.parentElement) && within(hit, el.parentElement)) return true;
+    if (field && apart(el.parentElement) && viaLabel(hit, el.parentElement)) return true;
     if (within(el, hit)) return apart(hit) && (!acts || getComputedStyle(hit).cursor === 'pointer');
     const around = el.closest('a[href],button,summary,[role=button],[role=link],[role=option],[role=tab],[role^=menuitem]');
     if (around && within(hit, around)) return true;
@@ -162,7 +164,7 @@ const FOCUS: &str = r#"function (clear) {
   const before = focused();
   into.focus();
   const after = focused();
-  if (after === before && !within(after)) return { why: 'unfocusable' };
+  if (!within(after)) return { why: after === before ? 'unfocusable' : 'away' };
   const picked = into.localName === 'input' && /^(color|date|datetime-local|month|range|time|week)$/.test(into.type);
   let holds = false;
   if (clear && !picked) {
@@ -196,7 +198,8 @@ const PICK: &str = r#"function (value) {
   if (el.type === 'datetime-local') value = value.replace(' ', 'T');
   if (el.type === 'range' && (value === '' || Number.isNaN(Number(value)))) return false;
   set(value);
-  if (el.type !== 'range' && !el.value.toLowerCase().startsWith(value.toLowerCase()) || (value !== '' && el.value === '')) {
+  const taken = el.type === 'color' ? el.value.toLowerCase() === value.toLowerCase() : value === '' || el.value !== '';
+  if (!taken) {
     set(before);
     return false;
   }
@@ -270,7 +273,10 @@ impl Page {
     }
 
     fn call_on(&self, node: i64, function: &str, arguments: Value) -> Result<Value, String> {
-        let resolved = self.call("DOM.resolveNode", json!({ "backendNodeId": node }))?;
+        let resolved = self.call(
+            "DOM.resolveNode",
+            json!({ "backendNodeId": node, "objectGroup": OBJECTS }),
+        )?;
         let object = resolved["object"]["objectId"]
             .as_str()
             .ok_or("the element is gone")?;
@@ -284,7 +290,11 @@ impl Page {
                 "awaitPromise": true,
             }),
         );
-        let _ = self.call("Runtime.releaseObject", json!({ "objectId": object }));
+        // One a dialog kept from being let go of goes with the next.
+        let _ = self.call(
+            "Runtime.releaseObjectGroup",
+            json!({ "objectGroup": OBJECTS }),
+        );
         script_result(&result?)
     }
 
@@ -296,6 +306,7 @@ impl Page {
         let mut align = None;
         let mut alignments = ALIGNMENTS.iter().cycle();
         let mut pointed = false;
+        let mut waited = false;
         loop {
             let late = Instant::now() >= deadline;
             let current = match node {
@@ -332,7 +343,21 @@ impl Page {
                         (x - point.0).abs() < AT_REST && (y - point.1).abs() < AT_REST
                     });
                     if rests || late {
-                        return Ok(point);
+                        // What it waited for may have made the node another element.
+                        if !waited {
+                            return Ok(point);
+                        }
+                        match self.resolve(reference) {
+                            Ok(found) if found == current => return Ok(point),
+                            Ok(_) | Err(Lost::Missing(_)) if !late => {
+                                node = None;
+                                last = None;
+                                waited = false;
+                                continue;
+                            }
+                            Ok(_) => return Err(refusal(reference, "gone", &Value::Null)),
+                            Err(lost) => return Err(lost.message()),
+                        }
                     }
                     last = Some(point);
                     thread::sleep(ACTIONABLE_POLL);
@@ -343,6 +368,7 @@ impl Page {
                 Err(error) => return Err(error),
             };
             last = None;
+            waited = true;
             let why = problem["why"].as_str().unwrap_or_default();
             if why == "gone" {
                 node = None;
@@ -388,6 +414,11 @@ impl Page {
             .ok()
             .and_then(|seen| Some((seen["x"].as_f64()?, seen["y"].as_f64()?)));
         Ok(node)
+    }
+
+    /// Tells the dialog that holds the page from others.
+    pub fn dialog_serial(&self) -> Option<u64> {
+        lock(&self.dialog).as_ref().map(|dialog| dialog.serial)
     }
 
     /// What the dialog that holds the page says, and how to answer it.
@@ -459,7 +490,9 @@ impl Page {
             let into = self.call_on(node, FOCUS, json!([{ "value": clear }]))?;
             match into["why"].as_str() {
                 None => break (node, into),
-                Some(_) if Instant::now() < deadline => thread::sleep(FIND_POLL),
+                Some(why) if why != "away" && Instant::now() < deadline => {
+                    thread::sleep(FIND_POLL);
+                }
                 Some(why) => return Err(refusal(reference, why, &into)),
             }
         };
@@ -469,6 +502,7 @@ impl Page {
             return if taken == true {
                 Ok(())
             } else {
+                self.acted = false;
                 Err(format!(
                     "{reference} doesn't take {text:?}: give its value, such as 2026-01-31 for a date, 14:30 for a time or #ff8800 for a color"
                 ))
@@ -522,6 +556,7 @@ impl Page {
             let node = self.reach(reference)?;
             self.reaches_page();
             let answer = self.call_on(node, SELECT, json!([{ "value": values }]))?;
+            self.acted = answer["why"].is_null();
             match answer["why"].as_str() {
                 None => return Ok(()),
                 Some("disabled" | "missing") if Instant::now() < deadline => {
@@ -622,6 +657,9 @@ fn refusal(reference: &str, why: &str, details: &Value) -> String {
         "read-only" => format!("{reference} is read-only"),
         "hidden" => format!("{reference} isn't shown"),
         "unfocusable" => format!("{reference} can't be focused to type into it"),
+        "away" => format!(
+            "{reference} passed the focus on to another element: take a new snapshot and type into that"
+        ),
         "option" => format!("{reference} is an option of a closed <select>: select it there"),
         "outside" => format!("{reference} is outside of what the page can show"),
         "covered" => format!("{reference} is covered by {by}, which would take the click"),

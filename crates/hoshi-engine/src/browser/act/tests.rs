@@ -284,6 +284,7 @@ fn refs_stay_between_snapshots_and_are_never_reused() {
     else {
         return;
     };
+    let first = rig.reference("First");
     let second = rig.reference("Second");
     rig.js("document.querySelector('button').remove()");
     rig.js(
@@ -294,8 +295,10 @@ fn refs_stay_between_snapshots_and_are_never_reused() {
 
     assert_eq!(rig.reference("Second"), second);
     assert_ne!(rig.reference("Third"), second);
-    let gone = rig.page.click("e1234").unwrap_err();
-    assert!(gone.contains("no element e1234"), "{gone}");
+    assert_ne!(rig.reference("Third"), first);
+    assert!(rig.page.click(&first).is_err());
+    let unknown = rig.page.click("e1234").unwrap_err();
+    assert!(unknown.contains("no element e1234"), "{unknown}");
 }
 
 #[test]
@@ -469,6 +472,51 @@ fn a_controlled_input_is_emptied_and_typed_into_by_key() {
 }
 
 #[test]
+fn an_element_waited_for_is_still_the_one_read() {
+    let body = REUSED.replace("NAME(item)", "'Delete'")
+        + "<div id=veil style=\"position:fixed;inset:0\"></div>";
+    let Some(mut rig) = Rig::open(&body) else {
+        return;
+    };
+    rig.js("setTimeout(() => { items.shift(); draw(); veil.remove(); }, 500)");
+
+    let refused = rig.click("button \"Delete\"").unwrap_err();
+
+    assert!(refused.contains("its place is now"), "{refused}");
+    assert_eq!(rig.js("log"), json!([]));
+}
+
+#[test]
+fn another_control_over_a_field_isn_t_clicked_for_it() {
+    let Some(mut rig) = Rig::open(
+        "<div style=\"position:relative;width:100px;height:30px\"><input type=checkbox aria-label=Agree><button style=\"position:absolute;inset:0\" onclick=log.push('other')>Other</button></div>",
+    ) else {
+        return;
+    };
+
+    assert!(
+        rig.click("checkbox")
+            .unwrap_err()
+            .contains("covered by <button>")
+    );
+    assert_eq!(rig.js("log"), json!([]));
+}
+
+#[test]
+fn text_for_a_field_that_passes_the_focus_on_isn_t_typed_elsewhere() {
+    let Some(mut rig) =
+        Rig::open("<input aria-label=One onfocus='two.focus()'><input aria-label=Two id=two>")
+    else {
+        return;
+    };
+
+    let refused = rig.type_into("\"One\"", "secret", false).unwrap_err();
+
+    assert!(refused.contains("passed the focus on"), "{refused}");
+    assert_eq!(rig.js("two.value"), json!(""));
+}
+
+#[test]
 fn the_parts_the_browser_draws_a_field_with_are_used_too() {
     let Some(mut rig) = Rig::open(
         "<input type=date aria-label=Day><input type=time aria-label=Hour><input type=number aria-label=Count><input type=search aria-label=Find value=x><video controls></video><details><summary>More</summary>Text</details>",
@@ -543,7 +591,7 @@ fn text_for_what_is_no_field_is_put_in_without_its_keys() {
 #[test]
 fn every_kind_of_field_takes_text() {
     let Some(mut rig) = Rig::open(
-        "<input type=email aria-label=Mail value=a@b.c><input type=number aria-label=Count value=3><textarea aria-label=Notes>old</textarea><div contenteditable role=textbox aria-label=Rich>some <b>bold</b></div><label>Wrapped<input id=wrapped></label><input type=date aria-label=Day onchange=log.push(this.value)><input type=range aria-label=Level><input readonly aria-label=Fixed value=x><input disabled aria-label=Off><p>Plain</p>",
+        "<input type=email aria-label=Mail value=a@b.c><input type=number aria-label=Count value=3><textarea aria-label=Notes>old</textarea><div contenteditable role=textbox aria-label=Rich>some <b>bold</b></div><label>Wrapped<input id=wrapped></label><input type=date aria-label=Day onchange=log.push(this.value)><input type=datetime-local aria-label=When><input type=range aria-label=Level><input readonly aria-label=Fixed value=x><input disabled aria-label=Off><p>Plain</p>",
     ) else {
         return;
     };
@@ -554,11 +602,15 @@ fn every_kind_of_field_takes_text() {
     rig.type_into("\"Rich\"", "fresh", true).unwrap();
     rig.type_into("LabelText", "by label", false).unwrap();
     rig.type_into("\"Day\"", "2026-01-31", true).unwrap();
+    rig.type_into("\"When\"", "2026-01-31 14:30:00", false)
+        .unwrap();
     rig.type_into("\"Level\"", "70", false).unwrap();
 
     assert_eq!(
-        rig.js("[...document.querySelectorAll('input,textarea')].slice(0, 6).map((field) => field.value)"),
-        json!(["new@test.dev", "42", "one\ntwo", "by label", "2026-01-31", "70"])
+        rig.js("[...document.querySelectorAll('input,textarea')].slice(0, 7).map((field) => field.value)"),
+        json!(["new@test.dev", "42", "one\ntwo", "by label", "2026-01-31",
+            "2026-01-31T14:30",
+            "70"])
     );
     assert_eq!(
         rig.js("document.querySelector('[contenteditable]').textContent"),

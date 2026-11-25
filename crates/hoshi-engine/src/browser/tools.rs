@@ -758,15 +758,17 @@ impl Browsing {
                 let action = text(arguments, "action").ok_or("`action` is required")?;
                 page.begin_act();
                 let acted = act(page, action, arguments);
-                // What the action opened holds the page; it is done all the same.
                 let opened = |page: &Page| {
                     let says = page.dialog_says().filter(|_| page.has_acted())?;
                     Some(json!({ "done": action, "dialog": says }))
                 };
-                if let Some(result) = opened(page) {
-                    return Ok(result);
+                if let Err(error) = acted {
+                    // What the action opened holds the page; it is done all the same.
+                    return match opened(page) {
+                        Some(result) if result["dialog"] == error => Ok(result),
+                        _ => Err(error),
+                    };
                 }
-                acted?;
                 page.settle();
                 let described = describe(page);
                 if let Some(result) = opened(page) {
@@ -821,10 +823,10 @@ impl Browsing {
 
 /// Goes to `url` and says where the page is, or what the dialog it opened on the way says.
 fn go_to(page: &mut Page, url: &str) -> Result<Value, String> {
-    let held = page.dialog_says();
+    let held = page.dialog_serial();
     let went = page.navigate(url, LOAD_TIMEOUT);
     match page.dialog_says() {
-        Some(says) if held.is_none() => Ok(json!({ "dialog": says })),
+        Some(says) if page.dialog_serial() != held => Ok(json!({ "dialog": says })),
         _ => {
             went?;
             describe(page)
