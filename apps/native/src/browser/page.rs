@@ -54,7 +54,8 @@ pub fn page_point(
 }
 
 /// What a key pressed on the page sends: named keys as the page knows them, printable ones
-/// as text. Shortcuts stay with the app.
+/// as what they type, as some fields take only keys, and others as text. Shortcuts stay with
+/// the app.
 pub fn key_input(keystroke: &Keystroke) -> Option<BrowserInput> {
     let modifiers = keystroke.modifiers;
     if modifiers.control || modifiers.alt || modifiers.platform {
@@ -80,9 +81,13 @@ pub fn key_input(keystroke: &Keystroke) -> Option<BrowserInput> {
             if text.is_empty() || text.chars().any(char::is_control) {
                 return None;
             }
-            return Some(BrowserInput::Text {
-                text: text.to_owned(),
-            });
+            if let [b' '..=b'~'] = text.as_bytes() {
+                text
+            } else {
+                return Some(BrowserInput::Text {
+                    text: text.to_owned(),
+                });
+            }
         }
     };
     Some(BrowserInput::Key {
@@ -146,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn named_keys_go_by_name_text_as_text_and_shortcuts_stay() {
+    fn named_keys_go_by_name_typed_ones_by_what_they_type_and_shortcuts_stay() {
         let key = |text: &'static str| key_input(&Keystroke::parse(text).unwrap());
         assert_eq!(
             key("enter"),
@@ -170,7 +175,12 @@ mod tests {
         typed.key_char = Some("A".into());
         assert_eq!(
             key_input(&typed),
-            Some(BrowserInput::Text { text: "A".into() })
+            Some(BrowserInput::Key { key: "A".into() })
+        );
+        typed.key_char = Some("ñ".into());
+        assert_eq!(
+            key_input(&typed),
+            Some(BrowserInput::Text { text: "ñ".into() })
         );
         assert_eq!(key("ctrl-a"), None);
         assert_eq!(key("f5"), None);

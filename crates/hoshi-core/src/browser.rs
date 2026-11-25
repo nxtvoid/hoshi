@@ -72,11 +72,11 @@ pub enum BrowserInput {
         delta_x: f64,
         delta_y: f64,
     },
-    /// A key such as `Enter`, `Backspace` or `ArrowDown`.
+    /// A key such as `Enter`, `Shift+Tab` or the character it types.
     Key {
         key: String,
     },
-    /// Typed or pasted text.
+    /// Pasted text, or a character without a key of its own.
     Text {
         text: String,
     },

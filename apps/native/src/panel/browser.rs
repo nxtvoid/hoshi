@@ -704,12 +704,14 @@ mod tests {
         redraw(&mut cx);
         let page = cx.debug_bounds("browser-page").unwrap();
         cx.simulate_click(page.center(), Modifiers::none());
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("b".into()));
         sent.take();
 
         for (keys, sends) in [
             ("tab", "\"Tab\""),
             ("shift-tab", "\"Shift+Tab\""),
-            ("a", "Text"),
+            ("a", "Key { key: \"a\" }"),
+            ("ctrl-v", "Text { text: \"b\" }"),
         ] {
             cx.simulate_keystrokes(keys);
             redraw(&mut cx);

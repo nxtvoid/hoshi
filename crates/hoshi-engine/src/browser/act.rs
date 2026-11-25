@@ -166,6 +166,8 @@ const FOCUS: &str = r#"function (clear) {
     return false;
   };
   const before = focused();
+  // One that keeps the focus adds what it is typed to what it was typed before.
+  if (part && before === into) [...into.parentElement.querySelectorAll('[role=spinbutton]')].find((other) => other !== into)?.focus();
   into.focus();
   const after = focused();
   if (!within(after)) return { why: after === before ? 'unfocusable' : 'away' };
@@ -539,16 +541,6 @@ impl Page {
         Ok(())
     }
 
-    /// Types `text` for the user, where the focus is: a character by its key, as some fields
-    /// take nothing else, and what was pasted at once.
-    pub fn type_as_user(&self, text: &str) -> Result<(), String> {
-        let mut characters = text.chars();
-        match (characters.next(), characters.next()) {
-            (Some(_), None) => self.type_keys(text),
-            _ => self.insert_text(text),
-        }
-    }
-
     /// Gives a field whose value is picked the value `text`.
     fn pick(&mut self, reference: &str, node: i64, text: &str) -> Result<(), String> {
         self.reaches_page();
@@ -562,8 +554,8 @@ impl Page {
         ))
     }
 
-    /// Types `text` into a part of a field, as the day of a date, which takes only keys and no
-    /// number over `most`.
+    /// Types `text` in place of what a part of a field holds, as the day of a date, which takes
+    /// only keys and no number over `most`.
     fn type_part(
         &mut self,
         reference: &str,
@@ -583,13 +575,14 @@ impl Page {
             return refused();
         }
         self.reaches_page();
-        if clear {
-            self.press_key("Backspace")?;
+        if text.is_empty() {
+            return if clear {
+                self.press_key("Backspace")
+            } else {
+                Ok(())
+            };
         }
         self.type_keys(text)?;
-        if text.is_empty() {
-            return Ok(());
-        }
         match self.call_on(node, SHOWS, json!([{ "value": text }])) {
             Ok(shows) if shows != true => refused(),
             Err(error) if self.dialog_says().is_some() => Err(error),
