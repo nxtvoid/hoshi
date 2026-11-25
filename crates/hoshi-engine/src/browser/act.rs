@@ -208,11 +208,10 @@ const SHOWS: &str = r#"function (text) {
   if (Number(held) === Number(typed)) return true;
   const parts = [...this.parentElement.querySelectorAll('[role=spinbutton]')];
   for (const part of parts.slice(parts.indexOf(this))) {
-    // Typed with the zeroes it shows or without them; what it shows may be in other digits.
-    const number = part.getAttribute('aria-valuenow');
-    const taken = number && [number.padStart(plain(part.textContent).length, '0'), number].find((digits) => typed.startsWith(digits));
+    // Typed with the zeroes before it or without them; what it shows may be in other digits.
+    const taken = typed.match('^0*' + (part.getAttribute('aria-valuenow') ?? 'none'));
     if (!taken) return false;
-    typed = typed.slice(taken.length);
+    typed = typed.slice(taken[0].length);
     if (!typed) return true;
   }
   return false;

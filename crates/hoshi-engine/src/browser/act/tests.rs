@@ -736,6 +736,7 @@ fn the_parts_of_a_date_take_their_text_or_say_why_not() {
         rig.js("document.querySelector('[type=month]').value"),
         json!("2026-12")
     );
+    rig.page.type_text(&parts[14], "0905", false).unwrap();
     rig.page.type_text(&parts[14], "14:30", false).unwrap();
     assert_eq!(
         rig.js("document.querySelector('[type=time]').value"),
