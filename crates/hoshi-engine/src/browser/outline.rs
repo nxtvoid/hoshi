@@ -505,8 +505,8 @@ impl<'a> Writer<'a, '_> {
                 };
                 let name = Some(name).filter(|name| !name.is_empty());
                 let name = name.map_or(String::new(), |name| format!(" {}", quoted(&name)));
-                let (flags, reference) = (flags(node), self.give(node));
-                self.line(depth, &format!("cell{name}{flags}{reference}"));
+                let reference = self.give(node);
+                self.line(depth, &format!("cell{name}{reference}"));
                 self.steps(node, depth + 1, false)
             }
             _ if self.is_shown(node) => self.element(node, &role, depth, told),
@@ -609,7 +609,7 @@ impl<'a> Writer<'a, '_> {
     fn row(&mut self, node: &'a Value, depth: usize) -> Vec<Step<'a>> {
         let (cells, rest) = self.cells(node);
         let small = self.table(node).cells <= MAX_CELLS;
-        let mut says = !rest.is_empty() || is_acted_on(node);
+        let mut says = !rest.is_empty() || is_acted_on(node) || !flags(node).is_empty();
         let mut slots = Vec::new();
         let mut held = Vec::new();
         for cell in cells {
@@ -620,7 +620,7 @@ impl<'a> Writer<'a, '_> {
             if holds {
                 says = true;
                 held.push(cell);
-                slots.push("*".to_owned());
+                slots.push(format!("*{}", flags(cell)));
                 continue;
             }
             let mut text = self.texts(cell).join(" ");
@@ -633,7 +633,7 @@ impl<'a> Writer<'a, '_> {
             if acts || small && !text.is_empty() {
                 slot.push_str(&self.give(cell));
             }
-            says |= acts || !text.is_empty();
+            says |= acts || !text.is_empty() || !flags(cell).is_empty();
             slots.push(slot);
         }
         if !says {

@@ -364,3 +364,20 @@ fn a_value_shows_even_when_it_is_the_name_and_short_code_keeps_its_lines() {
         "textbox \"Email\" value=\"Email\" [e1]\n- one\n-   two\n- three\n-   four\n"
     );
 }
+
+#[test]
+fn what_is_selected_shows_in_a_row_that_says_nothing_or_holds_more() {
+    let (mut page, root) = Page::new();
+    let blank = page.add(&root, "row", "");
+    page.add(&blank, "gridcell", "");
+    page.property(&blank, "selected", json!(true));
+    let row = page.add(&root, "row", "");
+    let cell = page.add(&row, "gridcell", "");
+    page.property(&cell, "selected", json!(true));
+    page.says(&cell, "button", "Pay", "Pay");
+
+    let read = page.read();
+
+    assert!(read.starts_with("row [selected] [e1]: "), "{read}");
+    assert!(read.contains("row [e2]: * [selected]"), "{read}");
+}
