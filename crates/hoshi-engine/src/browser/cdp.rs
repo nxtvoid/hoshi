@@ -8,12 +8,14 @@ use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
 
-const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long the socket thread waits for the browser before sending what is queued.
 const POLL: Duration = Duration::from_millis(4);
+/// How often a call that waits looks at whether to give up.
+const STOP_POLL: Duration = Duration::from_millis(25);
 
 type Reply = mpsc::Sender<Result<Value, String>>;
 
@@ -91,6 +93,18 @@ impl Connection {
         session: Option<&str>,
         timeout: Duration,
     ) -> Result<Value, String> {
+        self.call_unless(method, params, session, timeout, || None)
+    }
+
+    /// Calls `method`, giving up with what `stopped` says as soon as it says something.
+    pub fn call_unless(
+        &self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+        timeout: Duration,
+        stopped: impl Fn() -> Option<String>,
+    ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut message = json!({ "id": id, "method": method, "params": params });
         if let Some(session) = session {
@@ -102,12 +116,19 @@ impl Connection {
             lock(&self.pending).remove(&id);
             return Err("the browser closed".into());
         }
-        match answer.recv_timeout(timeout) {
-            Ok(result) => result,
-            Err(_) => {
-                lock(&self.pending).remove(&id);
-                Err(format!("the browser didn't answer {method} in time"))
-            }
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let failed = match answer.recv_timeout(left.min(STOP_POLL)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) if !left.is_zero() => match stopped() {
+                    Some(reason) => reason,
+                    None => continue,
+                },
+                Err(_) => format!("the browser didn't answer {method} in time"),
+            };
+            lock(&self.pending).remove(&id);
+            return Err(failed);
         }
     }
 

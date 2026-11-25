@@ -471,6 +471,10 @@ impl Browsing {
         agent_point: Option<(f64, f64)>,
         opened: bool,
     ) {
+        // Held by a dialog, it can't say where it is.
+        if page.is_some_and(|page| page.dialog_says().is_some()) {
+            return;
+        }
         let fitted = self.state().fits.contains_key(thread_id);
         let (url, title) = page
             .and_then(|page| page.location().ok())
@@ -670,7 +674,6 @@ impl Browsing {
             return Err(NO_AGENT_ACCESS.into());
         }
         self.drop_dead_browser();
-        let point = self.agent_point(caller, tool, arguments);
         let result = self.dispatch(caller, tool, arguments);
         if result.is_err() {
             self.drop_dead_browser();
@@ -679,23 +682,11 @@ impl Browsing {
             let opened = tool == "preview_open"
                 && result.as_ref().is_ok_and(|value| value["opened"] == true);
             let page = self.page_if_open(caller);
-            let page = page.as_deref().map(lock);
+            let mut page = page.as_deref().map(lock);
+            let point = page.as_deref_mut().and_then(Page::take_acted_at);
             self.announce(caller, page.as_deref(), true, point, opened);
         }
         result
-    }
-
-    /// Where an action is about to happen, to show the user what the agent acts on.
-    fn agent_point(&self, caller: &str, tool: &str, arguments: &Value) -> Option<(f64, f64)> {
-        if tool != "preview_act" {
-            return None;
-        }
-        if let (Some(x), Some(y)) = (arguments["x"].as_f64(), arguments["y"].as_f64()) {
-            return Some((x, y));
-        }
-        let page = self.page_if_open(caller)?;
-        let page = lock(&page);
-        page.point_of(text(arguments, "ref")?).ok()
     }
 
     fn dispatch(&self, caller: &str, tool: &str, arguments: &Value) -> Result<Value, String> {
@@ -728,8 +719,7 @@ impl Browsing {
             let wanted = size(arguments, page.size());
             self.resize_page(caller, &mut page, wanted)?;
         }
-        page.navigate(&url, LOAD_TIMEOUT)?;
-        let mut result = describe(&page)?;
+        let mut result = go_to(&mut page, &url)?;
         result["opened"] = json!(opened.is_some());
         Ok(result)
     }
@@ -750,12 +740,10 @@ impl Browsing {
         let page = self.page(caller)?;
         let mut page = lock(&page);
         let page = &mut *page;
-        let reference = text(arguments, "ref");
         match tool {
             "preview_navigate" => {
                 let url = address(text(arguments, "url").ok_or("`url` is required")?);
-                page.navigate(&url, LOAD_TIMEOUT)?;
-                describe(page)
+                go_to(page, &url)
             }
             "preview_snapshot" => {
                 let snapshot = page.snapshot(SNAPSHOT_CHARS)?;
@@ -768,38 +756,25 @@ impl Browsing {
             }
             "preview_act" => {
                 let action = text(arguments, "action").ok_or("`action` is required")?;
-                let needs_ref = || reference.ok_or(format!("`ref` is required to {action}"));
-                match action {
-                    "click" => match (arguments["x"].as_f64(), arguments["y"].as_f64()) {
-                        (Some(x), Some(y)) => page.click_at((x, y))?,
-                        _ => page.click(needs_ref()?)?,
-                    },
-                    "hover" => page.hover(needs_ref()?)?,
-                    "type" => page.type_text(
-                        needs_ref()?,
-                        arguments["text"].as_str().unwrap_or_default(),
-                        arguments["clear"].as_bool().unwrap_or(false),
-                    )?,
-                    "press" => page.press(text(arguments, "key").ok_or("`key` is required")?)?,
-                    "select" => {
-                        let values: Vec<String> = arguments["values"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|value| value.as_str().map(str::to_owned))
-                            .collect();
-                        page.select(needs_ref()?, &values)?;
-                    }
-                    "scroll" => page.scroll(
-                        reference,
-                        (
-                            arguments["deltaX"].as_f64().unwrap_or(0.0),
-                            arguments["deltaY"].as_f64().unwrap_or(0.0),
-                        ),
-                    )?,
-                    other => return Err(format!("unknown action {other}")),
+                page.begin_act();
+                let acted = act(page, action, arguments);
+                let opened = |page: &Page| {
+                    let says = page.dialog_says().filter(|_| page.has_acted())?;
+                    Some(json!({ "done": action, "dialog": says }))
+                };
+                if let Err(error) = acted {
+                    // What the action opened holds the page; it is done all the same.
+                    return match opened(page) {
+                        Some(result) if result["dialog"] == error => Ok(result),
+                        _ => Err(error),
+                    };
                 }
-                let mut result = describe(page)?;
+                page.settle();
+                let described = describe(page);
+                if let Some(result) = opened(page) {
+                    return Ok(result);
+                }
+                let mut result = described?;
                 result["done"] = json!(action);
                 Ok(result)
             }
@@ -843,6 +818,54 @@ impl Browsing {
             }
             _ => Err(format!("hoshi has no tool named {tool}")),
         }
+    }
+}
+
+/// Goes to `url` and says where the page is, or what the dialog it opened on the way says.
+fn go_to(page: &mut Page, url: &str) -> Result<Value, String> {
+    let held = page.dialog_serial();
+    let went = page.navigate(url, LOAD_TIMEOUT);
+    match page.dialog_says() {
+        Some(says) if page.dialog_serial() != held => Ok(json!({ "dialog": says })),
+        _ => {
+            went?;
+            describe(page)
+        }
+    }
+}
+
+fn act(page: &mut Page, action: &str, arguments: &Value) -> Result<(), String> {
+    let reference = text(arguments, "ref");
+    let needs_ref = || reference.ok_or(format!("`ref` is required to {action}"));
+    match action {
+        "click" => match (arguments["x"].as_f64(), arguments["y"].as_f64()) {
+            (Some(x), Some(y)) => page.click_point((x, y)),
+            _ => page.click(needs_ref()?),
+        },
+        "hover" => page.hover(needs_ref()?),
+        "type" => page.type_text(
+            needs_ref()?,
+            arguments["text"].as_str().unwrap_or_default(),
+            arguments["clear"].as_bool().unwrap_or(false),
+        ),
+        "press" => page.press_as_agent(text(arguments, "key").ok_or("`key` is required")?),
+        "select" => {
+            let values: Vec<String> = arguments["values"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().map(str::to_owned))
+                .collect();
+            page.select(needs_ref()?, &values)
+        }
+        "scroll" => page.scroll(
+            reference,
+            (
+                arguments["deltaX"].as_f64().unwrap_or(0.0),
+                arguments["deltaY"].as_f64().unwrap_or(0.0),
+            ),
+        ),
+        other => Err(format!("unknown action {other}")),
     }
 }
 

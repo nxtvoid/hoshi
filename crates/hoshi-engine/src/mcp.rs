@@ -388,7 +388,7 @@ fn tools() -> Value {
         },
         {
             "name": "preview_snapshot",
-            "description": "Read the page as its accessibility tree, each element with a `ref` to pass to preview_act. Refs last until the next snapshot. includeImage adds a screenshot, to check how it looks.",
+            "description": "Read the page as its accessibility tree, each element with a `ref` to pass to preview_act. A ref stays with its element until the page goes elsewhere. includeImage adds a screenshot, to check how it looks.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "includeImage": { "type": "boolean" } },
@@ -396,7 +396,7 @@ fn tools() -> Value {
         },
         {
             "name": "preview_act",
-            "description": "Use the page as a person would, with real input: click (a ref, or x and y), hover, type (text into a ref; clear empties it first), press (a key such as Enter, Tab, Escape, ArrowDown), select (values of a <select> ref) or scroll (deltaX, deltaY, at a ref or the page). Snapshot again to see the result.",
+            "description": "Use the page as a person would, with real input: click (a ref, or x and y), hover, type (text into a ref; clear empties it first), press (a key such as Enter, ArrowDown or Control+a; Enter or Escape answers a dialog), select (values of a <select> ref) or scroll (deltaX, deltaY, at a ref or the page). Snapshot again to see the result.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
