@@ -208,9 +208,9 @@ const SHOWS: &str = r#"function (text) {
   if (Number(held) === Number(typed)) return true;
   const parts = [...this.parentElement.querySelectorAll('[role=spinbutton]')];
   for (const part of parts.slice(parts.indexOf(this))) {
-    const said = plain(part.textContent);
-    // Typed with the zeroes it shows or without them.
-    const taken = /^\d+$/.test(said) && [said, String(Number(said))].find((digits) => typed.startsWith(digits));
+    // Typed with the zeroes it shows or without them; what it shows may be in other digits.
+    const number = part.getAttribute('aria-valuenow');
+    const taken = number && [number.padStart(plain(part.textContent).length, '0'), number].find((digits) => typed.startsWith(digits));
     if (!taken) return false;
     typed = typed.slice(taken.length);
     if (!typed) return true;
