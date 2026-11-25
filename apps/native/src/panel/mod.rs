@@ -3,7 +3,7 @@ mod changes;
 mod diff_surface;
 mod persist;
 mod pull_request;
-pub(crate) use pull_request::format_review_threads;
+pub(crate) use pull_request::{check_look, format_review_threads};
 mod surfaces;
 
 use crate::m;

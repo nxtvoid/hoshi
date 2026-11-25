@@ -17,9 +17,10 @@ mod servers_view;
 mod view_state;
 
 use crate::m;
+use crate::panel::check_look;
 use crate::sections::relative_time;
 use crate::sidebar::cards::checks_label;
-use crate::sidebar::{checks_color, pull_request_mark};
+use crate::sidebar::pull_request_mark;
 use crate::state::Workspace;
 use crate::usage::limits::{SectionState, section_state};
 pub use agents::track_pending_tasks;
@@ -359,6 +360,7 @@ fn pull_request_row(
             )
         })
         .when_some(pull_request.checks, |this, checks| {
+            let (name, color) = check_look(checks, colors);
             this.child(
                 div()
                     .id("details-pr-checks")
@@ -368,12 +370,7 @@ fn pull_request_row(
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        div()
-                            .size_1p5()
-                            .rounded_full()
-                            .bg(checks_color(checks, colors)),
-                    )
+                    .child(Icon::new(name).size_3p5().text_color(color))
                     .with_tooltip(Tooltip::new(checks_label(checks))),
             )
         })
