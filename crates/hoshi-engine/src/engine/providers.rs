@@ -335,8 +335,6 @@ impl Engine {
                 .filter_map(|read| read.join().ok())
                 .collect()
         });
-        catalogs.extend(updating);
-        catalogs.sort_by_key(|catalog| catalog.provider != DEFAULT_PROVIDER);
         for catalog in catalogs.iter().filter(|catalog| !catalog.models.is_empty()) {
             if let Err(error) = provider_cache::write(&cache_dir, catalog) {
                 eprintln!(
@@ -345,6 +343,8 @@ impl Engine {
                 );
             }
         }
+        catalogs.extend(updating);
+        catalogs.sort_by_key(|catalog| catalog.provider != DEFAULT_PROVIDER);
         catalogs
     }
 

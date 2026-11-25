@@ -1539,16 +1539,42 @@ fn check_provider_versions(state: &Mutex<State>, maintenance: &Mutex<()>, only: 
     }
 }
 
-/// Updates a provider [`State::begin_update`] marked, then lets its turns start again.
+/// How an update ended.
+struct UpdateEnd {
+    /// `None` when it never got to look at the CLI.
+    installation: Option<Installation>,
+    update: ProviderUpdate,
+    /// Read again for a CLI that was missing.
+    account: Option<ProviderAccountStatus>,
+}
+
+/// Updates a provider [`State::begin_update`] marked, then lets its turns start again. The mark
+/// goes before the end is told, so whoever reads the models then reads the updated CLI's.
 fn update_provider(state: &Mutex<State>, maintenance: &Mutex<()>, provider: &str) {
-    run_provider_update(state, maintenance, provider);
+    let end = run_provider_update(state, maintenance, provider);
     let mut state = lock(state);
     state.updating.remove(provider);
+    if let Some(end) = end {
+        match end.installation {
+            Some(installation) => state.keep_provider_version(provider, &installation, end.update),
+            None => state.set_provider_update(provider, end.update),
+        }
+        if let Some(account) = end.account
+            && state.adapter_for(provider).is_some()
+        {
+            state.provider_accounts.insert(provider.to_owned(), account);
+            state.notify_providers();
+        }
+    }
     state.start_parked(provider);
 }
 
 /// Turns spawn the CLI the update replaces, so it refuses while any runs.
-fn run_provider_update(state: &Mutex<State>, maintenance: &Mutex<()>, provider: &str) {
+fn run_provider_update(
+    state: &Mutex<State>,
+    maintenance: &Mutex<()>,
+    provider: &str,
+) -> Option<UpdateEnd> {
     let _updating = maintenance
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1557,32 +1583,29 @@ fn run_provider_update(state: &Mutex<State>, maintenance: &Mutex<()>, provider: 
         let busy = !state.turns.is_empty() || state.keeps_agents_busy(provider);
         (state.adapter_for(provider), busy)
     };
-    let Some(adapter) = adapter else {
-        return;
+    let adapter = adapter?;
+    let ended = |installation, update| {
+        Some(UpdateEnd {
+            installation,
+            update,
+            account: None,
+        })
     };
     let failed = |reason| ProviderUpdate::Failed {
         reason,
         output: None,
     };
     if turns_running {
-        lock(state).set_provider_update(provider, failed(ProviderUpdateFailure::TurnsRunning));
-        return;
+        return ended(None, failed(ProviderUpdateFailure::TurnsRunning));
     }
     let Some(before) = adapter.installation() else {
-        lock(state).set_provider_update(provider, failed(ProviderUpdateFailure::Unsupported));
-        return;
+        return ended(None, failed(ProviderUpdateFailure::Unsupported));
     };
     let Some(updater) = before.updater.clone() else {
-        lock(state).keep_provider_version(
-            provider,
-            &before,
-            failed(ProviderUpdateFailure::Unsupported),
-        );
-        return;
+        return ended(Some(before), failed(ProviderUpdateFailure::Unsupported));
     };
     if before.installed.is_some() && before.latest.is_some() && !before.update_available() {
-        lock(state).keep_provider_version(provider, &before, ProviderUpdate::Idle);
-        return;
+        return ended(Some(before), ProviderUpdate::Idle);
     }
     lock(state).close_lingering_of(provider);
     adapter.end_idle_processes();
@@ -1617,14 +1640,11 @@ fn run_provider_update(state: &Mutex<State>, maintenance: &Mutex<()>, provider: 
         }
         Ok(()) => ProviderUpdate::Succeeded,
     };
-    let mut state = lock(state);
-    state.keep_provider_version(provider, &after, update);
-    if let Some(account) = account
-        && state.adapter_for(provider).is_some()
-    {
-        state.provider_accounts.insert(provider.to_owned(), account);
-        state.notify_providers();
-    }
+    Some(UpdateEnd {
+        installation: Some(after),
+        update,
+        account,
+    })
 }
 
 /// Checks again every few hours, for as long as the engine lives.

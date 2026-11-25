@@ -735,6 +735,13 @@ fn updater_for(binary: Option<&CodexBinary>, install: &CodexInstall) -> Option<U
 /// Updates a Codex the user put in place the way it was installed: `path` is where it was
 /// found and `real` the file it leads to.
 fn own_updater(path: &Path, real: &Path) -> Option<Updater> {
+    // An update adds a release beside this one and leaves this one as it is.
+    if path
+        .ancestors()
+        .any(|dir| dir.ends_with("packages/standalone/releases"))
+    {
+        return None;
+    }
     // `codex update` finds the install through `CODEX_HOME`, which may not be the account's.
     if let Some(home) = standalone_home(path, real) {
         return Some(Updater::Command {

@@ -27,13 +27,18 @@ pub(crate) enum Manager {
 /// Who installed `package`'s CLI: `path` is where it was found and `real` the file it leads
 /// to. `None` when none of the managers hoshi drives did.
 pub(crate) fn manager_of(package: &str, path: &Path, real: &Path) -> Option<Manager> {
-    if any_path(path, real, |path| path.contains("/.bun/")) {
+    if any_path(path, real, in_global_bun) {
         return Some(Manager::Bun);
     }
     if any_path(path, real, |path| path.contains("/pnpm/")) {
         return Some(Manager::Pnpm);
     }
     npm_prefix(package, path, real).map(Manager::Npm)
+}
+
+/// Bun also keeps a project's packages in its `node_modules/.bun`.
+fn in_global_bun(path: &str) -> bool {
+    path.replace("/node_modules/.bun/", "/").contains("/.bun/")
 }
 
 /// Whether `test` holds for either path, lowercase and with forward slashes.
@@ -201,6 +206,29 @@ mod tests {
                 "{mise}/node/24.0.0/lib/node_modules/@openai/codex/codex.js"
             )),
             Some(Manager::Npm(PathBuf::from(format!("{mise}/node/24.0.0"))))
+        );
+    }
+
+    #[test]
+    fn a_project_s_bun_store_is_not_a_global_install() {
+        let store = "node_modules/.bun/@openai+codex@1.0.0/node_modules/@openai/codex/codex.js";
+        let manager = |path: &str, real: String| {
+            manager_of("@openai/codex", Path::new(path), Path::new(&real))
+        };
+
+        assert_eq!(
+            manager(
+                "/work/shop/node_modules/.bin/codex",
+                format!("/work/shop/{store}")
+            ),
+            None
+        );
+        assert_eq!(
+            manager(
+                "/home/dev/bin/codex",
+                format!("/home/dev/.bun/install/global/{store}")
+            ),
+            Some(Manager::Bun)
         );
     }
 

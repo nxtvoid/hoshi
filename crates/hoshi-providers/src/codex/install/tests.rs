@@ -195,6 +195,15 @@ fn a_standalone_codex_updates_itself_in_the_home_it_is_under() {
 }
 
 #[test]
+fn a_standalone_release_the_user_pinned_is_not_updated() {
+    let home = Path::new("/home/dev/.codex/packages/standalone");
+    let release = home.join("releases/0.1.0/bin/codex");
+
+    assert_eq!(own_updater(&release, &release), None);
+    assert!(own_updater(&home.join("current/bin/codex"), &release).is_some());
+}
+
+#[test]
 fn a_codex_of_unknown_origin_is_left_to_the_user() {
     let path = Path::new("/opt/codex");
 

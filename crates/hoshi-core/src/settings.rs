@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
+    /// Settings saved without it ran every provider.
+    #[serde(default = "providers_before_their_key")]
     pub providers: ProviderSettings,
     /// Shows the composer's Plan toggle.
     pub plan_mode_enabled: bool,
@@ -258,6 +260,13 @@ pub struct ProviderSettings {
     pub idle_compaction: IdleCompaction,
 }
 
+fn providers_before_their_key() -> ProviderSettings {
+    ProviderSettings {
+        copilot: copilot_before_its_key(),
+        ..ProviderSettings::default()
+    }
+}
+
 fn copilot_before_its_key() -> CopilotSettings {
     CopilotSettings {
         added: true,
@@ -394,6 +403,10 @@ mod tests {
 
     #[test]
     fn settings_saved_before_copilot_keep_running_it() {
+        let saved: AppSettings = serde_json::from_value(json!({ "general": {} })).unwrap();
+        assert!(saved.providers.copilot.added && saved.providers.copilot.enabled);
+        assert!(saved.providers.claude_code.added && saved.providers.codex.added);
+
         let saved: AppSettings = serde_json::from_value(json!({
             "providers": { "claudeCode": { "enabled": true, "binaryPath": null } },
         }))
