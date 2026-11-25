@@ -22,16 +22,29 @@ const LINE_MAX_CHARS: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Updater {
     /// A command that updates it in place.
-    Command { program: PathBuf, args: Vec<String> },
+    Command {
+        program: PathBuf,
+        args: Vec<String>,
+        /// Set on top of the environment hoshi runs in.
+        env: Vec<(String, String)>,
+    },
     /// hoshi downloads the release into its own folder.
     Managed(CodexInstall),
 }
 
 impl Updater {
+    pub fn command(program: PathBuf, args: Vec<String>) -> Self {
+        Self::Command {
+            program,
+            args,
+            env: Vec::new(),
+        }
+    }
+
     /// As typed in a terminal; a managed install names the package it installs.
     pub fn display(&self) -> String {
         let (program, args) = match self {
-            Self::Command { program, args } => (program, args),
+            Self::Command { program, args, .. } => (program, args),
             Self::Managed(install) => return install.package().to_owned(),
         };
         let program = program
@@ -67,9 +80,9 @@ pub fn run(
     mut progress: impl FnMut(UpdateProgress),
 ) -> Result<(), UpdateFailure> {
     match updater {
-        Updater::Command { program, args } => {
-            run_command(program, args, |line| progress(UpdateProgress::Line(line)))
-        }
+        Updater::Command { program, args, env } => run_command(program, args, env, |line| {
+            progress(UpdateProgress::Line(line))
+        }),
         Updater::Managed(install) => install
             .install(|step| progress(UpdateProgress::Step(step)))
             .map(|_| ()),
@@ -79,11 +92,13 @@ pub fn run(
 fn run_command(
     program: &Path,
     args: &[String],
+    env: &[(String, String)],
     mut progress: impl FnMut(String),
 ) -> Result<(), UpdateFailure> {
     let mut command = Command::new(program);
     command
         .args(args)
+        .envs(env.iter().map(|(name, value)| (name, value)))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -281,6 +296,7 @@ mod tests {
     #[test]
     fn the_command_reads_as_typed() {
         let updater = Updater::Command {
+            env: Vec::new(),
             program: PathBuf::from("/home/me/.local/bin/claude.exe"),
             args: vec!["update".into()],
         };
@@ -304,6 +320,7 @@ mod tests {
             script.split('|').map(str::to_owned).collect()
         };
         let updater = Updater::Command {
+            env: Vec::new(),
             program: find_program(program, false).unwrap(),
             args,
         };
@@ -327,6 +344,7 @@ mod tests {
     #[test]
     fn a_missing_updater_fails_to_spawn() {
         let updater = Updater::Command {
+            env: Vec::new(),
             program: PathBuf::from("hoshi-no-such-updater"),
             args: Vec::new(),
         };

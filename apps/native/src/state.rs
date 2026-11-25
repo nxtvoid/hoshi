@@ -206,11 +206,6 @@ impl Workspace {
         self.providers.usage_limits.get(provider)
     }
 
-    /// The default provider's CLI as last checked; `None` until checked or while disabled.
-    pub fn provider_version(&self) -> Option<&hoshi_core::ProviderVersion> {
-        self.providers.versions.get(hoshi_core::DEFAULT_PROVIDER)
-    }
-
     /// The model a choice runs on: the one it names, or its provider's default.
     pub fn chosen_model(&self, provider: &str, slug: Option<&str>) -> Option<&ModelInfo> {
         let catalog = self.catalog(provider)?;

@@ -287,6 +287,7 @@ impl ProviderAdapter for OutdatedAdapter {
             installed,
             latest: Some("1.1.0".into()),
             updater: Some(Updater::Command {
+                env: Vec::new(),
                 program: program.into(),
                 args,
             }),
@@ -339,6 +340,76 @@ fn an_outdated_cli_is_updated_and_checked_again() {
     assert_eq!(finished.update, ProviderUpdate::Succeeded);
     assert_eq!(finished.installed.as_deref(), Some("1.1.0"));
     assert!(!finished.update_available);
+}
+
+/// Runs `work` on an engine whose update waits for a check to end.
+fn while_update_waits(
+    name: &str,
+    work: impl FnOnce(&Engine),
+) -> (Engine, Receiver<ProviderVersionUpdate>, PathBuf) {
+    let (notify, updates) = version_updates();
+    let dir = scratch_dir(name);
+    let engine = Engine::from_store(Store::open_in_memory().unwrap(), &dir, notify).unwrap();
+    engine.set_adapter(Some(Arc::new(OutdatedAdapter {
+        marker: dir.join("updated"),
+        missing: false,
+    })));
+    wait_for_versions(&updates, &[DEFAULT_PROVIDER]);
+    let maintenance = engine.maintenance.clone();
+    let checking = maintenance.lock().unwrap();
+    engine.update_provider();
+    work(&engine);
+    drop(checking);
+    (engine, updates, dir)
+}
+
+fn wait_until_updated(engine: &Engine) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !lock(&engine.state).updating.is_empty() {
+        assert!(Instant::now() < deadline, "the update never ended");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn asking_twice_while_a_check_runs_updates_once_and_keeps_how_it_ended() {
+    let (engine, _updates, _) = while_update_waits("update-twice", |engine| {
+        let version = engine.provider_version().unwrap();
+        assert!(matches!(version.update, ProviderUpdate::Running { .. }));
+        engine.update_provider();
+    });
+
+    wait_until_updated(&engine);
+    thread::sleep(Duration::from_millis(100));
+    let version = engine.provider_version().unwrap();
+    assert_eq!(version.update, ProviderUpdate::Succeeded);
+}
+
+#[test]
+fn a_provider_disabled_mid_update_stays_forgotten() {
+    let (engine, _updates, _) =
+        while_update_waits("update-disabled", |engine| engine.set_adapter(None));
+
+    wait_until_updated(&engine);
+    assert_eq!(engine.provider_version(), None);
+}
+
+#[test]
+fn a_turn_waits_for_its_provider_s_update() {
+    let harness = Harness::in_memory("update-parks", completed_turn());
+    let adapter = adapter(None);
+    harness.engine.set_adapter(Some(adapter.clone()));
+    assert!(lock(&harness.engine.state).begin_update(DEFAULT_PROVIDER));
+    harness.send("t", "m1", "hello");
+    assert!(adapter.requests.lock().unwrap().is_empty());
+
+    update_provider(
+        &harness.engine.state,
+        &harness.engine.maintenance,
+        DEFAULT_PROVIDER,
+    );
+
+    assert_eq!(adapter.requests.lock().unwrap().len(), 1);
 }
 
 #[test]

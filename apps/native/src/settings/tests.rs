@@ -127,11 +127,11 @@ fn clicking_a_provider_shows_its_settings(cx: &mut TestAppContext) {
         hoshi_core::DEFAULT_PROVIDER
     );
 
-    let bounds = h.cx.debug_bounds("settings-item-provider-copilot").unwrap();
+    let bounds = h.cx.debug_bounds("settings-item-provider-codex").unwrap();
     h.cx.simulate_click(bounds.center(), gpui_kit::Modifiers::none());
     h.cx.run_until_parked();
 
-    assert_eq!(h.view.read_with(&h.cx, |view, _| view.provider), "copilot");
+    assert_eq!(h.view.read_with(&h.cx, |view, _| view.provider), "codex");
 }
 
 #[gpui_kit::test]

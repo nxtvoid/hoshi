@@ -3,6 +3,7 @@
 //! the settings, that install or the `PATH` provide.
 
 use super::login;
+use crate::packages;
 use crate::process::{hide_console, kill_tree};
 use crate::updater::{UpdateFailure, Updater, find_program};
 use crate::{
@@ -26,6 +27,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 const PACKAGE: &str = "@openai/codex";
 const REGISTRY: &str = "https://registry.npmjs.org";
+const STANDALONE_LATEST: &str = "https://releases.openai.com/codex/channels/latest";
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 /// A fresh binary can take long to start while the system scans it.
@@ -190,7 +192,7 @@ fn latest_metadata() -> Option<Value> {
 
 /// The latest Codex release on npm; reaches the network.
 pub fn latest_version() -> Option<String> {
-    version_of(&latest_metadata()?)
+    packages::npm_latest(PACKAGE).filter(|version| is_version(version))
 }
 
 fn latest_release(platform: &Platform) -> Option<Release> {
@@ -626,6 +628,13 @@ impl CodexBinary {
             Self::Configured(path) | Self::Managed(path) | Self::OnPath(path) => path,
         }
     }
+
+    fn standalone_home(&self) -> Option<PathBuf> {
+        match self {
+            Self::Managed(_) => None,
+            Self::Configured(path) | Self::OnPath(path) => standalone_home(path, &real_path(path)),
+        }
+    }
 }
 
 impl CodexSetup {
@@ -712,14 +721,62 @@ fn make_adapter(
     )
 }
 
-/// Only hoshi's own install is updated: a Codex the user put in place stays as it is.
 fn updater_for(binary: Option<&CodexBinary>, install: &CodexInstall) -> Option<Updater> {
     match binary {
         None | Some(CodexBinary::Managed(_)) => {
             current_platform().map(|_| Updater::Managed(install.clone()))
         }
-        Some(CodexBinary::Configured(_) | CodexBinary::OnPath(_)) => None,
+        Some(CodexBinary::Configured(path) | CodexBinary::OnPath(path)) => {
+            own_updater(path, &real_path(path))
+        }
     }
+}
+
+/// Updates a Codex the user put in place the way it was installed: `path` is where it was
+/// found and `real` the file it leads to.
+fn own_updater(path: &Path, real: &Path) -> Option<Updater> {
+    // An update adds a release beside this one and leaves this one as it is.
+    if path
+        .ancestors()
+        .any(|dir| dir.ends_with("packages/standalone/releases"))
+    {
+        return None;
+    }
+    // `codex update` finds the install through `CODEX_HOME`, which may not be the account's.
+    if let Some(home) = standalone_home(path, real) {
+        return Some(Updater::Command {
+            program: path.to_owned(),
+            args: vec!["update".into()],
+            env: vec![("CODEX_HOME".into(), home.to_string_lossy().into_owned())],
+        });
+    }
+    packages::updater(packages::manager_of(PACKAGE, path, real)?, PACKAGE)
+}
+
+/// The `CODEX_HOME` the official installer put `path` under, in `packages/standalone`.
+fn standalone_home(path: &Path, real: &Path) -> Option<PathBuf> {
+    real.ancestors()
+        .chain(path.ancestors())
+        .find(|dir| dir.ends_with("packages/standalone"))?
+        .ancestors()
+        .nth(2)
+        .map(Path::to_owned)
+}
+
+fn real_path(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+/// The release `codex update` installs, which can lag npm's.
+fn standalone_latest() -> Option<String> {
+    packages::cached(STANDALONE_LATEST, || {
+        standalone_version(&get_json(STANDALONE_LATEST)?)
+    })
+}
+
+fn standalone_version(release: &Value) -> Option<String> {
+    let version = release["tag_name"].as_str()?.strip_prefix("rust-v")?;
+    is_version(version).then(|| version.to_owned())
 }
 
 fn account_status(
@@ -760,10 +817,22 @@ impl ProviderAdapter for ManagedCodex {
 
     fn installation(&self) -> Option<Installation> {
         let binary = lock(&self.current).0.clone();
+        let installed = self.installed();
+        let updater = updater_for(binary.as_ref(), &self.setup.install)
+            .filter(|updater| installed.is_some() || matches!(updater, Updater::Managed(_)));
+        let latest = if binary
+            .as_ref()
+            .and_then(CodexBinary::standalone_home)
+            .is_some()
+        {
+            standalone_latest()
+        } else {
+            latest_version()
+        };
         Some(Installation {
-            installed: self.installed(),
-            latest: latest_version(),
-            updater: updater_for(binary.as_ref(), &self.setup.install),
+            installed,
+            latest,
+            updater,
         })
     }
 
@@ -777,6 +846,10 @@ impl ProviderAdapter for ManagedCodex {
         } else {
             current.1.forget_version();
         }
+    }
+
+    fn end_idle_processes(&self) {
+        self.adapter().end_idle_processes();
     }
 
     fn account_status(&self) -> ProviderAccountStatus {

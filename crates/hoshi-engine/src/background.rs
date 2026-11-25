@@ -91,6 +91,35 @@ impl State {
             .is_some_and(|lingering| lingering.runs_background_work() || lingering.may_wake())
     }
 
+    fn lingering_of(&self, provider: &str) -> impl Iterator<Item = (&String, &Lingering)> {
+        self.lingering.iter().filter(move |(thread_id, _)| {
+            self.model
+                .thread(thread_id)
+                .is_some_and(|thread| thread.provider == provider)
+        })
+    }
+
+    /// Whether agents of `provider` kept between turns still have work to end or answers to
+    /// give.
+    pub(crate) fn keeps_agents_busy(&self, provider: &str) -> bool {
+        self.lingering_of(provider).any(|(_, lingering)| {
+            lingering.runs_background_work()
+                || lingering.may_wake()
+                || lingering.owes_answer
+                || lingering.holds_answer
+        })
+    }
+
+    pub(crate) fn close_lingering_of(&mut self, provider: &str) {
+        let threads: Vec<String> = self
+            .lingering_of(provider)
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in threads {
+            self.close_lingering(&thread_id);
+        }
+    }
+
     /// The agent process of the thread: its turn's, or the one kept between turns.
     fn agent_process(&self, thread_id: &str) -> Option<&dyn RunningTurn> {
         match self.turns.get(thread_id) {

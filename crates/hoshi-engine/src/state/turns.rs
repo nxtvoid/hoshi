@@ -9,6 +9,15 @@ impl State {
             .cloned()
     }
 
+    /// The enabled adapters whose CLI isn't being updated.
+    pub(crate) fn settled_adapters(&self) -> Vec<Arc<dyn ProviderAdapter>> {
+        self.adapters
+            .iter()
+            .filter(|adapter| !self.updating.contains(adapter.provider()))
+            .cloned()
+            .collect()
+    }
+
     /// Where the thread's agent runs. A chat's own folder is created when first asked for.
     pub(crate) fn cwd(&self, thread_id: &str) -> Option<String> {
         let thread = self.model.thread(thread_id)?;
@@ -309,9 +318,10 @@ impl State {
         });
     }
 
-    /// Starts the turns that waited for git to finish with `folder`.
-    pub(crate) fn start_parked(&mut self, folder: &str) {
-        for turn in self.parked.remove(folder).unwrap_or_default() {
+    /// Starts the turns that waited for git to finish with a folder, or for a provider's
+    /// update to end.
+    pub(crate) fn start_parked(&mut self, waited_for: &str) {
+        for turn in self.parked.remove(waited_for).unwrap_or_default() {
             let current = self.model.thread(&turn.thread_id).is_some_and(|thread| {
                 thread.active_turn_id.as_deref() == Some(turn.turn_id.as_str())
             });
@@ -329,7 +339,7 @@ impl State {
         }
     }
 
-    /// Ends a parked turn the user stopped before git was done with its folder.
+    /// Ends a parked turn the user stopped before what it waited for was done.
     pub(crate) fn interrupt_parked(&mut self, thread_id: &str) {
         let mut stopped = Vec::new();
         for turns in self.parked.values_mut() {

@@ -50,7 +50,6 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 const STEER_TIMEOUT: Duration = Duration::from_secs(15);
 const TITLE_TIMEOUT: Duration = Duration::from_secs(90);
 const WRITING_TIMEOUT: Duration = Duration::from_secs(120);
-const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long an interrupted turn may take to stop before its server is killed.
 const CANCEL_GRACE: Duration = Duration::from_secs(5);
 const STDERR_TAIL_BYTES: usize = 2_000;
@@ -77,7 +76,6 @@ const MODEL_OUTPUT: [&str; 6] = [
     "turn/plan/updated",
 ];
 
-const NPM_LATEST: &str = "https://registry.npmjs.org/@openai/codex/latest";
 const CODEX_HOME: &str = "CODEX_HOME";
 /// What a plan the user accepted is answered with.
 const IMPLEMENT_PLAN: &str = "The plan is approved. Implement it now.";
@@ -361,7 +359,7 @@ impl ProviderAdapter for CodexAdapter {
             .version()
             .map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"));
         Some(Installation {
-            latest: installed.as_ref().and_then(|_| npm_latest()),
+            latest: installed.as_ref().and_then(|_| install::latest_version()),
             installed,
             updater: None,
         })
@@ -541,22 +539,6 @@ fn skills(connection: &Connection, cwd: &Path) -> Option<Vec<Value>> {
             .flat_map(|entry| entry["skills"].as_array().cloned().unwrap_or_default())
             .collect(),
     )
-}
-
-fn npm_latest() -> Option<String> {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(LOOKUP_TIMEOUT))
-        .build()
-        .into();
-    let text = agent
-        .get(NPM_LATEST)
-        .call()
-        .ok()?
-        .body_mut()
-        .read_to_string()
-        .ok()?;
-    let package: Value = serde_json::from_str(&text).ok()?;
-    Some(package["version"].as_str()?.to_owned())
 }
 
 /// The first JSON object a one-shot answer holds.

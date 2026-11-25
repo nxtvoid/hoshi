@@ -76,9 +76,13 @@ fn redraw(cx: &mut VisualTestContext) {
 }
 
 fn set_version(h: &mut Harness, update: ProviderUpdate, update_available: bool) {
+    set_version_of(h, hoshi_core::DEFAULT_PROVIDER, update, update_available);
+}
+
+fn set_version_of(h: &mut Harness, provider: &str, update: ProviderUpdate, update_available: bool) {
     h.workspace.update(&mut h.cx, |workspace, cx| {
         workspace.providers.versions.insert(
-            hoshi_core::default_provider(),
+            provider.to_owned(),
             ProviderVersion {
                 installed: Some("2.0.0".into()),
                 latest: Some("2.1.0".into()),
@@ -107,13 +111,45 @@ fn dev_builds_with_nothing_to_update_show_the_check_button(cx: &mut TestAppConte
 
 #[gpui_kit::test]
 fn an_available_cli_update_opens_its_details(cx: &mut TestAppContext) {
-    let mut h = harness(cx, "updates-provider");
+    let mut h = harness(cx, "updates-provider-claudeCode");
     set_version(&mut h, ProviderUpdate::Idle, true);
     assert!(h.cx.debug_bounds("updates-check").is_none());
-    assert!(h.cx.debug_bounds("updates-provider").is_none());
+    assert!(h.cx.debug_bounds("updates-provider-claudeCode").is_none());
     click(&mut h, "updates-details");
-    assert!(h.cx.debug_bounds("updates-provider").is_some());
+    assert!(h.cx.debug_bounds("updates-provider-claudeCode").is_some());
     assert!(h.cx.debug_bounds("updates-app").is_none());
+}
+
+#[gpui_kit::test]
+fn every_provider_with_an_update_is_listed(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "updates-providers");
+    set_version(&mut h, ProviderUpdate::Idle, false);
+    set_version_of(&mut h, "copilot", ProviderUpdate::Idle, true);
+    assert!(h.cx.debug_bounds("updates-details").is_none(), "not added");
+    h.workspace.update(&mut h.cx, |workspace, _| {
+        let copilot = &mut workspace.settings.providers.copilot;
+        (copilot.added, copilot.enabled) = (true, true);
+    });
+    set_version_of(&mut h, "copilot", ProviderUpdate::Idle, true);
+    set_version_of(&mut h, "codex", ProviderUpdate::Idle, true);
+    click(&mut h, "updates-details");
+    assert!(h.cx.debug_bounds("updates-provider-claudeCode").is_none());
+    assert!(h.cx.debug_bounds("updates-provider-copilot").is_some());
+    assert!(h.cx.debug_bounds("updates-provider-codex").is_some());
+}
+
+#[gpui_kit::test]
+fn an_update_hoshi_cant_install_is_not_pointed_at(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "updates-manual");
+    set_version_of(&mut h, "codex", ProviderUpdate::Idle, true);
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        let version = workspace.providers.versions.get_mut("codex").unwrap();
+        version.update_command = None;
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("updates-details").is_none());
+    assert!(h.cx.debug_bounds("updates-check").is_some());
 }
 
 #[gpui_kit::test]
@@ -131,12 +167,57 @@ fn a_finished_cli_update_stays_until_its_details_close(cx: &mut TestAppContext) 
     set_version(&mut h, ProviderUpdate::Succeeded, false);
     assert!(h.cx.debug_bounds("updates-details").is_some());
     click(&mut h, "updates-details");
-    assert!(h.cx.debug_bounds("updates-provider").is_some());
+    assert!(h.cx.debug_bounds("updates-provider-claudeCode").is_some());
     h.cx.simulate_keystrokes("escape");
     redraw(&mut h.cx);
-    assert!(h.cx.debug_bounds("updates-provider").is_none());
+    assert!(h.cx.debug_bounds("updates-provider-claudeCode").is_none());
     assert!(h.cx.debug_bounds("updates-details").is_none());
     assert!(h.cx.debug_bounds("updates-check").is_some());
+}
+
+#[gpui_kit::test]
+fn a_finished_cli_update_goes_after_a_moment_and_the_others_stay(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "updates-put-away");
+    let running = ProviderUpdate::Running {
+        line: None,
+        step: None,
+    };
+    set_version_of(&mut h, "codex", running, true);
+    set_version(&mut h, ProviderUpdate::Idle, true);
+    set_version_of(&mut h, "codex", ProviderUpdate::Succeeded, false);
+    click(&mut h, "updates-details");
+    assert!(h.cx.debug_bounds("updates-provider-codex").is_some());
+
+    h.cx.executor().advance_clock(super::UPDATED_FOR);
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("updates-provider-codex").is_none());
+    assert!(h.cx.debug_bounds("updates-provider-claudeCode").is_some());
+
+    let running = ProviderUpdate::Running {
+        line: None,
+        step: None,
+    };
+    set_version(&mut h, running, true);
+    set_version(&mut h, ProviderUpdate::Succeeded, false);
+    h.cx.executor().advance_clock(super::UPDATED_FOR);
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("updates-details").is_none());
+    assert!(h.cx.debug_bounds("updates-check").is_some());
+    assert!(!h.button.read_with(&h.cx, |button, _| button.open));
+}
+
+#[gpui_kit::test]
+fn a_failed_cli_update_stays(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "updates-failed");
+    let running = ProviderUpdate::Running {
+        line: None,
+        step: None,
+    };
+    set_version(&mut h, running, true);
+    set_version(&mut h, ProviderUpdate::Unchanged, false);
+    h.cx.executor().advance_clock(super::UPDATED_FOR);
+    redraw(&mut h.cx);
+    assert!(h.cx.debug_bounds("updates-details").is_some());
 }
 
 #[gpui_kit::test]
@@ -163,7 +244,7 @@ fn an_app_release_opens_its_page_and_notes(cx: &mut TestAppContext) {
     click(&mut h, "updates-details");
     assert!(h.cx.debug_bounds("updates-app").is_some());
     assert!(h.cx.debug_bounds("updates-release-notes").is_some());
-    assert!(h.cx.debug_bounds("updates-provider").is_none());
+    assert!(h.cx.debug_bounds("updates-provider-claudeCode").is_none());
 }
 
 fn installable(version: &str) -> AppRelease {

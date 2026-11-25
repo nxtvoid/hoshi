@@ -21,6 +21,10 @@ fn ids(providers: Vec<&'static super::KnownProvider>) -> Vec<&'static str> {
 #[test]
 fn the_menu_offers_only_providers_not_added() {
     let mut settings = ProviderSettings::default();
+    assert_eq!(ids(addable(&settings)), [COPILOT]);
+    assert_eq!(ids(listed(&settings)), [DEFAULT_PROVIDER, CODEX]);
+
+    settings.copilot.added = true;
     assert!(addable(&settings).is_empty());
     assert_eq!(ids(listed(&settings)), [DEFAULT_PROVIDER, COPILOT, CODEX]);
 

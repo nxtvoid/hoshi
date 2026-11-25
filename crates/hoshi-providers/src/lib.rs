@@ -9,6 +9,7 @@ mod codex;
 mod copilot;
 mod history;
 mod jsonrpc;
+mod packages;
 mod process;
 mod titles;
 mod updater;
@@ -237,6 +238,9 @@ pub trait ProviderAdapter: Send + Sync {
 
     /// Reads the CLI's version again next time, after an update replaced it.
     fn forget_version(&self) {}
+
+    /// Ends the processes kept between turns, which hold the files an update replaces.
+    fn end_idle_processes(&self) {}
 
     /// Whether the CLI is installed and signed in. Runs the CLI, so it can take a few
     /// seconds; `Unknown` when it can't tell.

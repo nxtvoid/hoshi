@@ -242,7 +242,10 @@ mod tests {
         );
 
         fs::write(&path, "{}").unwrap();
-        assert_eq!(load(&path), AppSettings::default());
+        let mut expected = AppSettings::default();
+        expected.providers.copilot.added = true;
+        expected.providers.copilot.enabled = true;
+        assert_eq!(load(&path), expected);
     }
 
     #[test]

@@ -170,17 +170,52 @@ fn the_settings_binary_wins_then_hoshis_install_then_the_path() {
 }
 
 #[test]
-fn only_hoshis_own_install_is_updated() {
+fn hoshis_own_install_is_updated_by_hoshi() {
     let install = CodexInstall::new(Path::new("/hoshi"));
     let managed = CodexBinary::Managed(PathBuf::from("/hoshi/tools/codex/0.1.0/bin/codex"));
-    let own = CodexBinary::OnPath(PathBuf::from("/usr/local/bin/codex"));
-    let configured = CodexBinary::Configured(PathBuf::from("/opt/codex"));
     let expected = current_platform().map(|_| Updater::Managed(install.clone()));
 
     assert_eq!(updater_for(Some(&managed), &install), expected);
     assert_eq!(updater_for(None, &install), expected);
-    assert_eq!(updater_for(Some(&own), &install), None);
-    assert_eq!(updater_for(Some(&configured), &install), None);
+}
+
+#[test]
+fn a_standalone_codex_updates_itself_in_the_home_it_is_under() {
+    let path = Path::new("/home/dev/.local/bin/codex");
+    let real = Path::new("/home/dev/.codex/packages/standalone/releases/0.1.0/bin/codex");
+
+    assert_eq!(
+        own_updater(path, real),
+        Some(Updater::Command {
+            program: path.to_owned(),
+            args: vec!["update".into()],
+            env: vec![("CODEX_HOME".into(), "/home/dev/.codex".into())],
+        })
+    );
+}
+
+#[test]
+fn a_standalone_release_the_user_pinned_is_not_updated() {
+    let home = Path::new("/home/dev/.codex/packages/standalone");
+    let release = home.join("releases/0.1.0/bin/codex");
+
+    assert_eq!(own_updater(&release, &release), None);
+    assert!(own_updater(&home.join("current/bin/codex"), &release).is_some());
+}
+
+#[test]
+fn a_codex_of_unknown_origin_is_left_to_the_user() {
+    let path = Path::new("/opt/codex");
+
+    assert_eq!(own_updater(path, path), None);
+}
+
+#[test]
+fn the_standalone_channel_names_its_release_by_tag() {
+    let version = |tag: &str| standalone_version(&json!({ "tag_name": tag }));
+
+    assert_eq!(version("rust-v0.172.0"), Some("0.172.0".into()));
+    assert_eq!(version("0.172.0"), None);
 }
 
 #[test]

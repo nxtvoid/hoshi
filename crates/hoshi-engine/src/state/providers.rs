@@ -117,6 +117,9 @@ impl State {
         installation: &Installation,
         update: ProviderUpdate,
     ) {
+        if self.adapter_for(provider).is_none() {
+            return;
+        }
         let version = ProviderVersion {
             installed: installation.installed.clone(),
             latest: installation.latest.clone(),
@@ -128,7 +131,26 @@ impl State {
         self.notify_provider_version(provider);
     }
 
+    /// Marks `provider`'s CLI as updating, which holds its turns back; `false` when it isn't
+    /// enabled or already is.
+    pub(crate) fn begin_update(&mut self, provider: &str) -> bool {
+        if self.adapter_for(provider).is_none() || !self.updating.insert(provider.to_owned()) {
+            return false;
+        }
+        self.set_provider_update(
+            provider,
+            ProviderUpdate::Running {
+                line: None,
+                step: None,
+            },
+        );
+        true
+    }
+
     pub(crate) fn set_provider_update(&mut self, provider: &str, update: ProviderUpdate) {
+        if self.adapter_for(provider).is_none() {
+            return;
+        }
         let version = self
             .provider_versions
             .entry(provider.to_owned())
