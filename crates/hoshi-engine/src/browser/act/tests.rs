@@ -648,6 +648,157 @@ fn every_kind_of_field_takes_text() {
 }
 
 #[test]
+fn the_parts_of_a_date_take_their_text_or_say_why_not() {
+    let Some(mut rig) = Rig::open(
+        "<input type=date aria-label=Day><input type=date aria-label=Off disabled><input type=date aria-label=Fixed readonly><input type=month aria-label=Month><input type=date aria-label=Once value=2026-03-03 onchange=\"log.push(this.value);this.remove()\"><input type=time step=1 aria-label=Hour>",
+    ) else {
+        return;
+    };
+    let parts: Vec<String> = rig
+        .snapshot
+        .lines()
+        .filter(|line| line.contains("spinbutton"))
+        .filter_map(|line| line.rsplit_once(" [e"))
+        .map(|(_, rest)| format!("e{}", rest.split(']').next().unwrap()))
+        .collect();
+    let value = |rig: &Rig| rig.js("document.querySelector('input').value");
+
+    // They come in the order of the browser's language.
+    let order = |rig: &Rig, options: &str| -> Vec<String> {
+        let order = rig.js(&format!("new Intl.DateTimeFormat(undefined, {options}).formatToParts().map((part) => part.type).filter((type) => /day|month|year/.test(type))"));
+        serde_json::from_value(order).unwrap()
+    };
+    let date = order(
+        &rig,
+        "{ day: 'numeric', month: 'numeric', year: 'numeric' }",
+    );
+    let month = order(&rig, "{ month: 'long', year: 'numeric' }");
+    let at = |order: &[String], name: &str| order.iter().position(|part| part == name).unwrap();
+    let (day_at, year_at) = (at(&date, "day"), at(&date, "year"));
+    for (part, text) in [("day", "04"), ("month", "4"), ("year", "2026")] {
+        rig.page
+            .type_text(&parts[at(&date, part)], text, false)
+            .unwrap();
+    }
+    assert_eq!(value(&rig), json!("2026-04-04"));
+    for text in ["2027", "2028"] {
+        rig.page.type_text(&parts[year_at], text, false).unwrap();
+    }
+    for text in ["1", "2"] {
+        rig.page.type_text(&parts[day_at], text, false).unwrap();
+    }
+    assert_eq!(value(&rig), json!("2028-04-02"));
+    // A year takes digits enough for all of it.
+    if year_at == 2 {
+        for text in ["05052027", "4042029", "552030"] {
+            rig.page.type_text(&parts[0], text, true).unwrap();
+        }
+        assert_eq!(value(&rig), json!("2030-05-05"));
+    }
+    rig.page.type_text(&parts[1], "2028-06-30", false).unwrap();
+    assert_eq!(value(&rig), json!("2028-06-30"));
+
+    for (text, clear) in [("99", false), ("99", true), ("x", false), ("x", true)] {
+        let refused = rig.page.type_text(&parts[day_at], text, clear).unwrap_err();
+        assert!(refused.contains("type the whole value"), "{refused}");
+        assert_eq!(value(&rig), json!("2028-06-30"));
+    }
+    let refused = rig
+        .page
+        .type_text(&parts[0], "30-06-2028", false)
+        .unwrap_err();
+    assert!(refused.contains("doesn't take"), "{refused}");
+    rig.page.type_text(&parts[2], "", false).unwrap();
+    assert_eq!(value(&rig), json!("2028-06-30"));
+    rig.page.type_text(&parts[2], "", true).unwrap();
+    assert_eq!(value(&rig), json!(""));
+    rig.page.type_text(&parts[2], "", true).unwrap();
+    rig.js(
+        "document.querySelector('[aria-label=Once]').onkeydown = (event) => event.preventDefault()",
+    );
+    for (text, clear) in [("", true), ("4", false)] {
+        let kept = rig.page.type_text(&parts[11 + day_at], text, clear);
+        assert!(kept.unwrap_err().contains("type the whole value"), "{text}");
+    }
+    rig.js("document.querySelector('[aria-label=Once]').onkeydown = null");
+    let off = rig.page.type_text(&parts[3], "4", false).unwrap_err();
+    assert!(off.ends_with("is disabled"), "{off}");
+    let fixed = rig.page.type_text(&parts[6], "4", false).unwrap_err();
+    assert!(fixed.ends_with("is read-only"), "{fixed}");
+
+    rig.page
+        .type_text(&parts[9 + at(&month, "month")], "12", false)
+        .unwrap();
+    rig.page
+        .type_text(&parts[9 + at(&month, "year")], "2026", false)
+        .unwrap();
+    assert_eq!(
+        rig.js("document.querySelector('[type=month]').value"),
+        json!("2026-12")
+    );
+    let time = |rig: &Rig| rig.js("document.querySelector('[type=time]').value");
+    rig.page.type_text(&parts[14], "10:20:30", false).unwrap();
+    for (text, reads) in [
+        ("0905", "10:09:05"),
+        ("0000", "10:00:00"),
+        ("0005", "10:00:05"),
+    ] {
+        rig.page.type_text(&parts[15], text, false).unwrap();
+        assert_eq!(time(&rig), json!(reads));
+    }
+    rig.js("{ let keys = 0; document.querySelector('[type=time]').onkeydown = (event) => { if (++keys > 2) event.preventDefault() } }");
+    let partly = rig.page.type_text(&parts[15], "0000", false).unwrap_err();
+    assert!(partly.contains("type the whole value"), "{partly}");
+    rig.page.type_text(&parts[14], "14:30", false).unwrap();
+    assert_eq!(
+        rig.js("document.querySelector('[type=time]').value"),
+        json!("14:30")
+    );
+    rig.page.type_text(&parts[11 + day_at], "5", false).unwrap();
+    assert!(rig.js("log").to_string().contains("05"));
+}
+
+#[test]
+fn a_date_takes_the_keys_the_user_presses_and_tab_goes_both_ways() {
+    let Some(mut rig) = Rig::open("<input aria-label=Name><input type=date aria-label=Day>") else {
+        return;
+    };
+    rig.type_into("\"Name\"", "", false).unwrap();
+
+    for (key, at) in [("Tab", "Day"), ("Shift+Tab", "Name"), ("Tab", "Day")] {
+        rig.page.press(key).unwrap();
+        assert_eq!(rig.js("document.activeElement.ariaLabel"), json!(at));
+    }
+    for _ in 0..3 {
+        rig.page.press("1").unwrap();
+        rig.page.press("ArrowRight").unwrap();
+    }
+    assert_eq!(
+        rig.js("document.querySelector('[type=date]').value"),
+        json!("0001-01-01")
+    );
+}
+
+#[test]
+fn every_character_of_a_keyboard_is_a_key_that_types_it() {
+    let Some(mut rig) = Rig::open("<input aria-label=Name onkeydown=log.push(event.key)>") else {
+        return;
+    };
+    rig.type_into("textbox", "", false).unwrap();
+    let characters: String = (' '..='~').collect();
+
+    for character in characters.chars() {
+        rig.page.press(&character.to_string()).unwrap();
+    }
+
+    assert_eq!(
+        rig.js("document.querySelector('input').value"),
+        json!(characters)
+    );
+    assert_eq!(rig.js("log.join('')"), json!(characters));
+}
+
+#[test]
 fn keys_are_pressed_together() {
     let Some(mut rig) = Rig::open(
         "<input aria-label=Name value=abc onkeydown=\"log.push([event.key, event.code, event.ctrlKey, event.shiftKey])\">",

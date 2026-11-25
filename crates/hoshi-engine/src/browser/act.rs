@@ -142,15 +142,19 @@ const AIM: &str = r#"function (align, enabled, any) {
 }"#;
 
 /// Focuses the element, or a label's control, to type into: `{ why }` when it takes no text,
-/// else whether its value is picked rather than typed, whether it holds anything and whether
-/// it takes keys.
+/// else whether its value is picked rather than typed, whether it holds anything, whether it
+/// takes keys and, for a part of a picked one such as the day of a date, the most it takes.
 const FOCUS: &str = r#"function (clear) {
   const el = this.nodeType === 9 ? this.documentElement : this;
   if (!el.isConnected) return { why: 'gone' };
   const typed = el.matches('input,textarea') || el.isContentEditable;
   const into = typed ? el : el.closest('label')?.control ?? el;
-  if (into.matches(':disabled')) return { why: 'disabled' };
-  if (into.readOnly) return { why: 'read-only' };
+  const PICKED = /^(color|date|datetime-local|month|range|time|week)$/;
+  const holder = into.getRootNode().host;
+  const part = into.matches('[role=spinbutton]') && holder?.localName === 'input' && PICKED.test(holder.type);
+  const owner = part ? holder : into;
+  if (owner.matches(':disabled')) return { why: 'disabled' };
+  if (owner.readOnly) return { why: 'read-only' };
   // Asked of its own root, as a closed one shows only its host outside.
   const focused = () => {
     let active = into.getRootNode().activeElement ?? document.activeElement;
@@ -162,10 +166,12 @@ const FOCUS: &str = r#"function (clear) {
     return false;
   };
   const before = focused();
+  // One that keeps the focus adds what it is typed to what it was typed before.
+  if (part && before === into) [...into.parentElement.querySelectorAll('[role=spinbutton]')].find((other) => other !== into)?.focus();
   into.focus();
   const after = focused();
   if (!within(after)) return { why: after === before ? 'unfocusable' : 'away' };
-  const picked = into.localName === 'input' && /^(color|date|datetime-local|month|range|time|week)$/.test(into.type);
+  const picked = into.localName === 'input' && PICKED.test(into.type);
   let holds = false;
   if (clear && !picked) {
     if (into.localName === 'input' || into.localName === 'textarea') {
@@ -177,7 +183,8 @@ const FOCUS: &str = r#"function (clear) {
     }
   }
   const keyed = into.localName === 'textarea' || (into.localName === 'input' && !/^(button|checkbox|file|hidden|image|radio|reset|submit)$/.test(into.type));
-  return { picked, holds, keyed };
+  const most = part ? Number(into.getAttribute('aria-valuemax')) : null;
+  return { picked, holds, keyed, most };
 }"#;
 
 /// Empties a field that isn't after its text was selected and deleted, as one that moves its
@@ -190,9 +197,33 @@ const EMPTY: &str = r#"function () {
   document.execCommand('delete');
 }"#;
 
-/// Sets the value of an input whose value is picked, as a date; `false` when it can't have it.
+/// Whether the part of a field shows `text`, or it and those after it do; no text is an empty
+/// part.
+const SHOWS: &str = r#"function (text) {
+  const plain = (said) => said.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  const held = this.getAttribute('aria-valuenow');
+  if (text === '' || held === null) return text === '' && held === null;
+  const typed = plain(text);
+  if (!/^\d+$/.test(typed)) return typed !== '' && plain(this.textContent).startsWith(typed);
+  const parts = [...this.parentElement.querySelectorAll('[role=spinbutton]')];
+  // Each part holds some of the digits, with zeroes before them or without, and all are held.
+  const holds = (at, digits) => {
+    const now = parts[at]?.getAttribute('aria-valuenow');
+    const most = Math.min(digits.length, parts[at]?.getAttribute('aria-valuemax')?.length ?? 0);
+    for (let count = 1; now && count <= most; count++) {
+      const rest = digits.slice(count);
+      if (Number(digits.slice(0, count)) === Number(now) && (!rest || holds(at + 1, rest))) return true;
+    }
+    return false;
+  };
+  return holds(parts.indexOf(this), typed);
+}"#;
+
+/// Sets the value of an input whose value is picked, as a date, or of the one it is a part of;
+/// `false` when it can't have it.
 const PICK: &str = r#"function (value) {
-  const el = this.localName === 'input' ? this : this.closest('label')?.control ?? this;
+  const holder = this.getRootNode().host;
+  const el = this.localName === 'input' ? this : holder?.localName === 'input' ? holder : this.closest('label')?.control ?? this;
   const before = el.value;
   const set = (value) => Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, value);
   if (el.type === 'datetime-local') value = value.replace(' ', 'T');
@@ -497,17 +528,14 @@ impl Page {
                 Some(why) => return Err(refusal(reference, why, &into)),
             }
         };
-        if into["picked"] == true {
-            self.reaches_page();
-            let taken = self.call_on(node, PICK, json!([{ "value": text }]))?;
-            return if taken == true {
-                Ok(())
-            } else {
-                self.acted = false;
-                Err(format!(
-                    "{reference} doesn't take {text:?}: give its value, such as 2026-01-31 for a date, 14:30 for a time or #ff8800 for a color"
-                ))
-            };
+        // Only a whole value has these, never a part of one.
+        let whole = text.contains(['-', ':']);
+        let most = into["most"].as_u64();
+        if into["picked"] == true || most.is_some() && whole {
+            return self.pick(reference, node, text);
+        }
+        if let Some(most) = most {
+            return self.type_part(reference, node, text, clear, most);
         }
         if into["holds"] == true {
             self.press_key("Backspace")?;
@@ -520,6 +548,56 @@ impl Page {
         }
         self.acted = true;
         Ok(())
+    }
+
+    /// Gives a field whose value is picked the value `text`.
+    fn pick(&mut self, reference: &str, node: i64, text: &str) -> Result<(), String> {
+        self.reaches_page();
+        let taken = self.call_on(node, PICK, json!([{ "value": text }]))?;
+        if taken == true {
+            return Ok(());
+        }
+        self.acted = false;
+        Err(format!(
+            "{reference} doesn't take {text:?}: give its value, such as 2026-01-31 for a date, 14:30 for a time or #ff8800 for a color"
+        ))
+    }
+
+    /// Types `text` in place of what a part of a field holds, as the day of a date, which takes
+    /// only keys and no number over `most`.
+    fn type_part(
+        &mut self,
+        reference: &str,
+        node: i64,
+        text: &str,
+        clear: bool,
+        most: u64,
+    ) -> Result<(), String> {
+        let refused = || {
+            Err(format!(
+                "{reference} is a part of a field and doesn't take {text:?}: type the whole value, such as 2026-01-31 or 14:30, into the field it is in"
+            ))
+        };
+        // What is longer goes on into the parts after it.
+        let alone = text.len() <= most.to_string().len();
+        if alone && text.parse::<u64>().is_ok_and(|number| number > most) {
+            return refused();
+        }
+        if text.is_empty() && !clear {
+            return Ok(());
+        }
+        self.reaches_page();
+        if text.is_empty() {
+            self.press_key("Backspace")?;
+        } else {
+            self.type_keys(text)?;
+        }
+        match self.call_on(node, SHOWS, json!([{ "value": text }])) {
+            Ok(shows) if shows != true => refused(),
+            Err(error) if self.dialog_says().is_some() => Err(error),
+            // The page may have put the field away once it had its value.
+            _ => Ok(()),
+        }
     }
 
     /// Types `text` key by key, for pages that follow the keys, where that is quick; line
