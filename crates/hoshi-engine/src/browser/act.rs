@@ -203,18 +203,20 @@ const SHOWS: &str = r#"function (text) {
   const plain = (said) => said.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
   const held = this.getAttribute('aria-valuenow');
   if (text === '' || held === null) return text === '' && held === null;
-  let typed = plain(text);
+  const typed = plain(text);
   if (!/^\d+$/.test(typed)) return typed !== '' && plain(this.textContent).startsWith(typed);
-  if (Number(held) === Number(typed)) return true;
   const parts = [...this.parentElement.querySelectorAll('[role=spinbutton]')];
-  for (const part of parts.slice(parts.indexOf(this))) {
-    // Typed with the zeroes before it or without them; what it shows may be in other digits.
-    const taken = typed.match('^0*' + (part.getAttribute('aria-valuenow') ?? 'none'));
-    if (!taken) return false;
-    typed = typed.slice(taken[0].length);
-    if (!typed) return true;
-  }
-  return false;
+  // Each part holds some of the digits, with zeroes before them or without, and all are held.
+  const holds = (at, digits) => {
+    const now = parts[at]?.getAttribute('aria-valuenow');
+    const most = Math.min(digits.length, parts[at]?.getAttribute('aria-valuemax')?.length ?? 0);
+    for (let count = 1; now && count <= most; count++) {
+      const rest = digits.slice(count);
+      if (Number(digits.slice(0, count)) === Number(now) && (!rest || holds(at + 1, rest))) return true;
+    }
+    return false;
+  };
+  return holds(parts.indexOf(this), typed);
 }"#;
 
 /// Sets the value of an input whose value is picked, as a date, or of the one it is a part of;

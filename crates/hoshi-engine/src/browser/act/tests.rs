@@ -650,7 +650,7 @@ fn every_kind_of_field_takes_text() {
 #[test]
 fn the_parts_of_a_date_take_their_text_or_say_why_not() {
     let Some(mut rig) = Rig::open(
-        "<input type=date aria-label=Day><input type=date aria-label=Off disabled><input type=date aria-label=Fixed readonly><input type=month aria-label=Month><input type=date aria-label=Once value=2026-03-03 onchange=\"log.push(this.value);this.remove()\"><input type=time aria-label=Hour>",
+        "<input type=date aria-label=Day><input type=date aria-label=Off disabled><input type=date aria-label=Fixed readonly><input type=month aria-label=Month><input type=date aria-label=Once value=2026-03-03 onchange=\"log.push(this.value);this.remove()\"><input type=time step=1 aria-label=Hour>",
     ) else {
         return;
     };
@@ -736,7 +736,19 @@ fn the_parts_of_a_date_take_their_text_or_say_why_not() {
         rig.js("document.querySelector('[type=month]').value"),
         json!("2026-12")
     );
-    rig.page.type_text(&parts[14], "0905", false).unwrap();
+    let time = |rig: &Rig| rig.js("document.querySelector('[type=time]').value");
+    rig.page.type_text(&parts[14], "10:20:30", false).unwrap();
+    for (text, reads) in [
+        ("0905", "10:09:05"),
+        ("0000", "10:00:00"),
+        ("0005", "10:00:05"),
+    ] {
+        rig.page.type_text(&parts[15], text, false).unwrap();
+        assert_eq!(time(&rig), json!(reads));
+    }
+    rig.js("{ let keys = 0; document.querySelector('[type=time]').onkeydown = (event) => { if (++keys > 2) event.preventDefault() } }");
+    let partly = rig.page.type_text(&parts[15], "0000", false).unwrap_err();
+    assert!(partly.contains("type the whole value"), "{partly}");
     rig.page.type_text(&parts[14], "14:30", false).unwrap();
     assert_eq!(
         rig.js("document.querySelector('[type=time]').value"),
