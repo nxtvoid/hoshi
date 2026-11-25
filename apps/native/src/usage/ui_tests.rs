@@ -104,6 +104,12 @@ fn shows(h: &mut Harness, selector: &'static str) -> bool {
 #[gpui_kit::test]
 fn without_a_provider_each_section_reads_as_unavailable(cx: &mut TestAppContext) {
     let mut h = harness(cx, "usage-unavailable");
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        let copilot = &mut workspace.settings.providers.copilot;
+        (copilot.added, copilot.enabled) = (true, true);
+        cx.notify();
+    });
+    redraw(&mut h.cx);
     assert!(shows(&mut h, "usage-unavailable-claudeCode"));
     assert!(shows(&mut h, "usage-unavailable-codex"));
     assert!(shows(&mut h, "usage-not-reported-copilot"));
@@ -240,6 +246,7 @@ fn the_switch_for_the_threads_card_shows_under_the_providers_with_limits(cx: &mu
         let providers = &mut workspace.settings.providers;
         providers.claude_code.enabled = false;
         providers.codex.added = false;
+        (providers.copilot.added, providers.copilot.enabled) = (true, true);
         cx.notify();
     });
     redraw(&mut h.cx);

@@ -133,10 +133,15 @@ mod tests {
     #[test]
     fn only_added_and_enabled_providers_get_an_adapter() {
         let mut settings = AppSettings::default();
+        assert_eq!(providers(&settings), ["claudeCode", "codex"]);
+
+        settings.providers.copilot.added = true;
+        assert_eq!(providers(&settings), ["claudeCode", "codex"]);
+
+        settings.providers.copilot.enabled = true;
         assert_eq!(providers(&settings), ["claudeCode", "copilot", "codex"]);
 
         settings.providers.copilot.added = false;
-        assert_eq!(providers(&settings), ["claudeCode", "codex"]);
 
         settings.providers.codex.enabled = false;
         assert_eq!(providers(&settings), ["claudeCode"]);

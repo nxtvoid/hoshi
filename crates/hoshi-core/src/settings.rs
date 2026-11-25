@@ -247,6 +247,8 @@ pub struct FavoriteModel {
 #[serde(default, rename_all = "camelCase")]
 pub struct ProviderSettings {
     pub claude_code: ClaudeCodeSettings,
+    /// Settings saved before Copilot was a key ran it added and enabled.
+    #[serde(default = "copilot_before_its_key")]
     pub copilot: CopilotSettings,
     pub codex: CodexSettings,
     /// How often, in seconds, the providers' status, versions and models refresh in the
@@ -254,6 +256,14 @@ pub struct ProviderSettings {
     pub health_check_interval_secs: u32,
     /// When an idle Claude thread over [`IDLE_COMPACTION_TOKENS`] compacts.
     pub idle_compaction: IdleCompaction,
+}
+
+fn copilot_before_its_key() -> CopilotSettings {
+    CopilotSettings {
+        added: true,
+        enabled: true,
+        ..CopilotSettings::default()
+    }
 }
 
 impl Default for ProviderSettings {
@@ -306,23 +316,13 @@ impl Default for CodexSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CopilotSettings {
     /// Listed among the providers; one not added is never run.
     pub added: bool,
     pub enabled: bool,
     pub binary_path: Option<String>,
-}
-
-impl Default for CopilotSettings {
-    fn default() -> Self {
-        Self {
-            added: true,
-            enabled: true,
-            binary_path: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,6 +376,30 @@ mod tests {
         assert_eq!(settings.providers.codex, CodexSettings::default());
         assert!(settings.providers.codex.added && settings.providers.codex.enabled);
         assert!(!settings.providers.copilot.added);
+    }
+
+    #[test]
+    fn copilot_waits_to_be_added() {
+        let settings = AppSettings::default().providers;
+
+        assert!(settings.claude_code.added && settings.codex.added);
+        assert!(!settings.copilot.added && !settings.copilot.enabled);
+
+        let saved: AppSettings = serde_json::from_value(json!({
+            "providers": { "copilot": { "added": true, "enabled": true } },
+        }))
+        .unwrap();
+        assert!(saved.providers.copilot.added && saved.providers.copilot.enabled);
+    }
+
+    #[test]
+    fn settings_saved_before_copilot_keep_running_it() {
+        let saved: AppSettings = serde_json::from_value(json!({
+            "providers": { "claudeCode": { "enabled": true, "binaryPath": null } },
+        }))
+        .unwrap();
+
+        assert!(saved.providers.copilot.added && saved.providers.copilot.enabled);
     }
 
     #[test]

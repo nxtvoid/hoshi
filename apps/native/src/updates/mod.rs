@@ -4,6 +4,7 @@ pub mod provider;
 mod ui_tests;
 
 use crate::m;
+use crate::providers::{KNOWN_PROVIDERS, KnownProvider};
 use crate::state::Workspace;
 use futures::StreamExt as _;
 use gpui_kit::component::progress::ProgressCircle;
@@ -24,6 +25,8 @@ use std::time::{Duration, Instant};
 
 const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
 const UP_TO_DATE_FOR: Duration = Duration::from_secs(2);
+/// How long a provider's finished update shows.
+const UPDATED_FOR: Duration = Duration::from_secs(5);
 const INSTALLED: &str = env!("CARGO_PKG_VERSION");
 
 /// Dev builds never update.
@@ -33,9 +36,12 @@ const APP_UPDATES_ENABLED: bool = !cfg!(debug_assertions);
 pub struct UpdatesButton {
     workspace: Entity<Workspace>,
     app: AppUpdate,
-    /// The user looked at how the last provider update ended.
-    seen: bool,
-    provider_update: Option<ProviderUpdate>,
+    /// The providers whose last update ended without the user looking at how.
+    unseen: HashSet<String>,
+    /// Puts away each provider's finished update.
+    updated: HashMap<String, Task<()>>,
+    /// As the last change found them.
+    versions: HashMap<String, ProviderVersion>,
     /// Releases between the running build and an update, by `release_notes_key`.
     release_notes: HashMap<String, Vec<AppRelease>>,
     loading_notes: HashSet<String>,
@@ -50,10 +56,7 @@ pub struct UpdatesButton {
 impl UpdatesButton {
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         provider::load_version(&workspace, cx);
-        let provider_update = workspace
-            .read(cx)
-            .provider_version()
-            .map(|version| version.update.clone());
+        let versions = workspace.read(cx).providers.versions.clone();
         let observe = [
             cx.observe(&workspace, |this, workspace, cx| {
                 this.provider_changed(&workspace, cx)
@@ -76,8 +79,9 @@ impl UpdatesButton {
         Self {
             workspace,
             app: AppUpdate::Idle,
-            seen: true,
-            provider_update,
+            unseen: HashSet::new(),
+            updated: HashMap::new(),
+            versions,
             release_notes: HashMap::new(),
             loading_notes: HashSet::new(),
             last_checked: None,
@@ -90,23 +94,54 @@ impl UpdatesButton {
     }
 
     fn provider_changed(&mut self, workspace: &Entity<Workspace>, cx: &mut Context<Self>) {
-        let next = workspace
-            .read(cx)
-            .provider_version()
-            .map(|version| version.update.clone());
-        if next == self.provider_update {
+        let next = &workspace.read(cx).providers.versions;
+        if *next == self.versions {
             return;
         }
-        if let Some(update) = &next
-            && update_ended(self.provider_update.as_ref(), update)
-        {
-            self.seen = false;
-            if *update == ProviderUpdate::Succeeded {
-                reload_models(workspace, cx);
+        let mut succeeded = Vec::new();
+        for (provider, version) in next {
+            let previous = self.versions.get(provider).map(|version| &version.update);
+            if update_ended(previous, &version.update) {
+                self.unseen.insert(provider.clone());
+                if version.update == ProviderUpdate::Succeeded {
+                    succeeded.push(provider.clone());
+                }
             }
         }
-        self.provider_update = next;
+        self.versions = next.clone();
+        if !succeeded.is_empty() {
+            reload_models(workspace, cx);
+        }
+        for provider in succeeded {
+            self.put_away_later(provider, cx);
+        }
         cx.notify();
+    }
+
+    /// Puts `provider`'s finished update away after a moment, unless another one ran since.
+    fn put_away_later(&mut self, provider: String, cx: &mut Context<Self>) {
+        let updated = provider.clone();
+        let task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UPDATED_FOR).await;
+            this.update(cx, |this, cx| {
+                let done = this
+                    .versions
+                    .get(&updated)
+                    .is_none_or(|version| version.update == ProviderUpdate::Succeeded);
+                if !done {
+                    return;
+                }
+                this.unseen.remove(&updated);
+                let nothing_left = this.app.release().is_none()
+                    && this.badged(this.workspace.read(cx)).next().is_none();
+                if nothing_left {
+                    this.open = false;
+                }
+                cx.notify();
+            })
+            .ok();
+        });
+        self.updated.insert(provider, task);
     }
 
     /// Reads the release feed; `manual` shows the check and how it ended.
@@ -282,7 +317,7 @@ impl UpdatesButton {
         if open {
             self.load_release_notes(cx);
         } else {
-            self.seen = true;
+            self.unseen.clear();
         }
         cx.notify();
     }
@@ -398,7 +433,11 @@ impl UpdatesButton {
     }
 
     fn details(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let version = self.workspace.read(cx).provider_version().cloned();
+        let workspace = self.workspace.read(cx);
+        let providers: Vec<_> = self
+            .badged(workspace)
+            .map(|(known, version, _)| (known, version.clone()))
+            .collect();
         div()
             .flex()
             .flex_col()
@@ -406,9 +445,11 @@ impl UpdatesButton {
             .when(self.app.release().is_some(), |this| {
                 this.child(self.app_details(cx))
             })
-            .when_some(version, |this, version| {
-                this.child(self.provider_details(&version, cx))
-            })
+            .children(
+                providers
+                    .iter()
+                    .map(|(known, version)| self.provider_details(known, version, cx)),
+            )
             .into_any_element()
     }
 
@@ -654,8 +695,31 @@ impl UpdatesButton {
         )
     }
 
-    fn provider_details(&self, version: &ProviderVersion, cx: &mut Context<Self>) -> AnyElement {
+    /// The enabled providers with an update to point at.
+    fn badged<'a>(
+        &'a self,
+        workspace: &'a Workspace,
+    ) -> impl Iterator<Item = (&'static KnownProvider, &'a ProviderVersion, UpdateBadge)> {
+        KNOWN_PROVIDERS.iter().filter_map(|known| {
+            if !known.enabled(&workspace.settings.providers) {
+                return None;
+            }
+            let version = workspace.providers.versions.get(known.id)?;
+            let badge = provider_badge(Some(version), !self.unseen.contains(known.id))?;
+            Some((known, version, badge))
+        })
+    }
+
+    fn provider_details(
+        &self,
+        known: &'static KnownProvider,
+        version: &ProviderVersion,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = known.id;
         let colors = cx.hoshi().clone();
+        let tint = (known.tint)(&colors);
+        let updating = provider::any_running(self.workspace.read(cx));
         let mono = cx.theme().mono_font_family.clone();
         let turns_running = provider::turns_running(self.workspace.read(cx));
         let running = matches!(version.update, ProviderUpdate::Running { .. });
@@ -678,13 +742,8 @@ impl UpdatesButton {
             .items_center()
             .justify_center()
             .rounded_lg()
-            .bg(colors.provider_claude.opacity(0.15))
-            .child(
-                svg()
-                    .path(brand::CLAUDE)
-                    .size_4()
-                    .text_color(colors.provider_claude),
-            );
+            .bg(tint.opacity(0.15))
+            .child(svg().path(known.mark).size_4().text_color(tint));
         let action = version
             .update_command
             .clone()
@@ -694,7 +753,7 @@ impl UpdatesButton {
                     version.update,
                     ProviderUpdate::Failed { .. } | ProviderUpdate::Unchanged
                 );
-                let button = Button::new("provider-update")
+                let button = Button::new(SharedString::from(format!("provider-update-{id}")))
                     .label(if retry {
                         m::provider_update_retry()
                     } else {
@@ -702,19 +761,20 @@ impl UpdatesButton {
                     })
                     .variant(ButtonVariant::Outline)
                     .size(ButtonSize::Sm)
-                    .disabled(turns_running)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.seen = false;
-                        provider::start_update(&this.workspace, cx);
+                    .disabled(turns_running || updating)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        provider::start_update_of(&this.workspace, id, cx);
                     }))
                     .into_any_element();
                 let text = if turns_running {
                     div().child(m::provider_update_busy()).into_any_element()
                 } else {
                     TooltipTrigger::new(
-                        "provider-update-command",
+                        SharedString::from(format!("provider-update-command-{id}")),
                         div()
-                            .id("provider-update-command-text")
+                            .id(SharedString::from(format!(
+                                "provider-update-command-text-{id}"
+                            )))
                             .truncate()
                             .font_family(mono.clone())
                             .child(format!("$ {command}")),
@@ -725,12 +785,12 @@ impl UpdatesButton {
                 update_action(text, Some(button), &colors)
             });
         div()
-            .debug_selector(|| "updates-provider".into())
+            .debug_selector(move || format!("updates-provider-{id}"))
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(update_header(tile, m::claude_code(), summary, &colors))
-            .children(provider::update_status(version, &colors, mono))
+            .child(update_header(tile, (known.name)(), summary, &colors))
+            .children(provider::update_status(id, version, &colors, mono))
             .children(action)
             .into_any_element()
     }
@@ -738,8 +798,10 @@ impl UpdatesButton {
 
 impl Render for UpdatesButton {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let version = self.workspace.read(cx).provider_version();
-        let badge = provider_badge(version, self.seen);
+        let badge = self
+            .badged(self.workspace.read(cx))
+            .map(|(_, _, badge)| badge)
+            .reduce(UpdateBadge::strongest);
         match update_button(&self.app, badge, APP_UPDATES_ENABLED) {
             UpdateButton::Details { badge } => self.details_button(badge, cx),
             button => self.check_button(button, cx),

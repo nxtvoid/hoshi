@@ -289,6 +289,11 @@ fn without_a_ready_agent_enter_waits_for_one(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn ready_agents_come_first(cx: &mut TestAppContext) {
     let mut h = harness(cx);
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        let copilot = &mut workspace.settings.providers.copilot;
+        (copilot.added, copilot.enabled) = (true, true);
+        cx.notify();
+    });
     set_accounts(
         &mut h,
         &[
@@ -349,7 +354,6 @@ fn turning_an_agent_on_saves_it_and_checks_it_again(cx: &mut TestAppContext) {
     let mut h = harness(cx);
     h.workspace.update(&mut h.cx, |workspace, _| {
         workspace.settings_path = None;
-        workspace.settings.providers.copilot.enabled = false;
     });
     h.cx.run_until_parked();
     let copilot = |states: Vec<(&'static str, AgentState)>| {
@@ -365,7 +369,8 @@ fn turning_an_agent_on_saves_it_and_checks_it_again(cx: &mut TestAppContext) {
     h.cx.run_until_parked();
 
     let enabled = h.workspace.read_with(&h.cx, |workspace, _| {
-        workspace.settings.providers.copilot.enabled
+        let copilot = &workspace.settings.providers.copilot;
+        copilot.added && copilot.enabled
     });
     assert!(enabled);
     assert_eq!(copilot(agent_states(&mut h)), Some(AgentState::Unknown));

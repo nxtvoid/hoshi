@@ -83,9 +83,13 @@ fn unknown(status: &ProvidersStatus) -> bool {
     status.versions.is_empty() && status.checked_at.is_none()
 }
 
-/// Starts the update of the default provider's CLI; its progress arrives as its version.
-pub fn start_update(workspace: &Entity<Workspace>, cx: &mut App) {
-    start_update_of(workspace, hoshi_core::DEFAULT_PROVIDER, cx);
+/// Updates run one at a time.
+pub fn any_running(workspace: &Workspace) -> bool {
+    workspace
+        .providers
+        .versions
+        .values()
+        .any(|version| matches!(version.update, ProviderUpdate::Running { .. }))
 }
 
 /// Starts the update of `provider`'s CLI; its progress arrives as its version.
@@ -98,6 +102,7 @@ pub fn start_update_of(workspace: &Entity<Workspace>, provider: &str, cx: &mut A
 
 /// How the last update goes or went; nothing while none ran.
 pub fn update_status(
+    provider: &str,
     version: &ProviderVersion,
     colors: &Colors,
     mono: SharedString,
@@ -184,7 +189,9 @@ pub fn update_status(
                 .when_some(output.clone(), |this, output| {
                     this.child(
                         div()
-                            .id("provider-update-output")
+                            .id(SharedString::from(format!(
+                                "provider-update-output-{provider}"
+                            )))
                             .max_h_32()
                             .overflow_y_scroll()
                             .rounded_md()

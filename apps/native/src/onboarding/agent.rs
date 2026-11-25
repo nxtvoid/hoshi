@@ -488,7 +488,7 @@ impl Onboarding {
                 if can_install && !self.codex_cli {
                     let status = version
                         .as_ref()
-                        .and_then(|version| update_status(version, colors, mono));
+                        .and_then(|version| update_status(CODEX, version, colors, mono));
                     return [
                         Some(
                             hint_text(m::onboarding_codex_install_hint(), colors)
@@ -501,6 +501,7 @@ impl Onboarding {
                                         .icon(IconName::Download)
                                         .label(m::onboarding_codex_install())
                                         .size(ButtonSize::Sm)
+                                        .disabled(provider::any_running(self.workspace.read(cx)))
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             provider::start_update_of(&this.workspace, CODEX, cx)
                                         })),

@@ -25,6 +25,14 @@ impl UpdateBadge {
             Self::Available => 1,
         }
     }
+
+    pub fn strongest(self, other: Self) -> Self {
+        if other.weight() > self.weight() {
+            other
+        } else {
+            self
+        }
+    }
 }
 
 /// hoshi's own update, from its release feed. A release without an installer for this machine
@@ -111,7 +119,7 @@ pub fn check_due(last_checked: Option<Duration>) -> bool {
     last_checked.is_none_or(|elapsed| elapsed >= RECHECK_ON_FOCUS_AFTER)
 }
 
-/// `seen`: the user already looked at how the last provider update ended.
+/// An update hoshi can't install isn't pointed at. `seen`: the user already looked at how the last provider update ended.
 pub fn provider_badge(version: Option<&ProviderVersion>, seen: bool) -> Option<UpdateBadge> {
     let version = version?;
     match version.update {
@@ -120,7 +128,8 @@ pub fn provider_badge(version: Option<&ProviderVersion>, seen: bool) -> Option<U
             Some(UpdateBadge::Failed)
         }
         ProviderUpdate::Succeeded if !seen => Some(UpdateBadge::Done),
-        _ => version.update_available.then_some(UpdateBadge::Available),
+        _ => (version.update_available && version.update_command.is_some())
+            .then_some(UpdateBadge::Available),
     }
 }
 
@@ -137,7 +146,7 @@ pub fn app_badge(update: &AppUpdate) -> Option<UpdateBadge> {
 /// The badge that says the most, so a running update is never hidden.
 pub fn strongest_badge(a: Option<UpdateBadge>, b: Option<UpdateBadge>) -> Option<UpdateBadge> {
     match (a, b) {
-        (Some(a), Some(b)) => Some(if b.weight() > a.weight() { b } else { a }),
+        (Some(a), Some(b)) => Some(a.strongest(b)),
         (a, b) => a.or(b),
     }
 }

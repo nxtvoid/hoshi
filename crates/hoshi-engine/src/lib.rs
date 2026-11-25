@@ -317,6 +317,9 @@ struct State {
     folder_ops: HashSet<String>,
     /// Turns that were to start in a folder git was changing, by that folder.
     parked: HashMap<String, Vec<ParkedTurn>>,
+    /// The providers whose CLI is being updated or waits to be; their turns wait in `parked`
+    /// under the provider's id.
+    updating: HashSet<String>,
     /// Threads git works on outside the lock, with the messages sent to them meanwhile.
     thread_ops: HashMap<String, Vec<Command>>,
     checkpoints: Arc<Checkpointer>,
@@ -653,6 +656,7 @@ impl Engine {
             idle_compactions: HashMap::new(),
             folder_ops: HashSet::new(),
             parked: HashMap::new(),
+            updating: HashSet::new(),
             thread_ops: HashMap::new(),
             checkpoints: Arc::new(Checkpointer::new()),
             secrets_dir: data_dir.join("secrets"),
@@ -1322,12 +1326,17 @@ fn start_turn(
         return;
     };
     let folder = git::normalize(&cwd);
-    if state.folder_ops.contains(&folder) {
+    let waits_for = if state.folder_ops.contains(&folder) {
+        Some(folder)
+    } else {
+        state.updating.contains(&provider).then(|| provider.clone())
+    };
+    if let Some(waits_for) = waits_for {
         let runs_on = runs_on.or_else(|| state.model.thread(thread_id).map(RunsOn::of));
         let Some(runs_on) = runs_on else {
             return;
         };
-        state.parked.entry(folder).or_default().push(ParkedTurn {
+        state.parked.entry(waits_for).or_default().push(ParkedTurn {
             thread_id: thread_id.to_owned(),
             turn_id: turn_id.to_owned(),
             prompt,
@@ -1530,14 +1539,23 @@ fn check_provider_versions(state: &Mutex<State>, maintenance: &Mutex<()>, only: 
     }
 }
 
-/// Turns spawn the CLI the update replaces, so it refuses while any runs.
+/// Updates a provider [`State::begin_update`] marked, then lets its turns start again.
 fn update_provider(state: &Mutex<State>, maintenance: &Mutex<()>, provider: &str) {
+    run_provider_update(state, maintenance, provider);
+    let mut state = lock(state);
+    state.updating.remove(provider);
+    state.start_parked(provider);
+}
+
+/// Turns spawn the CLI the update replaces, so it refuses while any runs.
+fn run_provider_update(state: &Mutex<State>, maintenance: &Mutex<()>, provider: &str) {
     let _updating = maintenance
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (adapter, turns_running) = {
         let state = lock(state);
-        (state.adapter_for(provider), !state.turns.is_empty())
+        let busy = !state.turns.is_empty() || state.keeps_agents_busy(provider);
+        (state.adapter_for(provider), busy)
     };
     let Some(adapter) = adapter else {
         return;
@@ -1550,13 +1568,6 @@ fn update_provider(state: &Mutex<State>, maintenance: &Mutex<()>, provider: &str
         lock(state).set_provider_update(provider, failed(ProviderUpdateFailure::TurnsRunning));
         return;
     }
-    lock(state).set_provider_update(
-        provider,
-        ProviderUpdate::Running {
-            line: None,
-            step: None,
-        },
-    );
     let Some(before) = adapter.installation() else {
         lock(state).set_provider_update(provider, failed(ProviderUpdateFailure::Unsupported));
         return;
@@ -1573,6 +1584,8 @@ fn update_provider(state: &Mutex<State>, maintenance: &Mutex<()>, provider: &str
         lock(state).keep_provider_version(provider, &before, ProviderUpdate::Idle);
         return;
     }
+    lock(state).close_lingering_of(provider);
+    adapter.end_idle_processes();
     let mut notified_at: Option<Instant> = None;
     let mut shown_step = None;
     let result = run_update(&updater, |progress| {
@@ -1652,6 +1665,9 @@ fn check_usage_limits(
                 }
             });
         if fresh {
+            return state.usage_limits.get(provider).cloned();
+        }
+        if state.updating.contains(provider) {
             return state.usage_limits.get(provider).cloned();
         }
         state.adapter_for(provider)?

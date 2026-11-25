@@ -103,7 +103,7 @@ impl Engine {
     /// Checks every enabled provider's CLI against its latest release, and whether it is
     /// installed and signed in. Runs each CLI, so it can take a few seconds.
     pub fn check_providers(&self) -> ProvidersStatus {
-        let adapters = lock(&self.state).adapters.clone();
+        let adapters = lock(&self.state).settled_adapters();
         let accounts: Vec<(String, ProviderAccountStatus, Option<String>)> =
             thread::scope(|scope| {
                 let accounts: Vec<_> = adapters
@@ -128,7 +128,9 @@ impl Engine {
         let codex = lock(&self.state).codex.clone();
         let codex_account = codex.and_then(|codex| codex_account(codex.home.as_deref()));
         let mut state = lock(&self.state);
-        state.provider_logins.clear();
+        for (provider, _, _) in &accounts {
+            state.provider_logins.remove(provider);
+        }
         for (provider, account, login) in accounts {
             if state.adapter_for(&provider).is_some() {
                 if let Some(login) = login {
@@ -248,6 +250,9 @@ impl Engine {
     /// Updates provider `provider`'s CLI in the background; its progress arrives as
     /// `Notification::ProviderVersion`.
     pub fn update_provider_of(&self, provider: &str) {
+        if !lock(&self.state).begin_update(provider) {
+            return;
+        }
         let state = Arc::downgrade(&self.state);
         let maintenance = self.maintenance.clone();
         let provider = provider.to_owned();
@@ -281,7 +286,9 @@ impl Engine {
             let provider = thread_id
                 .and_then(|thread_id| state.model.thread(thread_id))
                 .map_or(DEFAULT_PROVIDER, |thread| thread.provider.as_str());
-            state.adapter_for(provider)
+            state
+                .adapter_for(provider)
+                .filter(|_| !state.updating.contains(provider))
         };
         let Some(adapter) = adapter else {
             return Ok(None);
@@ -303,9 +310,15 @@ impl Engine {
     /// Every enabled provider's models, the default provider first. Runs the providers' CLIs
     /// side by side, and keeps what they list for [`Engine::known_provider_models`].
     pub fn provider_models(&self) -> Vec<ProviderModels> {
-        let (adapters, cache_dir) = {
+        let (adapters, updating, cache_dir) = {
             let state = lock(&self.state);
-            (state.adapters.clone(), state.provider_cache_dir.clone())
+            let updating: Vec<ProviderModels> = state
+                .updating
+                .iter()
+                .filter_map(|provider| state.known_models(provider))
+                .collect();
+            let adapters = state.settled_adapters();
+            (adapters, updating, state.provider_cache_dir.clone())
         };
         let mut catalogs: Vec<ProviderModels> = thread::scope(|scope| {
             let reads: Vec<_> = adapters
@@ -322,6 +335,7 @@ impl Engine {
                 .filter_map(|read| read.join().ok())
                 .collect()
         });
+        catalogs.extend(updating);
         catalogs.sort_by_key(|catalog| catalog.provider != DEFAULT_PROVIDER);
         for catalog in catalogs.iter().filter(|catalog| !catalog.models.is_empty()) {
             if let Err(error) = provider_cache::write(&cache_dir, catalog) {

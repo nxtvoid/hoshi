@@ -445,6 +445,7 @@ impl SettingsView {
             return None;
         }
         let turns_running = provider::turns_running(workspace);
+        let updating = provider::any_running(workspace);
         let running = matches!(version.update, ProviderUpdate::Running { .. });
         let button = if running {
             Button::new("codex-installing")
@@ -457,7 +458,7 @@ impl SettingsView {
             Button::new("codex-install")
                 .label(m::codex_install())
                 .size(ButtonSize::Sm)
-                .disabled(turns_running)
+                .disabled(turns_running || updating)
                 .when(turns_running, |this| {
                     this.tooltip(m::provider_update_busy())
                 })
@@ -466,7 +467,7 @@ impl SettingsView {
                 }))
         };
         let mono = cx.theme().mono_font_family.clone();
-        let status = update_status(&version, &colors, mono);
+        let status = update_status(CODEX, &version, &colors, mono);
         Some(
             SettingsRow::new(m::provider_version())
                 .description(m::codex_not_installed_description())
@@ -858,6 +859,7 @@ impl SettingsView {
         let version = workspace.providers.versions.get(provider)?.clone();
         version.installed.as_ref()?;
         let turns_running = provider::turns_running(workspace);
+        let updating = provider::any_running(workspace);
         let running = matches!(version.update, ProviderUpdate::Running { .. });
         let update_to = version
             .latest
@@ -878,7 +880,7 @@ impl SettingsView {
                 Button::new("provider-update")
                     .label(m::provider_update_to(latest))
                     .size(ButtonSize::Sm)
-                    .disabled(turns_running)
+                    .disabled(turns_running || updating)
                     .when(turns_running, |this| {
                         this.tooltip(m::provider_update_busy())
                     })
@@ -889,7 +891,7 @@ impl SettingsView {
         };
 
         let mono = cx.theme().mono_font_family.clone();
-        let status = update_status(&version, &colors, mono);
+        let status = update_status(provider, &version, &colors, mono);
         let row = SettingsRow::new(m::provider_version()).description(version_summary(&version));
         Some(
             match control {

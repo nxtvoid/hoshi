@@ -3,6 +3,7 @@
 //! the process waits a while for that session's next turn.
 
 mod account;
+mod install;
 
 use crate::acp::{Translator, normalize_tool};
 use crate::jsonrpc::{Connection, Incoming, RpcError};
@@ -224,16 +225,16 @@ impl ProviderAdapter for CopilotAdapter {
         let installed = self
             .version()
             .map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"));
-        Some(Installation {
-            installed,
-            latest: None,
-            updater: None,
-        })
+        Some(install::installation(self.binary(), installed))
     }
 
     fn forget_version(&self) {
         *lock(&self.version) = None;
         *lock(&self.models) = None;
+        self.idle.end_all();
+    }
+
+    fn end_idle_processes(&self) {
         self.idle.end_all();
     }
 
