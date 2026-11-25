@@ -6,6 +6,7 @@ mod cdp;
 pub(crate) mod html;
 mod keys;
 mod launch;
+mod outline;
 mod refs;
 pub(crate) mod tools;
 
@@ -27,6 +28,8 @@ pub const DEFAULT_SIZE: (u32, u32) = (1280, 800);
 const CONSOLE_KEPT: usize = 200;
 /// Dialogs in a row dismissed for a page to go elsewhere.
 const MAX_DISMISSED: usize = 20;
+/// The longest side of a screenshot, in pixels.
+const MAX_SCREENSHOT_SIDE: f64 = 1600.0;
 const READY_POLL: Duration = Duration::from_millis(100);
 const SCREENCAST_QUALITY: u8 = 85;
 /// The most device pixels per pixel a page paints at. The browser's own screen has it, as a
@@ -418,10 +421,21 @@ impl Page {
         ))
     }
 
-    /// A PNG of what the page shows, base64, at `size` whatever screen shows it.
+    /// How much smaller than the page its screenshots are, as large ones cost agents dearly.
+    fn screenshot_shrink(&self) -> f64 {
+        (MAX_SCREENSHOT_SIDE / f64::from(self.size.0.max(self.size.1))).min(1.0)
+    }
+
+    /// Pixels of a screenshot per CSS pixel.
+    pub fn screenshot_scale(&self) -> f64 {
+        self.screenshot_shrink() * self.zoom
+    }
+
+    /// A PNG of what the page shows, base64, at `size` whatever screen shows it, up to a limit.
     pub fn screenshot(&self) -> Result<String, String> {
         let mut params = json!({ "format": "png" });
-        if self.scale != 1.0 {
+        let shrunk = self.screenshot_shrink();
+        if self.scale != 1.0 || shrunk != 1.0 {
             let metrics = self.call("Page.getLayoutMetrics", json!({}))?;
             let viewport = &metrics["cssVisualViewport"];
             let side = |key: &str| viewport[key].as_f64().unwrap_or_default();
@@ -430,7 +444,7 @@ impl Page {
                 "y": side("pageY"),
                 "width": side("clientWidth"),
                 "height": side("clientHeight"),
-                "scale": 1.0 / self.scale,
+                "scale": shrunk / self.scale,
             });
         }
         let shot = self.call("Page.captureScreenshot", params)?;
@@ -440,13 +454,13 @@ impl Page {
             .ok_or_else(|| "the browser gave no screenshot".into())
     }
 
-    /// The accessibility tree as indented lines, each element with a `ref` to act on.
+    /// The page as an outline, with a ref for what can be acted on.
     pub fn snapshot(&mut self, max_chars: usize) -> Result<String, String> {
         let place = self.place()?;
         let nodes = self.nodes()?;
         let tree = Tree::new(&nodes);
         self.refs.begin(&tree, place);
-        let text = format_tree(&tree, max_chars, &mut self.refs);
+        let text = outline::outline(&tree, max_chars, &mut self.refs);
         self.refs.trim();
         Ok(text)
     }
@@ -627,113 +641,9 @@ fn script_result(result: &Value) -> Result<Value, String> {
     Ok(result["result"]["value"].clone())
 }
 
-/// Roles that only group others, left out unless they carry a name.
-const PLAIN_ROLES: [&str; 6] = [
-    "none",
-    "generic",
-    "InlineTextBox",
-    "LineBreak",
-    "RootWebArea",
-    "WebArea",
-];
-const FLAGS: [&str; 6] = [
-    "checked", "disabled", "expanded", "selected", "pressed", "focused",
-];
-
-/// The accessibility tree as an outline like `- button "Save" [ref=e3]`.
-fn format_tree(tree: &Tree, max_chars: usize, refs: &mut Refs) -> String {
-    let mut lines = String::new();
-    let mut truncated = false;
-    let mut stack: Vec<(&Value, usize)> = tree.root().map(|root| (root, 0)).into_iter().collect();
-    while let Some((node, depth)) = stack.pop() {
-        if truncated {
-            break;
-        }
-        let role = text_of(&node["role"]["value"]);
-        let name = text_of(&node["name"]["value"]).trim().to_owned();
-        let ignored = node["ignored"] == true;
-        let shown = !ignored && !(PLAIN_ROLES.contains(&role.as_str()) && name.is_empty());
-        let child_depth = if shown { depth + 1 } else { depth };
-        if shown {
-            let mut line = format!("{}- ", "  ".repeat(depth));
-            if role == "StaticText" {
-                line.push_str(&format!("text: {name}"));
-            } else {
-                line.push_str(&role);
-                if !name.is_empty() {
-                    line.push_str(&format!(" {}", json!(name)));
-                }
-                let value = text_of(&node["value"]["value"]);
-                if !value.is_empty() {
-                    line.push_str(&format!(" value={}", json!(value)));
-                }
-                for property in node["properties"].as_array().into_iter().flatten() {
-                    let flag = property["name"].as_str().unwrap_or_default();
-                    if FLAGS.contains(&flag) && property["value"]["value"] == true {
-                        line.push_str(&format!(" [{flag}]"));
-                    }
-                }
-                if let Some(reference) = refs.give(tree, node) {
-                    line.push_str(&format!(" [ref={reference}]"));
-                }
-            }
-            line.push('\n');
-            if lines.len() + line.len() > max_chars {
-                truncated = true;
-                continue;
-            }
-            lines.push_str(&line);
-        }
-        for child in tree.children(node).rev() {
-            stack.push((child, child_depth));
-        }
-    }
-    if truncated {
-        lines.push_str("[truncated: the page has more]\n");
-    }
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn node(id: &str, role: &str, name: &str, children: &[&str], backend: Option<i64>) -> Value {
-        json!({
-            "nodeId": id,
-            "ignored": false,
-            "role": { "value": role },
-            "name": { "value": name },
-            "childIds": children,
-            "backendDOMNodeId": backend,
-        })
-    }
-
-    #[test]
-    fn the_tree_reads_as_an_outline_with_refs_to_act_on() {
-        let mut checkbox = node("5", "checkbox", "Remember me", &[], Some(15));
-        checkbox["properties"] = json!([{ "name": "checked", "value": { "value": true } }]);
-        let nodes = vec![
-            node("1", "RootWebArea", "", &["2"], Some(11)),
-            node("2", "generic", "", &["3", "4", "5"], Some(12)),
-            node("3", "heading", "Sign in", &["6"], Some(13)),
-            node("4", "button", "Save", &[], Some(14)),
-            checkbox,
-            node("6", "StaticText", "Sign in", &[], None),
-        ];
-
-        let tree = Tree::new(&nodes);
-        let mut refs = Refs::default();
-        let text = format_tree(&tree, 10_000, &mut refs);
-
-        assert_eq!(
-            text,
-            "- heading \"Sign in\" [ref=e1]\n  - text: Sign in\n- button \"Save\" [ref=e2]\n- checkbox \"Remember me\" [checked] [ref=e3]\n"
-        );
-        assert_eq!(refs.find("e2", &tree, &Place::default()), Ok(14));
-        let cut = format_tree(&tree, 40, &mut refs);
-        assert!(cut.ends_with("[truncated: the page has more]\n"));
-    }
 
     #[test]
     fn a_page_s_listener_stops_once_the_page_is_gone() {
@@ -782,8 +692,8 @@ mod tests {
             snapshot
                 .lines()
                 .find(|line| line.contains(label))
-                .and_then(|line| line.split("[ref=").nth(1))
-                .map(|rest| rest.trim_end_matches(']').to_owned())
+                .and_then(|line| line.rsplit_once(" [e"))
+                .map(|(_, rest)| format!("e{}", rest.trim_end_matches(']')))
                 .unwrap()
         };
         page.type_text(&reference("textbox"), "Ana", true).unwrap();

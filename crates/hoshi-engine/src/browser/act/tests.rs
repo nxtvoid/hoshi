@@ -100,13 +100,28 @@ impl Rig {
         self.snapshot = self.page.snapshot(50_000).unwrap();
     }
 
-    /// The ref on the first line of the snapshot with `label`.
-    fn reference(&self, label: &str) -> String {
-        self.snapshot
+    /// The ref of the first element that reads as `label`, whether the outline shows one or not.
+    fn reference(&mut self, label: &str) -> String {
+        let shown = self
+            .snapshot
             .lines()
             .filter(|line| line.contains(label))
-            .find_map(|line| line.split("[ref=").nth(1))
-            .map(|rest| rest.trim_end_matches(']').to_owned())
+            .find_map(|line| line.rsplit_once(" [e"))
+            .map(|(_, rest)| format!("e{}", rest.split(']').next().unwrap()));
+        if let Some(reference) = shown {
+            return reference;
+        }
+        let nodes = self.page.nodes().unwrap();
+        let tree = Tree::new(&nodes);
+        nodes
+            .iter()
+            .filter(|node| node["ignored"] != true)
+            .filter(|node| {
+                let name = node["name"]["value"].as_str().unwrap_or_default();
+                let role = node["role"]["value"].as_str().unwrap_or_default();
+                format!("{role} {name:?}").contains(label)
+            })
+            .find_map(|node| self.page.refs.give(&tree, node))
             .unwrap_or_else(|| panic!("no {label} in\n{}", self.snapshot))
     }
 
@@ -173,8 +188,8 @@ fn a_ref_follows_its_row_when_every_row_has_the_same_button() {
     let reference = rest
         .iter()
         .find(|line| line.contains("button \"Delete\""))
-        .and_then(|line| line.split("[ref=").nth(1))
-        .map(|rest| rest.trim_end_matches(']').to_owned())
+        .and_then(|line| line.rsplit_once(" ["))
+        .map(|(_, rest)| rest.trim_end_matches(']').to_owned())
         .unwrap();
     rig.click("Drop first").unwrap();
 
@@ -526,8 +541,8 @@ fn the_parts_the_browser_draws_a_field_with_are_used_too() {
     let refs: Vec<String> = rig
         .snapshot
         .lines()
-        .filter_map(|line| line.split("[ref=").nth(1))
-        .map(|rest| rest.trim_end_matches(']').to_owned())
+        .filter_map(|line| line.rsplit_once(" [e"))
+        .map(|(_, rest)| format!("e{}", rest.split(']').next().unwrap()))
         .collect();
 
     for reference in &refs {
