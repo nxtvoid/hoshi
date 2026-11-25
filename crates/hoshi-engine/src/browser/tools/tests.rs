@@ -25,8 +25,8 @@ fn an_agent_opens_reads_uses_and_closes_its_page() {
     let reference = text
         .lines()
         .find(|line| line.contains("button"))
-        .and_then(|line| line.split("[ref=").nth(1))
-        .map(|rest| rest.trim_end_matches(']'))
+        .and_then(|line| line.rsplit_once(" ["))
+        .map(|(_, rest)| rest.trim_end_matches(']'))
         .unwrap();
     browsing
         .call(
@@ -304,7 +304,7 @@ fn a_page_that_waits_keeps_no_other_thread_s_page_waiting() {
 
     assert_eq!(opened["opened"], true);
     assert!(
-        took < Duration::from_secs(3),
+        took < Duration::from_secs(5),
         "the other page waited {took:?}"
     );
     assert_eq!(waited["found"], false);

@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+use tungstenite::protocol::WebSocketConfig;
 use tungstenite::{Message, WebSocket};
 
 pub(super) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -45,7 +46,12 @@ impl Connection {
             .and_then(|rest| rest.split('/').next())
             .ok_or_else(|| format!("not a DevTools address: {url}"))?;
         let stream = TcpStream::connect(address).map_err(|error| error.to_string())?;
-        let (socket, _) = tungstenite::client(url, stream).map_err(|error| error.to_string())?;
+        // A large page's accessibility tree is larger than what a message may be by default.
+        let limits = WebSocketConfig::default()
+            .max_message_size(None)
+            .max_frame_size(None);
+        let (socket, _) = tungstenite::client::client_with_config(url, stream, Some(limits))
+            .map_err(|error| error.to_string())?;
         socket
             .get_ref()
             .set_read_timeout(Some(POLL))

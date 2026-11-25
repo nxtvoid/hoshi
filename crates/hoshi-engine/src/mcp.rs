@@ -160,7 +160,16 @@ pub(crate) fn reply(
                         .as_object_mut()
                         .and_then(|fields| fields.remove("image"))
                         .and_then(|image| image.as_str().map(str::to_owned));
-                    let mut content = vec![json!({ "type": "text", "text": value.to_string() })];
+                    // Read as it is: quoted in JSON it would cost agents much more.
+                    let outline = value
+                        .as_object_mut()
+                        .and_then(|fields| fields.remove("snapshot"))
+                        .and_then(|outline| outline.as_str().map(str::to_owned));
+                    let mut text = value.to_string();
+                    if let Some(outline) = outline {
+                        text = format!("{text}\n{outline}");
+                    }
+                    let mut content = vec![json!({ "type": "text", "text": text })];
                     if let Some(data) = image {
                         content.push(
                             json!({ "type": "image", "data": data, "mimeType": "image/png" }),
@@ -388,7 +397,7 @@ fn tools() -> Value {
         },
         {
             "name": "preview_snapshot",
-            "description": "Read the page as its accessibility tree, each element with a `ref` to pass to preview_act. A ref stays with its element until the page goes elsewhere. includeImage adds a screenshot, to check how it looks.",
+            "description": "Read the page as an outline: its elements, each with a ref for preview_act, as `button \"Save\" [e3]`, and its text after `-`. A ref stays with its element until the page goes elsewhere. includeImage adds a screenshot, to check how it looks; divide its x and y by imageScale when given.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "includeImage": { "type": "boolean" } },

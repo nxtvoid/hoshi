@@ -24,11 +24,11 @@ pub(super) fn text_of(value: &Value) -> String {
     }
 }
 
-fn role_of(node: &Value) -> String {
+pub(super) fn role_of(node: &Value) -> String {
     text_of(&node["role"]["value"])
 }
 
-fn name_of(node: &Value) -> String {
+pub(super) fn name_of(node: &Value) -> String {
     text_of(&node["name"]["value"]).trim().to_owned()
 }
 
@@ -115,6 +115,8 @@ fn skeleton(name: &str) -> String {
     name.chars().filter(|one| !one.is_ascii_digit()).collect()
 }
 
+type Alike = HashMap<Arc<[String]>, Vec<i64>>;
+
 /// An accessibility tree, to look around its nodes.
 pub(super) struct Tree<'a> {
     nodes: &'a [Value],
@@ -125,6 +127,8 @@ pub(super) struct Tree<'a> {
     /// The nodes with each role and name.
     named: HashMap<(String, String), Vec<i64>>,
     around: RefCell<HashMap<i64, Arc<[String]>>>,
+    /// The nodes of a role and name by what is around them, once asked for.
+    alike: RefCell<HashMap<(String, String), Alike>>,
 }
 
 impl<'a> Tree<'a> {
@@ -156,6 +160,7 @@ impl<'a> Tree<'a> {
             ignored,
             named,
             around: RefCell::default(),
+            alike: RefCell::default(),
         }
     }
 
@@ -171,7 +176,17 @@ impl<'a> Tree<'a> {
             .filter_map(|id| self.by_id.get(id.as_str()?).copied())
     }
 
-    fn parent(&self, node: &'a Value) -> Option<&'a Value> {
+    /// What is under `node`, in order.
+    pub fn descendants(&self, node: &'a Value) -> impl Iterator<Item = &'a Value> {
+        let mut stack: Vec<&Value> = self.children(node).rev().collect();
+        std::iter::from_fn(move || {
+            let next = stack.pop()?;
+            stack.extend(self.children(next).rev());
+            Some(next)
+        })
+    }
+
+    pub fn parent(&self, node: &'a Value) -> Option<&'a Value> {
         self.by_id.get(node["parentId"].as_str()?).copied()
     }
 
@@ -245,16 +260,22 @@ impl<'a> Tree<'a> {
 
     /// Up to two nodes that read as `identity`.
     fn reading_as(&self, identity: &Identity) -> Vec<i64> {
-        self.named_as(identity)
-            .iter()
-            .copied()
-            .filter(|node| {
-                self.by_backend
-                    .get(node)
-                    .is_some_and(|value| self.around(*node, value) == identity.around)
+        let mut alike = self.alike.borrow_mut();
+        alike
+            .entry((identity.role.clone(), identity.name.clone()))
+            .or_insert_with(|| {
+                let mut by_around = Alike::new();
+                for node in self.named_as(identity) {
+                    if let Some(value) = self.by_backend.get(node) {
+                        let around = self.around(*node, value);
+                        by_around.entry(around).or_default().push(*node);
+                    }
+                }
+                by_around
             })
-            .take(2)
-            .collect()
+            .get(&identity.around)
+            .map(|nodes| nodes.iter().copied().take(2).collect())
+            .unwrap_or_default()
     }
 }
 

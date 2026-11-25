@@ -750,6 +750,10 @@ impl Browsing {
                 let mut result = describe(page)?;
                 result["snapshot"] = json!(snapshot);
                 if arguments["includeImage"] == true {
+                    let scale = page.screenshot_scale();
+                    if scale != 1.0 {
+                        result["imageScale"] = json!((scale * 1e5).round() / 1e5);
+                    }
                     result["image"] = json!(page.screenshot()?);
                 }
                 Ok(result)
