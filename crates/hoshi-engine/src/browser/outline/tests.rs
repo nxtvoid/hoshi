@@ -119,7 +119,7 @@ fn a_row_has_a_place_for_each_of_its_cells() {
 
     assert_eq!(
         page.read(),
-        "table [e1]\n  row [e2]: \"Item\" [e3] | \"Qty\" [e4]\n  row [e5]: \"Apple\" [e6] | \"\" | \"-\" [e7] | \"$19 99\" [e8] | *\n    button \"Edit\" [e9]\n"
+        "table [e1]\n  row [e4]: \"Item\" [e2] | \"Qty\" [e3]\n  row [e8]: \"Apple\" [e5] | \"\" | \"-\" [e6] | \"$19 99\" [e7] | *\n    button \"Edit\" [e9]\n"
     );
 }
 
@@ -249,7 +249,7 @@ fn a_table_that_only_places_things_is_not_read_as_rows() {
 
     assert_eq!(
         page.read(),
-        "- Menu\n- Page\nrow [e1]: \"Ana\" [e2] | \"10\" [e3]\nrow [e4]: \"Luis\" [e5] | \"\"\n"
+        "- Menu\n- Page\nrow [e3]: \"Ana\" [e1] | \"10\" [e2]\nrow [e5]: \"Luis\" [e4] | \"\"\n"
     );
 }
 
@@ -323,4 +323,44 @@ fn what_is_long_or_odd_is_cut_and_kept_on_its_line() {
         "{read}"
     );
     assert!(read.len() < 1_200);
+}
+
+#[test]
+fn a_cell_shows_its_name_and_state_whatever_the_size_of_its_table() {
+    let (mut page, root) = Page::new();
+    let grid = page.add(&root, "grid", "");
+    let head = page.add(&grid, "row", "");
+    page.add(&head, "columnheader", "Status");
+    page.says(&head, "columnheader", "Order", "Order");
+    let blank = page.add(&grid, "row", "");
+    let empty = page.add(&blank, "gridcell", "");
+    page.property(&empty, "focusable", json!(true));
+    page.add(&grid, "row", "");
+    for at in 0..MAX_CELLS {
+        let row = page.add(&grid, "row", "");
+        let cell = page.says(&row, "gridcell", "", &format!("Order {at}"));
+        page.property(&cell, "selected", json!(at == 0));
+    }
+
+    let read = page.read();
+
+    assert!(
+        read.starts_with("grid [e1]\n  row [e4]: \"Status\" [e2] | \"Order\" [e3]\n  row [e6]: \"\" [e5]\n  row [e7]: \"Order 0\" [selected]\n  row [e8]: \"Order 1\"\n"),
+        "{read}"
+    );
+}
+
+#[test]
+fn a_value_shows_even_when_it_is_the_name_and_short_code_keeps_its_lines() {
+    let (mut page, root) = Page::new();
+    let email = page.says(&root, "textbox", "Email", "Email");
+    page.set(&email, "value", json!({ "value": "Email" }));
+    page.says(&root, "paragraph", "", "one\n  two");
+    let list = page.add(&root, "list", "");
+    page.says(&list, "listitem", "", "three\n  four");
+
+    assert_eq!(
+        page.read(),
+        "textbox \"Email\" value=\"Email\" [e1]\n- one\n-   two\n- three\n-   four\n"
+    );
 }

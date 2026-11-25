@@ -18,6 +18,10 @@ const POLL: Duration = Duration::from_millis(4);
 /// How often a call that waits looks at whether to give up.
 const STOP_POLL: Duration = Duration::from_millis(25);
 
+/// What the browser may say at once: a large page's accessibility tree is larger than what is
+/// allowed by default.
+const MAX_MESSAGE: usize = 96 << 20;
+
 type Reply = mpsc::Sender<Result<Value, String>>;
 
 /// Something the browser reported on its own.
@@ -46,10 +50,9 @@ impl Connection {
             .and_then(|rest| rest.split('/').next())
             .ok_or_else(|| format!("not a DevTools address: {url}"))?;
         let stream = TcpStream::connect(address).map_err(|error| error.to_string())?;
-        // A large page's accessibility tree is larger than what a message may be by default.
         let limits = WebSocketConfig::default()
-            .max_message_size(None)
-            .max_frame_size(None);
+            .max_message_size(Some(MAX_MESSAGE))
+            .max_frame_size(Some(MAX_MESSAGE));
         let (socket, _) = tungstenite::client::client_with_config(url, stream, Some(limits))
             .map_err(|error| error.to_string())?;
         socket

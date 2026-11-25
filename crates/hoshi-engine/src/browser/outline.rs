@@ -499,8 +499,14 @@ impl<'a> Writer<'a, '_> {
                 self.steps(node, depth + usize::from(nested), told)
             }
             _ if headed => {
+                let name = match self.is_named_by_contents(node) {
+                    false if role == "columnheader" => plain(&name_of(node)),
+                    _ => String::new(),
+                };
+                let name = Some(name).filter(|name| !name.is_empty());
+                let name = name.map_or(String::new(), |name| format!(" {}", quoted(&name)));
                 let (flags, reference) = (flags(node), self.give(node));
-                self.line(depth, &format!("cell{flags}{reference}"));
+                self.line(depth, &format!("cell{name}{flags}{reference}"));
                 self.steps(node, depth + 1, false)
             }
             _ if self.is_shown(node) => self.element(node, &role, depth, told),
@@ -533,24 +539,35 @@ impl<'a> Writer<'a, '_> {
         }
     }
 
-    fn short_paragraph(&mut self, node: &'a Value, depth: usize) -> bool {
-        let texts = self.texts(node);
-        let simple = !is_acted_on(node)
-            && name_of(node).is_empty()
-            && texts.len() == 1
-            && texts[0].chars().count() <= MAX_SHORT
-            && !self
-                .tree
-                .descendants(node)
-                .any(|child| self.is_shown(child));
-        if simple {
-            let reference = self.give(node);
-            self.line(
-                depth,
-                &format!("paragraph {}{reference}", quoted(&texts[0])),
-            );
+    /// What a node that holds nothing but a short line of text says.
+    fn short_text(&self, node: &'a Value) -> Option<String> {
+        let mut said = None;
+        for child in self.tree.descendants(node) {
+            if self.is_shown(child) {
+                return None;
+            }
+            let text = text_of(&child["name"]["value"]);
+            if !is_text(child) || text.trim().is_empty() {
+                continue;
+            }
+            if said.is_some() || text.trim().contains(is_break) {
+                return None;
+            }
+            said = Some(plain(&text));
         }
-        simple
+        said.filter(|text| text.chars().count() <= MAX_SHORT)
+    }
+
+    fn short_paragraph(&mut self, node: &'a Value, depth: usize) -> bool {
+        if is_acted_on(node) || !name_of(node).is_empty() {
+            return false;
+        }
+        let Some(text) = self.short_text(node) else {
+            return false;
+        };
+        let reference = self.give(node);
+        self.line(depth, &format!("paragraph {}{reference}", quoted(&text)));
+        true
     }
 
     /// A label, unless the field it names says the same.
@@ -573,16 +590,11 @@ impl<'a> Writer<'a, '_> {
             .map(|marker| plain(&name_of(marker)))
             .filter(|marker| marker.chars().any(char::is_alphanumeric));
         if !is_acted_on(node) && marker.is_none() && !self.takes_lines(node) {
-            let texts = self.texts(node);
-            let shown = self
-                .tree
-                .descendants(node)
-                .any(|child| self.is_shown(child));
-            if told || shown || texts.len() != 1 || texts[0].chars().count() > MAX_SHORT {
+            let Some(text) = self.short_text(node).filter(|_| !told) else {
                 return self.steps(node, depth, told);
-            }
+            };
             let reference = self.give(node);
-            self.line(depth, &format!("item {}{reference}", quoted(&texts[0])));
+            self.line(depth, &format!("item {}{reference}", quoted(&text)));
             return Vec::new();
         }
         let marker = marker
@@ -597,7 +609,7 @@ impl<'a> Writer<'a, '_> {
     fn row(&mut self, node: &'a Value, depth: usize) -> Vec<Step<'a>> {
         let (cells, rest) = self.cells(node);
         let small = self.table(node).cells <= MAX_CELLS;
-        let (flags_of_row, reference) = (flags(node), self.give(node));
+        let mut says = !rest.is_empty() || is_acted_on(node);
         let mut slots = Vec::new();
         let mut held = Vec::new();
         for cell in cells {
@@ -606,24 +618,28 @@ impl<'a> Writer<'a, '_> {
                 .descendants(cell)
                 .any(|child| self.is_shown(child) || role_of(child) == "row");
             if holds {
+                says = true;
                 held.push(cell);
                 slots.push("*".to_owned());
                 continue;
             }
-            let text = self.texts(cell).join(" ");
+            let mut text = self.texts(cell).join(" ");
+            if text.is_empty() {
+                text = plain(&name_of(cell));
+            }
             let mut slot = quoted(&text);
+            slot.push_str(&flags(cell));
             let acts = is_acted_on(cell) || role_of(cell) == "columnheader";
             if acts || small && !text.is_empty() {
-                slot.push_str(&flags(cell));
                 slot.push_str(&self.give(cell));
             }
+            says |= acts || !text.is_empty();
             slots.push(slot);
         }
-        let says = slots.iter().any(|slot| !slot.starts_with("\"\""));
-        if !says && rest.is_empty() && !is_acted_on(node) {
+        if !says {
             return Vec::new();
         }
-        let mut line = format!("row{flags_of_row}{reference}");
+        let mut line = format!("row{}{}", flags(node), self.give(node));
         if !slots.is_empty() {
             line.push_str(&format!(": {}", slots.join(" | ")));
         }
@@ -658,7 +674,7 @@ impl<'a> Writer<'a, '_> {
             line.push_str(&format!(" {}", quoted(&name)));
         }
         let value = text_of(&node["value"]["value"]);
-        if !value.trim().is_empty() && value != name {
+        if !value.trim().is_empty() && (field || value != name) {
             line.push_str(&format!(" value={}", quoted(&value)));
         }
         line.push_str(&flags(node));

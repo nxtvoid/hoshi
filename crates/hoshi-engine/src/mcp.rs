@@ -397,7 +397,7 @@ fn tools() -> Value {
         },
         {
             "name": "preview_snapshot",
-            "description": "Read the page as an outline: its elements, each with a ref for preview_act, as `button \"Save\" [e3]`, and its text after `-`. A ref stays with its element until the page goes elsewhere. includeImage adds a screenshot, to check how it looks; divide its x and y by imageScale when given.",
+            "description": "Read the page as an outline: its elements, with refs for preview_act, as `button \"Save\" [e3]`, and its text after `-`. A ref stays with its element until the page goes elsewhere. includeImage adds a screenshot, to check how it looks; divide its x and y by imageScale when given.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "includeImage": { "type": "boolean" } },
