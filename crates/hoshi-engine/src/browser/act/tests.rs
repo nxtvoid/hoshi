@@ -690,8 +690,10 @@ fn the_parts_of_a_date_take_their_text_or_say_why_not() {
     assert_eq!(value(&rig), json!("2028-04-02"));
     // A year takes digits enough for all of it.
     if year_at == 2 {
-        rig.page.type_text(&parts[0], "05052027", true).unwrap();
-        assert_eq!(value(&rig), json!("2027-05-05"));
+        for text in ["05052027", "4042029", "552030"] {
+            rig.page.type_text(&parts[0], text, true).unwrap();
+        }
+        assert_eq!(value(&rig), json!("2030-05-05"));
     }
     rig.page.type_text(&parts[1], "2028-06-30", false).unwrap();
     assert_eq!(value(&rig), json!("2028-06-30"));
@@ -706,8 +708,19 @@ fn the_parts_of_a_date_take_their_text_or_say_why_not() {
         .type_text(&parts[0], "30-06-2028", false)
         .unwrap_err();
     assert!(refused.contains("doesn't take"), "{refused}");
+    rig.page.type_text(&parts[2], "", false).unwrap();
+    assert_eq!(value(&rig), json!("2028-06-30"));
     rig.page.type_text(&parts[2], "", true).unwrap();
     assert_eq!(value(&rig), json!(""));
+    rig.page.type_text(&parts[2], "", true).unwrap();
+    rig.js(
+        "document.querySelector('[aria-label=Once]').onkeydown = (event) => event.preventDefault()",
+    );
+    for (text, clear) in [("", true), ("4", false)] {
+        let kept = rig.page.type_text(&parts[11 + day_at], text, clear);
+        assert!(kept.unwrap_err().contains("type the whole value"), "{text}");
+    }
+    rig.js("document.querySelector('[aria-label=Once]').onkeydown = null");
     let off = rig.page.type_text(&parts[3], "4", false).unwrap_err();
     assert!(off.ends_with("is disabled"), "{off}");
     let fixed = rig.page.type_text(&parts[6], "4", false).unwrap_err();

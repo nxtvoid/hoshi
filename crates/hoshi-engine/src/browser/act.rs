@@ -197,17 +197,25 @@ const EMPTY: &str = r#"function () {
   document.execCommand('delete');
 }"#;
 
-/// Whether the part of a field shows `text`, or it and those after it do.
+/// Whether the part of a field shows `text`, or it and those after it do; no text is an empty
+/// part.
 const SHOWS: &str = r#"function (text) {
   const plain = (said) => said.toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-  const typed = plain(text);
-  const said = plain(this.textContent);
-  if (!/^\d+$/.test(typed)) return typed !== '' && said.startsWith(typed);
-  const held = Number(this.getAttribute('aria-valuenow') ?? NaN);
-  if (held === Number(typed) && (held > 0 || /\d/.test(said))) return true;
+  const held = this.getAttribute('aria-valuenow');
+  if (text === '' || held === null) return text === '' && held === null;
+  let typed = plain(text);
+  if (!/^\d+$/.test(typed)) return typed !== '' && plain(this.textContent).startsWith(typed);
+  if (Number(held) === Number(typed)) return true;
   const parts = [...this.parentElement.querySelectorAll('[role=spinbutton]')];
-  const rest = parts.slice(parts.indexOf(this) + 1).map((part) => plain(part.textContent)).join('');
-  return /^\d+$/.test(said) && typed.length > said.length && (said + rest).startsWith(typed);
+  for (const part of parts.slice(parts.indexOf(this))) {
+    const said = plain(part.textContent);
+    // Typed with the zeroes it shows or without them.
+    const taken = /^\d+$/.test(said) && [said, String(Number(said))].find((digits) => typed.startsWith(digits));
+    if (!taken) return false;
+    typed = typed.slice(taken.length);
+    if (!typed) return true;
+  }
+  return false;
 }"#;
 
 /// Sets the value of an input whose value is picked, as a date, or of the one it is a part of;
@@ -574,15 +582,15 @@ impl Page {
         if alone && text.parse::<u64>().is_ok_and(|number| number > most) {
             return refused();
         }
+        if text.is_empty() && !clear {
+            return Ok(());
+        }
         self.reaches_page();
         if text.is_empty() {
-            return if clear {
-                self.press_key("Backspace")
-            } else {
-                Ok(())
-            };
+            self.press_key("Backspace")?;
+        } else {
+            self.type_keys(text)?;
         }
-        self.type_keys(text)?;
         match self.call_on(node, SHOWS, json!([{ "value": text }])) {
             Ok(shows) if shows != true => refused(),
             Err(error) if self.dialog_says().is_some() => Err(error),
