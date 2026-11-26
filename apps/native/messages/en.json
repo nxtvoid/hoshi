@@ -1769,16 +1769,6 @@
     }
   ],
   "agents": "Agents",
-  "agents_ended": [
-    {
-      "declarations": ["input count", "local countPlural = count: plural"],
-      "selectors": ["countPlural"],
-      "match": {
-        "countPlural=one": "{count} ended",
-        "countPlural=*": "{count} ended"
-      }
-    }
-  ],
   "agent_needs_you": "Needs you",
   "servers": "Servers",
   "panel_running": "{count} running",

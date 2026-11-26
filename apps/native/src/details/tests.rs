@@ -770,6 +770,11 @@ fn the_wheel_moves_the_card_only_once_the_agent_list_ends(cx: &mut TestAppContex
     );
 
     wheel(&mut h, -1_000.);
+    assert_eq!(
+        card(&mut h),
+        card_before,
+        "the wheel that reaches the list's end stays in the list"
+    );
     wheel(&mut h, -40.);
     assert!(
         card(&mut h) < card_before,

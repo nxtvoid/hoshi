@@ -527,7 +527,8 @@ pub fn relative_time(at: &str, now: DateTime<Utc>) -> String {
     }
 }
 
-/// How long ago `at` was in its largest whole unit, as the servers' ages read: "now", "12 min".
+/// How long ago `at` was: "now" within a minute, else in its largest whole unit as the servers'
+/// ages read, "12 min".
 pub fn short_age(at: &str, now: DateTime<Utc>) -> String {
     use crate::m;
     let minutes = age(at, now).num_minutes().max(0);

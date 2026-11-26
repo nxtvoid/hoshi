@@ -119,11 +119,11 @@ impl ThreadDetails {
                         let scroll = self.agents_scroll.clone();
                         this.on_scroll(move |event, window, cx| {
                             let delta = event.delta.pixel_delta(window.line_height()).y;
-                            let offset = scroll.offset().y;
+                            let before = scroll.offset().y - delta;
                             let at_end = if delta < px(0.) {
-                                offset <= -scroll.max_offset().y
+                                before <= -scroll.max_offset().y
                             } else {
-                                offset >= px(0.)
+                                before >= px(0.)
                             };
                             if !at_end {
                                 cx.stop_propagation();
@@ -267,13 +267,10 @@ impl ThreadDetails {
     }
 }
 
-/// How many agents no longer run: "done" when all finished well, else "ended".
+/// How the agents that no longer run ended: "2 done · 1 failed".
 fn ended_label(agents: &[ThreadAgent]) -> String {
-    if agents.iter().all(|agent| agent.state == AgentState::Done) {
-        m::agents_done(agents.len())
-    } else {
-        m::agents_ended(agents.len())
-    }
+    let states: Vec<_> = agents.iter().map(|agent| Some(agent.state)).collect();
+    crate::subagents::group_counts(&states).join(" · ")
 }
 
 fn agent_title(agent: &ThreadAgent) -> String {
@@ -322,17 +319,16 @@ mod tests {
     }
 
     #[test]
-    fn the_finished_count_says_done_only_when_none_failed_or_stopped() {
+    fn the_finished_agents_are_counted_by_how_they_ended() {
         use AgentState::{Done, Failed, Stopped};
         assert_eq!(
             ended_label(&[agent("d1", Done), agent("d2", Done)]),
             "2 done"
         );
         assert_eq!(
-            ended_label(&[agent("d1", Done), agent("f1", Failed)]),
-            "2 ended"
+            ended_label(&[agent("d1", Done), agent("f1", Failed), agent("s1", Stopped)]),
+            "1 done · 1 stopped · 1 failed"
         );
-        assert_eq!(ended_label(&[agent("s1", Stopped)]), "1 ended");
     }
 
     #[test]
