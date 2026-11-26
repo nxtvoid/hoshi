@@ -208,6 +208,7 @@ impl SettingsView {
             .trigger(move |open| {
                 div()
                     .id(SharedString::from(format!("font-trigger-{slot:?}")))
+                    .debug_selector(move || format!("font-trigger-{slot:?}"))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -250,6 +251,8 @@ impl SettingsView {
                             let hover = list_colors.accent;
                             div()
                                 .id(("font-option", index))
+                                .debug_selector(move || format!("font-option-{index}"))
+                                .w_full()
                                 .flex()
                                 .items_center()
                                 .gap_2()
@@ -292,6 +295,7 @@ impl SettingsView {
                         })
                         .collect()
                 })
+                .debug_selector(|| "font-list".into())
                 .h(px((count.clamp(1, 10) * 28) as f32));
                 div()
                     .flex()
