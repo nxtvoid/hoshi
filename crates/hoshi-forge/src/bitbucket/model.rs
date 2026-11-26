@@ -67,9 +67,16 @@ pub struct CommitRef {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct RepositoryName {
+    pub full_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct Endpoint {
     pub branch: Branch,
     pub commit: Option<CommitRef>,
+    /// `None` once a fork is deleted.
+    pub repository: Option<RepositoryName>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,6 +128,14 @@ impl RawPullRequest {
             .commit
             .as_ref()
             .map(|commit| commit.hash.as_str())
+    }
+
+    /// Whether its branch lives in `full_name` rather than in a fork.
+    pub fn comes_from(&self, full_name: &str) -> bool {
+        self.source
+            .repository
+            .as_ref()
+            .is_some_and(|repository| repository.full_name.eq_ignore_ascii_case(full_name))
     }
 
     pub fn url(&self) -> String {
