@@ -366,7 +366,7 @@ impl TranscriptView {
         if before == 0 {
             self.minimap.shown = None;
         } else if prepended.is_some() {
-            self.minimap.rows_prepended(after.saturating_sub(before));
+            self.minimap.rows_spliced(changed.clone(), count);
         }
         self.scroller.update(cx, |scroller, cx| {
             if before == 0 {

@@ -9,6 +9,7 @@ use hoshi_core::{ItemContent, ThreadItem};
 use hoshi_ui::assets::IconName;
 use hoshi_ui::prelude::*;
 use std::cell::RefCell;
+use std::ops::Range;
 use std::rc::Rc;
 
 /// Fewer messages than this need no map.
@@ -152,9 +153,13 @@ pub struct MinimapState {
 }
 
 impl MinimapState {
-    /// Keeps the rows on screen once `added` rows come before them, until they are measured.
-    pub fn rows_prepended(&mut self, added: usize) {
-        self.shown = self.shown.map(|(start, end)| (start + added, end + added));
+    /// Follows the rows on screen once the rows `changed` became `count` others: those after
+    /// the change move with it, and rows on screen within it are forgotten until measured.
+    pub fn rows_spliced(&mut self, changed: Range<usize>, count: usize) {
+        self.shown = self.shown.and_then(|(start, end)| {
+            (start >= changed.end)
+                .then(|| (start - changed.len() + count, end - changed.len() + count))
+        });
     }
 }
 
@@ -580,12 +585,18 @@ mod tests {
     }
 
     #[test]
-    fn rows_added_before_keep_the_rows_shown() {
-        let mut state = MinimapState {
-            shown: Some((4, 9)),
-            ..Default::default()
+    fn the_rows_shown_follow_a_change_before_them_and_are_forgotten_within_one() {
+        let spliced = |changed, count| {
+            let mut state = MinimapState {
+                shown: Some((4, 9)),
+                ..Default::default()
+            };
+            state.rows_spliced(changed, count);
+            state.shown
         };
-        state.rows_prepended(20);
-        assert_eq!(state.shown, Some((24, 29)));
+        assert_eq!(spliced(0..0, 20), Some((24, 29)));
+        assert_eq!(spliced(0..1, 21), Some((24, 29)));
+        assert_eq!(spliced(0..10, 30), None);
+        assert_eq!(spliced(2..5, 1), None);
     }
 }
