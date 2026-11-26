@@ -23,5 +23,8 @@ uuid = { version = "1", features = ["v4"] }
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["process"] }
 
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+
 [lints]
 workspace = true

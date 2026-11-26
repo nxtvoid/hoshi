@@ -17,7 +17,7 @@ const EXIT_POLL: Duration = Duration::from_millis(100);
 
 /// The CLI's answer to `request`, asked from `cwd`. `None` when it can't answer in time.
 pub(crate) fn ask(
-    binary: &str,
+    binary: &Path,
     cwd: &Path,
     request_id: &'static str,
     request: Value,
@@ -27,7 +27,7 @@ pub(crate) fn ask(
 
 /// Like `ask`, giving up after `timeout`.
 pub(crate) fn ask_within(
-    binary: &str,
+    binary: &Path,
     cwd: &Path,
     request_id: &'static str,
     request: Value,

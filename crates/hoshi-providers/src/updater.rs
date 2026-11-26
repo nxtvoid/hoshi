@@ -228,18 +228,120 @@ fn clean_line(bytes: &[u8]) -> Option<String> {
     })
 }
 
-/// Where the system finds `name`: itself when it is a path, else the first match on the
-/// `PATH`. On Windows a bare name only matches an `.exe`, as `Command` does, unless
+/// Where the system finds `name`: itself when it is a path, else the first match in
+/// [`search_path`]. On Windows a bare name only matches an `.exe`, as `Command` does, unless
 /// `any_extension` also allows the `PATHEXT` ones, such as `npm.cmd`.
 pub(crate) fn find_program(name: &str, any_extension: bool) -> Option<PathBuf> {
+    find_in(name, any_extension, search_path)
+}
+
+/// Like [`find_program`], looking for a bare name only in the folders `dirs` gives.
+pub(crate) fn find_in(
+    name: &str,
+    any_extension: bool,
+    dirs: impl FnOnce() -> Vec<PathBuf>,
+) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.components().count() > 1 {
         return path.is_file().then(|| path.to_owned());
     }
     let candidates = candidate_names(name, any_extension);
-    std::env::split_paths(&std::env::var_os("PATH")?)
+    dirs()
+        .iter()
         .flat_map(|dir| candidates.iter().map(move |name| dir.join(name)))
         .find(|candidate| candidate.is_file())
+}
+
+/// The `PATH` hoshi started with, then, on Windows, the folders the machine's and the user's
+/// `PATH` hold now, so a program installed since hoshi started is found.
+pub(crate) fn search_path() -> Vec<PathBuf> {
+    let process = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    merge_paths(process, stored_path())
+}
+
+/// The `PATH` for a shell hoshi starts: [`search_path`] plus the folders agent installers
+/// put their CLIs in, so one just installed runs by name.
+pub fn shell_path() -> Option<OsString> {
+    let installed = crate::claude::install::native_dir(std::env::home_dir().as_deref());
+    let dirs = merge_paths(
+        search_path(),
+        installed.into_iter().filter(|dir| dir.is_dir()).collect(),
+    );
+    std::env::join_paths(dirs).ok()
+}
+
+fn merge_paths(mut dirs: Vec<PathBuf>, more: Vec<PathBuf>) -> Vec<PathBuf> {
+    let key = |dir: &Path| {
+        let text = dir.to_string_lossy();
+        let text = text.trim_end_matches(['/', '\\']);
+        if cfg!(windows) {
+            text.to_lowercase()
+        } else {
+            text.to_owned()
+        }
+    };
+    let mut seen: std::collections::HashSet<String> = dirs.iter().map(|dir| key(dir)).collect();
+    for dir in more {
+        if !dir.as_os_str().is_empty() && seen.insert(key(&dir)) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+#[cfg(windows)]
+fn stored_path() -> Vec<PathBuf> {
+    use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE};
+    const MACHINE: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    let read = |root: &Key, path: &str| root.open(path).and_then(|key| key.get_string("Path")).ok();
+    [
+        read(LOCAL_MACHINE, MACHINE),
+        read(CURRENT_USER, "Environment"),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|path| {
+        let expanded = expand_variables(&path, |name| std::env::var(name).ok());
+        std::env::split_paths(&expanded).collect::<Vec<_>>()
+    })
+    .collect()
+}
+
+#[cfg(not(windows))]
+fn stored_path() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// `text` with each `%NAME%` replaced by what `lookup` gives for it; unknown ones stay as
+/// written, as Windows leaves them.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn expand_variables(text: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut expanded = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        expanded.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            rest = &rest[start..];
+            break;
+        };
+        let name = &after[..end];
+        match lookup(name).filter(|_| !name.is_empty()) {
+            Some(value) => {
+                expanded.push_str(&value);
+                rest = &after[end + 1..];
+            }
+            None => {
+                expanded.push('%');
+                expanded.push_str(name);
+                rest = &after[end..];
+            }
+        }
+    }
+    expanded.push_str(rest);
+    expanded
 }
 
 fn candidate_names(name: &str, any_extension: bool) -> Vec<OsString> {
@@ -339,6 +441,76 @@ mod tests {
         );
         assert!(seen.contains(&"no space left".to_owned()));
         assert!(failure.output.unwrap().contains("downloading"));
+    }
+
+    #[test]
+    fn stored_path_folders_come_after_the_process_ones_without_repeats() {
+        let process = vec![PathBuf::from("/usr/bin"), PathBuf::from("/home/dev/bin/")];
+        let stored = vec![
+            PathBuf::from("/home/dev/bin"),
+            PathBuf::new(),
+            PathBuf::from("/home/dev/.local/bin"),
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/home/dev/.local/bin"),
+        ];
+
+        assert_eq!(
+            merge_paths(process, stored),
+            [
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/home/dev/bin/"),
+                PathBuf::from("/home/dev/.local/bin"),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_folders_match_whatever_their_case() {
+        let process = vec![PathBuf::from(r"C:\Windows\System32")];
+        let stored = vec![
+            PathBuf::from(r"c:\windows\system32\"),
+            PathBuf::from(r"C:\Users\dev\.local\bin"),
+        ];
+
+        assert_eq!(
+            merge_paths(process, stored),
+            [
+                PathBuf::from(r"C:\Windows\System32"),
+                PathBuf::from(r"C:\Users\dev\.local\bin"),
+            ]
+        );
+    }
+
+    #[test]
+    fn variables_in_a_stored_path_are_expanded_and_unknown_ones_kept() {
+        let lookup = |name: &str| match name {
+            "USERPROFILE" => Some(r"C:\Users\dev".to_owned()),
+            "SystemRoot" => Some(r"C:\Windows".to_owned()),
+            _ => None,
+        };
+
+        assert_eq!(
+            expand_variables(
+                r"%SystemRoot%\system32;%USERPROFILE%\.local\bin;%NOPE%\bin;50%;%%",
+                lookup
+            ),
+            r"C:\Windows\system32;C:\Users\dev\.local\bin;%NOPE%\bin;50%;%%"
+        );
+    }
+
+    #[test]
+    fn a_bare_name_is_looked_up_only_in_the_given_folders() {
+        let dir = std::env::temp_dir().join(format!("hoshi-find-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = if cfg!(windows) { "tool.exe" } else { "tool" };
+        std::fs::write(dir.join(name), "").unwrap();
+
+        assert_eq!(
+            find_in("tool", false, || vec![dir.clone()]),
+            Some(dir.join(name))
+        );
+        assert_eq!(find_in("tool", false, Vec::new), None);
     }
 
     #[test]

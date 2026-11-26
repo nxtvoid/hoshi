@@ -4,6 +4,7 @@ use super::titles::run_quick;
 use crate::writing::{commit_prompt, parse_commit, parse_pull_request, pull_request_prompt};
 use crate::{CommitMessage, CommitMessageRequest, PullRequestText, PullRequestTextRequest};
 use serde_json::{Value, json};
+use std::path::Path;
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
@@ -39,7 +40,7 @@ fn pull_request_schema() -> Value {
     })
 }
 
-pub(crate) fn write_commit(binary: &str, request: &CommitMessageRequest) -> Option<CommitMessage> {
+pub(crate) fn write_commit(binary: &Path, request: &CommitMessageRequest) -> Option<CommitMessage> {
     let schema = commit_schema(request.wants_branch);
     parse_commit(&run_quick(
         binary,
@@ -51,7 +52,7 @@ pub(crate) fn write_commit(binary: &str, request: &CommitMessageRequest) -> Opti
 }
 
 pub(crate) fn write_pull_request(
-    binary: &str,
+    binary: &Path,
     request: &PullRequestTextRequest,
 ) -> Option<PullRequestText> {
     parse_pull_request(&run_quick(

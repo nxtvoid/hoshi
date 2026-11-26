@@ -112,6 +112,9 @@ pub(super) struct Setup {
     pub command: &'static str,
     pub view: Entity<TerminalView>,
     pub ended: bool,
+    pub succeeded: bool,
+    /// Where the agent stood when it started.
+    from: Option<AgentState>,
     _exit: Subscription,
 }
 
@@ -173,12 +176,14 @@ impl Onboarding {
         cx: &mut Context<Self>,
     ) {
         self.close_setup(cx);
+        let from = self.state_of(provider, cx);
         let terminal_id = format!("onboarding-{provider}-{}", uuid::Uuid::new_v4());
         let workspace = self.workspace.clone();
         let view = cx.new(|cx| TerminalView::run(workspace, terminal_id, command.to_owned(), cx));
-        let exit = cx.subscribe(&view, |this, _, _: &ShellExited, cx| {
+        let exit = cx.subscribe(&view, |this, _, exited: &ShellExited, cx| {
             if let Some(setup) = &mut this.setup {
                 setup.ended = true;
+                setup.succeeded = exited.code == Some(0);
             }
             this.check(cx);
         });
@@ -189,6 +194,8 @@ impl Onboarding {
             command,
             view,
             ended: false,
+            succeeded: false,
+            from,
             _exit: exit,
         });
         cx.notify();
@@ -207,10 +214,11 @@ impl Onboarding {
         cx.notify();
     }
 
-    /// Closes the terminal once what it ran left its agent ready.
+    /// Closes the terminal once what it ran moved its agent on, leaving the row's next step.
     pub(super) fn settle_setup(&mut self, cx: &mut Context<Self>) {
         let done = self.setup.as_ref().is_some_and(|setup| {
-            setup.ended && self.state_of(setup.provider, cx) == Some(AgentState::Ready)
+            let state = self.state_of(setup.provider, cx);
+            setup.ended && state != Some(AgentState::Checking) && state != setup.from
         });
         if done {
             self.close_setup(cx);
@@ -403,7 +411,11 @@ impl Onboarding {
     ) -> Div {
         let id = provider.id;
         let note = if setup.ended && !self.checking {
-            m::onboarding_terminal_not_ready((provider.name)())
+            if setup.succeeded && self.state_of(id, cx) == Some(AgentState::NotInstalled) {
+                m::onboarding_terminal_not_found((provider.name)())
+            } else {
+                m::onboarding_terminal_not_ready((provider.name)())
+            }
         } else {
             m::onboarding_terminal_running((provider.name)())
         };

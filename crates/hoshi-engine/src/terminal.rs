@@ -325,6 +325,9 @@ fn shell_command(terminal_id: &str, launch: &Launch<'_>) -> CommandBuilder {
     command.cwd(launch.cwd);
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
+    if let Some(path) = hoshi_providers::shell_path() {
+        command.env("PATH", path);
+    }
     command.env("HOSHI_PROJECT_ROOT", launch.project_root);
     if let Some(worktree) = launch.worktree_path {
         command.env("HOSHI_WORKTREE_PATH", worktree);

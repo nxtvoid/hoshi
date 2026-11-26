@@ -2,7 +2,7 @@
 
 use crate::Installation;
 use crate::packages::{self, Manager, any_path, get, manager_of, npm_latest};
-use crate::updater::{Updater, find_program};
+use crate::updater::{Updater, find_in};
 use crate::version::parse_version;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -19,9 +19,35 @@ enum Source {
     Other,
 }
 
+/// The CLI hoshi runs: the settings' binary, else `claude` in `dirs`, else where the native
+/// installer puts it under `home`, which it may leave off the `PATH`.
+pub(crate) fn resolve(
+    configured: Option<&str>,
+    dirs: impl FnOnce() -> Vec<PathBuf>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(configured) = configured.map(str::trim).filter(|path| !path.is_empty()) {
+        return find_in(configured, false, dirs);
+    }
+    find_in("claude", false, dirs).or_else(|| {
+        let name = if cfg!(windows) {
+            "claude.exe"
+        } else {
+            "claude"
+        };
+        let native = native_dir(home)?.join(name);
+        native.is_file().then_some(native)
+    })
+}
+
+/// Where the native installer puts the CLI.
+pub(crate) fn native_dir(home: Option<&Path>) -> Option<PathBuf> {
+    Some(home?.join(".local").join("bin"))
+}
+
 /// `installed` is what the CLI reported; reaches the network for the latest release.
-pub(crate) fn installation(binary: &str, installed: Option<String>) -> Installation {
-    let Some(path) = find_program(binary, false) else {
+pub(crate) fn installation(binary: Option<PathBuf>, installed: Option<String>) -> Installation {
+    let Some(path) = binary else {
         return Installation::default();
     };
     let real = dunce::canonicalize(&path).unwrap_or_else(|_| path.clone());
@@ -90,6 +116,96 @@ fn update_channel() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const EXE: &str = if cfg!(windows) {
+        "claude.exe"
+    } else {
+        "claude"
+    };
+
+    fn folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hoshi-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn cli_in(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(EXE);
+        std::fs::write(&path, "").unwrap();
+        path
+    }
+
+    fn native_home() -> PathBuf {
+        let home = folder("claude-home");
+        cli_in(&home.join(".local").join("bin"));
+        home
+    }
+
+    #[test]
+    fn the_settings_binary_wins_over_the_path_and_the_native_install() {
+        let home = native_home();
+        let on_path = folder("claude-path");
+        cli_in(&on_path);
+        let configured = cli_in(&folder("claude-configured"));
+
+        let found = resolve(
+            Some(&configured.to_string_lossy()),
+            || vec![on_path.clone()],
+            Some(&home),
+        );
+
+        assert_eq!(found, Some(configured));
+    }
+
+    #[test]
+    fn a_missing_settings_binary_is_not_replaced_by_another() {
+        let home = native_home();
+        let on_path = folder("claude-path");
+        cli_in(&on_path);
+        let missing = on_path.join("gone").join(EXE);
+
+        let found = resolve(
+            Some(&missing.to_string_lossy()),
+            || vec![on_path.clone()],
+            Some(&home),
+        );
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn the_path_wins_over_the_native_install() {
+        let home = native_home();
+        let on_path = folder("claude-path");
+        let expected = cli_in(&on_path);
+
+        assert_eq!(
+            resolve(Some("  "), || vec![on_path.clone()], Some(&home)),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn the_native_install_is_found_off_the_path() {
+        let home = native_home();
+
+        assert_eq!(
+            resolve(None, || vec![folder("claude-empty")], Some(&home)),
+            Some(home.join(".local").join("bin").join(EXE))
+        );
+    }
+
+    #[test]
+    fn nothing_installed_is_none() {
+        let home = folder("claude-home");
+
+        assert_eq!(
+            resolve(None, || vec![folder("claude-empty")], Some(&home)),
+            None
+        );
+        assert_eq!(resolve(None, Vec::new, None), None);
+    }
 
     fn source(path: &str, real: &str) -> Source {
         source_of(Path::new(path), Path::new(real))

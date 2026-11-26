@@ -1,7 +1,7 @@
 mod account;
 mod commands;
 mod control;
-mod install;
+pub(crate) mod install;
 mod login;
 mod models;
 mod outcome;
@@ -46,7 +46,7 @@ use prompt::MediaBudget;
 use requests::{Access, Grants, Requests};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -61,7 +61,7 @@ const TOOL_INPUT_MAX_CHARS: usize = 2_000;
 const TOOL_OUTPUT_MAX_CHARS: usize = 8_000;
 
 pub struct ClaudeCodeAdapter {
-    /// Empty means `claude` on the PATH.
+    /// Empty means `claude` on the PATH, else where the native installer puts it.
     binary_path: Option<String>,
     /// Runs threads without a model of their own; empty means the manifest's default.
     model: Option<String>,
@@ -80,8 +80,13 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    fn binary(&self) -> &str {
-        self.binary_path.as_deref().unwrap_or("claude")
+    /// Looked up on each use, so a CLI installed since hoshi started is found.
+    fn binary(&self) -> Option<PathBuf> {
+        install::resolve(
+            self.binary_path.as_deref(),
+            crate::updater::search_path,
+            std::env::home_dir().as_deref(),
+        )
     }
 
     /// Asks the CLI once; `None` when it can't be run.
@@ -91,7 +96,7 @@ impl ClaudeCodeAdapter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *version.get_or_insert_with(|| {
-            let mut command = Command::new(self.binary());
+            let mut command = Command::new(self.binary()?);
             command
                 .arg("--version")
                 .stdin(Stdio::null())
@@ -136,7 +141,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     }
 
     fn usage_limits(&self) -> Option<UsageLimits> {
-        let mut limits = usage::probe(self.binary())?;
+        let mut limits = usage::probe(&self.binary()?)?;
         if !limits.windows.is_empty()
             && let Some(version) = self.version_text()
         {
@@ -165,25 +170,25 @@ impl ProviderAdapter for ClaudeCodeAdapter {
     }
 
     fn account_status(&self) -> ProviderAccountStatus {
-        let status = account::probe(self.binary());
+        let status = account::probe(self.binary().as_deref());
         self.forget_version();
         status
     }
 
     fn slash_commands(&self, cwd: &Path) -> Option<Vec<SlashCommand>> {
-        commands::probe(self.binary(), cwd)
+        commands::probe(&self.binary()?, cwd)
     }
 
     fn generate_title(&self, request: &TitleRequest) -> Option<GeneratedTitle> {
-        titles::generate(self.binary(), request)
+        titles::generate(&self.binary()?, request)
     }
 
     fn write_commit_message(&self, request: &CommitMessageRequest) -> Option<CommitMessage> {
-        writing::write_commit(self.binary(), request)
+        writing::write_commit(&self.binary()?, request)
     }
 
     fn write_pull_request(&self, request: &PullRequestTextRequest) -> Option<PullRequestText> {
-        writing::write_pull_request(self.binary(), request)
+        writing::write_pull_request(&self.binary()?, request)
     }
 
     fn compacts_idle_threads(&self) -> bool {
@@ -216,7 +221,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         };
         let instructions = system_prompt(&request, self.model.as_deref(), tool_search);
         let access = access(&request);
-        let mut command = Command::new(self.binary());
+        let binary = self.binary().ok_or_else(|| TurnFailure::SpawnFailed {
+            detail: "claude was not found".into(),
+        })?;
+        let mut command = Command::new(binary);
         command
             .current_dir(&request.cwd)
             .args(["-p", "--input-format", "stream-json"])

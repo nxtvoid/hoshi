@@ -48,8 +48,10 @@ enum Input {
     Resize(GridSize),
 }
 
-/// The shell ended.
-pub struct ShellExited;
+/// The shell ended, with the code it exited with when the platform reported one.
+pub struct ShellExited {
+    pub code: Option<u32>,
+}
 
 impl EventEmitter<ShellExited> for TerminalView {}
 
@@ -437,7 +439,7 @@ impl TerminalView {
 
     fn exited(&mut self, exit: TerminalExit, cx: &mut Context<Self>) {
         self.shell = Shell::Exited;
-        cx.emit(ShellExited);
+        cx.emit(ShellExited { code: exit.code });
         let notice = match exit.code {
             Some(code) => m::terminal_exited_with_code(code),
             None => m::terminal_exited(),
