@@ -130,6 +130,7 @@ impl Text {
     fn body(&self) -> String {
         match self {
             Self::Simple(text) => format_call(text),
+            Self::Plural { one, other, .. } if one == other => format_call(one),
             Self::Plural { count, one, other } => format!(
                 "if {} == 1 {{ {} }} else {{ {} }}",
                 ident(count),

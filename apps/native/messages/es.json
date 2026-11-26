@@ -1677,9 +1677,36 @@
   "agents_count": "{count} agentes",
   "agents_more": "+{count}",
   "agents_running": "{count} en marcha",
-  "agents_waiting": "{count} esperan respuesta",
-  "agents_done": "{count} terminados",
-  "agents_stopped": "{count} detenidos",
+  "agents_waiting": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} espera respuesta",
+        "countPlural=*": "{count} esperan respuesta"
+      }
+    }
+  ],
+  "agents_done": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} terminado",
+        "countPlural=*": "{count} terminados"
+      }
+    }
+  ],
+  "agents_stopped": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} detenido",
+        "countPlural=*": "{count} detenidos"
+      }
+    }
+  ],
   "agents_failed": "{count} con fallos",
   "agent_own_thread": "hilo propio",
   "agent_finished": "Terminado",
@@ -1742,13 +1769,16 @@
     }
   ],
   "agents": "Agentes",
-  "agents_previous": "Anteriores",
-  "agents_running_heading": "En marcha",
-  "agents_need_you": "Te necesitan",
-  "agents_show_all": "Mostrar todos",
-  "agents_summary": "{running} · {done}",
-  "agents_more_need_you": "+{count} más te necesitan",
-  "agents_group": "{heading} · {count}",
+  "agents_ended": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} finalizado",
+        "countPlural=*": "{count} finalizados"
+      }
+    }
+  ],
   "agent_needs_you": "Te necesita",
   "servers": "Servidores",
   "panel_running": "{count} en marcha",

@@ -561,7 +561,7 @@ fn a_disabled_git_action_says_why_on_hover(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn many_previous_agents_stay_in_the_show_all_menu(cx: &mut TestAppContext) {
+fn many_done_agents_stay_in_their_menu(cx: &mut TestAppContext) {
     let mut h = harness(cx, "details-many-agents", 1200.);
     let workspace = h
         .details
@@ -610,17 +610,170 @@ fn many_previous_agents_stay_in_the_show_all_menu(cx: &mut TestAppContext) {
             .count()
     };
     assert_eq!(rows(&mut h), 0, "done agents get no row of their own");
-    assert!(h.cx.debug_bounds("details-agents-summary").is_some());
+    assert!(h.cx.debug_bounds("details-agents-list").is_none());
 
-    let show_all =
-        h.cx.debug_bounds("details-agents-show-all")
-            .expect("the show all button shows");
-    h.cx.simulate_click(show_all.center(), Modifiers::default());
+    let done =
+        h.cx.debug_bounds("details-agents-done")
+            .expect("the count of the done agents shows");
+    h.cx.simulate_click(done.center(), Modifiers::default());
     redraw(&mut h.cx);
     assert!(
         h.cx.debug_bounds("menu-item-details-agent-option-call-0")
             .is_some(),
         "the menu lists the previous agents"
+    );
+}
+
+#[gpui_kit::test]
+fn each_running_agent_gets_a_row_in_a_list_that_scrolls(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-running-agents", 1200.);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    let open = workspace
+        .read_with(&h.cx, |workspace, _| workspace.open.clone())
+        .expect("the thread is open");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while open.read_with(&h.cx, |thread, _| thread.loading) {
+        assert!(Instant::now() < deadline, "timed out loading the thread");
+        redraw(&mut h.cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let count = 8;
+    open.update(&mut h.cx, |thread, cx| {
+        for index in 0..count {
+            thread.items.push(hoshi_core::ThreadItem {
+                id: format!("call-{index}"),
+                thread_id: "t".into(),
+                created_at: "2026-11-13T10:00:00Z".into(),
+                content: hoshi_core::ItemContent::ToolCall {
+                    name: "Agent".into(),
+                    input: r#"{"description":"Look around","subagent_type":"Explore"}"#.into(),
+                    output: None,
+                    is_error: false,
+                    detail: None,
+                    output_omitted: false,
+                    interrupted: false,
+                },
+            });
+        }
+        cx.notify();
+    });
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    redraw(&mut h.cx);
+
+    let row =
+        h.cx.debug_bounds("details-agent-call-7")
+            .expect("each running agent has a row");
+    let list =
+        h.cx.debug_bounds("details-agents-list")
+            .expect("the rows sit in a list");
+    assert!(
+        list.size.height < row.size.height * count as f32,
+        "list: {list:?}, row: {row:?}"
+    );
+    assert!(
+        h.cx.debug_bounds("details-agents-done").is_none(),
+        "without done agents there is no count of them"
+    );
+
+    let at = list.center();
+    h.cx.simulate_mouse_move(at, None, Modifiers::none());
+    redraw(&mut h.cx);
+    h.cx.simulate_event(gpui_kit::ScrollEvent {
+        position: at,
+        delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-1_000.))),
+        ..Default::default()
+    });
+    redraw(&mut h.cx);
+    let scrolled =
+        h.cx.debug_bounds("details-agent-call-7")
+            .expect("the row is still drawn");
+    assert!(
+        scrolled.top() < row.top(),
+        "the list scrolls: {scrolled:?} was {row:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn the_wheel_moves_the_card_only_once_the_agent_list_ends(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "details-agents-wheel", 1200.);
+    let workspace = h
+        .details
+        .read_with(&h.cx, |details, _| details.workspace.clone());
+    let open = workspace
+        .read_with(&h.cx, |workspace, _| workspace.open.clone())
+        .expect("the thread is open");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while open.read_with(&h.cx, |thread, _| thread.loading) {
+        assert!(Instant::now() < deadline, "timed out loading the thread");
+        redraw(&mut h.cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    open.update(&mut h.cx, |thread, cx| {
+        for index in 0..8 {
+            thread.items.push(hoshi_core::ThreadItem {
+                id: format!("call-{index}"),
+                thread_id: "t".into(),
+                created_at: "2026-11-13T10:00:00Z".into(),
+                content: hoshi_core::ItemContent::ToolCall {
+                    name: "Agent".into(),
+                    input: r#"{"description":"Look around","subagent_type":"Explore"}"#.into(),
+                    output: None,
+                    is_error: false,
+                    detail: None,
+                    output_omitted: false,
+                    interrupted: false,
+                },
+            });
+        }
+        cx.notify();
+    });
+    h.details
+        .update(&mut h.cx, |details, cx| details.set_open(true, cx));
+    h.cx.simulate_resize(size(px(1200.), px(330.)));
+    redraw(&mut h.cx);
+
+    let wheel = |h: &mut Harness, by: f32| {
+        let list =
+            h.cx.debug_bounds("details-agents-list")
+                .expect("the rows sit in a list");
+        let at = gpui_kit::point(list.center().x, list.top() + px(16.));
+        h.cx.simulate_mouse_move(at, None, Modifiers::none());
+        redraw(&mut h.cx);
+        h.cx.simulate_event(gpui_kit::ScrollEvent {
+            position: at,
+            delta: gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(by))),
+            ..Default::default()
+        });
+        redraw(&mut h.cx);
+    };
+    let card = |h: &mut Harness| {
+        h.cx.debug_bounds("thread-details-card")
+            .expect("the card shows")
+            .top()
+    };
+    let row = |h: &mut Harness| {
+        h.cx.debug_bounds("details-agent-call-0")
+            .expect("the row is drawn")
+            .top()
+    };
+    let (card_before, row_before) = (card(&mut h), row(&mut h));
+
+    wheel(&mut h, -20.);
+    assert!(row(&mut h) < row_before, "the list scrolls");
+    assert_eq!(
+        card(&mut h),
+        card_before,
+        "the card stays while the list scrolls"
+    );
+
+    wheel(&mut h, -1_000.);
+    wheel(&mut h, -40.);
+    assert!(
+        card(&mut h) < card_before,
+        "past the list's end the card scrolls"
     );
 }
 
