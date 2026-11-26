@@ -358,7 +358,7 @@ fn an_install_terminal_closes_once_the_agent_only_needs_a_sign_in(cx: &mut TestA
     );
     h.cx.update(|window, cx| {
         h.view.update(cx, |view, cx| {
-            view.start_setup("claudeCode", "exit 0", window, cx)
+            view.start_setup("claudeCode", "sleep 60", window, cx)
         })
     });
     h.cx.run_until_parked();

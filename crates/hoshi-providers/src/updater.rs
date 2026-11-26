@@ -244,7 +244,11 @@ pub(crate) fn find_in(
 ) -> Option<PathBuf> {
     let path = Path::new(name);
     if path.components().count() > 1 {
-        return path.is_file().then(|| path.to_owned());
+        if path.is_file() {
+            return Some(path.to_owned());
+        }
+        let exe = path.with_extension("exe");
+        return (cfg!(windows) && path.extension().is_none() && exe.is_file()).then_some(exe);
     }
     let candidates = candidate_names(name, any_extension);
     dirs()
@@ -332,20 +336,31 @@ fn merge_paths(mut dirs: Vec<PathBuf>, more: Vec<PathBuf>) -> Vec<PathBuf> {
 
 #[cfg(windows)]
 fn stored_path() -> Vec<PathBuf> {
-    use windows_registry::{CURRENT_USER, Key, LOCAL_MACHINE};
+    use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
     const MACHINE: &str = r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
-    let read = |root: &Key, path: &str| root.open(path).and_then(|key| key.get_string("Path")).ok();
-    [
-        read(LOCAL_MACHINE, MACHINE),
-        read(CURRENT_USER, "Environment"),
-    ]
-    .into_iter()
-    .flatten()
-    .flat_map(|path| {
-        let expanded = expand_variables(&path, |name| std::env::var(name).ok());
-        std::env::split_paths(&expanded).collect::<Vec<_>>()
-    })
-    .collect()
+    let machine = LOCAL_MACHINE.open(MACHINE).ok();
+    let user = CURRENT_USER.open("Environment").ok();
+    let stored = |name: &str| {
+        [&user, &machine]
+            .into_iter()
+            .flatten()
+            .find_map(|key| key.get_string(name).ok())
+    };
+    let lookup = |name: &str| std::env::var(name).ok().or_else(|| stored(name));
+    [&machine, &user]
+        .into_iter()
+        .flatten()
+        .filter_map(|key| key.get_string("Path").ok())
+        .flat_map(|path| usable_dirs(&expand_variables(&path, lookup)))
+        .collect()
+}
+
+/// The folders in an expanded `PATH` value that are absolute and have no variable left.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn usable_dirs(path: &str) -> Vec<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute() && !dir.to_string_lossy().contains('%'))
+        .collect()
 }
 
 #[cfg(not(windows))]
@@ -535,6 +550,32 @@ mod tests {
                 lookup
             ),
             r"C:\Windows\system32;C:\Users\dev\.local\bin;%NOPE%\bin;50%;%%"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stored_path_keeps_only_absolute_folders_without_variables() {
+        assert_eq!(
+            usable_dirs(r"C:\Windows\system32;%NOPE%\bin;relative\bin;;C:\Users\dev\.local\bin"),
+            [
+                PathBuf::from(r"C:\Windows\system32"),
+                PathBuf::from(r"C:\Users\dev\.local\bin")
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_path_without_an_extension_finds_its_exe() {
+        let dir = std::env::temp_dir().join(format!("hoshi-find-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        fake_program(&dir.join("tool.exe"));
+        let bare = dir.join("tool");
+
+        assert_eq!(
+            find_in(bare.to_str().unwrap(), false, Vec::new),
+            Some(dir.join("tool.exe"))
         );
     }
 
