@@ -1341,6 +1341,7 @@
   "usage_extra_cap_resets": "{limit} · {time}",
   "usage_extra_monthly_cap": "{limit} / month",
   "usage_extra_spent": "spent",
+  "usage_extra_per_month": "month",
   "usage_extra_no_cap": "No monthly cap",
   "usage_extra_unlimited": "Unlimited",
   "usage_credits_balance": "Bought ahead",

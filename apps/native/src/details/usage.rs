@@ -265,11 +265,7 @@ fn extra_row(
         ),
         SpendUnit::Credits { .. } => (IconName::Coins, m::usage_credits(), m::usage_credits()),
     };
-    let side = match (left, extra.resets_at.as_deref()) {
-        (Some(_), Some(at)) => moment_short(at, now),
-        (None, _) if extra.balance.is_none() && !extra.unlimited => Some(m::usage_extra_spent()),
-        _ => None,
-    };
+    let side = extra_side(extra, left.is_some(), now);
     let amount = match &note {
         Some(note) => m::usage_amount_note(shown.clone(), note.clone()),
         None => shown.clone(),
@@ -302,6 +298,20 @@ fn extra_row(
     )
 }
 
+/// Beside the extra usage: when a cap resets, or that it is monthly when the provider does not
+/// say when; that it was spent when there is no cap or balance.
+fn extra_side<Tz: TimeZone>(extra: &ExtraUsage, capped: bool, now: &DateTime<Tz>) -> Option<String>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    match (capped, extra.resets_at.as_deref()) {
+        (true, Some(at)) => moment_short(at, now),
+        (true, None) => Some(m::usage_extra_per_month()),
+        (false, _) if extra.balance.is_none() && !extra.unlimited => Some(m::usage_extra_spent()),
+        _ => None,
+    }
+}
+
 fn tooltip_lines<Tz: TimeZone>(window: &UsageWindow, now: &DateTime<Tz>) -> Vec<String>
 where
     Tz::Offset: std::fmt::Display,
@@ -325,9 +335,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{provider_of, tooltip_lines};
+    use super::{extra_side, provider_of, tooltip_lines};
     use chrono::{DateTime, TimeZone, Utc};
-    use hoshi_core::{ModelChoice, Thread, UsageWindow, UsageWindowKind};
+    use hoshi_core::{ExtraUsage, ModelChoice, SpendUnit, Thread, UsageWindow, UsageWindowKind};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 11, 13, 12, 0, 0).unwrap()
@@ -396,5 +406,33 @@ mod tests {
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(lines[1], "Resets tomorrow at 12:00 PM · in 1d 0h");
         assert_eq!(lines[2], "Even pace: 14% left by now");
+    }
+
+    #[test]
+    fn a_capped_extra_usage_says_when_it_resets_or_that_it_is_monthly() {
+        let extra = |limit: Option<u64>, resets_at: Option<&str>| ExtraUsage {
+            unit: SpendUnit::Money {
+                currency: Some("USD".into()),
+                exponent: 2,
+            },
+            used: Some(500),
+            limit,
+            balance: None,
+            unlimited: false,
+            resets_at: resets_at.map(str::to_owned),
+        };
+
+        let in_hours = extra(Some(2_000), Some("2026-11-13T15:00:00Z"));
+        assert_eq!(
+            extra_side(&in_hours, true, &now()).as_deref(),
+            Some("3h 0m")
+        );
+        let monthly = extra(Some(2_000), None);
+        assert_eq!(extra_side(&monthly, true, &now()).as_deref(), Some("month"));
+        let uncapped = extra(None, None);
+        assert_eq!(
+            extra_side(&uncapped, false, &now()).as_deref(),
+            Some("spent")
+        );
     }
 }
