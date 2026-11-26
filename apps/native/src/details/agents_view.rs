@@ -10,7 +10,7 @@ const ROW_GAP: f32 = 2.;
 /// What the agents box shows of `agents`, newest first as [`ThreadDetails::agents`] lists them.
 #[derive(Debug, PartialEq)]
 pub(super) struct AgentsSummary {
-    /// The rows: the agents that need the user, longest waiting first, then those running,
+    /// The rows: the agents that need the user, oldest first, then those running,
     /// newest first.
     pub active: Vec<ThreadAgent>,
     pub done: Vec<ThreadAgent>,
