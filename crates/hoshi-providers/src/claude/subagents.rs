@@ -115,7 +115,7 @@ impl Subagents {
 
     /// The call that first started subagent `task_id` of session `session_id`, which an
     /// earlier process ran; known from then on, to show it running again when the session's
-    /// transcript still holds it.
+    /// transcript still holds it, with what it runs on and its id.
     pub(crate) fn launched_earlier(&mut self, session_id: &str, task_id: &str) -> Option<String> {
         let projects = match &self.projects {
             Some(projects) => projects.clone(),
@@ -123,8 +123,14 @@ impl Subagents {
         };
         let (launch, call) = launch_on_disk(&projects, session_id, task_id)?;
         if let Some((name, input)) = call {
+            if matches!(name.as_str(), "Agent" | "Task") && !self.started.contains_key(&launch) {
+                self.started(None, &launch, &input);
+            }
             let input = truncate_json(&input, super::TOOL_INPUT_MAX_CHARS);
             self.launched(None, &launch, &name, input);
+        }
+        if let Some(subagent) = self.started.get_mut(&launch) {
+            subagent.agent_id.get_or_insert_with(|| task_id.to_owned());
         }
         Some(launch)
     }

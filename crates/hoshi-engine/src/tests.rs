@@ -2669,6 +2669,12 @@ fn subagents_a_usage_limit_cut_short_are_resumed_by_their_id_once_it_resets() {
     });
     receive(ProviderOutput::ToolCallCompleted {
         item_id: "toolu_2".into(),
+        output: "Overloaded".into(),
+        is_error: true,
+        detail: Some(subagent("a2")),
+    });
+    receive(ProviderOutput::ToolCallCompleted {
+        item_id: "toolu_2".into(),
         output: "Docs are fine".into(),
         is_error: false,
         detail: Some(subagent("a2")),

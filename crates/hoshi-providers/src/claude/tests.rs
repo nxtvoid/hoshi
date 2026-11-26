@@ -71,7 +71,7 @@ fn a_subagent_an_api_error_cut_short_failed_with_the_error_above_its_partial_rep
         "message": { "role": "user", "content": [{ "type": "tool_result",
             "tool_use_id": "toolu_agent", "content": [{ "type": "text", "text": CUT_SHORT_RESULT }] }] } });
     assert_eq!(
-        parse_tool_results(&frame, false),
+        parse_tool_results(&frame, false, |id| id == "toolu_agent"),
         [ProviderOutput::ToolCallCompleted {
             item_id: "toolu_agent".into(),
             output: "You've hit your 5-hour limit · resets 3pm (UTC)\n\nNow I'll write the tests."
@@ -80,6 +80,13 @@ fn a_subagent_an_api_error_cut_short_failed_with_the_error_above_its_partial_rep
             detail: None,
         }]
     );
+    assert!(matches!(
+        parse_tool_results(&frame, false, |_| false).as_slice(),
+        [ProviderOutput::ToolCallCompleted {
+            is_error: false,
+            ..
+        }]
+    ));
 }
 
 #[test]
@@ -2385,6 +2392,7 @@ fn a_subagent_of_an_earlier_process_resumed_runs_its_first_call_again() {
         subagents: Subagents::kept_in(&projects),
         ..ClaudeParser::new(None)
     };
+    parser.subagents.retarget(Some("opus"), Some(Effort::Max));
 
     let mut lines = vec![json!({ "type": "system", "subtype": "init", "session_id": "s1" })];
     lines.extend(resume_with_send_message(run_result()));
@@ -2392,6 +2400,19 @@ fn a_subagent_of_an_earlier_process_resumed_runs_its_first_call_again() {
     std::fs::remove_dir_all(&projects).unwrap();
 
     assert!(agent_a_runs_again(&resumed), "{resumed:#?}");
+    assert_eq!(
+        details(&resumed),
+        [(
+            None,
+            "toolu_agent".into(),
+            ToolDetail::Subagent {
+                model: "claude-haiku-5-5".into(),
+                effort: Some(Effort::Max),
+                resume_id: Some("a1".into()),
+            }
+        )],
+        "resumed after a restart, it keeps the id it is resumed by"
+    );
     assert!(completions(&resumed).is_empty(), "{resumed:#?}");
     assert_eq!(
         parser.live_output.agent_task("toolu_agent").as_deref(),

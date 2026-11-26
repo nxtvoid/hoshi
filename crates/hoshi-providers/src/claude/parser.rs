@@ -412,7 +412,8 @@ impl ClaudeParser {
                     self.local_output = Some(printed);
                 }
                 let interrupted = self.queue.state().interrupted;
-                let results = parse_tool_results(value, interrupted);
+                let results =
+                    parse_tool_results(value, interrupted, |id| self.subagents.owner(id).is_some());
                 let mut outputs = self.answered(value);
                 self.wakeup_scheduled(value);
                 outputs.extend(self.hold_async_agents(value, results, None));
@@ -1072,7 +1073,9 @@ impl ClaudeParser {
                 self.parse_assistant(Some(parent), &value["message"])
             }
             Some("user") => {
-                let results = parse_tool_results(value, self.queue.state().interrupted);
+                let interrupted = self.queue.state().interrupted;
+                let results =
+                    parse_tool_results(value, interrupted, |id| self.subagents.owner(id).is_some());
                 self.hold_async_agents(value, results, Some(parent))
             }
             _ => Vec::new(),
@@ -1250,8 +1253,13 @@ pub(super) const ASYNC_AGENT_LAUNCHED: &str = "Async agent launched successfully
 
 /// The results a `user` frame carries. A frame with a single result also carries the CLI's
 /// own reading of it, in `tool_use_result`. Once the user asked the turn to stop, a call that
-/// fails was stopped.
-pub(super) fn parse_tool_results(frame: &Value, interrupted: bool) -> Vec<ProviderOutput> {
+/// fails was stopped. `subagent` tells the calls that started a subagent, whose result may say
+/// an API error cut it short.
+pub(super) fn parse_tool_results(
+    frame: &Value,
+    interrupted: bool,
+    subagent: impl Fn(&str) -> bool,
+) -> Vec<ProviderOutput> {
     let structured = &frame["tool_use_result"];
     let Some(blocks) = frame["message"]["content"].as_array() else {
         return Vec::new();
@@ -1288,7 +1296,11 @@ pub(super) fn parse_tool_results(frame: &Value, interrupted: bool) -> Vec<Provid
                     .join("\n"),
                 _ => String::new(),
             };
-            let (output, cut_short) = subagent_result(&output);
+            let (output, cut_short) = if subagent(&item_id) {
+                subagent_result(&output)
+            } else {
+                (subagent_report(&output), false)
+            };
             let is_error = cut_short || block["is_error"].as_bool().unwrap_or(false);
             let stopped = cancelled(&item_id)
                 || (is_error && (interrupted || output.trim_start().starts_with(STOPPED_MARKER)));

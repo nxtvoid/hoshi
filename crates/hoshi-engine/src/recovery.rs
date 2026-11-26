@@ -612,8 +612,21 @@ impl State {
         })
     }
 
-    /// A subagent call of the thread's running turn failed, as a usage limit cuts one short.
-    pub(crate) fn subagent_failed(&mut self, thread_id: &str, item_id: &str, detail: &ToolDetail) {
+    /// A subagent call of the thread's running turn ended: `failed`, as a usage limit cuts one
+    /// short, or done, as one resumed after a failure may still end.
+    pub(crate) fn subagent_ended(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        failed: bool,
+        detail: &ToolDetail,
+    ) {
+        if !failed {
+            if let Some(work) = self.recovery.failed_subagents.get_mut(thread_id) {
+                work.retain(|entry| entry.id != item_id);
+            }
+            return;
+        }
         let Ok(Some(item)) = self.store.thread_item(thread_id, item_id) else {
             return;
         };
