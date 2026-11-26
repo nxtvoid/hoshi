@@ -38,10 +38,11 @@ macro_rules! review_turn_fields {
 
 const PULL_REQUEST_QUERY: &str = concat!(
     "
-query($owner: String!, $name: String!, $branch: String!, $first: Int!) {
+query($owner: String!, $name: String!, $branch: String!, $first: Int!, $after: String) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
-    pullRequests(headRefName: $branch, first: $first, orderBy: {field: UPDATED_AT, direction: DESC}) {
+    pullRequests(headRefName: $branch, first: $first, after: $after, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
       nodes { isCrossRepository ",
     pull_request_fields!(),
     review_turn_fields!(),
@@ -63,8 +64,10 @@ query($owner: String!, $name: String!, $number: Int!) {
 }"
 );
 
-/// How many pull requests from `headRefName` are read when the latest one comes from a fork.
-const PAST_FORKS: u32 = 10;
+/// Past a fork's latest pull request, pull requests from `headRefName` are read in pages of
+/// [`FORK_PAGE`], up to [`FORK_PAGES`] of them.
+const FORK_PAGE: u32 = 50;
+const FORK_PAGES: usize = 4;
 
 const SEARCH_LIMIT: u32 = 20;
 
@@ -253,23 +256,27 @@ impl Forge for GitHub {
         repository: &RepositoryRef,
         branch: &str,
     ) -> Result<Option<PullRequest>, ForgeError> {
-        let read = |first: u32| {
+        let read = |first: u32, after: Option<&str>| {
             let variables = json!({
                 "owner": repository.owner,
                 "name": repository.name,
                 "branch": branch,
                 "first": first,
+                "after": after,
             });
             self.graphql::<RepositoryData>(PULL_REQUEST_QUERY, variables)
                 .and_then(|data| pull_request_from(data, branch))
         };
-        let found = match read(1)? {
-            BranchPullRequest::OnlyForks => read(PAST_FORKS)?,
-            found => found,
-        };
+        let mut found = read(1, None)?;
+        for _ in 0..FORK_PAGES {
+            let BranchPullRequest::OnlyForks { after } = found else {
+                break;
+            };
+            found = read(FORK_PAGE, Some(&after))?;
+        }
         Ok(match found {
             BranchPullRequest::Own(pull_request) => Some(*pull_request),
-            BranchPullRequest::None | BranchPullRequest::OnlyForks => None,
+            BranchPullRequest::None | BranchPullRequest::OnlyForks { .. } => None,
         })
     }
 
@@ -561,7 +568,22 @@ struct NumberRepository {
 #[serde(rename_all = "camelCase")]
 struct Repository {
     default_branch_ref: Option<Named>,
-    pull_requests: Nodes<PullRequestNode>,
+    pull_requests: Page<PullRequestNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Page<T> {
+    nodes: Vec<T>,
+    #[serde(default)]
+    page_info: Option<PageInfo>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PageInfo {
+    has_next_page: bool,
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -695,8 +717,10 @@ impl TimelineNode {
 enum BranchPullRequest {
     Own(Box<PullRequest>),
     None,
-    /// Every one read came from a fork; older ones may not.
-    OnlyForks,
+    /// Every one read came from a fork; those after `after` may not.
+    OnlyForks {
+        after: String,
+    },
 }
 
 fn pull_request_from(data: RepositoryData, branch: &str) -> Result<BranchPullRequest, ForgeError> {
@@ -707,13 +731,21 @@ fn pull_request_from(data: RepositoryData, branch: &str) -> Result<BranchPullReq
     {
         return Ok(BranchPullRequest::None);
     }
-    let nodes = repository.pull_requests.nodes;
-    let any = !nodes.is_empty();
-    match nodes.into_iter().find(|node| !node.is_cross_repository) {
-        Some(node) => Ok(BranchPullRequest::Own(Box::new(pull_request_of(node)))),
-        None if any => Ok(BranchPullRequest::OnlyForks),
-        None => Ok(BranchPullRequest::None),
+    let page = repository.pull_requests;
+    if let Some(node) = page
+        .nodes
+        .into_iter()
+        .find(|node| !node.is_cross_repository)
+    {
+        return Ok(BranchPullRequest::Own(Box::new(pull_request_of(node))));
     }
+    Ok(match page.page_info {
+        Some(PageInfo {
+            has_next_page: true,
+            end_cursor: Some(after),
+        }) => BranchPullRequest::OnlyForks { after },
+        _ => BranchPullRequest::None,
+    })
 }
 
 fn pull_request_by_number(data: NumberData) -> Result<PullRequest, ForgeError> {
@@ -854,7 +886,7 @@ mod tests {
     fn parse(text: &str, branch: &str) -> Result<Option<PullRequest>, ForgeError> {
         lookup(text, branch).map(|found| match found {
             BranchPullRequest::Own(pull_request) => Some(*pull_request),
-            BranchPullRequest::None | BranchPullRequest::OnlyForks => None,
+            BranchPullRequest::None | BranchPullRequest::OnlyForks { .. } => None,
         })
     }
 
@@ -864,10 +896,20 @@ mod tests {
             .replace(r#""number": 42"#, r#""number": 86"#)
             .replace(r#""isDraft""#, r#""isCrossRepository": true, "isDraft""#);
         let own = OPEN_PR.replace(r#""isDraft""#, r#""isCrossRepository": false, "isDraft""#);
+        let with_more = |nodes: &str| {
+            response(nodes).replace(
+                r#""pullRequests":{"#,
+                r#""pullRequests":{"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"#,
+            )
+        };
 
         assert_eq!(
+            lookup(&with_more(&fork), "fix/sidebar"),
+            Ok(BranchPullRequest::OnlyForks { after: "c1".into() })
+        );
+        assert_eq!(
             lookup(&response(&fork), "fix/sidebar"),
-            Ok(BranchPullRequest::OnlyForks)
+            Ok(BranchPullRequest::None)
         );
         let found = parse(&response(&format!("{fork},{own}")), "fix/sidebar")
             .unwrap()
