@@ -363,6 +363,11 @@ impl TranscriptView {
             .and_then(|old| thread.items.iter().position(|item| &item.id == old));
         let (before, after) = (self.rows.len(), next.len());
         let (changed, count) = changed_rows(&self.rows, &next, prepended.unwrap_or(0));
+        if before == 0 {
+            self.minimap.shown = None;
+        } else if prepended.is_some() {
+            self.minimap.rows_prepended(after.saturating_sub(before));
+        }
         self.scroller.update(cx, |scroller, cx| {
             if before == 0 {
                 scroller.reset(after, cx);

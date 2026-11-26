@@ -97,13 +97,19 @@ pub fn in_view(marks: &[Mark], index: usize, shown: (usize, usize)) -> bool {
     })
 }
 
-/// The first and last of the rows `painted` that reach between `top` and `bottom`.
+/// The first and last of the rows `painted` that reach between `top` and `bottom`. A list
+/// lays its rows out again, top to bottom, when one asks to be scrolled into view: only the
+/// last pass counts.
 pub fn shown_rows(
     painted: &[(usize, Bounds<Pixels>)],
     top: Pixels,
     bottom: Pixels,
 ) -> Option<(usize, usize)> {
-    painted
+    let last_pass = painted
+        .windows(2)
+        .rposition(|pair| pair[1].0 <= pair[0].0 || pair[1].1.top() < pair[0].1.top())
+        .map_or(0, |at| at + 1);
+    painted[last_pass..]
         .iter()
         .filter(|(_, bounds)| {
             bounds.top() < bottom && bounds.top() + bounds.size.height.max(px(1.)) > top
@@ -112,6 +118,15 @@ pub fn shown_rows(
             None => Some((*row, *row)),
             Some((start, end)) => Some((start.min(*row), end.max(*row))),
         })
+}
+
+/// The marks the arrows step to from the message being read, by index: none before the
+/// first, none after the last or once the end is shown, and the first when only rows before
+/// it are on screen.
+pub fn steps(reading: Option<usize>, count: usize, at_end: bool) -> (Option<usize>, Option<usize>) {
+    let previous = reading.and_then(|index| index.checked_sub(1));
+    let next = reading.map_or(0, |index| index + 1);
+    (previous, (next < count && !at_end).then_some(next))
 }
 
 /// Markdown as one line of plain text, for a preview.
@@ -134,6 +149,13 @@ pub struct MinimapState {
     pub painted: PaintedRows,
     /// The first and last rows on screen.
     pub shown: Option<(usize, usize)>,
+}
+
+impl MinimapState {
+    /// Keeps the rows on screen once `added` rows come before them, until they are measured.
+    pub fn rows_prepended(&mut self, added: usize) {
+        self.shown = self.shown.map(|(start, end)| (start + added, end + added));
+    }
 }
 
 /// Records where the row at `index` is laid out, for the map.
@@ -321,13 +343,9 @@ impl TranscriptView {
                             .child(plain_preview(answer, 1500))
                     }))
             });
-        let previous = reading
-            .and_then(|index| index.checked_sub(1))
-            .map(|index| rows[index]);
-        let next = reading
-            .map(|index| index + 1)
-            .filter(|index| *index < count && !at_end)
-            .map(|index| rows[index]);
+        let (previous, next) = steps(reading, count, at_end);
+        let previous = previous.map(|index| rows[index]);
+        let next = next.map(|index| rows[index]);
         let step = |id: &'static str,
                     icon: IconName,
                     label: String,
@@ -399,7 +417,9 @@ impl TranscriptView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mark, current, in_view, index_at, marks, plain_preview, shown_rows};
+    use super::{
+        Mark, MinimapState, current, in_view, index_at, marks, plain_preview, shown_rows, steps,
+    };
     use crate::transcript::Row;
     use gpui_kit::{Bounds, point, px, size};
     use hoshi_core::{ItemContent, ThreadItem};
@@ -522,5 +542,50 @@ mod tests {
         ];
         assert_eq!(shown_rows(&painted, px(0.), px(200.)), Some((4, 6)));
         assert_eq!(shown_rows(&painted, px(300.), px(400.)), None);
+    }
+
+    #[test]
+    fn only_the_last_layout_pass_of_a_frame_counts() {
+        let row = |index, top: f32| {
+            (
+                index,
+                Bounds::new(point(px(0.), px(top)), size(px(100.), px(100.))),
+            )
+        };
+        let index_back = [
+            row(10, 0.),
+            row(11, 100.),
+            row(12, 200.),
+            row(12, -50.),
+            row(13, 50.),
+        ];
+        assert_eq!(shown_rows(&index_back, px(0.), px(150.)), Some((12, 13)));
+        let top_back = [
+            row(10, 0.),
+            row(11, 100.),
+            row(12, 200.),
+            row(13, -50.),
+            row(14, 50.),
+        ];
+        assert_eq!(shown_rows(&top_back, px(0.), px(150.)), Some((13, 14)));
+    }
+
+    #[test]
+    fn the_arrows_step_from_the_message_read_or_to_the_first() {
+        assert_eq!(steps(Some(1), 3, false), (Some(0), Some(2)));
+        assert_eq!(steps(Some(0), 3, false), (None, Some(1)));
+        assert_eq!(steps(Some(2), 3, false), (Some(1), None));
+        assert_eq!(steps(Some(1), 3, true), (Some(0), None));
+        assert_eq!(steps(None, 3, false), (None, Some(0)));
+    }
+
+    #[test]
+    fn rows_added_before_keep_the_rows_shown() {
+        let mut state = MinimapState {
+            shown: Some((4, 9)),
+            ..Default::default()
+        };
+        state.rows_prepended(20);
+        assert_eq!(state.shown, Some((24, 29)));
     }
 }
