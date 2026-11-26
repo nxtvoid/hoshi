@@ -722,10 +722,13 @@ pub enum ToolDetail {
         diff: Option<String>,
     },
     /// A call that started a subagent: the model it runs on and the effort it runs at, as
-    /// far as known. `effort` is `None` for a model without effort levels.
+    /// far as known. `effort` is `None` for a model without effort levels. `resume_id` is
+    /// the provider's id for the subagent, by which its agent can go on with it, once known.
     Subagent {
         model: String,
         effort: Option<Effort>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resume_id: Option<String>,
     },
 }
 

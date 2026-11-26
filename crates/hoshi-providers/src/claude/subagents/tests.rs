@@ -9,6 +9,7 @@ fn subagent(model: &str, effort: Option<Effort>) -> Option<ToolDetail> {
     Some(ToolDetail::Subagent {
         model: model.into(),
         effort,
+        resume_id: None,
     })
 }
 
@@ -79,6 +80,7 @@ fn its_own_messages_correct_the_model_once() {
             detail: ToolDetail::Subagent {
                 model: "claude-haiku-4-5".into(),
                 effort: None,
+                resume_id: None,
             },
         })
     );
@@ -110,6 +112,7 @@ fn a_nested_subagent_s_correction_goes_to_its_owner_s_transcript() {
                 detail: ToolDetail::Subagent {
                     model: "claude-sonnet-5-5".into(),
                     effort: Some(Effort::Max),
+                    resume_id: None,
                 },
             }),
         })
@@ -138,6 +141,7 @@ fn a_resumed_call_starts_again_in_its_owner_s_transcript_with_what_it_runs_on() 
                 detail: ToolDetail::Subagent {
                     model: "claude-opus-5-5".into(),
                     effort: Some(Effort::Max),
+                    resume_id: None,
                 },
             },
         ]

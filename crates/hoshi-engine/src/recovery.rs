@@ -8,7 +8,7 @@ use crate::{
 };
 use hoshi_core::{
     BackgroundTask, CommandError, EffectiveSetting, Event, HeldMessage, ItemContent, MessageSender,
-    ProjectSettings, QueueEntry, Resumption, ThreadQueue, TurnFailure, TurnOutcome,
+    ProjectSettings, QueueEntry, Resumption, ThreadQueue, ToolDetail, TurnFailure, TurnOutcome,
     drop_queued_messages, may_continue_alone, restore_session, snooze_until_reset,
     start_resumed_turn,
 };
@@ -22,6 +22,7 @@ pub(crate) const CONTINUE_PROMPT: &str = "Continue where you left off. Your last
 /// thread whose turn was stopped or failed on its limit.
 pub(crate) const LIMIT_RESET_PROMPT: &str = "Continue where you left off.";
 pub(crate) const CUT_WORK_NOTE: &str = "Note: hoshi restarted, and this background work was cancelled before it finished. It will not report back on its own, so resume or restart what you still need and wait for its result:";
+pub(crate) const LIMIT_CUT_NOTE: &str = "Note: the usage limit cut these subagents short before they finished. Each keeps what it did, so resume the ones you still need where they stopped instead of starting them again:";
 const MAX_NOTE_ENTRIES: usize = 10;
 const MAX_LABEL_CHARS: usize = 160;
 /// A thread whose turns keep being cut short by restarts goes on by itself this many times in
@@ -60,7 +61,7 @@ enum TurnEnd {
     UsageLimited,
 }
 
-/// Background work a restart ended before it finished.
+/// Background work a restart, or subagents a usage limit, ended before they finished.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CutWork {
@@ -69,6 +70,19 @@ pub(crate) struct CutWork {
     id: String,
     /// The agent waited for it, so it gets to go on at once.
     awaited: bool,
+    /// The provider's id for a subagent, by which its agent goes on with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resume_id: Option<String>,
+    #[serde(default)]
+    cause: CutCause,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum CutCause {
+    #[default]
+    Restart,
+    UsageLimit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +167,9 @@ pub(crate) struct Recovery {
     /// By thread, the background commands its agent waits for.
     awaited: HashMap<String, Vec<String>>,
     notes: HashMap<String, CutNote>,
+    /// By thread, the subagents of its running turn that failed, which its usage limit may
+    /// have cut short.
+    failed_subagents: HashMap<String, Vec<CutWork>>,
     continuations: HashMap<String, Vec<Continuation>>,
     limits: HashMap<String, LimitRecovery>,
     cut: Vec<CutThread>,
@@ -174,6 +191,7 @@ impl Default for Recovery {
             shown: HashMap::new(),
             awaited: HashMap::new(),
             notes: HashMap::new(),
+            failed_subagents: HashMap::new(),
             continuations: HashMap::new(),
             limits: HashMap::new(),
             cut: Vec::new(),
@@ -191,6 +209,7 @@ impl Recovery {
         self.shown.remove(thread_id);
         self.awaited.remove(thread_id);
         self.notes.remove(thread_id);
+        self.failed_subagents.remove(thread_id);
         self.continuations.remove(thread_id);
         self.limits.remove(thread_id);
         self.resumed.remove(thread_id);
@@ -198,18 +217,36 @@ impl Recovery {
     }
 }
 
-/// What the agent reads of the background work a restart cut short.
-fn cut_work_note(work: &[CutWork]) -> String {
-    let mut lines = vec![CUT_WORK_NOTE.to_owned()];
-    lines.extend(
-        work.iter()
-            .take(MAX_NOTE_ENTRIES)
-            .map(|entry| format!("- {}: {}", entry.kind.name(), entry.label)),
-    );
-    if work.len() > MAX_NOTE_ENTRIES {
-        lines.push(format!("- and {} more", work.len() - MAX_NOTE_ENTRIES));
-    }
-    lines.join("\n")
+/// What the agent reads of the work a restart or its usage limit cut short; `resumption`
+/// says how it goes on with a subagent, by its id.
+fn cut_work_note(work: &[CutWork], resumption: impl Fn(&str) -> Option<String>) -> String {
+    [
+        (CutCause::Restart, CUT_WORK_NOTE),
+        (CutCause::UsageLimit, LIMIT_CUT_NOTE),
+    ]
+    .into_iter()
+    .filter_map(|(cause, header)| {
+        let entries: Vec<&CutWork> = work.iter().filter(|entry| entry.cause == cause).collect();
+        if entries.is_empty() {
+            return None;
+        }
+        let mut lines = vec![header.to_owned()];
+        lines.extend(entries.iter().take(MAX_NOTE_ENTRIES).map(|entry| {
+            let hint = entry
+                .resume_id
+                .as_deref()
+                .and_then(&resumption)
+                .map(|hint| format!(", {hint}"))
+                .unwrap_or_default();
+            format!("- {}: {}{hint}", entry.kind.name(), entry.label)
+        }));
+        if entries.len() > MAX_NOTE_ENTRIES {
+            lines.push(format!("- and {} more", entries.len() - MAX_NOTE_ENTRIES));
+        }
+        Some(lines.join("\n"))
+    })
+    .collect::<Vec<_>>()
+    .join("\n\n")
 }
 
 /// `text` on one line, cut to `max` characters; `None` when blank.
@@ -243,20 +280,33 @@ fn command_work(task: &BackgroundTask, awaited: bool) -> CutWork {
         label: label_with_id(Some(&task.description), "background command", &task.task_id),
         id: task.task_id.clone(),
         awaited,
+        resume_id: None,
+        cause: CutCause::Restart,
     }
 }
 
-/// A subagent call left running, from its input.
-fn subagent_work(item_id: &str, input: &str) -> CutWork {
+/// A subagent call cut short, from its input and what its provider reported of it.
+fn subagent_work(
+    item_id: &str,
+    input: &str,
+    detail: Option<&ToolDetail>,
+    cause: CutCause,
+) -> CutWork {
     let input: Value = serde_json::from_str(input).unwrap_or_default();
     let name = ["description", "prompt"]
         .into_iter()
         .find_map(|key| input[key].as_str().filter(|text| !text.trim().is_empty()));
+    let resume_id = match detail {
+        Some(ToolDetail::Subagent { resume_id, .. }) => resume_id.clone(),
+        _ => None,
+    };
     CutWork {
         kind: WorkKind::Subagent,
-        label: label_with_id(name, "subagent", item_id),
+        label: label_with_id(name, "subagent", resume_id.as_deref().unwrap_or(item_id)),
         id: item_id.to_owned(),
         awaited: true,
+        resume_id,
+        cause,
     }
 }
 
@@ -440,11 +490,17 @@ impl State {
             .filter_map(|call| {
                 let item = self.store.thread_item(thread_id, &call.item_id).ok()??;
                 match item.content {
-                    ItemContent::ToolCall { name, input, .. }
-                        if matches!(name.as_str(), "Agent" | "Task") =>
-                    {
-                        Some(subagent_work(&item.id, &input))
-                    }
+                    ItemContent::ToolCall {
+                        name,
+                        input,
+                        detail,
+                        ..
+                    } if matches!(name.as_str(), "Agent" | "Task") => Some(subagent_work(
+                        &item.id,
+                        &input,
+                        detail.as_ref(),
+                        CutCause::Restart,
+                    )),
                     _ => None,
                 }
             })
@@ -479,7 +535,7 @@ impl State {
                 .recovery
                 .notes
                 .get(&thread_id)
-                .map(|note| cut_work_note(&note.work));
+                .map(|note| self.cut_work_note(&thread_id, &note.work));
             let (text, resumed) = match (&cut.source, note) {
                 (_, None) => (CONTINUE_PROMPT.to_owned(), Resumption::Restart),
                 (Some(_), Some(note)) => {
@@ -519,8 +575,8 @@ impl State {
         }
     }
 
-    /// The prompt of turn `turn_id` with the background work a restart cut short before it,
-    /// until a turn that carried it completes. A compaction carries nothing.
+    /// The prompt of turn `turn_id` with the work a restart or its usage limit cut short
+    /// before it, until a turn that carried it completes. A compaction carries nothing.
     pub(crate) fn carry_cut_work(
         &mut self,
         thread_id: &str,
@@ -537,7 +593,40 @@ impl State {
             return prompt;
         }
         note.sent_in = Some(turn_id.to_owned());
-        format!("{}\n\nUser message:\n{prompt}", cut_work_note(&note.work))
+        let work = note.work.clone();
+        format!(
+            "{}\n\nUser message:\n{prompt}",
+            self.cut_work_note(thread_id, &work)
+        )
+    }
+
+    /// What the thread's agent reads of `work`, told by its provider how to go on with a
+    /// subagent.
+    fn cut_work_note(&self, thread_id: &str, work: &[CutWork]) -> String {
+        let adapter = self
+            .model
+            .thread(thread_id)
+            .and_then(|thread| self.adapter_for(&thread.provider));
+        cut_work_note(work, |resume_id| {
+            adapter.as_ref()?.subagent_resumption(resume_id)
+        })
+    }
+
+    /// A subagent call of the thread's running turn failed, as a usage limit cuts one short.
+    pub(crate) fn subagent_failed(&mut self, thread_id: &str, item_id: &str, detail: &ToolDetail) {
+        let Ok(Some(item)) = self.store.thread_item(thread_id, item_id) else {
+            return;
+        };
+        let ItemContent::ToolCall { input, .. } = &item.content else {
+            return;
+        };
+        let work = subagent_work(item_id, input, Some(detail), CutCause::UsageLimit);
+        let failed = self
+            .recovery
+            .failed_subagents
+            .entry(thread_id.to_owned())
+            .or_default();
+        merge(failed, work);
     }
 
     /// Remembers the session a starting turn resumes, which a failed resume must not lose.
@@ -581,6 +670,11 @@ impl State {
     pub(crate) fn turn_ended(&mut self, thread_id: &str, turn_id: &str, outcome: &TurnOutcome) {
         let stopped = self.recovery.stopped.remove(thread_id).as_deref() == Some(turn_id);
         let resumed = self.recovery.resumed.remove(thread_id);
+        let failed = self
+            .recovery
+            .failed_subagents
+            .remove(thread_id)
+            .unwrap_or_default();
         if let (
             Some(session_id),
             TurnOutcome::Failed {
@@ -609,6 +703,19 @@ impl State {
             }
             TurnOutcome::Failed { reason } => {
                 self.hold_queue(thread_id);
+                if matches!(reason, TurnFailure::UsageLimited { .. }) && !failed.is_empty() {
+                    let note = self
+                        .recovery
+                        .notes
+                        .entry(thread_id.to_owned())
+                        .or_insert_with(|| CutNote {
+                            work: Vec::new(),
+                            sent_in: None,
+                        });
+                    for work in failed {
+                        merge(&mut note.work, work);
+                    }
+                }
                 if let TurnFailure::UsageLimited {
                     resets_at: Some(resets_at),
                     ..
@@ -642,6 +749,7 @@ impl State {
         for event in events {
             match event {
                 Event::TurnStarted { thread_id, .. } => {
+                    self.recovery.failed_subagents.remove(thread_id);
                     let limited = self.recovery.limits.remove(thread_id).is_some();
                     if self.recovery.ended.remove(thread_id).is_some() || limited {
                         self.save_recovery(thread_id);
@@ -1176,10 +1284,12 @@ mod tests {
                 label: format!("work {index}"),
                 id: index.to_string(),
                 awaited: false,
+                resume_id: None,
+                cause: CutCause::Restart,
             })
             .collect();
 
-        let note = cut_work_note(&work);
+        let note = cut_work_note(&work, |_| None);
 
         let lines: Vec<&str> = note.lines().collect();
         assert_eq!(lines[0], CUT_WORK_NOTE);
@@ -1213,14 +1323,44 @@ mod tests {
 
         let long = "word ".repeat(100);
         let input = serde_json::json!({ "prompt": long }).to_string();
-        let subagent = subagent_work("toolu_1", &input);
+        let subagent = subagent_work("toolu_1", &input, None, CutCause::Restart);
         assert!(subagent.awaited);
         assert!(subagent.label.ends_with("… (id toolu_1)"));
         assert_eq!(subagent.label.chars().count(), MAX_LABEL_CHARS);
         let input = serde_json::json!({ "description": "Count files", "prompt": "x" });
         assert_eq!(
-            subagent_work("toolu_2", &input.to_string()).label,
+            subagent_work("toolu_2", &input.to_string(), None, CutCause::Restart).label,
             "Count files (id toolu_2)"
+        );
+    }
+
+    #[test]
+    fn a_subagent_its_provider_can_resume_is_named_by_its_id_and_told_how() {
+        let detail = ToolDetail::Subagent {
+            model: "claude-fable-5-2".into(),
+            effort: None,
+            resume_id: Some("a1".into()),
+        };
+        let input = serde_json::json!({ "description": "Review" }).to_string();
+        let restarted = subagent_work("toolu_1", &input, Some(&detail), CutCause::Restart);
+        let limited = subagent_work("toolu_2", &input, Some(&detail), CutCause::UsageLimit);
+        let unknown = subagent_work("toolu_3", &input, None, CutCause::UsageLimit);
+
+        let note = cut_work_note(&[restarted, limited, unknown], |id| {
+            Some(format!("resume it with SendMessage to '{id}'"))
+        });
+
+        assert_eq!(
+            note,
+            [
+                CUT_WORK_NOTE,
+                "- subagent: Review (id a1), resume it with SendMessage to 'a1'",
+                "",
+                LIMIT_CUT_NOTE,
+                "- subagent: Review (id a1), resume it with SendMessage to 'a1'",
+                "- subagent: Review (id toolu_3)",
+            ]
+            .join("\n")
         );
     }
 

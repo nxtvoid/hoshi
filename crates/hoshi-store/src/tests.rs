@@ -928,6 +928,7 @@ fn a_subagent_call_keeps_its_model_and_effort_as_they_are_corrected() {
     let subagent = |model: &str, effort| ToolDetail::Subagent {
         model: model.into(),
         effort,
+        resume_id: None,
     };
     let outputs = [
         ProviderOutput::ToolCallStarted {

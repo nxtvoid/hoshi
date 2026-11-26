@@ -220,6 +220,7 @@ impl Turn {
                         detail: ToolDetail::Subagent {
                             model: model.to_owned(),
                             effort: None,
+                            resume_id: None,
                         },
                     }]);
                 }

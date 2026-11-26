@@ -149,6 +149,15 @@ impl State {
             }
             _ => {}
         }
+        if let ProviderOutput::ToolCallCompleted {
+            item_id,
+            is_error: true,
+            detail: Some(detail @ hoshi_core::ToolDetail::Subagent { .. }),
+            ..
+        } = &output
+        {
+            self.subagent_failed(thread_id, item_id, detail);
+        }
         if let ProviderOutput::ToolCallStarted { input, .. } = &output
             && let Some(turn) = self.turns.get_mut(thread_id)
             && turn.id == turn_id

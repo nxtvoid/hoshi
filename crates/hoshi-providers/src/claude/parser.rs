@@ -668,7 +668,22 @@ impl ClaudeParser {
         let launched = result["isAsync"] == true
             || result["status"] == "async_launched"
             || result["taskType"] == "local_workflow";
-        outputs
+        let calls: Vec<String> = outputs
+            .iter()
+            .filter_map(|output| match output {
+                ProviderOutput::ToolCallCompleted { item_id, .. } => Some(item_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let identified: Vec<ProviderOutput> = match result["agentId"].as_str() {
+            Some(agent_id) if calls.len() == 1 => self
+                .subagents
+                .identified(&calls[0], agent_id)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+        let held = outputs
             .into_iter()
             .filter(|output| match output {
                 ProviderOutput::ToolCallCompleted {
@@ -686,7 +701,8 @@ impl ClaudeParser {
                 }
                 _ => true,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        identified.into_iter().chain(held).collect()
     }
 
     /// The end of a subagent or workflow started in the background closes the call that
@@ -750,6 +766,7 @@ impl ClaudeParser {
                     outputs.extend(self.subagents.reopened(&launch));
                     self.async_agents.insert(launch.clone(), owner);
                 }
+                outputs.extend(self.subagents.identified(&launch, task_id));
                 Some(launch)
             }
             _ => None,
@@ -1271,8 +1288,8 @@ pub(super) fn parse_tool_results(frame: &Value, interrupted: bool) -> Vec<Provid
                     .join("\n"),
                 _ => String::new(),
             };
-            let output = subagent_report(&output);
-            let is_error = block["is_error"].as_bool().unwrap_or(false);
+            let (output, cut_short) = subagent_result(&output);
+            let is_error = cut_short || block["is_error"].as_bool().unwrap_or(false);
             let stopped = cancelled(&item_id)
                 || (is_error && (interrupted || output.trim_start().starts_with(STOPPED_MARKER)));
             let mut outputs = vec![ProviderOutput::ToolCallCompleted {
@@ -1310,6 +1327,48 @@ pub(super) const HAND_BACK: &str = "[Subagent hand-back]";
 pub(super) const REPORT_FOLLOWS: &str = "The report follows:\n";
 
 pub(super) const REPORT_INDENT: &str = "  ";
+
+/// How Claude Code opens the result of a subagent an API error cut short, such as a usage
+/// limit, ahead of what it recovered of the subagent's report.
+pub(super) const CUT_SHORT_MARKER: &str = "Agent terminated early due to an API error: ";
+
+/// What Claude Code appends to an API error between parentheses.
+const ERROR_DIAGNOSTICS: [&str; 4] = [
+    "error type ",
+    "HTTP ",
+    "request id ",
+    "model sent to the API",
+];
+
+/// A subagent's result, and whether an API error cut it short. Claude Code reports such a
+/// subagent as completed; its error then comes first, above what it reported until then.
+pub(super) fn subagent_result(output: &str) -> (String, bool) {
+    let report = subagent_report(output);
+    let Some(error) = output.trim_start().strip_prefix(CUT_SHORT_MARKER) else {
+        return (report, false);
+    };
+    let error = without_diagnostics(error.lines().next().unwrap_or_default().trim_end());
+    let partial = report.trim();
+    let result = if partial.is_empty() || partial.starts_with(CUT_SHORT_MARKER) {
+        error.to_owned()
+    } else {
+        format!("{error}\n\n{partial}")
+    };
+    (result, true)
+}
+
+fn without_diagnostics(error: &str) -> &str {
+    error
+        .rfind(" (")
+        .filter(|at| {
+            let note = &error[at + 2..];
+            note.ends_with(')')
+                && ERROR_DIAGNOSTICS
+                    .iter()
+                    .any(|prefix| note.starts_with(prefix))
+        })
+        .map_or(error, |at| &error[..at])
+}
 
 /// What a subagent reported, without what Claude Code wraps it in for the agent that
 /// started it: notes of its own such as the tools the subagent used, a line saying the

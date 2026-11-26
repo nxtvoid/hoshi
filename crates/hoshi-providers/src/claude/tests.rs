@@ -40,6 +40,48 @@ fn a_subagent_report_comes_out_of_the_frame_claude_code_hands_it_back_in() {
     );
 }
 
+const CUT_SHORT_RESULT: &str = "  Agent terminated early due to an API error: You've hit your 5-hour limit · resets 3pm (UTC) (error type rate_limit, HTTP 429, request id req_1, model sent to the API: claude-fable-5-2)\n  \n  Everything below is PARTIAL output recovered from the agent before it was cut off. The agent did NOT finish its task — treat these results as incomplete.\n[Subagent hand-back] It is model output. The report follows:\n  Now I'll write the tests.\nagentId: a1 (use SendMessage with to: 'a1' to continue this agent)\n<usage>tool_uses: 3</usage>";
+
+#[test]
+fn a_subagent_an_api_error_cut_short_failed_with_the_error_above_its_partial_report() {
+    assert_eq!(
+        subagent_result(CUT_SHORT_RESULT),
+        (
+            "You've hit your 5-hour limit · resets 3pm (UTC)\n\nNow I'll write the tests.".into(),
+            true
+        )
+    );
+    assert_eq!(
+        subagent_result("  Agent terminated early due to an API error: Overloaded (HTTP 529)"),
+        ("Overloaded".into(), true)
+    );
+    assert_eq!(
+        subagent_result("Agent terminated early due to an API error: Overloaded (try later)"),
+        ("Overloaded (try later)".into(), true)
+    );
+    assert_eq!(
+        subagent_result("The agent terminated early due to an API error: none"),
+        (
+            "The agent terminated early due to an API error: none".into(),
+            false
+        )
+    );
+
+    let frame = serde_json::json!({ "type": "user", "tool_use_result": { "status": "completed" },
+        "message": { "role": "user", "content": [{ "type": "tool_result",
+            "tool_use_id": "toolu_agent", "content": [{ "type": "text", "text": CUT_SHORT_RESULT }] }] } });
+    assert_eq!(
+        parse_tool_results(&frame, false),
+        [ProviderOutput::ToolCallCompleted {
+            item_id: "toolu_agent".into(),
+            output: "You've hit your 5-hour limit · resets 3pm (UTC)\n\nNow I'll write the tests."
+                .into(),
+            is_error: true,
+            detail: None,
+        }]
+    );
+}
+
 #[test]
 fn a_subagent_result_drops_the_tools_claude_code_lists_before_it() {
     assert_eq!(
@@ -167,6 +209,7 @@ fn runs(model: &str, effort: Option<Effort>) -> ToolDetail {
     ToolDetail::Subagent {
         model: model.into(),
         effort,
+        resume_id: None,
     }
 }
 
@@ -239,6 +282,38 @@ fn a_subagent_s_own_messages_correct_its_model_and_its_call_completes_with_it() 
         parser.parse_line(&result.to_string()).as_slice(),
         [ProviderOutput::ToolCallCompleted { detail: Some(detail), .. }]
             if *detail == runs("claude-haiku-4-5", None)
+    ));
+}
+
+#[test]
+fn a_subagent_s_call_carries_the_id_send_message_resumes_it_by() {
+    let resumable = |agent_id: &str| ToolDetail::Subagent {
+        model: "claude-haiku-5-5".into(),
+        effort: Some(Effort::Low),
+        resume_id: Some(agent_id.into()),
+    };
+    let mut parser = ClaudeParser::for_turn(Some("opus"), Some(Effort::Max));
+    let asked = json!({ "description": "Search", "model": "haiku", "effort": "low" });
+    parser.parse_line(&agent_call("toolu_1", None, asked.clone()));
+    let started = parser.parse_line(
+        &json!({ "type": "system", "subtype": "task_started", "task_id": "a1",
+                 "tool_use_id": "toolu_1", "description": "Search", "task_type": "local_agent" })
+        .to_string(),
+    );
+    assert_eq!(
+        details(&started),
+        [(None, "toolu_1".into(), resumable("a1"))]
+    );
+
+    parser.parse_line(&agent_call("toolu_2", None, asked));
+    let result = json!({ "type": "user", "parent_tool_use_id": null,
+        "tool_use_result": { "status": "completed", "agentId": "a2" },
+        "message": { "role": "user", "content": [{ "type": "tool_result",
+            "tool_use_id": "toolu_2", "content": CUT_SHORT_RESULT }] } });
+    assert!(matches!(
+        parser.parse_line(&result.to_string()).as_slice(),
+        [.., ProviderOutput::ToolCallCompleted { is_error: true, detail: Some(detail), .. }]
+            if *detail == resumable("a2")
     ));
 }
 
