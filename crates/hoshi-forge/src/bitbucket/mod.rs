@@ -160,11 +160,19 @@ struct Extras {
 
 type PullRequestKey = (String, String, u32);
 
+/// What a branch's pull request is looked up against: the name Bitbucket gives the
+/// repository and its main branch.
+#[derive(Debug, Clone)]
+struct Home {
+    full_name: String,
+    main_branch: Option<String>,
+}
+
 pub struct Bitbucket {
     agent: ureq::Agent,
     source: CredentialSource,
     credentials: Mutex<Option<BitbucketCredentials>>,
-    main_branches: Mutex<HashMap<(String, String), Option<String>>>,
+    homes: Mutex<HashMap<(String, String), Home>>,
     extras: Mutex<HashMap<PullRequestKey, Extras>>,
 }
 
@@ -186,7 +194,7 @@ impl Bitbucket {
             agent,
             source: Box::new(source),
             credentials: Mutex::new(None),
-            main_branches: Mutex::new(HashMap::new()),
+            homes: Mutex::new(HashMap::new()),
             extras: Mutex::new(HashMap::new()),
         }
     }
@@ -356,22 +364,26 @@ impl Bitbucket {
         Ok(values)
     }
 
-    fn main_branch(&self, repository: &RepositoryRef) -> Result<Option<String>, ForgeError> {
+    fn home(&self, repository: &RepositoryRef) -> Result<Home, ForgeError> {
         let key = (repository.owner.clone(), repository.name.clone());
-        if let Some(branch) = lock(&self.main_branches).get(&key) {
-            return Ok(branch.clone());
+        if let Some(home) = lock(&self.homes).get(&key) {
+            return Ok(home.clone());
         }
         #[derive(Deserialize)]
         struct Repository {
+            full_name: String,
             mainbranch: Option<model::Branch>,
         }
         let found: Repository = self.get(&format!(
-            "{}?fields=mainbranch.name",
+            "{}?fields=full_name,mainbranch.name",
             repository_path(repository)
         ))?;
-        let branch = found.mainbranch.map(|branch| branch.name);
-        lock(&self.main_branches).insert(key, branch.clone());
-        Ok(branch)
+        let home = Home {
+            full_name: found.full_name,
+            main_branch: found.mainbranch.map(|branch| branch.name),
+        };
+        lock(&self.homes).insert(key, home.clone());
+        Ok(home)
     }
 
     fn statuses(
@@ -643,6 +655,23 @@ fn filter_literal(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Pull requests from `branch` of the repository itself; a fork's branch of the same name
+/// is another branch.
+fn branch_filter(full_name: &str, branch: &str) -> String {
+    format!(
+        "source.repository.full_name = {} AND source.branch.name = {}",
+        filter_literal(full_name),
+        filter_literal(branch)
+    )
+}
+
+fn own_pull_request<'a>(
+    values: &'a [RawPullRequest],
+    full_name: &str,
+) -> Option<&'a RawPullRequest> {
+    values.iter().find(|raw| raw.comes_from(full_name))
+}
+
 fn repository_path(repository: &RepositoryRef) -> String {
     format!(
         "/repositories/{}/{}",
@@ -675,16 +704,16 @@ impl Forge for Bitbucket {
         repository: &RepositoryRef,
         branch: &str,
     ) -> Result<Option<PullRequest>, ForgeError> {
-        if self.main_branch(repository)?.as_deref() == Some(branch) {
+        let home = self.home(repository)?;
+        if home.main_branch.as_deref() == Some(branch) {
             return Ok(None);
         }
-        let filter = format!("source.branch.name = {}", filter_literal(branch));
         let page: Page<RawPullRequest> = self.get(&format!(
             "{}/pullrequests?{ALL_STATES}&sort=-updated_on&pagelen=1&q={}",
             repository_path(repository),
-            encode(&filter)
+            encode(&branch_filter(&home.full_name, branch))
         ))?;
-        match page.values.first() {
+        match own_pull_request(&page.values, &home.full_name) {
             Some(raw) => self.summarize(repository, raw).map(Some),
             None => Ok(None),
         }
@@ -971,6 +1000,33 @@ mod tests {
             encode("source.branch.name = \"a b\""),
             "source.branch.name%20%3D%20%22a%20b%22"
         );
+    }
+
+    fn from_repository(id: u32, source: Option<&str>) -> RawPullRequest {
+        serde_json::from_value(json!({
+            "id": id, "title": "Fix totals", "state": "OPEN",
+            "source": {
+                "branch": {"name": "master"},
+                "repository": source.map(|full_name| json!({"full_name": full_name}))
+            },
+            "destination": {"branch": {"name": "master"}, "repository": {"full_name": "acme/shop"}},
+            "updated_on": "2026-11-07T10:00:00.000000+00:00"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_branch_matches_only_pull_requests_from_the_repository_itself() {
+        assert_eq!(
+            branch_filter("acme/shop", "master"),
+            r#"source.repository.full_name = "acme/shop" AND source.branch.name = "master""#
+        );
+        let fork = from_repository(86, Some("test-user/shop"));
+        let deleted_fork = from_repository(87, None);
+        let own = from_repository(90, Some("Acme/Shop"));
+        assert!(own_pull_request(&[fork.clone(), deleted_fork.clone()], "acme/shop").is_none());
+        let found = own_pull_request(&[fork, deleted_fork, own], "acme/shop").map(|raw| raw.id);
+        assert_eq!(found, Some(90));
     }
 
     fn reply(status: u16, text: &str, granted: &str) -> Reply {
