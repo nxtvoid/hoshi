@@ -241,6 +241,9 @@ impl ThreadDetails {
         if !servers.is_empty() {
             self.tick_in(servers::age_tick(&servers, servers::now_millis()), cx);
         }
+        if let Some(wait) = agents_view::age_tick(&agents, Utc::now()) {
+            self.tick_in(wait, cx);
+        }
 
         let pull_request_open = pull_request.as_ref().is_some_and(|pull_request| {
             matches!(

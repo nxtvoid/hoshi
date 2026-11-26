@@ -267,6 +267,19 @@ impl ThreadDetails {
     }
 }
 
+/// How long until the age of an active agent among `agents` reads differently: its next minute.
+pub(super) fn age_tick(agents: &[ThreadAgent], now: DateTime<Utc>) -> Option<std::time::Duration> {
+    agents
+        .iter()
+        .filter(|agent| agent.state.is_active())
+        .filter_map(|agent| DateTime::parse_from_rfc3339(&agent.at).ok())
+        .map(|at| {
+            let seconds = (now - at.with_timezone(&Utc)).num_seconds().max(0);
+            std::time::Duration::from_secs((60 - seconds % 60) as u64)
+        })
+        .min()
+}
+
 /// How the agents that no longer run ended: "2 done · 1 failed".
 fn ended_label(agents: &[ThreadAgent]) -> String {
     let states: Vec<_> = agents.iter().map(|agent| Some(agent.state)).collect();
@@ -283,7 +296,9 @@ fn agent_title(agent: &ThreadAgent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentKind, AgentState, ThreadAgent, ended_label, summarize};
+    use super::{AgentKind, AgentState, ThreadAgent, age_tick, ended_label, summarize};
+    use chrono::{DateTime, Utc};
+    use std::time::Duration;
 
     fn agent(id: &str, state: AgentState) -> ThreadAgent {
         ThreadAgent {
@@ -329,6 +344,23 @@ mod tests {
             ended_label(&[agent("d1", Done), agent("f1", Failed), agent("s1", Stopped)]),
             "1 done · 1 stopped · 1 failed"
         );
+    }
+
+    #[test]
+    fn the_ages_are_told_again_when_the_next_active_agent_turns_a_minute() {
+        use AgentState::{Done, Running};
+        let now = DateTime::parse_from_rfc3339("2026-11-13T10:02:20Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut late = agent("r2", Running);
+        late.at = "2026-11-13T10:01:30Z".into();
+        let mut done = agent("d1", Done);
+        done.at = "2026-11-13T10:02:15Z".into();
+        assert_eq!(
+            age_tick(&[agent("r1", Running), late, done.clone()], now),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(age_tick(&[done], now), None);
     }
 
     #[test]
