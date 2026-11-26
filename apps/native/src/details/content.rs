@@ -190,6 +190,10 @@ impl ThreadDetails {
             return div().into_any_element();
         };
         self.ensure_fresh(&thread, cx);
+        if self.agents_scroll_thread.as_deref() != Some(thread_id) {
+            self.agents_scroll = ScrollHandle::new();
+            self.agents_scroll_thread = Some(thread_id.to_owned());
+        }
         let colors = cx.hoshi().clone();
         let workspace = self.workspace.read(cx);
         let root = thread
@@ -236,6 +240,9 @@ impl ThreadDetails {
         }
         if !servers.is_empty() {
             self.tick_in(servers::age_tick(&servers, servers::now_millis()), cx);
+        }
+        if let Some(wait) = agents_view::age_tick(&agents, Utc::now()) {
+            self.tick_in(wait, cx);
         }
 
         let pull_request_open = pull_request.as_ref().is_some_and(|pull_request| {

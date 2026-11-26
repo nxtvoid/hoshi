@@ -361,6 +361,16 @@ fn a_project_signals_its_strongest_news() {
 }
 
 #[test]
+fn an_age_reads_in_its_largest_whole_unit() {
+    let at = |seconds: i64| (now() - Duration::seconds(seconds)).to_rfc3339();
+    assert_eq!(short_age(&at(20), now()), "now");
+    assert_eq!(short_age(&at(12 * 60 + 59), now()), "12 min");
+    assert_eq!(short_age(&at(2 * 3_600 + 5), now()), "2 hr");
+    assert_eq!(short_age(&at(3 * 86_400), now()), "3 days");
+    assert_eq!(short_age(&at(-90), now()), "now");
+}
+
+#[test]
 fn times_read_like_the_web_sidebar() {
     let at = |seconds: i64| (now() - Duration::seconds(seconds)).to_rfc3339();
     assert_eq!(relative_time(&at(20), now()), "now");

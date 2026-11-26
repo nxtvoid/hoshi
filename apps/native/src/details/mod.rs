@@ -18,7 +18,7 @@ mod view_state;
 
 use crate::m;
 use crate::panel::check_look;
-use crate::sections::relative_time;
+use crate::sections::{relative_time, short_age};
 use crate::sidebar::cards::checks_label;
 use crate::sidebar::pull_request_mark;
 use crate::state::Workspace;
@@ -110,6 +110,9 @@ pub struct ThreadDetails {
     editor_anchor: PopoverAnchor,
     branch_anchor: PopoverAnchor,
     agents_anchor: PopoverAnchor,
+    /// The agent list's scroll, and the thread it belongs to.
+    agents_scroll: ScrollHandle,
+    agents_scroll_thread: Option<String>,
     servers_anchor: PopoverAnchor,
     home: Option<PathBuf>,
     prefs: Prefs,
@@ -204,6 +207,8 @@ impl ThreadDetails {
             editor_anchor: PopoverAnchor::new(),
             branch_anchor: PopoverAnchor::new(),
             agents_anchor: PopoverAnchor::new(),
+            agents_scroll: ScrollHandle::new(),
+            agents_scroll_thread: None,
             servers_anchor: PopoverAnchor::new(),
             popover_open: false,
             home,

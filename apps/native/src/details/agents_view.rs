@@ -1,26 +1,18 @@
 use super::*;
 use chrono::DateTime;
 
-/// How many provider marks the summary row shows before a `+N`.
-const MARKS_SHOWN: usize = 5;
-/// How many agents that need the user get a row of their own before the rest go in a menu.
-const WAITING_SHOWN: usize = 3;
-const MARK_SIZE: f32 = 18.;
+/// How many agent rows the box shows before its list scrolls; the half row past them hints at
+/// the rest.
+const ROWS_SHOWN: f32 = 4.5;
+const ROW_HEIGHT: f32 = 32.;
+const ROW_GAP: f32 = 2.;
 
 /// What the agents box shows of `agents`, newest first as [`ThreadDetails::agents`] lists them.
 #[derive(Debug, PartialEq)]
 pub(super) struct AgentsSummary {
-    /// The active agents for the marks: the ones that need the user first.
-    pub marks: Vec<ThreadAgent>,
-    pub active: usize,
-    pub previous: usize,
-    /// The rows under the marks: the agents that need the user, longest waiting first, else the
-    /// newest one running.
-    pub rows: Vec<ThreadAgent>,
-    /// The agents that need the user past [`WAITING_SHOWN`].
-    pub more_waiting: Vec<ThreadAgent>,
-    pub waiting: Vec<ThreadAgent>,
-    pub running: Vec<ThreadAgent>,
+    /// The rows: the agents that need the user, oldest first, then those running,
+    /// newest first.
+    pub active: Vec<ThreadAgent>,
     pub done: Vec<ThreadAgent>,
 }
 
@@ -33,29 +25,10 @@ pub(super) fn summarize(agents: Vec<ThreadAgent>) -> AgentsSummary {
             _ => done.push(agent),
         }
     }
-    let longest_waiting: Vec<ThreadAgent> = waiting.iter().rev().cloned().collect();
-    let rows = if longest_waiting.is_empty() {
-        running.first().cloned().into_iter().collect()
-    } else {
-        longest_waiting
-            .iter()
-            .take(WAITING_SHOWN)
-            .cloned()
-            .collect()
-    };
+    waiting.reverse();
+    waiting.extend(running);
     AgentsSummary {
-        marks: waiting
-            .iter()
-            .chain(&running)
-            .take(MARKS_SHOWN)
-            .cloned()
-            .collect(),
-        active: waiting.len() + running.len(),
-        previous: done.len(),
-        rows,
-        more_waiting: longest_waiting.into_iter().skip(WAITING_SHOWN).collect(),
-        waiting,
-        running,
+        active: waiting,
         done,
     }
 }
@@ -75,50 +48,42 @@ impl ThreadDetails {
         }
         let summary = summarize(agents);
         let now = Utc::now();
-        let any = summary.active + summary.previous > 0;
-        let all = any.then(|| {
-            let groups = vec![
-                (m::agents_need_you(), summary.waiting.clone()),
-                (m::agents_running_heading(), summary.running.clone()),
-                (m::agents_previous(), summary.done.clone()),
-            ];
-            self.agents_menu(
-                "details-agents-all",
-                groups,
-                now,
-                colors,
-                cx,
-                |open, colors| {
-                    div()
-                        .id("details-agents-show-all")
-                        .debug_selector(|| "details-agents-show-all".into())
-                        .flex()
-                        .items_center()
-                        .gap_0p5()
-                        .px_1p5()
-                        .py_0p5()
-                        .mr(px(-4.))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .text_xs()
-                        .when(open, |this| {
-                            this.bg(colors.foreground.opacity(0.06))
-                                .text_color(colors.foreground)
-                        })
-                        .hover({
-                            let (bg, fg) = (colors.foreground.opacity(0.06), colors.foreground);
-                            move |style| style.bg(bg).text_color(fg)
-                        })
-                        .child(m::agents_show_all())
-                        .child(Icon::new(IconName::ChevronRight).size_3().flex_none())
-                },
-            )
+        let done = (!summary.done.is_empty()).then(|| {
+            let count = summary.done.len();
+            let tooltip = ended_label(&summary.done);
+            self.done_menu(summary.done, now, colors, cx, move |open, colors| {
+                div()
+                    .id("details-agents-done")
+                    .debug_selector(|| "details-agents-done".into())
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_1()
+                    .px_1p5()
+                    .py_0p5()
+                    .mr(px(-4.))
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .when(open, |this| {
+                        this.bg(colors.foreground.opacity(0.06))
+                            .text_color(colors.foreground)
+                    })
+                    .hover({
+                        let (bg, fg) = (colors.foreground.opacity(0.06), colors.foreground);
+                        move |style| style.bg(bg).text_color(fg)
+                    })
+                    .child(Icon::new(IconName::RotateCcwClock).size_3().flex_none())
+                    .child(count.to_string())
+                    .child(Icon::new(IconName::ChevronRight).size_3().flex_none())
+                    .with_tooltip(Tooltip::new(tooltip.clone()).disabled(open))
+            })
         });
         let mut column = panel(self.inline, colors)
             .debug_selector(|| "details-agents".into())
             .relative()
             .child(self.agents_anchor.area())
-            .child(panel_header(m::agents(), None, colors).pr_2().children(all));
+            .child(panel_header(m::agents(), None, colors).children(done));
         if let Some((id, title)) = parent {
             column = column.child(
                 row("details-delegated-by", colors)
@@ -134,136 +99,47 @@ impl ThreadDetails {
                     .on_click(cx.listener(move |this, _, _, cx| this.open_thread(id.clone(), cx))),
             );
         }
-        if any {
-            column = column.child(self.summary_row(&summary, colors, cx));
-        }
-        for agent in summary.rows.iter().cloned() {
-            column = column.child(Self::agent_row(agent, now, colors, cx));
-        }
-        if !summary.more_waiting.is_empty() {
-            let count = summary.more_waiting.len();
-            let more = self.agents_menu(
-                "details-agents-waiting",
-                vec![(m::agents_need_you(), summary.more_waiting.clone())],
-                now,
-                colors,
-                cx,
-                move |open, colors| {
-                    row("details-agents-more-waiting", colors)
-                        .when(open, |this| this.bg(colors.foreground.opacity(0.05)))
-                        .font_weight(FontWeight::NORMAL)
-                        .text_color(colors.muted_foreground)
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .child(m::agents_more_need_you(count)),
-                        )
-                        .child(Icon::new(IconName::ChevronRight).size_3p5().flex_none())
-                },
+        if !summary.active.is_empty() {
+            let scrolls = summary.active.len() as f32 > ROWS_SHOWN;
+            let rows = summary
+                .active
+                .into_iter()
+                .map(|agent| Self::agent_row(agent, now, colors, cx));
+            column = column.child(
+                div()
+                    .id("details-agents-list")
+                    .debug_selector(|| "details-agents-list".into())
+                    .flex()
+                    .flex_col()
+                    .gap(px(ROW_GAP))
+                    .max_h(px(ROWS_SHOWN * (ROW_HEIGHT + ROW_GAP)))
+                    .overflow_y_scroll()
+                    .track_scroll(&self.agents_scroll)
+                    .when(scrolls, |this| {
+                        let scroll = self.agents_scroll.clone();
+                        this.on_scroll(move |event, window, cx| {
+                            let delta = event.delta.pixel_delta(window.line_height()).y;
+                            let before = scroll.offset().y - delta;
+                            let at_end = if delta < px(0.) {
+                                before <= -scroll.max_offset().y
+                            } else {
+                                before >= px(0.)
+                            };
+                            if !at_end {
+                                cx.stop_propagation();
+                            }
+                        })
+                    })
+                    .children(rows),
             );
-            column = column.child(more);
         }
         Some(column)
     }
 
-    /// The marks of the active agents, waiting ones ringed, and how many run and are done.
-    fn summary_row(
+    /// The menu of the agents that ended, opened by `trigger`.
+    fn done_menu<E: IntoElement + 'static>(
         &self,
-        summary: &AgentsSummary,
-        colors: &Colors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let text = match (summary.active, summary.previous) {
-            (0, done) => m::agents_done(done),
-            (active, 0) => m::panel_running(active),
-            (active, done) => m::agents_summary(m::agents_done(done), m::panel_running(active)),
-        };
-        let extra = summary.active.saturating_sub(summary.marks.len());
-        let marks = summary
-            .marks
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, agent)| Self::mark(index, agent, colors, cx).into_any_element())
-            .chain((extra > 0).then(|| {
-                div()
-                    .flex_none()
-                    .h(px(MARK_SIZE))
-                    .ml(px(-4.))
-                    .px(px(5.))
-                    .flex()
-                    .items_center()
-                    .rounded_full()
-                    .border_1()
-                    .border_color(colors.border)
-                    .bg(colors.popover)
-                    .text_size(rems(0.625))
-                    .text_color(colors.muted_foreground)
-                    .child(m::agents_more(extra))
-                    .into_any_element()
-            }));
-        row_static("details-agents-summary", colors)
-            .debug_selector(|| "details-agents-summary".into())
-            .child(div().flex().flex_none().items_center().children(marks))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(FontWeight::NORMAL)
-                    .text_color(colors.muted_foreground)
-                    .child(text),
-            )
-    }
-
-    /// An active agent's provider mark, ringed when it needs the user; pressing it opens it.
-    fn mark(
-        index: usize,
-        agent: ThreadAgent,
-        colors: &Colors,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let waiting = agent.state == AgentState::Waiting;
-        let selector = format!("details-agent-mark-{}", agent.id);
-        let title = agent_title(&agent);
-        div()
-            .id(SharedString::from(format!(
-                "details-agent-mark-{}",
-                agent.id
-            )))
-            .debug_selector(move || selector)
-            .flex()
-            .flex_none()
-            .size(px(MARK_SIZE))
-            .when(index > 0, |this| this.ml(px(-4.)))
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .border_1()
-            .border_color(if waiting {
-                colors.status_waiting
-            } else {
-                colors.border
-            })
-            .bg(colors.popover)
-            .cursor_pointer()
-            .child(
-                svg()
-                    .path(crate::composer::provider_mark(&agent.provider))
-                    .size(px(11.))
-                    .text_color(crate::composer::provider_tint(&agent.provider, colors)),
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.open_agent(&agent, cx)))
-            .with_tooltip(Tooltip::new(title))
-    }
-
-    /// A menu of `groups` of agents, each under its heading, opened by `trigger`.
-    fn agents_menu<E: IntoElement + 'static>(
-        &self,
-        id: &'static str,
-        groups: Vec<(String, Vec<ThreadAgent>)>,
+        agents: Vec<ThreadAgent>,
         now: DateTime<Utc>,
         colors: &Colors,
         cx: &mut Context<Self>,
@@ -272,33 +148,16 @@ impl ThreadDetails {
         let this = cx.weak_entity();
         let trigger_colors = colors.clone();
         let menu_colors = colors.clone();
-        Popover::new(id)
+        Popover::new("details-agents-done-menu")
             .anchor(self.agents_anchor.clone())
             .side(Side::Left)
             .side_offset(px(rows::BESIDE_BOX))
             .align(Align::Start)
             .trigger(move |open| trigger(open, &trigger_colors))
-            .menu(move |mut menu, _, _| {
-                menu = menu.max_list_height(px(360.));
-                for (heading, agents) in groups.iter().filter(|(_, agents)| !agents.is_empty()) {
-                    menu = menu.heading(m::agents_group(agents.len(), heading));
-                    menu = menu.items(agents.iter().cloned().map(|agent| {
+            .menu(move |menu, _, _| {
+                menu.max_list_height(px(360.))
+                    .items(agents.iter().cloned().map(|agent| {
                         let this = this.clone();
-                        let tint = crate::composer::provider_tint(&agent.provider, &menu_colors);
-                        let side = if agent.state == AgentState::Waiting {
-                            div()
-                                .rounded_full()
-                                .px(px(6.))
-                                .text_size(rems(0.6875))
-                                .bg(menu_colors.status_waiting.opacity(0.15))
-                                .text_color(menu_colors.status_waiting)
-                                .child(m::agent_needs_you())
-                        } else {
-                            div()
-                                .text_xs()
-                                .text_color(menu_colors.muted_foreground)
-                                .child(relative_time(&agent.at, now))
-                        };
                         MenuOption::new(
                             SharedString::from(format!("details-agent-option-{}", agent.id)),
                             agent_title(&agent),
@@ -309,19 +168,22 @@ impl ThreadDetails {
                                 .size_3p5()
                                 .flex_none()
                                 .mr_1()
-                                .text_color(if agent.state.is_active() {
-                                    tint
+                                .text_color(if agent.state == AgentState::Failed {
+                                    menu_colors.status_error
                                 } else {
                                     menu_colors.muted_foreground
                                 }),
                         )
-                        .trailing(side)
+                        .trailing(
+                            div()
+                                .text_xs()
+                                .text_color(menu_colors.muted_foreground)
+                                .child(relative_time(&agent.at, now)),
+                        )
                         .on_select(move |_, cx| {
                             this.update(cx, |this, cx| this.open_agent(&agent, cx)).ok();
                         })
-                    }));
-                }
-                menu
+                    }))
             })
             .into_any_element()
     }
@@ -400,9 +262,28 @@ impl ThreadDetails {
                 .text_xs()
                 .font_weight(FontWeight::NORMAL)
                 .text_color(colors.muted_foreground)
-                .child(relative_time(&agent.at, now))
+                .child(short_age(&agent.at, now))
         })
     }
+}
+
+/// How long until the age of an active agent among `agents` reads differently: its next minute.
+pub(super) fn age_tick(agents: &[ThreadAgent], now: DateTime<Utc>) -> Option<std::time::Duration> {
+    agents
+        .iter()
+        .filter(|agent| agent.state.is_active())
+        .filter_map(|agent| DateTime::parse_from_rfc3339(&agent.at).ok())
+        .map(|at| {
+            let seconds = (now - at.with_timezone(&Utc)).num_seconds().max(0);
+            std::time::Duration::from_secs((60 - seconds % 60) as u64)
+        })
+        .min()
+}
+
+/// How the agents that no longer run ended: "2 done · 1 failed".
+fn ended_label(agents: &[ThreadAgent]) -> String {
+    let states: Vec<_> = agents.iter().map(|agent| Some(agent.state)).collect();
+    crate::subagents::group_counts(&states).join(" · ")
 }
 
 fn agent_title(agent: &ThreadAgent) -> String {
@@ -415,7 +296,9 @@ fn agent_title(agent: &ThreadAgent) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentKind, AgentState, ThreadAgent, summarize};
+    use super::{AgentKind, AgentState, ThreadAgent, age_tick, ended_label, summarize};
+    use chrono::{DateTime, Utc};
+    use std::time::Duration;
 
     fn agent(id: &str, state: AgentState) -> ThreadAgent {
         ThreadAgent {
@@ -433,38 +316,58 @@ mod tests {
     }
 
     #[test]
-    fn the_agents_that_need_the_user_come_first_longest_waiting_first() {
-        use AgentState::{Done, Running, Waiting};
+    fn the_agents_that_need_the_user_come_first_then_the_newest_running() {
+        use AgentState::{Done, Failed, Running, Stopped, Waiting};
         let summary = summarize(vec![
             agent("r3", Running),
-            agent("w5", Waiting),
-            agent("r2", Running),
-            agent("w4", Waiting),
             agent("w3", Waiting),
+            agent("r2", Running),
+            agent("d2", Done),
             agent("w2", Waiting),
+            agent("s1", Stopped),
             agent("r1", Running),
             agent("w1", Waiting),
-            agent("d1", Done),
+            agent("f1", Failed),
         ]);
-        assert_eq!(ids(&summary.marks), ["w5", "w4", "w3", "w2", "w1"]);
-        assert_eq!(ids(&summary.rows), ["w1", "w2", "w3"]);
-        assert_eq!(ids(&summary.more_waiting), ["w4", "w5"]);
-        assert_eq!((summary.active, summary.previous), (8, 1));
+        assert_eq!(ids(&summary.active), ["w1", "w2", "w3", "r3", "r2", "r1"]);
+        assert_eq!(ids(&summary.done), ["d2", "s1", "f1"]);
     }
 
     #[test]
-    fn without_one_waiting_the_newest_running_agent_shows() {
-        use AgentState::{Done, Running, Stopped};
-        let summary = summarize(vec![
-            agent("r2", Running),
-            agent("r1", Running),
-            agent("d1", Done),
-        ]);
-        assert_eq!(ids(&summary.rows), ["r2"]);
-        assert!(summary.more_waiting.is_empty());
+    fn the_finished_agents_are_counted_by_how_they_ended() {
+        use AgentState::{Done, Failed, Stopped};
+        assert_eq!(
+            ended_label(&[agent("d1", Done), agent("d2", Done)]),
+            "2 done"
+        );
+        assert_eq!(
+            ended_label(&[agent("d1", Done), agent("f1", Failed), agent("s1", Stopped)]),
+            "1 done · 1 stopped · 1 failed"
+        );
+    }
 
+    #[test]
+    fn the_ages_are_told_again_when_the_next_active_agent_turns_a_minute() {
+        use AgentState::{Done, Running};
+        let now = DateTime::parse_from_rfc3339("2026-11-13T10:02:20Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let mut late = agent("r2", Running);
+        late.at = "2026-11-13T10:01:30Z".into();
+        let mut done = agent("d1", Done);
+        done.at = "2026-11-13T10:02:15Z".into();
+        assert_eq!(
+            age_tick(&[agent("r1", Running), late, done.clone()], now),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(age_tick(&[done], now), None);
+    }
+
+    #[test]
+    fn without_active_agents_there_are_no_rows() {
+        use AgentState::{Done, Stopped};
         let summary = summarize(vec![agent("d1", Done), agent("s1", Stopped)]);
-        assert!(summary.rows.is_empty() && summary.marks.is_empty());
-        assert_eq!((summary.active, summary.previous), (0, 2));
+        assert!(summary.active.is_empty());
+        assert_eq!(ids(&summary.done), ["d1", "s1"]);
     }
 }

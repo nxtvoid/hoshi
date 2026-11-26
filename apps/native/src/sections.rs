@@ -527,5 +527,18 @@ pub fn relative_time(at: &str, now: DateTime<Utc>) -> String {
     }
 }
 
+/// How long ago `at` was: "now" within a minute, else in its largest whole unit as the servers'
+/// ages read, "12 min".
+pub fn short_age(at: &str, now: DateTime<Utc>) -> String {
+    use crate::m;
+    let minutes = age(at, now).num_minutes().max(0);
+    match minutes {
+        0 => m::relative_now(),
+        1..60 => m::server_age_minutes(minutes as u64),
+        60..1_440 => m::server_age_hours(minutes as u64 / 60),
+        _ => m::server_age_days((minutes / 1_440) as usize),
+    }
+}
+
 #[cfg(test)]
 mod tests;

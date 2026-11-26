@@ -1677,9 +1677,36 @@
   "agents_count": "{count} agents",
   "agents_more": "+{count}",
   "agents_running": "{count} running",
-  "agents_waiting": "{count} waiting for input",
-  "agents_done": "{count} done",
-  "agents_stopped": "{count} stopped",
+  "agents_waiting": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} waiting for input",
+        "countPlural=*": "{count} waiting for input"
+      }
+    }
+  ],
+  "agents_done": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} done",
+        "countPlural=*": "{count} done"
+      }
+    }
+  ],
+  "agents_stopped": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} stopped",
+        "countPlural=*": "{count} stopped"
+      }
+    }
+  ],
   "agents_failed": "{count} failed",
   "agent_own_thread": "own thread",
   "agent_finished": "Finished",
@@ -1742,13 +1769,6 @@
     }
   ],
   "agents": "Agents",
-  "agents_previous": "Previous",
-  "agents_running_heading": "Running",
-  "agents_need_you": "Need you",
-  "agents_show_all": "Show all",
-  "agents_summary": "{running} · {done}",
-  "agents_more_need_you": "+{count} more need you",
-  "agents_group": "{heading} · {count}",
   "agent_needs_you": "Needs you",
   "servers": "Servers",
   "panel_running": "{count} running",
