@@ -739,6 +739,7 @@ impl Render for TranscriptView {
             crate::minimap::marks(&self.rows, &self.thread.read(cx).items),
             cx,
         );
+        let painted = self.minimap.painted.clone();
 
         div()
             .relative()
@@ -808,8 +809,10 @@ impl Render for TranscriptView {
                                 None => div().into_any_element(),
                             };
                             div()
+                                .relative()
                                 .when(read_only, |row| row.opacity(0.6))
                                 .child(Lane::new().child(row))
+                                .child(crate::minimap::row_probe(&painted, index))
                         },
                     )
                     .with_row_style(StyleRefinement::default().pb(ROW_GAP))

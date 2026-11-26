@@ -1,6 +1,6 @@
-//! A mark per message the user sent, beside the transcript, as the web shows it. The message
-//! being read is brighter; pointing at a mark previews it and its answer, clicking scrolls
-//! there, and the arrows past the rail's ends step to the message before or after.
+//! A mark per message the user sent, beside the transcript, as the web shows it. The marks of
+//! the turns on screen are brighter; pointing at a mark previews it and its answer, clicking
+//! scrolls there, and the arrows past the rail's ends step to the message before or after.
 
 use crate::m;
 use crate::transcript::{Row, TranscriptView};
@@ -8,13 +8,17 @@ use gpui_kit::*;
 use hoshi_core::{ItemContent, ThreadItem};
 use hoshi_ui::assets::IconName;
 use hoshi_ui::prelude::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// Fewer messages than this need no map.
 const MIN_ITEMS: usize = 2;
 /// Room between two marks, until the rail fills the height it may take.
 const SPACING: Pixels = px(8.);
-/// The map needs this much room beside the chat, so it never covers the messages.
+/// Beside a narrower gutter the map only shows while pointed at, over the messages.
 const MIN_GUTTER: Pixels = px(48.);
+/// The strip that shows the map beside a narrow gutter.
+const NARROW_STRIP: Pixels = px(8.);
 const MARK_WIDTH: f32 = 24.;
 const RAIL_LEFT: Pixels = px(12.);
 
@@ -35,8 +39,8 @@ pub fn marks(rows: &[Row], items: &[ThreadItem]) -> Vec<Mark> {
         match items.get(*index).map(|item| &item.content) {
             Some(ItemContent::UserMessage {
                 text,
-                steer: false,
                 resumed: None,
+                pull_request_update: None,
                 ..
             }) => marks.push(Mark {
                 row: at,
@@ -66,12 +70,48 @@ pub fn index_at(y: Pixels, top: Pixels, height: Pixels, count: usize) -> Option<
     Some((progress * (count - 1) as f32).round() as usize)
 }
 
-/// The message being read: the last one that starts at or above the first row shown.
-pub fn current(marks: &[Mark], top_row: usize) -> Option<usize> {
-    marks
+/// The message being read, among the rows `shown`: the first on screen, else the one whose
+/// turn is.
+pub fn current(marks: &[Mark], shown: (usize, usize)) -> Option<usize> {
+    let (start, end) = shown;
+    let mut preceding = None;
+    for (index, mark) in marks.iter().enumerate() {
+        if mark.row >= start {
+            return if mark.row <= end {
+                Some(index)
+            } else {
+                preceding
+            };
+        }
+        preceding = Some(index);
+    }
+    preceding
+}
+
+/// Whether the turn of the mark at `index`, from its message up to the next, has a row among
+/// those `shown`.
+pub fn in_view(marks: &[Mark], index: usize, shown: (usize, usize)) -> bool {
+    let (start, end) = shown;
+    marks.get(index).is_some_and(|mark| {
+        mark.row <= end && marks.get(index + 1).is_none_or(|next| next.row > start)
+    })
+}
+
+/// The first and last of the rows `painted` that reach between `top` and `bottom`.
+pub fn shown_rows(
+    painted: &[(usize, Bounds<Pixels>)],
+    top: Pixels,
+    bottom: Pixels,
+) -> Option<(usize, usize)> {
+    painted
         .iter()
-        .rposition(|mark| mark.row <= top_row)
-        .or_else(|| (!marks.is_empty()).then_some(0))
+        .filter(|(_, bounds)| {
+            bounds.top() < bottom && bounds.top() + bounds.size.height.max(px(1.)) > top
+        })
+        .fold(None, |shown, (row, _)| match shown {
+            None => Some((*row, *row)),
+            Some((start, end)) => Some((start.min(*row), end.max(*row))),
+        })
 }
 
 /// Markdown as one line of plain text, for a preview.
@@ -80,12 +120,33 @@ pub fn plain_preview(markdown: &str, limit: usize) -> String {
     crate::markdown::plain_text(&text)
 }
 
+/// Each row laid out this frame, with where.
+pub type PaintedRows = Rc<RefCell<Vec<(usize, Bounds<Pixels>)>>>;
+
 #[derive(Default)]
 pub struct MinimapState {
     pub size: Size<Pixels>,
     pub origin: Point<Pixels>,
     pub pointed: Option<usize>,
     pub over: bool,
+    /// Where each row was laid out this frame, as the list lays out only the rows near the
+    /// screen.
+    pub painted: PaintedRows,
+    /// The first and last rows on screen.
+    pub shown: Option<(usize, usize)>,
+}
+
+/// Records where the row at `index` is laid out, for the map.
+pub fn row_probe(painted: &PaintedRows, index: usize) -> impl IntoElement + use<> {
+    let painted = painted.clone();
+    canvas(
+        move |bounds, _, _| painted.borrow_mut().push((index, bounds)),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 impl TranscriptView {
@@ -101,33 +162,56 @@ impl TranscriptView {
         let measure = canvas(
             {
                 let view = cx.weak_entity();
+                let painted = state.painted.clone();
                 move |bounds, _, cx| {
-                    view.update(cx, |view, cx| {
-                        let state = view.minimap_state_mut();
-                        if state.size != bounds.size || state.origin != bounds.origin {
-                            state.size = bounds.size;
-                            state.origin = bounds.origin;
-                            cx.notify();
-                        }
-                    })
-                    .ok();
+                    let painted = std::mem::take(&mut *painted.borrow_mut());
+                    let shown = shown_rows(&painted, bounds.top(), bounds.bottom());
+                    let view = view.clone();
+                    cx.defer(move |cx| {
+                        view.update(cx, |view, cx| {
+                            let state = view.minimap_state_mut();
+                            if state.size != bounds.size
+                                || state.origin != bounds.origin
+                                || state.shown != shown
+                            {
+                                state.size = bounds.size;
+                                state.origin = bounds.origin;
+                                state.shown = shown;
+                                cx.notify();
+                            }
+                        })
+                        .ok();
+                    });
                 }
             },
             |_, _, _, _| {},
         )
         .absolute()
         .size_full();
-        let fits = (size.width - px(Lane::WIDTH)) / 2. >= MIN_GUTTER;
-        if marks.len() < MIN_ITEMS || !fits {
+        let gutter = (size.width - px(Lane::WIDTH)) / 2.;
+        let roomy = gutter >= MIN_GUTTER;
+        if marks.len() < MIN_ITEMS || gutter <= px(0.) {
             return Some(measure.into_any_element());
         }
         let colors = cx.hoshi().clone();
         let count = marks.len();
         let rail_height = (SPACING * (count - 1) as f32).min(size.height - px(128.));
         let rail_top = (size.height - rail_height) / 2.;
-        let top_row = self.scroller().read(cx).logical_scroll_top().item_ix;
-        let reading = current(&marks, top_row);
+        let scroller = self.scroller().read(cx);
+        let at_end = !scroller.is_scrolled_up();
+        let shown = state.shown.unwrap_or_else(|| {
+            let top_row = scroller.logical_scroll_top().item_ix;
+            (top_row, top_row)
+        });
+        let reading = current(&marks, shown);
         let pointed = state.pointed.filter(|index| *index < count);
+        let over = state.over;
+        let rail_left = if roomy { RAIL_LEFT } else { px(0.) };
+        let strip_width = if roomy {
+            px(32.)
+        } else {
+            NARROW_STRIP.min(gutter)
+        };
         let mark_top = |index: usize| {
             if count <= 1 {
                 rail_top
@@ -145,14 +229,14 @@ impl TranscriptView {
             };
             let color = if distance == Some(0) {
                 colors.foreground.opacity(0.7)
-            } else if Some(index) == reading {
+            } else if in_view(&marks, index, shown) {
                 colors.foreground.opacity(0.45)
             } else {
                 colors.muted_foreground.opacity(0.25)
             };
             div()
                 .absolute()
-                .left(RAIL_LEFT)
+                .left(rail_left)
                 .top(mark_top(index) - px(1.))
                 .h(px(2.))
                 .w(px(MARK_WIDTH * scale))
@@ -164,9 +248,9 @@ impl TranscriptView {
         let hit = div()
             .id("minimap-rail")
             .absolute()
-            .left(RAIL_LEFT)
+            .left(rail_left)
             .top(rail_top - px(4.))
-            .w(px(32.))
+            .w(strip_width)
             .h(rail_height + px(8.))
             .cursor_pointer()
             .on_mouse_move(cx.listener(move |view, event: &MouseMoveEvent, _, cx| {
@@ -182,9 +266,11 @@ impl TranscriptView {
                 }
             }))
             .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
-                view.minimap_state_mut().over = *hovered;
-                if !*hovered {
-                    view.minimap_state_mut().pointed = None;
+                let state = view.minimap_state_mut();
+                if *hovered {
+                    state.over = true;
+                } else {
+                    state.pointed = None;
                 }
                 cx.notify();
             }))
@@ -209,7 +295,7 @@ impl TranscriptView {
                 };
                 div()
                     .absolute()
-                    .left(RAIL_LEFT + px(32.))
+                    .left(rail_left + px(32.))
                     .top(top.max(px(0.)))
                     .w(px(320.))
                     .p_3()
@@ -240,7 +326,7 @@ impl TranscriptView {
             .map(|index| rows[index]);
         let next = reading
             .map(|index| index + 1)
-            .filter(|index| *index < count)
+            .filter(|index| *index < count && !at_end)
             .map(|index| rows[index]);
         let step = |id: &'static str,
                     icon: IconName,
@@ -262,8 +348,7 @@ impl TranscriptView {
                     })),
             )
         };
-        let over = state.over;
-        let steps = over.then(|| {
+        let steps = (over && roomy).then(|| {
             [
                 step(
                     "minimap-previous",
@@ -297,12 +382,12 @@ impl TranscriptView {
                         .top_0()
                         .left_0()
                         .h_full()
-                        .w(px(56.))
+                        .w(if roomy { px(56.) } else { strip_width })
                         .on_hover(cx.listener(|view, hovered: &bool, _, cx| {
                             view.minimap_state_mut().over = *hovered;
                             cx.notify();
                         }))
-                        .children(lines)
+                        .when(roomy || over, |map| map.children(lines))
                         .child(hit)
                         .children(steps.into_iter().flatten())
                         .children(preview),
@@ -314,27 +399,128 @@ impl TranscriptView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Mark, current, index_at, plain_preview};
-    use gpui_kit::px;
+    use super::{Mark, current, in_view, index_at, marks, plain_preview, shown_rows};
+    use crate::transcript::Row;
+    use gpui_kit::{Bounds, point, px, size};
+    use hoshi_core::{ItemContent, ThreadItem};
+
+    fn item(id: &str, content: ItemContent) -> ThreadItem {
+        ThreadItem {
+            id: id.into(),
+            thread_id: "t".into(),
+            created_at: "2026-11-08T10:00:00Z".into(),
+            content,
+        }
+    }
+
+    fn message(id: &str, steer: bool) -> ThreadItem {
+        item(
+            id,
+            ItemContent::UserMessage {
+                text: id.into(),
+                attachments: Vec::new(),
+                steer,
+                task_result: None,
+                pull_request_update: None,
+                resumed: None,
+                rewind: None,
+                dropped: false,
+                model_switch: None,
+            },
+        )
+    }
+
+    fn answer(id: &str) -> ThreadItem {
+        item(id, ItemContent::AssistantMessage { text: id.into() })
+    }
+
+    #[test]
+    fn a_message_sent_while_the_agent_works_gets_its_own_mark() {
+        let items = [
+            message("u1", false),
+            answer("partial"),
+            message("s", true),
+            answer("a1"),
+        ];
+        let rows: Vec<Row> = (0..items.len()).map(Row::Item).collect();
+        assert_eq!(
+            marks(&rows, &items),
+            [
+                Mark {
+                    row: 0,
+                    user: "u1".into(),
+                    answer: Some("partial".into()),
+                },
+                Mark {
+                    row: 2,
+                    user: "s".into(),
+                    answer: Some("a1".into()),
+                },
+            ]
+        );
+    }
 
     #[test]
     fn the_rail_maps_the_pointer_to_the_nearest_mark() {
         assert_eq!(index_at(px(0.), px(10.), px(80.), 5), Some(0));
         assert_eq!(index_at(px(50.), px(10.), px(80.), 5), Some(2));
         assert_eq!(index_at(px(200.), px(10.), px(80.), 5), Some(4));
-        let marks: Vec<Mark> = [0, 4, 9]
-            .into_iter()
-            .map(|row| Mark {
-                row,
-                user: String::new(),
-                answer: None,
-            })
-            .collect();
-        assert_eq!(current(&marks, 5), Some(1));
-        assert_eq!(current(&marks, 9), Some(2));
         assert_eq!(
             plain_preview("# Title\n- **bold** `code`", 100),
             "Title bold code"
         );
+    }
+
+    fn at_rows(rows: &[usize]) -> Vec<Mark> {
+        rows.iter()
+            .map(|row| Mark {
+                row: *row,
+                user: String::new(),
+                answer: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_message_read_is_the_first_on_screen_else_the_one_whose_turn_is() {
+        let marks = at_rows(&[0, 4, 9]);
+        assert_eq!(current(&marks, (2, 6)), Some(1));
+        assert_eq!(current(&marks, (4, 12)), Some(1));
+        assert_eq!(current(&marks, (5, 8)), Some(1));
+        assert_eq!(current(&marks, (10, 12)), Some(2));
+        assert_eq!(current(&marks, (0, 2)), Some(0));
+    }
+
+    #[test]
+    fn every_turn_with_a_row_on_screen_is_in_view() {
+        let marks = at_rows(&[0, 4, 9]);
+        let lit = |shown| {
+            (0..marks.len())
+                .filter(|index| in_view(&marks, *index, shown))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lit((2, 3)), [0]);
+        assert_eq!(lit((3, 9)), [0, 1, 2]);
+        assert_eq!(lit((5, 8)), [1]);
+        assert_eq!(lit((12, 14)), [2]);
+    }
+
+    #[test]
+    fn the_rows_shown_are_those_that_reach_into_the_view() {
+        let row = |index, top: f32, height: f32| {
+            (
+                index,
+                Bounds::new(point(px(0.), px(top)), size(px(100.), px(height))),
+            )
+        };
+        let painted = [
+            row(3, -40., 30.),
+            row(4, -10., 50.),
+            row(5, 40., 100.),
+            row(6, 140., 80.),
+            row(7, 220., 40.),
+        ];
+        assert_eq!(shown_rows(&painted, px(0.), px(200.)), Some((4, 6)));
+        assert_eq!(shown_rows(&painted, px(300.), px(400.)), None);
     }
 }
