@@ -279,9 +279,16 @@ pub(crate) fn fake_program(path: &Path) {
 /// Starts `command` with [`search_path`] as its `PATH`, so a launcher such as `codex.cmd`
 /// finds `node` even when it was installed after hoshi started.
 pub(crate) fn with_search_path(command: &mut Command) {
-    if let Ok(path) = std::env::join_paths(search_path()) {
+    if let Some(path) = path_of(search_path()) {
         command.env("PATH", path);
     }
+}
+
+fn path_of(dirs: Vec<PathBuf>) -> Option<OsString> {
+    if dirs.is_empty() {
+        return None;
+    }
+    std::env::join_paths(dirs).ok()
 }
 
 /// The `PATH` hoshi started with, then, on Windows, the folders the machine's and the user's
@@ -301,7 +308,7 @@ pub fn shell_path() -> Option<OsString> {
         search_path(),
         installed.into_iter().filter(|dir| dir.is_dir()).collect(),
     );
-    std::env::join_paths(dirs).ok()
+    path_of(dirs)
 }
 
 fn merge_paths(mut dirs: Vec<PathBuf>, more: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -529,6 +536,12 @@ mod tests {
             ),
             r"C:\Windows\system32;C:\Users\dev\.local\bin;%NOPE%\bin;50%;%%"
         );
+    }
+
+    #[test]
+    fn no_folders_leave_the_path_as_it_is() {
+        assert_eq!(path_of(Vec::new()), None);
+        assert!(path_of(vec![PathBuf::from("bin")]).is_some());
     }
 
     #[test]

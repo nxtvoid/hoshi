@@ -33,6 +33,8 @@ pub struct Onboarding {
     /// Whether the agents were checked since the setup opened.
     pub(super) checked: bool,
     pub(super) checking: bool,
+    /// A check asked for while one ran, done once it ends.
+    check_again: bool,
     /// The agents checked again on their own, as after turning one on.
     pub(super) rechecking: HashSet<&'static str>,
     /// Codex's own setup shows under its row.
@@ -75,6 +77,7 @@ impl Onboarding {
             workspace,
             checked: false,
             checking: false,
+            check_again: false,
             rechecking: HashSet::new(),
             codex_open: false,
             codex_cli: false,
@@ -110,6 +113,7 @@ impl Onboarding {
     /// Checks every agent, which runs each CLI and takes a few seconds.
     pub(super) fn check(&mut self, cx: &mut Context<Self>) {
         if self.checking {
+            self.check_again = true;
             return;
         }
         self.checking = true;
@@ -125,7 +129,11 @@ impl Onboarding {
                 this.installed = installed_agents(this.workspace.read(cx));
                 this.checking = false;
                 this.checked = true;
-                this.settle_setup(cx);
+                if std::mem::take(&mut this.check_again) {
+                    this.check(cx);
+                } else {
+                    this.settle_setup(cx);
+                }
                 cx.notify();
             })
             .ok();

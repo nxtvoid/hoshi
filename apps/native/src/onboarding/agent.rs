@@ -20,7 +20,7 @@ use std::time::Duration;
 const CLAUDE_INSTALL: &str = if cfg!(windows) {
     "irm https://claude.ai/install.ps1 | iex"
 } else {
-    "curl -fsSL https://claude.ai/install.sh | bash"
+    "bash -o pipefail -c 'curl -fsSL https://claude.ai/install.sh | bash'"
 };
 const CLAUDE_SIGN_IN: &str = "claude auth login";
 const COPILOT_INSTALL: &str = "npm install -g @github/copilot";
