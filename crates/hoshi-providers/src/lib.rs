@@ -307,6 +307,13 @@ pub trait ProviderAdapter: Send + Sync {
         false
     }
 
+    /// How the agent goes on with a subagent of its own that ended before it finished, by the
+    /// `resume_id` its call's [`hoshi_core::ToolDetail::Subagent`] reports; `None` when it
+    /// can't.
+    fn subagent_resumption(&self, _resume_id: &str) -> Option<String> {
+        None
+    }
+
     /// The context window of `model`, `None` for the default one, when known before a turn
     /// reports it.
     fn context_window(&self, _model: Option<&str>) -> Option<u64> {

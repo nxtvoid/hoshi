@@ -968,6 +968,7 @@ impl Conversation {
             detail: ToolDetail::Subagent {
                 model: model.to_owned(),
                 effort: item["reasoningEffort"].as_str().and_then(effort),
+                resume_id: None,
             },
         })
     }

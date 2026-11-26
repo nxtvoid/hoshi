@@ -194,6 +194,10 @@ impl ProviderAdapter for ClaudeCodeAdapter {
         true
     }
 
+    fn subagent_resumption(&self, resume_id: &str) -> Option<String> {
+        Some(format!("resume it with SendMessage to '{resume_id}'"))
+    }
+
     fn context_window(&self, model: Option<&str>) -> Option<u64> {
         let (slug, _) = manifest().run(model.or(self.model.as_deref()), None);
         manifest().context_window(&slug)

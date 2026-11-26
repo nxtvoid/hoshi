@@ -430,6 +430,7 @@ fn a_subagent_shows_as_a_task_and_ends_with_its_answer() {
                 detail: ToolDetail::Subagent {
                     model: "gpt-6-luna".into(),
                     effort: Some(Effort::Low),
+                    resume_id: None,
                 },
             },
             ProviderOutput::Subagent {
@@ -505,6 +506,7 @@ fn a_spawned_agent_shows_its_model_and_runs_until_its_turn_ends() {
                     detail: ToolDetail::Subagent {
                         model: "gpt-5.6-luna".into(),
                         effort: Some(Effort::Medium),
+                        resume_id: None,
                     },
                 },
                 ProviderOutput::Subagent {

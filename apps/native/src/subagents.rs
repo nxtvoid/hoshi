@@ -60,7 +60,7 @@ pub fn preview(text: &str, streaming: bool) -> String {
 
 /// The model a subagent runs on, as the catalog names it, and its effort.
 pub fn run_label(detail: Option<&ToolDetail>, cx: &App) -> Option<String> {
-    let Some(ToolDetail::Subagent { model, effort }) = detail else {
+    let Some(ToolDetail::Subagent { model, effort, .. }) = detail else {
         return None;
     };
     Some(model_label(model, *effort, cx))

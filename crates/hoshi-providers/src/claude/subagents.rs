@@ -45,6 +45,8 @@ struct Subagent {
     asked_effort: Option<Effort>,
     /// One of its own messages told the model it runs on.
     seen: bool,
+    /// Claude Code's id for it, which `SendMessage` resumes it by.
+    agent_id: Option<String>,
 }
 
 impl Run {
@@ -52,11 +54,25 @@ impl Run {
         let (model, effort) = manifest().run(model, effort);
         Self { model, effort }
     }
+}
 
+impl Subagent {
     fn detail(&self) -> ToolDetail {
         ToolDetail::Subagent {
-            model: self.model.clone(),
-            effort: self.effort,
+            model: self.run.model.clone(),
+            effort: self.run.effort,
+            resume_id: self.agent_id.clone(),
+        }
+    }
+
+    /// `output` about its call, in its owner's transcript.
+    fn within_owner(&self, output: ProviderOutput) -> ProviderOutput {
+        match &self.owner {
+            Some(owner) => ProviderOutput::Subagent {
+                tool_use_id: owner.clone(),
+                output: Box::new(output),
+            },
+            None => output,
         }
     }
 }
@@ -99,7 +115,7 @@ impl Subagents {
 
     /// The call that first started subagent `task_id` of session `session_id`, which an
     /// earlier process ran; known from then on, to show it running again when the session's
-    /// transcript still holds it.
+    /// transcript still holds it, with what it runs on and its id.
     pub(crate) fn launched_earlier(&mut self, session_id: &str, task_id: &str) -> Option<String> {
         let projects = match &self.projects {
             Some(projects) => projects.clone(),
@@ -107,8 +123,14 @@ impl Subagents {
         };
         let (launch, call) = launch_on_disk(&projects, session_id, task_id)?;
         if let Some((name, input)) = call {
+            if matches!(name.as_str(), "Agent" | "Task") && !self.started.contains_key(&launch) {
+                self.started(None, &launch, &input);
+            }
             let input = truncate_json(&input, super::TOOL_INPUT_MAX_CHARS);
             self.launched(None, &launch, &name, input);
+        }
+        if let Some(subagent) = self.started.get_mut(&launch) {
+            subagent.agent_id.get_or_insert_with(|| task_id.to_owned());
         }
         Some(launch)
     }
@@ -170,17 +192,15 @@ impl Subagents {
             .filter(|_| !fork)
             .and_then(parse_effort)
             .or(inherited.effort);
-        let run = Run::resolve(Some(model), asked_effort);
-        let detail = run.detail();
-        self.started.insert(
-            id.to_owned(),
-            Subagent {
-                owner: owner.map(str::to_owned),
-                run,
-                asked_effort,
-                seen: false,
-            },
-        );
+        let subagent = Subagent {
+            owner: owner.map(str::to_owned),
+            run: Run::resolve(Some(model), asked_effort),
+            asked_effort,
+            seen: false,
+            agent_id: None,
+        };
+        let detail = subagent.detail();
+        self.started.insert(id.to_owned(), subagent);
         Some(detail)
     }
 
@@ -195,22 +215,28 @@ impl Subagents {
             return None;
         }
         subagent.run = run;
-        let output = ProviderOutput::ToolCallDetail {
+        Some(subagent.within_owner(ProviderOutput::ToolCallDetail {
             item_id: id.to_owned(),
-            detail: subagent.run.detail(),
-        };
-        Some(match &subagent.owner {
-            Some(owner) => ProviderOutput::Subagent {
-                tool_use_id: owner.clone(),
-                output: Box::new(output),
-            },
-            None => output,
-        })
+            detail: subagent.detail(),
+        }))
     }
 
-    /// What the subagent of call `id` runs on, when it started one.
+    /// Claude Code named the subagent of call `id` `agent_id`. Says so on the call, in its
+    /// owner's transcript, the first time.
+    pub(crate) fn identified(&mut self, id: &str, agent_id: &str) -> Option<ProviderOutput> {
+        let subagent = self.started.get_mut(id).filter(|subagent| {
+            !agent_id.is_empty() && subagent.agent_id.as_deref() != Some(agent_id)
+        })?;
+        subagent.agent_id = Some(agent_id.to_owned());
+        Some(subagent.within_owner(ProviderOutput::ToolCallDetail {
+            item_id: id.to_owned(),
+            detail: subagent.detail(),
+        }))
+    }
+
+    /// What the subagent of call `id` runs on and its id, when it started one.
     pub(crate) fn detail(&self, id: &str) -> Option<ToolDetail> {
-        self.started.get(id).map(|subagent| subagent.run.detail())
+        self.started.get(id).map(Subagent::detail)
     }
 }
 

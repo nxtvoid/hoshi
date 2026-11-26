@@ -90,6 +90,10 @@ impl ProviderAdapter for FakeAdapter {
         true
     }
 
+    fn subagent_resumption(&self, resume_id: &str) -> Option<String> {
+        Some(format!("resume it as {resume_id}"))
+    }
+
     fn start_turn(
         &self,
         request: TurnRequest,
@@ -2629,6 +2633,87 @@ fn stopping_a_usage_limited_thread_turns_its_resumption_off() {
     harness.engine.resume_thread("t").unwrap();
     turn_started(&harness);
     assert_eq!(prompts(&adapter)[1], recovery::LIMIT_RESET_PROMPT);
+}
+
+#[test]
+fn subagents_a_usage_limit_cut_short_are_resumed_by_their_id_once_it_resets() {
+    let harness = Harness::in_memory("limit-subagents", Vec::new());
+    let adapter = adapter(None);
+    harness.engine.set_adapter(Some(adapter.clone()));
+    harness.engine.set_resume_after_usage_limit(true);
+    harness.send("t", "m1", "review the branch");
+    let subagent = |resume_id: &str| hoshi_core::ToolDetail::Subagent {
+        model: "claude-fable-5-2".into(),
+        effort: None,
+        resume_id: Some(resume_id.into()),
+    };
+    let receive = |output| lock(&harness.engine.state).receive("t", "m1", output);
+    receive(ProviderOutput::SessionStarted {
+        session_id: "s1".into(),
+    });
+    for (call, description) in [
+        ("toolu_1", "Review the branch"),
+        ("toolu_2", "Check the docs"),
+    ] {
+        receive(ProviderOutput::ToolCallStarted {
+            item_id: call.into(),
+            name: "Agent".into(),
+            input: serde_json::json!({ "description": description }).to_string(),
+        });
+    }
+    receive(ProviderOutput::ToolCallCompleted {
+        item_id: "toolu_1".into(),
+        output: "You've hit your limit".into(),
+        is_error: true,
+        detail: Some(subagent("a1")),
+    });
+    receive(ProviderOutput::ToolCallCompleted {
+        item_id: "toolu_2".into(),
+        output: "Overloaded".into(),
+        is_error: true,
+        detail: Some(subagent("a2")),
+    });
+    receive(ProviderOutput::ToolCallCompleted {
+        item_id: "toolu_2".into(),
+        output: "Docs are fine".into(),
+        is_error: false,
+        detail: Some(subagent("a2")),
+    });
+    let reset = Utc::now() + chrono::Duration::hours(1);
+    finish(&adapter, 0, usage_limited(&reset.to_rfc3339()));
+    harness.wait_for_turn_end();
+
+    lock(&harness.engine.state).resume_limited_threads(reset.timestamp_millis() as u64);
+    let resumed = turn_started(&harness);
+    assert_eq!(
+        prompts(&adapter)[1],
+        format!(
+            "{}\n- subagent: Review the branch (id a1), resume it as a1\n\nUser message:\n{}",
+            recovery::LIMIT_CUT_NOTE,
+            recovery::LIMIT_RESET_PROMPT
+        )
+    );
+
+    lock(&harness.engine.state).receive(
+        "t",
+        &resumed,
+        ProviderOutput::ToolCallCompleted {
+            item_id: "toolu_1".into(),
+            output: "Two findings".into(),
+            is_error: false,
+            detail: Some(subagent("a1")),
+        },
+    );
+    let reset = Utc::now() + chrono::Duration::hours(2);
+    finish(&adapter, 1, usage_limited(&reset.to_rfc3339()));
+    harness.wait_for_turn_end();
+    lock(&harness.engine.state).resume_limited_threads(reset.timestamp_millis() as u64);
+    turn_started(&harness);
+    assert_eq!(
+        prompts(&adapter)[2],
+        recovery::LIMIT_RESET_PROMPT,
+        "a subagent that went on to finish is no longer listed"
+    );
 }
 
 #[test]
