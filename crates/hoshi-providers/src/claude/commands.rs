@@ -9,7 +9,7 @@ use std::path::Path;
 const REQUEST_ID: &str = "hoshi-commands";
 
 /// Asks a CLI started in `cwd`, so the project's own commands and skills are included.
-pub(crate) fn probe(binary: &str, cwd: &Path) -> Option<Vec<SlashCommand>> {
+pub(crate) fn probe(binary: &Path, cwd: &Path) -> Option<Vec<SlashCommand>> {
     let request = json!({ "subtype": "initialize" });
     let init = control::ask(binary, cwd, REQUEST_ID, request)?;
     Some(commands(&init))

@@ -350,6 +350,57 @@ fn a_setup_terminal_opens_under_its_agent_and_closes(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn an_install_terminal_closes_once_the_agent_only_needs_a_sign_in(cx: &mut TestAppContext) {
+    let mut h = harness(cx);
+    set_accounts(
+        &mut h,
+        &[("claudeCode", ProviderAccountStatus::NotInstalled)],
+    );
+    h.cx.update(|window, cx| {
+        h.view.update(cx, |view, cx| {
+            view.start_setup("claudeCode", "sleep 60", window, cx)
+        })
+    });
+    h.cx.run_until_parked();
+    let settle = |h: &mut Harness| {
+        h.view.update(&mut h.cx, |view, cx| {
+            if let Some(setup) = &mut view.setup {
+                setup.ended = true;
+            }
+            view.settle_setup(cx);
+        });
+        h.cx.run_until_parked();
+    };
+
+    set_accounts(
+        &mut h,
+        &[("claudeCode", ProviderAccountStatus::NotInstalled)],
+    );
+    settle(&mut h);
+    assert!(
+        h.cx.debug_bounds("onboarding-terminal-claudeCode")
+            .is_some(),
+        "still not installed, the terminal stays"
+    );
+
+    set_accounts(&mut h, &[("claudeCode", ProviderAccountStatus::Unknown)]);
+    settle(&mut h);
+    assert!(
+        h.cx.debug_bounds("onboarding-terminal-claudeCode")
+            .is_some(),
+        "a check that can't tell keeps the terminal"
+    );
+
+    set_accounts(&mut h, &[("claudeCode", ProviderAccountStatus::SignedOut)]);
+    settle(&mut h);
+    assert!(
+        h.cx.debug_bounds("onboarding-terminal-claudeCode")
+            .is_none()
+    );
+    assert!(h.view.read_with(&h.cx, |view, _| view.setup.is_none()));
+}
+
+#[gpui_kit::test]
 fn turning_an_agent_on_saves_it_and_checks_it_again(cx: &mut TestAppContext) {
     let mut h = harness(cx);
     h.workspace.update(&mut h.cx, |workspace, _| {

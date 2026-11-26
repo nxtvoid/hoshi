@@ -7,6 +7,7 @@ use crate::titles::{parse, prompt};
 use crate::{GeneratedTitle, TitleRequest};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -30,7 +31,7 @@ fn schema() -> Value {
 }
 
 /// Runs the CLI outside any project, without tools, hooks or a saved session.
-pub(crate) fn generate(binary: &str, request: &TitleRequest) -> Option<GeneratedTitle> {
+pub(crate) fn generate(binary: &Path, request: &TitleRequest) -> Option<GeneratedTitle> {
     let model = request.model.as_deref().unwrap_or(DEFAULT_MODEL);
     parse(&run_quick(
         binary,
@@ -44,7 +45,7 @@ pub(crate) fn generate(binary: &str, request: &TitleRequest) -> Option<Generated
 /// One tool-less run of `model` at low effort that answers `prompt` as `schema` says;
 /// what the CLI printed, or `None` when it failed or took longer than `timeout`.
 pub(crate) fn run_quick(
-    binary: &str,
+    binary: &Path,
     model: &str,
     schema: &Value,
     prompt: &str,
@@ -52,6 +53,7 @@ pub(crate) fn run_quick(
 ) -> Option<String> {
     let model = manifest().resolve(Some(model), Some(hoshi_core::Effort::Low), false, false);
     let mut command = Command::new(binary);
+    crate::updater::with_search_path(&mut command);
     command
         .current_dir(std::env::temp_dir())
         .args(["-p", "--output-format", "json"])

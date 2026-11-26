@@ -4,13 +4,14 @@ use super::control;
 use chrono::{DateTime, SecondsFormat, Utc};
 use hoshi_core::{ExtraUsage, SpendUnit, UsageLimits, UsageWindow, UsageWindowKind};
 use serde_json::{Value, json};
+use std::path::Path;
 
 const SESSION_MINUTES: u32 = 5 * 60;
 const WEEK_MINUTES: u32 = 7 * 24 * 60;
 const REQUEST_ID: &str = "hoshi-usage";
 
 /// Asks a CLI started only for this, from outside any project.
-pub(crate) fn probe(binary: &str) -> Option<UsageLimits> {
+pub(crate) fn probe(binary: &Path) -> Option<UsageLimits> {
     // Without it the CLI also scans every local transcript, which grows with history.
     let request = json!({ "subtype": "get_usage", "skip_behaviors": true });
     let usage = control::ask(binary, &std::env::temp_dir(), REQUEST_ID, request)?;

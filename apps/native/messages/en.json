@@ -1846,6 +1846,7 @@
   "onboarding_theme": "Theme",
   "onboarding_terminal_running": "hoshi checks {name} again when this ends.",
   "onboarding_terminal_not_ready": "It ended, but {name} isn't ready yet. Press a key in the terminal to run it again.",
+  "onboarding_terminal_not_found": "{name} was installed, but hoshi can't find it. Restart hoshi, or add it to your PATH.",
   "onboarding_terminal_close": "Close",
   "onboarding_folders_looking": "Looking for folders your agents worked in…",
   "onboarding_folders_empty": "No recent folders found",

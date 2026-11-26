@@ -1,19 +1,19 @@
 //! Whether Claude Code is signed in, read from its `initialize` answer.
 
 use super::control;
-use crate::updater::find_program;
 use hoshi_core::ProviderAccountStatus;
 use serde_json::{Value, json};
+use std::path::Path;
 use std::time::Duration;
 
 const REQUEST_ID: &str = "hoshi-account";
 const TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Asks a CLI started only for this, from outside any project.
-pub(crate) fn probe(binary: &str) -> ProviderAccountStatus {
-    if find_program(binary, false).is_none() {
+pub(crate) fn probe(binary: Option<&Path>) -> ProviderAccountStatus {
+    let Some(binary) = binary else {
         return ProviderAccountStatus::NotInstalled;
-    }
+    };
     let request = json!({ "subtype": "initialize" });
     let temp = std::env::temp_dir();
     match control::ask_within(binary, &temp, REQUEST_ID, request, TIMEOUT) {

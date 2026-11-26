@@ -117,6 +117,7 @@ pub(crate) fn updater(manager: Manager, package: &str) -> Option<Updater> {
 
 fn program_version(program: &Path) -> Option<(u32, u32, u32)> {
     let mut command = Command::new(program);
+    crate::updater::with_search_path(&mut command);
     command
         .arg("--version")
         .stdin(Stdio::null())

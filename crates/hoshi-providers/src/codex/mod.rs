@@ -156,6 +156,7 @@ impl CodexAdapter {
 
     fn command(&self) -> Option<Command> {
         let mut command = Command::new(self.binary()?);
+        crate::updater::with_search_path(&mut command);
         if let Some(home) = &self.codex_home {
             command.env(CODEX_HOME, home);
         }

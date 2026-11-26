@@ -34,7 +34,7 @@ use hoshi_core::{
     UsageLimits,
 };
 use std::path::{Path, PathBuf};
-pub use updater::{UpdateFailure, UpdateProgress, Updater, run as run_update};
+pub use updater::{UpdateFailure, UpdateProgress, Updater, run as run_update, shell_path};
 
 #[derive(Clone)]
 pub struct TurnRequest {

@@ -321,6 +321,7 @@ impl Drop for CopilotAdapter {
 
 fn command(binary: &Path) -> Command {
     let mut command = Command::new(binary);
+    crate::updater::with_search_path(&mut command);
     hide_console(&mut command);
     command
 }
