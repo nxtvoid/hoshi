@@ -625,6 +625,18 @@ impl State {
             if let Some(work) = self.recovery.failed_subagents.get_mut(thread_id) {
                 work.retain(|entry| entry.id != item_id);
             }
+            let Some(note) = self.recovery.notes.get_mut(thread_id) else {
+                return;
+            };
+            let before = note.work.len();
+            note.work.retain(|entry| entry.id != item_id);
+            if note.work.len() == before {
+                return;
+            }
+            if note.work.is_empty() {
+                self.recovery.notes.remove(thread_id);
+            }
+            self.save_recovery(thread_id);
             return;
         }
         let Ok(Some(item)) = self.store.thread_item(thread_id, item_id) else {

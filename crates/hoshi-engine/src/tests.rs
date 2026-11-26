@@ -2684,7 +2684,7 @@ fn subagents_a_usage_limit_cut_short_are_resumed_by_their_id_once_it_resets() {
     harness.wait_for_turn_end();
 
     lock(&harness.engine.state).resume_limited_threads(reset.timestamp_millis() as u64);
-    turn_started(&harness);
+    let resumed = turn_started(&harness);
     assert_eq!(
         prompts(&adapter)[1],
         format!(
@@ -2692,6 +2692,27 @@ fn subagents_a_usage_limit_cut_short_are_resumed_by_their_id_once_it_resets() {
             recovery::LIMIT_CUT_NOTE,
             recovery::LIMIT_RESET_PROMPT
         )
+    );
+
+    lock(&harness.engine.state).receive(
+        "t",
+        &resumed,
+        ProviderOutput::ToolCallCompleted {
+            item_id: "toolu_1".into(),
+            output: "Two findings".into(),
+            is_error: false,
+            detail: Some(subagent("a1")),
+        },
+    );
+    let reset = Utc::now() + chrono::Duration::hours(2);
+    finish(&adapter, 1, usage_limited(&reset.to_rfc3339()));
+    harness.wait_for_turn_end();
+    lock(&harness.engine.state).resume_limited_threads(reset.timestamp_millis() as u64);
+    turn_started(&harness);
+    assert_eq!(
+        prompts(&adapter)[2],
+        recovery::LIMIT_RESET_PROMPT,
+        "a subagent that went on to finish is no longer listed"
     );
 }
 
