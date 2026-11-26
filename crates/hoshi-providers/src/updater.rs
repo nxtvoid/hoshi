@@ -96,6 +96,7 @@ fn run_command(
     mut progress: impl FnMut(String),
 ) -> Result<(), UpdateFailure> {
     let mut command = Command::new(program);
+    with_search_path(&mut command);
     command
         .args(args)
         .envs(env.iter().map(|(name, value)| (name, value)))
@@ -249,7 +250,38 @@ pub(crate) fn find_in(
     dirs()
         .iter()
         .flat_map(|dir| candidates.iter().map(move |name| dir.join(name)))
-        .find(|candidate| candidate.is_file())
+        .find(|candidate| is_executable(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
+/// An empty program at `path` that a `PATH` search takes.
+#[cfg(test)]
+pub(crate) fn fake_program(path: &Path) {
+    std::fs::write(path, "").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Starts `command` with [`search_path`] as its `PATH`, so a launcher such as `codex.cmd`
+/// finds `node` even when it was installed after hoshi started.
+pub(crate) fn with_search_path(command: &mut Command) {
+    if let Ok(path) = std::env::join_paths(search_path()) {
+        command.env("PATH", path);
+    }
 }
 
 /// The `PATH` hoshi started with, then, on Windows, the folders the machine's and the user's
@@ -504,13 +536,29 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hoshi-find-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let name = if cfg!(windows) { "tool.exe" } else { "tool" };
-        std::fs::write(dir.join(name), "").unwrap();
+        fake_program(&dir.join(name));
 
         assert_eq!(
             find_in("tool", false, || vec![dir.clone()]),
             Some(dir.join(name))
         );
         assert_eq!(find_in("tool", false, Vec::new), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_can_not_run_is_passed_over_for_one_later_on_the_path() {
+        let first = std::env::temp_dir().join(format!("hoshi-find-{}", uuid::Uuid::new_v4()));
+        let second = std::env::temp_dir().join(format!("hoshi-find-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::write(first.join("tool"), "").unwrap();
+        fake_program(&second.join("tool"));
+
+        assert_eq!(
+            find_in("tool", false, || vec![first.clone(), second.clone()]),
+            Some(second.join("tool"))
+        );
     }
 
     #[test]

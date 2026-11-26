@@ -34,6 +34,7 @@ pub(crate) fn ask_within(
     timeout: Duration,
 ) -> Option<Value> {
     let mut command = Command::new(binary);
+    crate::updater::with_search_path(&mut command);
     command
         .current_dir(cwd)
         .args(["-p", "--input-format", "stream-json"])

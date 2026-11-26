@@ -383,6 +383,14 @@ fn an_install_terminal_closes_once_the_agent_only_needs_a_sign_in(cx: &mut TestA
         "still not installed, the terminal stays"
     );
 
+    set_accounts(&mut h, &[("claudeCode", ProviderAccountStatus::Unknown)]);
+    settle(&mut h);
+    assert!(
+        h.cx.debug_bounds("onboarding-terminal-claudeCode")
+            .is_some(),
+        "a check that can't tell keeps the terminal"
+    );
+
     set_accounts(&mut h, &[("claudeCode", ProviderAccountStatus::SignedOut)]);
     settle(&mut h);
     assert!(

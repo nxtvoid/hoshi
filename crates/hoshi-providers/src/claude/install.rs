@@ -132,7 +132,7 @@ mod tests {
     fn cli_in(dir: &Path) -> PathBuf {
         std::fs::create_dir_all(dir).unwrap();
         let path = dir.join(EXE);
-        std::fs::write(&path, "").unwrap();
+        crate::updater::fake_program(&path);
         path
     }
 

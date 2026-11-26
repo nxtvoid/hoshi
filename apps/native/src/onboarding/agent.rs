@@ -214,11 +214,16 @@ impl Onboarding {
         cx.notify();
     }
 
-    /// Closes the terminal once what it ran moved its agent on, leaving the row's next step.
+    /// Closes the terminal once what it ran moved its agent forward, leaving the row's next
+    /// step; a check that can't tell keeps it.
     pub(super) fn settle_setup(&mut self, cx: &mut Context<Self>) {
         let done = self.setup.as_ref().is_some_and(|setup| {
-            let state = self.state_of(setup.provider, cx);
-            setup.ended && state != Some(AgentState::Checking) && state != setup.from
+            setup.ended
+                && matches!(
+                    (setup.from, self.state_of(setup.provider, cx)),
+                    (_, Some(AgentState::Ready))
+                        | (Some(AgentState::NotInstalled), Some(AgentState::SignedOut))
+                )
         });
         if done {
             self.close_setup(cx);

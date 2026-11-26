@@ -97,6 +97,7 @@ impl ClaudeCodeAdapter {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         *version.get_or_insert_with(|| {
             let mut command = Command::new(self.binary()?);
+            crate::updater::with_search_path(&mut command);
             command
                 .arg("--version")
                 .stdin(Stdio::null())
@@ -225,6 +226,7 @@ impl ProviderAdapter for ClaudeCodeAdapter {
             detail: "claude was not found".into(),
         })?;
         let mut command = Command::new(binary);
+        crate::updater::with_search_path(&mut command);
         command
             .current_dir(&request.cwd)
             .args(["-p", "--input-format", "stream-json"])

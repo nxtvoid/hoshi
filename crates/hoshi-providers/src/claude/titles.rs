@@ -53,6 +53,7 @@ pub(crate) fn run_quick(
 ) -> Option<String> {
     let model = manifest().resolve(Some(model), Some(hoshi_core::Effort::Low), false, false);
     let mut command = Command::new(binary);
+    crate::updater::with_search_path(&mut command);
     command
         .current_dir(std::env::temp_dir())
         .args(["-p", "--output-format", "json"])

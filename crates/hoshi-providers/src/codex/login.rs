@@ -191,6 +191,7 @@ impl Session {
     ) -> Result<Self, ProviderSignInFailure> {
         let binary = setup.binary().ok_or(ProviderSignInFailure::NotInstalled)?;
         let mut command = Command::new(binary.path());
+        crate::updater::with_search_path(&mut command);
         command
             .arg("app-server")
             .stdin(Stdio::piped())

@@ -568,6 +568,7 @@ fn parse_cli_version(output: &str) -> Option<String> {
 
 fn run_version(binary: &Path, timeout: Duration) -> Option<String> {
     let mut command = Command::new(binary);
+    crate::updater::with_search_path(&mut command);
     command
         .arg("--version")
         .stdin(Stdio::null())
