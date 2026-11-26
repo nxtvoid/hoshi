@@ -77,6 +77,7 @@ fn harness(cx: &mut TestAppContext, section: Section) -> Harness {
         let workspace = workspace.clone();
         let mut view = None;
         let (window, host) = gpui_kit::open_window(options, cx, |window, cx| {
+            crate::look::init(None, window, cx);
             let shown = cx.new(|cx| SettingsView::new(workspace, section, window, cx));
             view = Some(shown.clone());
             cx.new(|_| Host {
@@ -278,4 +279,18 @@ fn escape_clears_the_search_before_it_closes(cx: &mut TestAppContext) {
     h.cx.simulate_keystrokes("escape");
     h.cx.run_until_parked();
     assert!(!h.host.read_with(&h.cx, |host, _| host.open));
+}
+
+#[gpui_kit::test]
+fn every_font_option_spans_the_list(cx: &mut TestAppContext) {
+    let mut h = harness(cx, Section::Appearance);
+    let trigger = h.cx.debug_bounds("font-trigger-Interface").unwrap();
+    h.cx.simulate_click(trigger.center(), gpui_kit::Modifiers::none());
+    h.cx.run_until_parked();
+
+    let list = h.cx.debug_bounds("font-list").unwrap();
+    for selector in ["font-option-0", "font-option-1"] {
+        let option = h.cx.debug_bounds(selector).unwrap();
+        assert_eq!(option.size.width, list.size.width, "{selector}");
+    }
 }
