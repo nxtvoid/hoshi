@@ -2874,6 +2874,7 @@ fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(Arc::default())),
             background: None,
             owes_answer: true,
@@ -2918,6 +2919,79 @@ fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
     assert!(harness.thread(&child).task_answered);
 }
 
+#[test]
+fn a_message_to_a_task_that_takes_in_its_agent_waking_answers_again() {
+    let harness = Harness::in_memory("delegate-woken-joined", Vec::new());
+    let adapter = adapter(None);
+    harness.engine.set_adapter(Some(adapter.clone()));
+    harness.send("t", "m1", "split the work");
+    let task = delegate(&harness, serde_json::json!({ "task": "wait a minute" }));
+    let child = task["taskId"].as_str().unwrap().to_owned();
+    finish(&adapter, 0, TurnOutcome::Completed);
+    harness.wait_for_turn_end();
+    child_turn_ends(&harness, &adapter, 1);
+    harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+    finish(&adapter, 2, TurnOutcome::Completed);
+    harness.wait_for_turn_end();
+    assert!(harness.thread(&child).task_answered);
+    let process = Arc::new(KeptProcess {
+        takes_turns: Mutex::new(true),
+        ..KeptProcess::default()
+    });
+    lock(&harness.engine.state).lingering.insert(
+        child.clone(),
+        Lingering {
+            process: 99,
+            turn_id: "m1".into(),
+            running: Box::new(KeptTurn(process.clone())),
+            background: Some(ThreadBackgroundTasks {
+                thread_id: child.clone(),
+                tasks: vec![dev_server()],
+                waiting: true,
+            }),
+            owes_answer: true,
+            holds_answer: false,
+            ended: false,
+            heard_at: SystemTime::now(),
+        },
+    );
+
+    harness.send(&child, "m-join", "is the minute up?");
+    harness.wait_for(|event| match event {
+        Event::TurnStarted { turn_id, .. } if turn_id == "m-join" => Some(()),
+        _ => None,
+    });
+    assert_eq!(*process.continued.lock().unwrap(), ["is the minute up?"]);
+    let state = &harness.engine.state;
+    lock(state).receive_from(&child, 99, ProviderOutput::Woke);
+    assert!(!harness.thread(&child).task_answered);
+    lock(state).receive_from(
+        &child,
+        99,
+        ProviderOutput::AssistantMessage {
+            item_id: "woken".into(),
+            text: "The minute is up.".into(),
+        },
+    );
+    lock(state).receive_from(
+        &child,
+        99,
+        ProviderOutput::TurnCompleted {
+            outcome: TurnOutcome::Completed,
+        },
+    );
+    harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+    let requests = adapter.requests.lock().unwrap();
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .prompt
+            .contains("The minute is up.")
+    );
+    assert!(harness.thread(&child).task_answered);
+}
+
 /// Thread `t` delegated a task whose turn ended while its agent awaits a command in process
 /// 99, holding back its answer.
 fn task_awaits_a_command(name: &str) -> (Harness, Arc<FakeAdapter>, String) {
@@ -2933,6 +3007,7 @@ fn task_awaits_a_command(name: &str) -> (Harness, Arc<FakeAdapter>, String) {
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(Arc::default())),
             background: Some(ThreadBackgroundTasks {
                 thread_id: child.clone(),
@@ -3049,6 +3124,7 @@ fn task_left_a_command_running(
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(Arc::default())),
             background: None,
             owes_answer,
@@ -3242,6 +3318,7 @@ fn cancelling_a_task_that_answered_stops_the_commands_it_left_running() {
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(process.clone())),
             background: None,
             owes_answer: true,
@@ -4614,6 +4691,39 @@ impl Forge for FakeBitbucket {
     fn repository(&self, _: &RepositoryRef) -> Result<RemoteRepository, ForgeError> {
         Err(ForgeError::NotFound)
     }
+}
+
+#[test]
+fn a_turn_reads_its_project_origin_when_the_read_at_start_has_not_come_to_it() {
+    let repo = git::tests::temp_repository("engine-origin-late");
+    let harness = Harness::new(
+        "origin-late",
+        repo,
+        Store::open_in_memory().unwrap(),
+        completed_turn(),
+    );
+    harness
+        .engine
+        .set_forges(vec![Arc::new(FakeBitbucket::default())]);
+    harness.send("t", "m1", "hi");
+    harness.wait_for_turn_end();
+    git_in(
+        &harness.root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://bitbucket.org/acme/shop.git",
+        ],
+    );
+    let mut state = lock(&harness.engine.state);
+    state.repositories.remove("p");
+    state.origins_read.remove("p");
+    assert!(!state.opens_pull_requests("t"));
+
+    state.read_origin("t");
+
+    assert!(state.opens_pull_requests("t"));
 }
 
 #[test]
@@ -6000,7 +6110,10 @@ struct KeptProcess {
     /// Whether a next turn may run in it.
     takes_turns: Mutex<bool>,
     continued: Mutex<Vec<String>>,
+    /// The folder each next turn asked to run in.
+    continued_in: Mutex<Vec<String>>,
     stopped: Mutex<Vec<String>>,
+    moved: Mutex<Vec<String>>,
     closed: Mutex<bool>,
 }
 
@@ -6052,7 +6165,16 @@ impl RunningTurn for KeptTurn {
             .lock()
             .unwrap()
             .push(request.prompt.clone());
+        self.0
+            .continued_in
+            .lock()
+            .unwrap()
+            .push(request.cwd.clone());
         true
+    }
+
+    fn moved_to(&self, cwd: &str) {
+        self.0.moved.lock().unwrap().push(cwd.to_owned());
     }
 
     fn close(&self) {
@@ -6389,6 +6511,129 @@ fn a_command_left_running_that_ends_wakes_the_agent_in_a_turn_of_its_own() {
     );
     assert!(running_in_background(&harness).is_empty());
     assert!(lock(&harness.engine.state).lingering.is_empty());
+}
+
+#[test]
+fn a_message_that_joins_the_agent_as_it_wakes_takes_in_what_woke_it() {
+    let (harness, process) = leave_dev_server_running("kept-process-wake-joined");
+
+    harness.send("t", "m2", "is it up?");
+    harness.wait_for(|event| match event {
+        Event::TurnStarted { turn_id, .. } if turn_id == "m2" => Some(()),
+        _ => None,
+    });
+    process.report(ProviderOutput::Woke);
+    process.report(ProviderOutput::BackgroundTaskEnded {
+        task_id: "b1".into(),
+        tool_use_id: Some("toolu_1".into()),
+        failed: false,
+    });
+    process.report(ProviderOutput::AssistantMessage {
+        item_id: "a2".into(),
+        text: "It stopped; restarting it.".into(),
+    });
+    process.report(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Completed,
+    });
+    assert_eq!(harness.wait_for_turn_end(), TurnOutcome::Completed);
+
+    let items = harness.engine.transcript("t", None).unwrap().items;
+    let ended: Vec<_> = items
+        .iter()
+        .filter(|item| item.id.ends_with(":ended:b1"))
+        .map(|item| item.id.as_str())
+        .collect();
+    assert_eq!(ended, ["m2:ended:b1"]);
+    assert_eq!(harness.thread("t").status, ThreadStatus::Idle);
+}
+
+#[test]
+fn a_message_joining_a_kept_process_whose_commands_ended_shows_none_running() {
+    let (harness, _process) = leave_dev_server_running("kept-process-ended-join");
+    harness.engine.state.lock().unwrap().receive_from(
+        "t",
+        1,
+        ProviderOutput::BackgroundTasks {
+            tasks: Vec::new(),
+            waiting: false,
+        },
+    );
+
+    harness.send("t", "m2", "is it still up?");
+    harness.wait_for(|event| match event {
+        Event::TurnStarted { turn_id, .. } if turn_id == "m2" => Some(()),
+        _ => None,
+    });
+
+    assert!(running_in_background(&harness).is_empty());
+    assert!(lock(&harness.engine.state).turns["t"].background.is_none());
+}
+
+#[test]
+fn a_kept_process_takes_the_next_message_in_the_worktree_its_agent_moved_to() {
+    let repo = git::tests::temp_repository("engine-kept-worktree");
+    commit_in(&repo.to_string_lossy(), "README.md");
+    let worktree = sibling(&repo, "5678");
+    let name = worktree.file_name().unwrap().to_string_lossy().into_owned();
+    let store = Store::open_in_memory().unwrap();
+    let harness = Harness::new("kept-worktree", repo.clone(), store, Vec::new());
+    let process = Arc::new(KeptProcess {
+        takes_turns: Mutex::new(true),
+        ..KeptProcess::default()
+    });
+    harness
+        .engine
+        .set_adapter(Some(Arc::new(KeptAdapter(process.clone()))));
+    harness.send("t", "m1", "fix ticket 5678 in a worktree of its own");
+    harness.wait_for(|event| matches!(event, Event::TurnStarted { .. }).then_some(()));
+    let before = checkpoint::reference("t", "m1", Moment::Before);
+    wait_until(|| checkpoint::exists(&harness.root, &before));
+
+    git::add_worktree(&harness.root, &worktree, "fix/5678").unwrap();
+    process.report(bash(&format!(
+        "git worktree add ../{name} -b fix/5678 main"
+    )));
+    process.report(bash(&format!("cd ../{name} && npm run dev")));
+    process.report(ProviderOutput::BackgroundTasks {
+        tasks: vec![dev_server()],
+        waiting: false,
+    });
+    *process.lingers.lock().unwrap() = true;
+    process.report(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Completed,
+    });
+
+    let expected = git::normalize(&worktree.to_string_lossy());
+    harness.wait_for(|event| matches!(event, Event::ThreadWorktreeAttached { .. }).then_some(()));
+    wait_until(|| !process.moved.lock().unwrap().is_empty());
+    assert_eq!(
+        *process.moved.lock().unwrap(),
+        std::slice::from_ref(&expected)
+    );
+
+    harness.send("t", "m2", "is it up?");
+    harness.wait_for(|event| match event {
+        Event::TurnStarted { turn_id, .. } if turn_id == "m2" => Some(()),
+        _ => None,
+    });
+    assert_eq!(*process.continued_in.lock().unwrap(), [expected]);
+    assert_eq!(*process.spawned.lock().unwrap(), 1);
+    interrupt(&harness);
+    process.report(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Interrupted,
+    });
+    harness.wait_for_turn_end();
+    let _ = git::remove_worktree(&harness.root, &git::normalize(&worktree.to_string_lossy()));
+}
+
+#[test]
+fn a_worktree_found_after_another_turn_took_the_thread_is_not_told_to_its_process() {
+    let (harness, process) = leave_dev_server_running("kept-process-stale-move");
+
+    lock(&harness.engine.state).agent_moved("t", "m0", "/home/dev/shop-old");
+    lock(&harness.engine.state).agent_moved("t", "m1", "/home/dev/shop-1234");
+
+    assert_eq!(*process.moved.lock().unwrap(), ["/home/dev/shop-1234"]);
 }
 
 #[test]

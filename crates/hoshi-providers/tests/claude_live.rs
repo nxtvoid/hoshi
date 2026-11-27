@@ -1191,6 +1191,65 @@ fn a_message_sent_while_an_awaited_command_runs_starts_a_turn_in_its_process() {
 
 #[test]
 #[ignore = "spends tokens on a real Claude Code turn"]
+fn a_message_sent_as_claude_wakes_for_a_command_joins_its_process() {
+    let cwd = scratch("join-wake");
+    let mut session = None;
+    let mut tasks: Vec<String> = Vec::new();
+    let mut joined = false;
+    let mut stopped = false;
+    let outputs = run_watching(
+        &cwd,
+        "Run two shell commands with the Bash tool, each with run_in_background: true: first `sleep 90 && echo server`, then `sleep 4 && echo done`. Then reply 'started' and end your turn. When the second one finishes, tell me what it printed.",
+        |output, turn| match output {
+            ProviderOutput::SessionStarted { session_id } => {
+                session = Some(session_id.clone());
+            }
+            ProviderOutput::BackgroundTasks { tasks: running, .. } => {
+                for task in running {
+                    if !tasks.contains(&task.task_id) {
+                        tasks.push(task.task_id.clone());
+                    }
+                }
+            }
+            ProviderOutput::Woke if !joined => {
+                let request =
+                    watched_request(&cwd, "Also reply with exactly: JOINED", session.clone());
+                assert!(turn.continue_with(&request), "the message was refused");
+                joined = true;
+            }
+            ProviderOutput::TurnCompleted { .. } if joined && !stopped => {
+                for task in &tasks {
+                    turn.stop_background_task(task);
+                }
+                stopped = true;
+            }
+            _ => {}
+        },
+    );
+
+    assert!(joined, "Claude never woke: {outputs:#?}");
+    let woke = outputs
+        .iter()
+        .position(|output| *output == ProviderOutput::Woke)
+        .unwrap();
+    let said = outputs[woke..]
+        .iter()
+        .position(|output| {
+            matches!(output, ProviderOutput::AssistantMessage { text, .. } if text.contains("JOINED"))
+        })
+        .unwrap_or_else(|| panic!("never answered the message: {outputs:#?}"));
+    let ended = outputs[woke..]
+        .iter()
+        .position(|output| matches!(output, ProviderOutput::TurnCompleted { .. }))
+        .unwrap_or_else(|| panic!("the joined turn never ended: {outputs:#?}"));
+    assert!(
+        said < ended,
+        "the turn ended before answering: {outputs:#?}"
+    );
+}
+
+#[test]
+#[ignore = "spends tokens on a real Claude Code turn"]
 fn the_next_message_runs_in_the_process_a_command_kept() {
     let cwd = scratch("continue-background-command");
     let mut session = None;

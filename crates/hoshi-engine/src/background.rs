@@ -22,6 +22,8 @@ const WAKE_GRACE: Duration = Duration::from_secs(5);
 /// A process whose turn completed, kept for the commands it left running.
 pub(crate) struct Lingering {
     pub process: u64,
+    /// The turn it was kept after.
+    pub turn_id: String,
     pub running: Box<dyn RunningTurn>,
     /// The commands it runs, once it reported any.
     pub background: Option<ThreadBackgroundTasks>,
@@ -131,6 +133,22 @@ impl State {
         }
     }
 
+    /// Turn `turn_id` moved the thread to a worktree its agent made: the process that ran it
+    /// may run the next turns there, unless another turn took the thread since.
+    pub(crate) fn agent_moved(&self, thread_id: &str, turn_id: &str, cwd: &str) {
+        let process = match self.turns.get(thread_id) {
+            Some(turn) => (turn.id == turn_id).then_some(turn.running.as_ref()),
+            None => self
+                .lingering
+                .get(thread_id)
+                .filter(|lingering| lingering.turn_id == turn_id)
+                .map(|lingering| lingering.running.as_ref()),
+        };
+        if let Some(process) = process {
+            process.moved_to(cwd);
+        }
+    }
+
     /// The commands the thread's agent still runs in the background.
     pub(crate) fn background_commands(&self, thread_id: &str) -> &[BackgroundTask] {
         let background = match self.turns.get(thread_id) {
@@ -176,6 +194,12 @@ impl State {
             .filter(|turn| turn.process == process)
             .map(|turn| turn.id.clone());
         if let Some(turn_id) = turn_id {
+            if output == ProviderOutput::Woke
+                && let Some(turn) = self.turns.get_mut(thread_id)
+                && std::mem::take(&mut turn.owes_answer)
+            {
+                self.reopen_task(thread_id);
+            }
             self.receive(thread_id, &turn_id, output);
         } else if self
             .lingering
@@ -263,6 +287,7 @@ impl State {
                 background,
                 compacting: false,
                 handoff: None,
+                owes_answer: false,
             },
         );
     }
@@ -271,6 +296,7 @@ impl State {
     /// background; otherwise clears what the turn showed running.
     pub(crate) fn keep_between_turns(&mut self, thread_id: &str, turn: Turn) {
         let Turn {
+            id: turn_id,
             process,
             running,
             background,
@@ -294,6 +320,7 @@ impl State {
             thread_id.to_owned(),
             Lingering {
                 process,
+                turn_id,
                 running,
                 background,
                 owes_answer,
@@ -390,7 +417,11 @@ impl State {
         }
     }
 
-    fn clear_background(&self, thread_id: &str, background: Option<&ThreadBackgroundTasks>) {
+    pub(crate) fn clear_background(
+        &self,
+        thread_id: &str,
+        background: Option<&ThreadBackgroundTasks>,
+    ) {
         self.save_recovery(thread_id);
         if background.is_some_and(|background| !background.tasks.is_empty()) {
             (self.notify)(Notification::BackgroundTasks(ThreadBackgroundTasks {

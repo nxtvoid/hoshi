@@ -190,21 +190,34 @@ impl RunningTurn for ClaudeTurn {
         let session = self.requests.session();
         let mut queue = self.queue.state();
         let request = request.clone().with_inline_handoff();
-        let Some(lines) = next_turn(
+        let woke = queue.woke;
+        let lines = match next_turn(
             &self.launch,
             self.default_model.as_deref(),
             session.as_deref(),
             &mut queue,
             &request,
-        ) else {
-            return false;
+        ) {
+            Ok(lines) => lines,
+            Err(misfit) => {
+                eprintln!(
+                    "hoshi: the kept Claude Code process can't take the next turn: {misfit:?}"
+                );
+                return false;
+            }
         };
         let stdin = self.process.stdin();
         if lines.iter().all(|line| stdin.write_line(line)) {
             return true;
         }
-        queue.turn_open = false;
+        eprintln!("hoshi: the kept Claude Code process stopped reading its input");
+        queue.turn_open = woke;
+        queue.woke = woke;
         false
+    }
+
+    fn moved_to(&self, cwd: &str) {
+        self.queue.state().cwd = Some(cwd.to_owned());
     }
 
     /// Between turns the process gets its stdin closed and a moment to exit on its own, as it

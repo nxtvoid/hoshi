@@ -357,7 +357,7 @@ fn the_agent_is_told_how_to_choose_its_subagents_only_when_it_decides() {
         turn_open: false,
         ..QueueState::default()
     };
-    assert!(next_turn(&launch, None, Some("s1"), &mut queue, &decides).is_some());
+    assert!(next_turn(&launch, None, Some("s1"), &mut queue, &decides).is_ok());
 }
 
 #[test]
@@ -831,35 +831,38 @@ fn a_turn_that_changes_how_the_process_started_needs_a_process_of_its_own() {
         next_turn(&launch, None, Some("s1"), &mut queue, &request)
     };
 
-    assert!(next(request("/repo/", "hi"), None).is_some());
-    assert!(next(request("/repo/.claude/worktrees/w", "hi"), None).is_none());
+    assert!(next(request("/repo/", "hi"), None).is_ok());
+    assert_eq!(
+        next(request("/repo/.claude/worktrees/w", "hi"), None),
+        Err(Misfit::Folder)
+    );
     assert!(
         next(
             request("/repo/.claude/worktrees/w", "hi"),
             Some("/repo/.claude/worktrees/w")
         )
-        .is_some()
+        .is_ok()
     );
     let rewound = TurnRequest {
         resume_session_at: Some("u1".into()),
         ..request("/repo", "hi")
     };
-    assert!(next(rewound, None).is_none());
+    assert_eq!(next(rewound, None), Err(Misfit::ConversationPoint));
     let forked = TurnRequest {
         fork_session: true,
         ..request("/repo", "hi")
     };
-    assert!(next(forked, None).is_none());
+    assert_eq!(next(forked, None), Err(Misfit::ConversationPoint));
     let unknown_effort = TurnRequest {
         model: Some("claude-custom".into()),
         ..request("/repo", "hi")
     };
-    assert!(next(unknown_effort, None).is_none());
+    assert_eq!(next(unknown_effort, None), Err(Misfit::Model));
     let full_access = TurnRequest {
         access_mode: AccessMode::FullAccess,
         ..request("/repo", "hi")
     };
-    assert!(next(full_access, None).is_none());
+    assert_eq!(next(full_access, None), Err(Misfit::FullAccess));
 
     let planning = TurnRequest {
         plan_mode: true,
@@ -876,27 +879,27 @@ fn a_turn_that_changes_how_the_process_started_needs_a_process_of_its_own() {
 fn a_process_with_a_turn_or_closing_takes_no_other_turn() {
     let launch = launch("/repo");
     let mut queue = QueueState::default();
-    assert!(
+    assert_eq!(
         next_turn(
             &launch,
             None,
             Some("s1"),
             &mut queue,
             &request("/repo", "a")
-        )
-        .is_none()
+        ),
+        Err(Misfit::TurnOpen)
     );
     queue.turn_open = false;
     queue.closing = true;
-    assert!(
+    assert_eq!(
         next_turn(
             &launch,
             None,
             Some("s1"),
             &mut queue,
             &request("/repo", "a")
-        )
-        .is_none()
+        ),
+        Err(Misfit::Closing)
     );
 }
 
@@ -1372,6 +1375,71 @@ fn a_cli_that_names_none_of_our_messages_ends_the_turn_at_any_result() {
 }
 
 #[test]
+fn a_message_sent_while_the_agent_answers_a_command_that_ended_joins_its_process() {
+    let mut parser = ClaudeParser::new(None);
+    feed(
+        &mut parser,
+        &[json!({ "type": "system", "subtype": "init", "session_id": "s1", "cwd": "/repo" })],
+    );
+    leave_sleep_running(&mut parser);
+    feed(&mut parser, &sleep_ended());
+    let [init, reply, wake_result] = &answer_to_sleep()[..] else {
+        unreachable!()
+    };
+    let woke = feed(&mut parser, &[init.clone(), reply.clone()]);
+    assert_eq!(woke[..2], [ProviderOutput::Woke, sleep_ended_output()]);
+
+    let lines = next_turn(
+        &launch("/repo"),
+        None,
+        Some("s1"),
+        &mut parser.queue.state(),
+        &request("/repo", "and now?"),
+    )
+    .expect("the message joins the process the agent woke in");
+    let message: Value = serde_json::from_str(lines.last().unwrap()).unwrap();
+    let message_id = message["uuid"].as_str().unwrap().to_owned();
+    assert_eq!(
+        next_turn(
+            &launch("/repo"),
+            None,
+            Some("s1"),
+            &mut parser.queue.state(),
+            &request("/repo", "and another"),
+        ),
+        Err(Misfit::TurnOpen)
+    );
+
+    let echo = json!([message_id]);
+    let answered_wake = feed(
+        &mut parser,
+        &[
+            json!({ "type": "command_lifecycle", "command_uuid": message_id,
+                    "state": "queued" }),
+            wake_result.clone(),
+        ],
+    );
+    assert!(completions(&answered_wake).is_empty(), "{answered_wake:#?}");
+
+    let answered = feed(
+        &mut parser,
+        &[
+            json!({ "type": "command_lifecycle", "command_uuid": message_id,
+                    "state": "started" }),
+            json!({ "type": "system", "subtype": "init", "session_id": "s1", "cwd": "/repo",
+                    "user_message_uuids": echo }),
+            json!({ "type": "assistant", "parent_tool_use_id": null,
+                    "user_message_uuid": message_id, "message": { "id": "msg_3",
+                    "content": [{ "type": "text", "text": "All done." }] } }),
+            json!({ "type": "result", "subtype": "success", "is_error": false,
+                    "num_turns": 1, "result": "All done.",
+                    "user_message_uuid": message_id, "user_message_uuids": echo }),
+        ],
+    );
+    assert_eq!(completions(&answered), [TurnOutcome::Completed]);
+}
+
+#[test]
 fn an_interrupted_turn_ends_at_its_result_as_interrupted() {
     let mut parser = ClaudeParser::new(None);
     parser.queue.state().interrupted = true;
@@ -1810,7 +1878,10 @@ fn a_turn_on_another_model_or_effort_switches_the_process_in_place() {
 
     queue.turn_open = false;
     queue.model_unsure = true;
-    assert!(next_turn(&launch, None, Some("s1"), &mut queue, &haiku).is_none());
+    assert_eq!(
+        next_turn(&launch, None, Some("s1"), &mut queue, &haiku),
+        Err(Misfit::Model)
+    );
 }
 
 #[test]
@@ -2573,6 +2644,67 @@ fn a_scheduled_wakeup_keeps_the_process_for_the_run_it_starts() {
     assert_eq!(woke[0], ProviderOutput::Woke);
     assert_eq!(completions(&woke), [TurnOutcome::Completed]);
     assert!(parser.queue.state().closing, "nothing else is scheduled");
+}
+
+#[test]
+fn a_message_waits_out_a_scheduled_wakeup_run_though_a_command_s_end_is_unanswered() {
+    let mut parser = ClaudeParser::new(None);
+    let later = unix_millis() + 60 * 60 * 1000;
+    let mut first = schedule_wakeup(later);
+    first.pop();
+    first.extend(sleep_in_background());
+    first.push(run_result());
+    feed(&mut parser, &first);
+    feed(&mut parser, &sleep_ended());
+    assert!(!parser.pending_wakes.is_empty());
+
+    let woke = feed(
+        &mut parser,
+        &[
+            json!({ "type": "command_lifecycle", "command_uuid": "c1", "state": "started",
+                    "wakeup_source": "loop_wakeup", "scheduled_for": later }),
+            json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+        ],
+    );
+    assert_eq!(woke[0], ProviderOutput::Woke);
+
+    assert_eq!(
+        next_turn(
+            &launch("/repo"),
+            None,
+            Some("s1"),
+            &mut parser.queue.state(),
+            &request("/repo", "and now?"),
+        ),
+        Err(Misfit::TurnOpen)
+    );
+}
+
+#[test]
+fn a_message_waits_out_a_run_a_scheduled_wakeup_started() {
+    let mut parser = ClaudeParser::new(None);
+    let later = unix_millis() + 60 * 60 * 1000;
+    feed(&mut parser, &schedule_wakeup(later));
+    let woke = feed(
+        &mut parser,
+        &[
+            json!({ "type": "command_lifecycle", "command_uuid": "c1", "state": "started",
+                    "wakeup_source": "loop_wakeup", "scheduled_for": later }),
+            json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+        ],
+    );
+    assert_eq!(woke[0], ProviderOutput::Woke);
+
+    assert_eq!(
+        next_turn(
+            &launch("/repo"),
+            None,
+            Some("s1"),
+            &mut parser.queue.state(),
+            &request("/repo", "and now?"),
+        ),
+        Err(Misfit::TurnOpen)
+    );
 }
 
 #[test]
