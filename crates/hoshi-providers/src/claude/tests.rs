@@ -2647,6 +2647,40 @@ fn a_scheduled_wakeup_keeps_the_process_for_the_run_it_starts() {
 }
 
 #[test]
+fn a_message_waits_out_a_scheduled_wakeup_run_though_a_command_s_end_is_unanswered() {
+    let mut parser = ClaudeParser::new(None);
+    let later = unix_millis() + 60 * 60 * 1000;
+    let mut first = schedule_wakeup(later);
+    first.pop();
+    first.extend(sleep_in_background());
+    first.push(run_result());
+    feed(&mut parser, &first);
+    feed(&mut parser, &sleep_ended());
+    assert!(!parser.pending_wakes.is_empty());
+
+    let woke = feed(
+        &mut parser,
+        &[
+            json!({ "type": "command_lifecycle", "command_uuid": "c1", "state": "started",
+                    "wakeup_source": "loop_wakeup", "scheduled_for": later }),
+            json!({ "type": "system", "subtype": "init", "session_id": "s1" }),
+        ],
+    );
+    assert_eq!(woke[0], ProviderOutput::Woke);
+
+    assert_eq!(
+        next_turn(
+            &launch("/repo"),
+            None,
+            Some("s1"),
+            &mut parser.queue.state(),
+            &request("/repo", "and now?"),
+        ),
+        Err(Misfit::TurnOpen)
+    );
+}
+
+#[test]
 fn a_message_waits_out_a_run_a_scheduled_wakeup_started() {
     let mut parser = ClaudeParser::new(None);
     let later = unix_millis() + 60 * 60 * 1000;

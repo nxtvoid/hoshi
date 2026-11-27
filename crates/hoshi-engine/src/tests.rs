@@ -2874,6 +2874,7 @@ fn a_task_that_wakes_for_a_command_it_left_running_answers_again() {
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(Arc::default())),
             background: None,
             owes_answer: true,
@@ -2941,6 +2942,7 @@ fn a_message_to_a_task_that_takes_in_its_agent_waking_answers_again() {
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(process.clone())),
             background: Some(ThreadBackgroundTasks {
                 thread_id: child.clone(),
@@ -3005,6 +3007,7 @@ fn task_awaits_a_command(name: &str) -> (Harness, Arc<FakeAdapter>, String) {
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(Arc::default())),
             background: Some(ThreadBackgroundTasks {
                 thread_id: child.clone(),
@@ -3121,6 +3124,7 @@ fn task_left_a_command_running(
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(Arc::default())),
             background: None,
             owes_answer,
@@ -3314,6 +3318,7 @@ fn cancelling_a_task_that_answered_stops_the_commands_it_left_running() {
         child.clone(),
         Lingering {
             process: 99,
+            turn_id: "m1".into(),
             running: Box::new(KeptTurn(process.clone())),
             background: None,
             owes_answer: true,
@@ -6105,6 +6110,8 @@ struct KeptProcess {
     /// Whether a next turn may run in it.
     takes_turns: Mutex<bool>,
     continued: Mutex<Vec<String>>,
+    /// The folder each next turn asked to run in.
+    continued_in: Mutex<Vec<String>>,
     stopped: Mutex<Vec<String>>,
     moved: Mutex<Vec<String>>,
     closed: Mutex<bool>,
@@ -6158,6 +6165,11 @@ impl RunningTurn for KeptTurn {
             .lock()
             .unwrap()
             .push(request.prompt.clone());
+        self.0
+            .continued_in
+            .lock()
+            .unwrap()
+            .push(request.cwd.clone());
         true
     }
 
@@ -6594,8 +6606,34 @@ fn a_kept_process_takes_the_next_message_in_the_worktree_its_agent_moved_to() {
     let expected = git::normalize(&worktree.to_string_lossy());
     harness.wait_for(|event| matches!(event, Event::ThreadWorktreeAttached { .. }).then_some(()));
     wait_until(|| !process.moved.lock().unwrap().is_empty());
-    assert_eq!(*process.moved.lock().unwrap(), [expected]);
+    assert_eq!(
+        *process.moved.lock().unwrap(),
+        std::slice::from_ref(&expected)
+    );
+
+    harness.send("t", "m2", "is it up?");
+    harness.wait_for(|event| match event {
+        Event::TurnStarted { turn_id, .. } if turn_id == "m2" => Some(()),
+        _ => None,
+    });
+    assert_eq!(*process.continued_in.lock().unwrap(), [expected]);
+    assert_eq!(*process.spawned.lock().unwrap(), 1);
+    interrupt(&harness);
+    process.report(ProviderOutput::TurnCompleted {
+        outcome: TurnOutcome::Interrupted,
+    });
+    harness.wait_for_turn_end();
     let _ = git::remove_worktree(&harness.root, &git::normalize(&worktree.to_string_lossy()));
+}
+
+#[test]
+fn a_worktree_found_after_another_turn_took_the_thread_is_not_told_to_its_process() {
+    let (harness, process) = leave_dev_server_running("kept-process-stale-move");
+
+    lock(&harness.engine.state).agent_moved("t", "m0", "/home/dev/shop-old");
+    lock(&harness.engine.state).agent_moved("t", "m1", "/home/dev/shop-1234");
+
+    assert_eq!(*process.moved.lock().unwrap(), ["/home/dev/shop-1234"]);
 }
 
 #[test]

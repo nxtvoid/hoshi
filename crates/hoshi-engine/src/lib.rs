@@ -910,7 +910,7 @@ fn attach_created_worktree(state: &Weak<Mutex<State>>, thread_id: &str, check: &
         return;
     }
     state.follow_turn(thread_id, &check.turn_id, &path, true);
-    state.agent_moved(thread_id, &path);
+    state.agent_moved(thread_id, &check.turn_id, &path);
 }
 
 /// Moves the thread where its agent's session went, once git shows it is the project root

@@ -22,6 +22,8 @@ const WAKE_GRACE: Duration = Duration::from_secs(5);
 /// A process whose turn completed, kept for the commands it left running.
 pub(crate) struct Lingering {
     pub process: u64,
+    /// The turn it was kept after.
+    pub turn_id: String,
     pub running: Box<dyn RunningTurn>,
     /// The commands it runs, once it reported any.
     pub background: Option<ThreadBackgroundTasks>,
@@ -131,10 +133,18 @@ impl State {
         }
     }
 
-    /// The thread moved to a worktree its agent made: its process may run the next turns
-    /// there.
-    pub(crate) fn agent_moved(&self, thread_id: &str, cwd: &str) {
-        if let Some(process) = self.agent_process(thread_id) {
+    /// Turn `turn_id` moved the thread to a worktree its agent made: the process that ran it
+    /// may run the next turns there, unless another turn took the thread since.
+    pub(crate) fn agent_moved(&self, thread_id: &str, turn_id: &str, cwd: &str) {
+        let process = match self.turns.get(thread_id) {
+            Some(turn) => (turn.id == turn_id).then_some(turn.running.as_ref()),
+            None => self
+                .lingering
+                .get(thread_id)
+                .filter(|lingering| lingering.turn_id == turn_id)
+                .map(|lingering| lingering.running.as_ref()),
+        };
+        if let Some(process) = process {
             process.moved_to(cwd);
         }
     }
@@ -286,6 +296,7 @@ impl State {
     /// background; otherwise clears what the turn showed running.
     pub(crate) fn keep_between_turns(&mut self, thread_id: &str, turn: Turn) {
         let Turn {
+            id: turn_id,
             process,
             running,
             background,
@@ -309,6 +320,7 @@ impl State {
             thread_id.to_owned(),
             Lingering {
                 process,
+                turn_id,
                 running,
                 background,
                 owes_answer,

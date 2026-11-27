@@ -91,6 +91,8 @@ pub struct ClaudeParser {
     /// When Claude Code starts a run by itself, as `ScheduleWakeup` asked, in Unix
     /// milliseconds. The process stays for it.
     pub(super) wakeup: Option<u64>,
+    /// The run starting is the one `ScheduleWakeup` asked for.
+    pub(super) wakeup_run: bool,
     pub(super) workflows: Workflows,
 }
 
@@ -970,13 +972,14 @@ impl ClaudeParser {
     /// A run that starts between turns is the agent going on by itself, as a command left
     /// running ended: a turn of its own, which first tells what ended.
     pub(super) fn wake(&mut self) -> Vec<ProviderOutput> {
+        let scheduled = std::mem::take(&mut self.wakeup_run);
         {
             let mut queue = self.queue.state();
             if queue.turn_open || queue.closing {
                 return Vec::new();
             }
             queue.turn_open = true;
-            queue.woke = !self.pending_wakes.is_empty();
+            queue.woke = !scheduled && !self.pending_wakes.is_empty();
             queue.answering = true;
         }
         let mut outputs = vec![ProviderOutput::Woke];
@@ -1152,6 +1155,7 @@ impl ClaudeParser {
         let due = value["type"] == "system" && value["subtype"] == "init" && unix_millis() >= at;
         if woke || due {
             self.wakeup = None;
+            self.wakeup_run = true;
         }
     }
 

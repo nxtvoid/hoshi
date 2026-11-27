@@ -277,7 +277,9 @@ impl State {
                     let events =
                         record_worktree(&state.model, &thread_id, path.clone(), branch, true);
                     match state.commit(&events, &now) {
-                        Ok(()) if !events.is_empty() => state.agent_moved(&thread_id, &path),
+                        Ok(()) if !events.is_empty() => {
+                            state.agent_moved(&thread_id, &turn_id, &path);
+                        }
                         Ok(()) => {}
                         Err(error) => eprintln!("hoshi: failed to record a worktree: {error}"),
                     }
