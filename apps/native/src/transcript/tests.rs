@@ -693,13 +693,15 @@ fn scroll_top(cx: &mut VisualTestContext, view: &Entity<TranscriptView>) -> (usi
 }
 
 /// Turns the wheel `steps` times, up for a positive `delta`, and fails if the view moves the
-/// other way.
+/// other way or not at all. Returns whether the bubble of `u1` was drawn on the way.
 fn scroll_steadily(
     cx: &mut VisualTestContext,
     view: &Entity<TranscriptView>,
     delta: f32,
     steps: usize,
-) {
+) -> bool {
+    let start = scroll_top(cx, view);
+    let mut drawn = false;
     for step in 0..steps {
         let before = scroll_top(cx, view);
         cx.simulate_event(gpui_kit::ScrollEvent {
@@ -717,7 +719,10 @@ fn scroll_steadily(
             after >= before
         };
         assert!(steady, "step {step}: {before:?} to {after:?}");
+        drawn |= cx.debug_bounds("collapse-u1").is_some();
     }
+    assert_ne!(scroll_top(cx, view), start, "the wheel moved nothing");
+    drawn
 }
 
 #[gpui_kit::test]
@@ -734,9 +739,15 @@ fn scrolling_past_a_long_message_never_jumps_back(cx: &mut TestAppContext) {
             long_answer("a1", "2026-11-12T10:02:00Z"),
         ],
     );
-    scroll_steadily(&mut cx, &view, 80., 40);
-    scroll_steadily(&mut cx, &view, -80., 40);
-    scroll_steadily(&mut cx, &view, 80., 40);
+    let shown = |cx: &mut VisualTestContext| cx.debug_bounds("collapse-u1").is_some();
+    assert!(!shown(&mut cx), "the question starts out of view");
+    assert!(
+        scroll_steadily(&mut cx, &view, 80., 40),
+        "up past the question"
+    );
+    assert!(scroll_steadily(&mut cx, &view, -80., 40), "down past it");
+    assert!(!shown(&mut cx), "the question left the view");
+    assert!(scroll_steadily(&mut cx, &view, 80., 40), "up past it again");
 }
 
 #[gpui_kit::test]
@@ -752,7 +763,10 @@ fn a_message_that_grows_long_in_a_narrower_column_never_jumps(cx: &mut TestAppCo
             long_answer("a1", "2026-11-12T10:01:00Z"),
         ],
     );
-    scroll_steadily(&mut cx, &view, 80., 40);
+    assert!(
+        scroll_steadily(&mut cx, &view, 80., 40),
+        "up to the question"
+    );
     assert!(
         cx.debug_bounds("collapse-u1-toggle").is_none(),
         "whole in the wide column"
@@ -760,7 +774,11 @@ fn a_message_that_grows_long_in_a_narrower_column_never_jumps(cx: &mut TestAppCo
     scroll_steadily(&mut cx, &view, -80., 40);
     cx.simulate_resize(size(px(360.), px(400.)));
     redraw(&mut cx);
-    scroll_steadily(&mut cx, &view, 80., 60);
+    assert!(
+        cx.debug_bounds("collapse-u1").is_none(),
+        "the question is out of view as the column narrows"
+    );
+    assert!(scroll_steadily(&mut cx, &view, 80., 60), "up to it again");
     assert!(
         cx.debug_bounds("collapse-u1-toggle").is_some(),
         "collapsed in the narrow column"
