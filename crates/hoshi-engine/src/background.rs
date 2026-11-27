@@ -131,6 +131,14 @@ impl State {
         }
     }
 
+    /// The thread moved to a worktree its agent made: its process may run the next turns
+    /// there.
+    pub(crate) fn agent_moved(&self, thread_id: &str, cwd: &str) {
+        if let Some(process) = self.agent_process(thread_id) {
+            process.moved_to(cwd);
+        }
+    }
+
     /// The commands the thread's agent still runs in the background.
     pub(crate) fn background_commands(&self, thread_id: &str) -> &[BackgroundTask] {
         let background = match self.turns.get(thread_id) {
@@ -176,6 +184,12 @@ impl State {
             .filter(|turn| turn.process == process)
             .map(|turn| turn.id.clone());
         if let Some(turn_id) = turn_id {
+            if output == ProviderOutput::Woke
+                && let Some(turn) = self.turns.get_mut(thread_id)
+                && std::mem::take(&mut turn.owes_answer)
+            {
+                self.reopen_task(thread_id);
+            }
             self.receive(thread_id, &turn_id, output);
         } else if self
             .lingering
@@ -263,6 +277,7 @@ impl State {
                 background,
                 compacting: false,
                 handoff: None,
+                owes_answer: false,
             },
         );
     }
@@ -390,7 +405,11 @@ impl State {
         }
     }
 
-    fn clear_background(&self, thread_id: &str, background: Option<&ThreadBackgroundTasks>) {
+    pub(crate) fn clear_background(
+        &self,
+        thread_id: &str,
+        background: Option<&ThreadBackgroundTasks>,
+    ) {
         self.save_recovery(thread_id);
         if background.is_some_and(|background| !background.tasks.is_empty()) {
             (self.notify)(Notification::BackgroundTasks(ThreadBackgroundTasks {

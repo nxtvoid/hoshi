@@ -937,6 +937,7 @@ impl ClaudeParser {
                 || !self.ending.is_empty()
                 || self.wakeup.is_some());
         queue.turn_open = false;
+        queue.woke = false;
         queue.closing = !lingers;
         queue.sent.clear();
         queue.unbegun = false;
@@ -975,6 +976,7 @@ impl ClaudeParser {
                 return Vec::new();
             }
             queue.turn_open = true;
+            queue.woke = !self.pending_wakes.is_empty();
             queue.answering = true;
         }
         let mut outputs = vec![ProviderOutput::Woke];

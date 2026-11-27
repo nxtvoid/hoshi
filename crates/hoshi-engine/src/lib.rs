@@ -257,6 +257,8 @@ struct State {
     forges: HashMap<ForgeKind, Arc<dyn Forge>>,
     /// The forge repository of each project whose `origin` a forge serves.
     repositories: HashMap<String, RepositoryRef>,
+    /// The projects whose `origin` was read, whether a forge serves it or not.
+    origins_read: HashSet<String>,
     /// The branch each project's root folder is on, as last read.
     root_branches: HashMap<String, Option<String>>,
     pull_requests: PullRequestSync,
@@ -563,6 +565,9 @@ struct Turn {
     compacting: bool,
     /// What it hands its agent first, until delivered.
     handoff: Option<handoffs::TurnHandoff>,
+    /// It runs in a process kept for a delegated task that owed its answer: the run the
+    /// agent woke for, which it takes in, reopens the task as a woken turn would.
+    owes_answer: bool,
 }
 
 /// What a background check for a worktree the turn created needs from the state.
@@ -629,6 +634,7 @@ impl Engine {
             sync_wake: None,
             forges: HashMap::new(),
             repositories: HashMap::new(),
+            origins_read: HashSet::new(),
             root_branches: HashMap::new(),
             pull_requests,
             pull_request_cache: PullRequestCache::default(),
@@ -904,6 +910,7 @@ fn attach_created_worktree(state: &Weak<Mutex<State>>, thread_id: &str, check: &
         return;
     }
     state.follow_turn(thread_id, &check.turn_id, &path, true);
+    state.agent_moved(thread_id, &path);
 }
 
 /// Moves the thread where its agent's session went, once git shows it is the project root
@@ -1074,8 +1081,9 @@ fn watch_projects(state: Weak<Mutex<State>>, projects: Vec<(String, String)>) {
                 watcher.watch(&project_id, git_dir);
             }
             if let Some(repository) = repository {
-                state.repositories.insert(project_id, repository);
+                state.repositories.insert(project_id.clone(), repository);
             }
+            state.origins_read.insert(project_id);
         }
     });
 }
@@ -1376,6 +1384,7 @@ fn start_turn(
         Some(prepared) => (prepared.fork_from, prepared.context, Some(prepared.handoff)),
         None => (None, None, None),
     };
+    state.read_origin(thread_id);
     let Some(thread) = state.model.thread(thread_id) else {
         return;
     };
@@ -1441,6 +1450,12 @@ fn start_turn(
     state.close_lingering_if_idle(thread_id, SystemTime::now());
     if let Some(lingering) = state.lingering.remove(thread_id) {
         if lingering.running.continue_with(&request) {
+            let background = if lingering.ended {
+                state.clear_background(thread_id, lingering.background.as_ref());
+                None
+            } else {
+                state.resumed_background(lingering.background)
+            };
             let turn = Turn {
                 id: turn_id.to_owned(),
                 process: lingering.process,
@@ -1449,9 +1464,10 @@ fn start_turn(
                 checkpointed,
                 arrivals: 0,
                 cursor: None,
-                background: state.resumed_background(lingering.background),
+                background,
                 compacting,
                 handoff,
+                owes_answer: lingering.owes_answer,
             };
             state.turns.insert(thread_id.to_owned(), turn);
             if delivers_inline {
@@ -1459,7 +1475,7 @@ fn start_turn(
             }
             return;
         }
-        if lingering.runs_background_work() {
+        if lingering.runs_background_work() && lingering.running.lingers() {
             state.lingering.insert(thread_id.to_owned(), lingering);
             state.abandon_handoff(handoff);
             let refused = turn_failed(TurnFailure::BackgroundWorkRunning);
@@ -1490,6 +1506,7 @@ fn start_turn(
                 background: None,
                 compacting,
                 handoff,
+                owes_answer: false,
             };
             state.turns.insert(thread_id.to_owned(), turn);
             if delivers_inline {

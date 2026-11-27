@@ -541,6 +541,7 @@ impl State {
                         watcher.unwatch(project_id);
                     }
                     self.repositories.remove(project_id);
+                    self.origins_read.remove(project_id);
                     self.root_branches.remove(project_id);
                 }
                 Event::ThreadDeleted { thread_id } => self.forget_thread(thread_id),

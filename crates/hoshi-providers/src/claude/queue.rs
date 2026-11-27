@@ -16,13 +16,16 @@ pub(super) struct QueueState {
     /// A turn runs. Between turns, the process only keeps the commands the last one left
     /// running in the background.
     pub(super) turn_open: bool,
+    /// The turn open is one the agent started by itself, as a task it left running ended:
+    /// the next turn's message joins it, as the task's result tells its run apart.
+    pub(super) woke: bool,
     /// The background commands running, by task id.
     pub(super) commands: HashSet<String>,
     /// The commands among them the agent said its turn waits for.
     pub(super) awaited: HashSet<String>,
     /// What the agent may do, as the latest turn asked.
     pub(super) access: Access,
-    /// Where the session works, as last reported.
+    /// Where the session works, as last reported, or the worktree its thread moved to since.
     pub(super) cwd: Option<String>,
     /// The images and documents the conversation holds, as this process sent them.
     pub(super) media: MediaBudget,
@@ -85,6 +88,7 @@ impl Default for QueueState {
             closing: false,
             interrupted: false,
             turn_open: true,
+            woke: false,
             commands: HashSet::new(),
             awaited: HashSet::new(),
             access: Access::default(),
@@ -147,8 +151,22 @@ pub(super) struct Launch {
     pub(super) full_access: bool,
 }
 
+/// Why a process can't take a next turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Misfit {
+    Folder,
+    Session,
+    ConversationPoint,
+    Model,
+    Instructions,
+    Mcp,
+    FullAccess,
+    Closing,
+    TurnOpen,
+}
+
 /// The lines that start `request` as the next turn of a process started as `launch`, whose
-/// session is `session`, and open that turn. `None` when the request asks for what the
+/// session is `session`, and open that turn. Refused when the request asks for what the
 /// process can't change: another folder or point of the conversation, or a model it can't
 /// switch to in place.
 pub(super) fn next_turn(
@@ -157,7 +175,7 @@ pub(super) fn next_turn(
     session: Option<&str>,
     queue: &mut QueueState,
     request: &TurnRequest,
-) -> Option<Vec<String>> {
+) -> Result<Vec<String>, Misfit> {
     let access = access(request);
     let here = same_folder(&request.cwd, &launch.cwd)
         || queue
@@ -166,19 +184,31 @@ pub(super) fn next_turn(
             .is_some_and(|cwd| same_folder(&request.cwd, cwd));
     let model = turn_model(request, default_model);
     let switch = model_switch(queue.model.as_ref().unwrap_or(&launch.model), &model);
-    let fits = here
-        && session.is_some()
-        && request.resume_session_id.as_deref() == session
-        && request.resume_session_at.is_none()
-        && !request.fork_session
-        && !queue.model_unsure
-        && switch.is_some()
-        && system_prompt(request, default_model, launch.tool_search) == launch.instructions
-        && request.mcp == launch.mcp
-        && (access.mode != AccessMode::FullAccess || launch.full_access);
-    if !fits || queue.closing || queue.turn_open {
-        return None;
+    let misfit = if !here {
+        Some(Misfit::Folder)
+    } else if session.is_none() || request.resume_session_id.as_deref() != session {
+        Some(Misfit::Session)
+    } else if request.resume_session_at.is_some() || request.fork_session {
+        Some(Misfit::ConversationPoint)
+    } else if queue.model_unsure || switch.is_none() {
+        Some(Misfit::Model)
+    } else if system_prompt(request, default_model, launch.tool_search) != launch.instructions {
+        Some(Misfit::Instructions)
+    } else if request.mcp != launch.mcp {
+        Some(Misfit::Mcp)
+    } else if access.mode == AccessMode::FullAccess && !launch.full_access {
+        Some(Misfit::FullAccess)
+    } else if queue.closing {
+        Some(Misfit::Closing)
+    } else if queue.turn_open && (!queue.woke || queue.interrupted) {
+        Some(Misfit::TurnOpen)
+    } else {
+        None
+    };
+    if let Some(misfit) = misfit {
+        return Err(misfit);
     }
+    queue.woke = false;
     let mut lines = switch.unwrap_or_default();
     if !lines.is_empty() {
         queue.model = Some(model);
@@ -207,7 +237,7 @@ pub(super) fn next_turn(
     queue.turn_open = true;
     queue.answering = false;
     queue.interrupted = false;
-    Some(lines)
+    Ok(lines)
 }
 
 /// The control requests that switch a process running `live` to `wanted`; `None` when that

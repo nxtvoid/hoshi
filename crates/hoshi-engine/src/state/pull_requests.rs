@@ -7,6 +7,30 @@ impl State {
         }
     }
 
+    /// Reads the `origin` of the thread's project now when the read at start has not come to
+    /// it yet, so the instructions of the turns its process runs agree on its forge.
+    pub(crate) fn read_origin(&mut self, thread_id: &str) {
+        let Some(project) = self
+            .model
+            .thread(thread_id)
+            .and_then(|thread| thread.project_id.clone())
+            .filter(|project| !self.origins_read.contains(project))
+        else {
+            return;
+        };
+        let Some(root) = self
+            .model
+            .project(&project)
+            .map(|project| project.workspace_root.clone())
+        else {
+            return;
+        };
+        if let Some(repository) = git::origin_url(&root).and_then(|url| parse_remote(&url)) {
+            self.repositories.insert(project.clone(), repository);
+        }
+        self.origins_read.insert(project);
+    }
+
     /// The forge and repository of a thread's project.
     pub(crate) fn pull_request_target_of(
         &self,

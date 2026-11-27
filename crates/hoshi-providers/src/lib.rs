@@ -382,6 +382,10 @@ pub trait RunningTurn: Send {
         false
     }
 
+    /// The thread moved to `cwd`, a worktree its agent made and worked in: the next turns
+    /// may run there in this process.
+    fn moved_to(&self, _cwd: &str) {}
+
     /// Ends the process and everything it started.
     fn close(&self) {
         self.interrupt();
