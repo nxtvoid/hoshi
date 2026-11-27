@@ -8,8 +8,10 @@ use hoshi_core::{
     ThreadStatus, ThreadWorkspace, ToolDetail, TranscriptPage,
 };
 use hoshi_engine::{Engine, Notification, Notify, ProvidersStatus};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 mod thread_state;
@@ -149,8 +151,13 @@ pub struct Workspace {
     /// Each thread's pull request, as the forge last told.
     pub pull_requests: PullRequests,
     pub logins: Logins,
-    /// Threads whose turn ended while another was on screen, until they are opened.
-    pub unseen: HashSet<String>,
+    /// The thread on screen that stays out of Done until the user leaves it: it had a turn
+    /// they hadn't seen, or a turn ended or its pull request finished while it was open.
+    held: Option<String>,
+    /// The turn end each visit on its way to the engine marks seen, by thread id.
+    visiting: HashMap<String, Option<String>>,
+    /// What [`Self::unseen`] last found, until the threads or the visits change.
+    unseen: RefCell<Option<Rc<HashSet<String>>>>,
     /// The enabled providers' CLIs, accounts and plan limits, as the engine last told.
     pub providers: ProvidersStatus,
     /// The servers of each watched thread, as the engine last told.
@@ -344,7 +351,9 @@ impl Workspace {
             last_used: DraftChoices::default(),
             pull_requests,
             logins: Logins::new(),
-            unseen: HashSet::new(),
+            held: None,
+            visiting: HashMap::new(),
+            unseen: RefCell::default(),
             providers,
             servers: HashMap::new(),
             git_phases: HashMap::new(),
@@ -388,17 +397,18 @@ impl Workspace {
     fn receive(&mut self, notification: Notification, cx: &mut Context<Self>) {
         match notification {
             Notification::Event(envelope) => {
-                let working: Vec<String> = self
-                    .model
-                    .threads()
-                    .filter(|thread| thread.status == ThreadStatus::Working)
-                    .map(|thread| thread.id.clone())
-                    .collect();
                 let open_project = self
                     .open_thread_id(cx)
                     .and_then(|id| self.model.thread(&id))
                     .map(|thread| thread.project_id.clone());
                 self.model.apply(&envelope.event);
+                self.unseen.take();
+                let model = &self.model;
+                self.visiting.retain(|thread_id, ended| {
+                    model.thread(thread_id).is_some_and(|thread| {
+                        thread.has_unseen_turn() && thread.last_turn_ended_at == *ended
+                    })
+                });
                 if let Event::ThreadCreated { thread } = &envelope.event {
                     self.sending_drafts.remove(&thread.id);
                 }
@@ -427,14 +437,11 @@ impl Workspace {
                         == Some(turn_id.as_str())
                 });
                 let open = self.open_thread_id(cx);
-                for id in working {
-                    let finished = self
-                        .model
-                        .thread(&id)
-                        .is_some_and(|thread| thread.status == ThreadStatus::Idle);
-                    if finished && open.as_deref() != Some(id.as_str()) {
-                        self.unseen.insert(id);
-                    }
+                if let Event::TurnCompleted { thread_id, .. } = &envelope.event
+                    && open.as_deref() == Some(thread_id.as_str())
+                {
+                    self.held = Some(thread_id.clone());
+                    self.visit(thread_id, cx);
                 }
                 for held in self.open.iter().chain(&self.recent) {
                     held.update(cx, |thread, cx| thread.apply(&envelope.event, cx));
@@ -459,6 +466,15 @@ impl Workspace {
                 }
             }
             Notification::PullRequest(update) => {
+                let finished = |pull_request: Option<&hoshi_core::PullRequest>| {
+                    pull_request.is_some_and(|pull_request| pull_request.state.is_finished())
+                };
+                if finished(update.pull_request.as_ref())
+                    && !finished(self.pull_requests.get(&update.thread_id))
+                    && self.open_thread_id(cx).as_deref() == Some(update.thread_id.as_str())
+                {
+                    self.held = Some(update.thread_id.clone());
+                }
                 match update.pull_request {
                     Some(pull_request) => {
                         self.pull_requests.insert(update.thread_id, pull_request);
@@ -561,13 +577,12 @@ impl Workspace {
         {
             return;
         }
-        let (engine, visited) = (self.engine.clone(), thread_id.to_owned());
-        cx.background_spawn(async move {
-            engine
-                .dispatch(Command::ThreadVisit { thread_id: visited })
-                .ok();
-        })
-        .detach();
+        self.held = self
+            .model
+            .thread(thread_id)
+            .filter(|thread| thread.has_unseen_turn())
+            .map(|thread| thread.id.clone());
+        self.visit(thread_id, cx);
         self.set_queue(self.engine.thread_queue(thread_id));
         let kept = self
             .recent
@@ -586,8 +601,56 @@ impl Workspace {
         self.keep_recent(left, cx);
         self.stream_held(cx);
         self.draft = None;
-        self.unseen.remove(thread_id);
         cx.notify();
+    }
+
+    fn visit(&mut self, thread_id: &str, cx: &mut Context<Self>) {
+        if let Some(thread) = self
+            .model
+            .thread(thread_id)
+            .filter(|thread| thread.has_unseen_turn())
+        {
+            self.visiting
+                .insert(thread.id.clone(), thread.last_turn_ended_at.clone());
+            self.unseen.take();
+        }
+        let (engine, thread_id) = (self.engine.clone(), thread_id.to_owned());
+        cx.background_spawn(async move {
+            engine.dispatch(Command::ThreadVisit { thread_id }).ok();
+        })
+        .detach();
+    }
+
+    /// The listed threads whose latest turn ended after the user last opened them.
+    pub fn unseen(&self) -> Rc<HashSet<String>> {
+        if let Some(unseen) = &*self.unseen.borrow() {
+            return unseen.clone();
+        }
+        let model = &self.model;
+        let unseen: Rc<HashSet<String>> = Rc::new(
+            model
+                .threads()
+                .filter(|thread| {
+                    !thread.archived
+                        && thread
+                            .parent_thread_id
+                            .as_deref()
+                            .is_none_or(|parent| model.thread(parent).is_none())
+                        && thread.has_unseen_turn()
+                        && self.visiting.get(&thread.id) != Some(&thread.last_turn_ended_at)
+                })
+                .map(|thread| thread.id.clone())
+                .collect(),
+        );
+        *self.unseen.borrow_mut() = Some(unseen.clone());
+        unseen
+    }
+
+    /// The open thread, while it stays out of Done until the user leaves it.
+    pub fn held(&self, cx: &App) -> Option<String> {
+        self.held
+            .clone()
+            .filter(|held| self.open_thread_id(cx).as_deref() == Some(held.as_str()))
     }
 
     fn set_queue(&mut self, queue: hoshi_core::ThreadQueue) {
@@ -614,6 +677,7 @@ impl Workspace {
     /// Opens a new thread in `project_id`, or a new chat with `None`, to be created by its
     /// first message.
     pub fn start_draft(&mut self, project_id: Option<String>, cx: &mut Context<Self>) {
+        self.held = None;
         let left = self.open.take();
         self.keep_recent(left, cx);
         self.stream_held(cx);

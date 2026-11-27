@@ -71,7 +71,7 @@ impl Sidebar {
             show_project: view == View::Inbox,
             project_titles,
             pull_requests: workspace.pull_requests.clone(),
-            unseen: workspace.unseen.clone(),
+            unseen: workspace.unseen(),
             waiting: workspace
                 .background
                 .values()

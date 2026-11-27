@@ -255,7 +255,7 @@ fn the_woke_indicator_shows_until_a_visit_or_a_later_turn_and_dismissing_hides_i
 }
 
 #[test]
-fn a_visit_is_kept_only_when_it_hides_the_woke_indicator() {
+fn without_an_unseen_turn_a_visit_is_kept_only_when_it_hides_the_woke_indicator() {
     let visit = Command::ThreadVisit {
         thread_id: "t".into(),
     };
@@ -273,6 +273,77 @@ fn a_visit_is_kept_only_when_it_hides_the_woke_indicator() {
     assert_eq!(thread.last_visited_at.as_deref(), Some(after));
     assert!(!shows_woke(&woken, thread, at(after)));
     assert!(decide(&woken, visit, after).unwrap().is_empty());
+}
+
+#[test]
+fn a_visit_marks_the_turn_that_ended_since_the_last_one_seen() {
+    let visit = Command::ThreadVisit {
+        thread_id: "t".into(),
+    };
+    let ended = "2026-11-15T12:30:00.000Z";
+    let mut model = model(
+        vec![Thread {
+            last_turn_ended_at: Some(ended.into()),
+            ..thread("t")
+        }],
+        Vec::new(),
+    );
+    assert!(model.thread("t").unwrap().has_unseen_turn());
+
+    let after = "2026-11-15T13:00:00.000Z";
+    let events = decide(&model, visit.clone(), after).unwrap();
+    assert_eq!(
+        events,
+        vec![Event::ThreadVisited {
+            thread_id: "t".into(),
+            at: after.into(),
+        }]
+    );
+    for event in &events {
+        model.apply(event);
+    }
+    assert!(!model.thread("t").unwrap().has_unseen_turn());
+    assert!(decide(&model, visit, after).unwrap().is_empty());
+
+    let next_turn = Thread {
+        last_turn_ended_at: Some("2026-11-15T14:00:00.000Z".into()),
+        ..model.thread("t").unwrap().clone()
+    };
+    assert!(next_turn.has_unseen_turn());
+    let seen_in_another_offset = Thread {
+        last_visited_at: Some("2026-11-15T15:00:00.000+01:00".into()),
+        ..next_turn
+    };
+    assert!(!seen_in_another_offset.has_unseen_turn());
+
+    let clock_went_back = "2026-11-15T13:30:00.000Z";
+    let mut model = self::model(vec![next_turn_thread()], Vec::new());
+    let events = decide(&model, visit_command(), clock_went_back).unwrap();
+    assert_eq!(
+        events,
+        vec![Event::ThreadVisited {
+            thread_id: "t".into(),
+            at: "2026-11-15T14:00:00.000Z".into(),
+        }]
+    );
+    for event in &events {
+        model.apply(event);
+    }
+    assert!(!model.thread("t").unwrap().has_unseen_turn());
+}
+
+fn next_turn_thread() -> Thread {
+    Thread {
+        last_turn_ended_at: Some("2026-11-15T14:00:00.000Z".into()),
+        last_visited_at: Some("2026-11-15T13:00:00.000Z".into()),
+        ..thread("t")
+    }
+}
+
+fn visit_command() -> Command {
+    Command::ThreadVisit {
+        thread_id: "t".into(),
+    }
 }
 
 #[test]

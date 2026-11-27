@@ -1804,6 +1804,29 @@ fn a_turn_the_app_cut_short_reads_as_cut_not_as_stopped_by_the_user() {
 }
 
 #[test]
+fn a_turn_the_app_cut_short_is_not_unseen_unless_an_earlier_one_was() {
+    let cut = |earlier_unseen: bool| {
+        let mut model = model_with_thread();
+        run(&mut model, send("m1", "test it")).unwrap();
+        if earlier_unseen {
+            model.threads.get_mut("t").unwrap().last_turn_ended_at =
+                Some("2026-01-01T00:00:00.000Z".into());
+        }
+        let events = close_stale_turn(&model, "t", "m1", NOW);
+        let visited = events
+            .iter()
+            .any(|event| matches!(event, Event::ThreadVisited { at, .. } if at == NOW));
+        for event in &events {
+            model.apply(event);
+        }
+        (visited, model.thread("t").unwrap().has_unseen_turn())
+    };
+
+    assert_eq!(cut(false), (true, false));
+    assert_eq!(cut(true), (false, true));
+}
+
+#[test]
 fn a_rewind_drops_the_questions_it_takes_out_of_the_transcript() {
     let mut model = model_with_thread();
     run(&mut model, send("m1", "test it")).unwrap();

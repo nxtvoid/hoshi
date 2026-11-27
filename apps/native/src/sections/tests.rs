@@ -77,6 +77,7 @@ fn query<'a>(
     project: Option<&'a str>,
     logins: &'a Logins,
     model: &'a ReadModel,
+    unseen: &'a HashSet<String>,
 ) -> Query<'a> {
     Query {
         view,
@@ -87,7 +88,12 @@ fn query<'a>(
         inactive_after: inactive_after(3),
         logins,
         model,
+        seen: Seen { unseen, held: None },
     }
+}
+
+fn left(unseen: &HashSet<String>) -> Seen<'_> {
+    Seen { unseen, held: None }
 }
 
 fn snoozed(id: &str, until: &str) -> Thread {
@@ -145,9 +151,14 @@ fn threads_fall_into_sections_in_order() {
     let sections = sidebar_sections(
         &threads,
         &pull_requests,
-        &query(View::Project, Some("p"), &logins, &ReadModel::default()),
+        &query(
+            View::Project,
+            Some("p"),
+            &logins,
+            &ReadModel::default(),
+            &HashSet::new(),
+        ),
         now(),
-        &HashSet::new(),
     );
 
     assert_eq!(
@@ -183,9 +194,14 @@ fn snoozed_threads_wait_between_inactive_and_done_soonest_first() {
     let sections = sidebar_sections(
         &threads,
         &PullRequests::new(),
-        &query(View::Project, Some("p"), &logins, &ReadModel::default()),
+        &query(
+            View::Project,
+            Some("p"),
+            &logins,
+            &ReadModel::default(),
+            &HashSet::new(),
+        ),
         now(),
-        &HashSet::new(),
     );
 
     assert_eq!(
@@ -211,7 +227,8 @@ fn a_long_snooze_does_not_leave_the_thread_inactive_once_it_wakes() {
             &ReadModel::default(),
             now(),
             inactive_after(3),
-            &Logins::new()
+            &Logins::new(),
+            left(&HashSet::new()),
         ),
         SectionId::Active
     );
@@ -228,9 +245,8 @@ fn the_inbox_leaves_snoozed_threads_out() {
     let sections = sidebar_sections(
         &[working, finished],
         &PullRequests::new(),
-        &query(View::Inbox, None, &logins, &ReadModel::default()),
+        &query(View::Inbox, None, &logins, &ReadModel::default(), &unseen),
         now(),
-        &unseen,
     );
 
     assert!(sections.is_empty());
@@ -265,7 +281,8 @@ fn someone_elses_pull_request_is_one_to_review() {
             &ReadModel::default(),
             now(),
             inactive_after(3),
-            &logins
+            &logins,
+            left(&HashSet::new()),
         ),
         SectionId::Reviewing
     );
@@ -278,9 +295,64 @@ fn someone_elses_pull_request_is_one_to_review() {
             &ReadModel::default(),
             now(),
             inactive_after(3),
-            &Logins::new()
+            &Logins::new(),
+            left(&HashSet::new()),
         ),
         SectionId::Attention
+    );
+}
+
+#[test]
+fn a_finished_pull_request_is_done_once_the_user_saw_its_thread_and_left_it() {
+    let merged = pull_request(PullRequestState::Merged);
+    let section = |thread: &Thread, seen: Seen| {
+        section_of(
+            thread,
+            Some(&merged),
+            &ReadModel::default(),
+            now(),
+            inactive_after(3),
+            &Logins::new(),
+            seen,
+        )
+    };
+    let finished = thread("t", Some("p"));
+    let unseen = HashSet::from(["t".to_owned()]);
+    let nothing = HashSet::new();
+
+    assert_eq!(section(&finished, left(&unseen)), SectionId::Active);
+    assert_eq!(
+        section(
+            &finished,
+            Seen {
+                unseen: &nothing,
+                held: Some("t"),
+            }
+        ),
+        SectionId::Active
+    );
+    assert_eq!(
+        section(
+            &finished,
+            Seen {
+                unseen: &nothing,
+                held: Some("other"),
+            }
+        ),
+        SectionId::Done
+    );
+
+    let mut archived = thread("t", Some("p"));
+    archived.archived = true;
+    assert_eq!(
+        section(
+            &archived,
+            Seen {
+                unseen: &unseen,
+                held: Some("t"),
+            }
+        ),
+        SectionId::Done
     );
 }
 
@@ -331,9 +403,8 @@ fn the_inbox_holds_what_waits_and_what_finished_unseen() {
     let sections = sidebar_sections(
         &[working, error, finished, idle],
         &PullRequests::new(),
-        &query(View::Inbox, None, &logins, &ReadModel::default()),
+        &query(View::Inbox, None, &logins, &ReadModel::default(), &unseen),
         now(),
-        &unseen,
     );
 
     assert_eq!(

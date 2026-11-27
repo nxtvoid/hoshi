@@ -72,7 +72,8 @@ pub enum Command {
     ThreadWake {
         thread_id: String,
     },
-    /// The user opened the thread, which hides its Woke indicator.
+    /// The user opened the thread or watched its turn end, which marks the turn seen and
+    /// hides its Woke indicator.
     ThreadVisit {
         thread_id: String,
     },

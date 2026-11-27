@@ -562,14 +562,22 @@ pub(crate) fn unsnoozed(thread: &Thread, woke_at: Option<&str>) -> Option<Event>
         })
 }
 
-/// A visit, kept only when it hides the Woke indicator: no other visit changes what it shows.
+/// A visit, kept only when it marks a turn seen or hides the Woke indicator: no other visit
+/// changes what the thread shows. It is never earlier than the turn it marks seen, should the
+/// clock have gone back.
 pub(crate) fn visited(model: &ReadModel, thread: &Thread, now: &str) -> Option<Event> {
-    instant(now)
-        .is_some_and(|at| shows_woke(model, thread, at))
-        .then(|| Event::ThreadVisited {
-            thread_id: thread.id.clone(),
-            at: now.to_owned(),
-        })
+    let at = instant(now)?;
+    if !thread.has_unseen_turn() && !shows_woke(model, thread, at) {
+        return None;
+    }
+    let at = match &thread.last_turn_ended_at {
+        Some(ended) if instant(ended).is_some_and(|ended| ended > at) => ended.clone(),
+        _ => now.to_owned(),
+    };
+    Some(Event::ThreadVisited {
+        thread_id: thread.id.clone(),
+        at,
+    })
 }
 
 /// A visit at the time the thread woke, which hides its Woke indicator.

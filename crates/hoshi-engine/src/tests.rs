@@ -1537,6 +1537,10 @@ fn a_turn_left_running_by_a_crash_is_closed_on_startup() {
     let thread = &engine.snapshot().threads[0];
     assert_eq!(thread.status, ThreadStatus::Idle);
     assert_eq!(thread.active_turn_id, None);
+    assert!(!thread.has_unseen_turn());
+    drop(engine);
+    let reopened = Store::open(&database).unwrap().snapshot().unwrap();
+    assert!(!reopened.threads[0].has_unseen_turn());
 }
 
 /// The engine on `database` again, as after a restart, with a fresh fake provider.

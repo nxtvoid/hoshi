@@ -7,7 +7,7 @@ use gpui_kit::{
     MouseButton, ParentElement as _, Point, Render, Styled as _, TestAppContext, VisualTestContext,
     Window, WindowBounds, WindowOptions, div, px, size,
 };
-use hoshi_core::{AccessMode, Command, ThreadWorkspace};
+use hoshi_core::{AccessMode, Command, Event, ThreadWorkspace, TurnOutcome};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,6 +63,11 @@ fn thread(id: &str, title: &str) -> Command {
 }
 
 fn harness(cx: &mut TestAppContext, name: &str) -> Harness {
+    harness_after(cx, name, &[])
+}
+
+/// The harness as after a restart, with `events` recorded while the app was closed.
+fn harness_after(cx: &mut TestAppContext, name: &str, events: &[Event]) -> Harness {
     cx.executor().allow_parking();
     let dir = std::env::temp_dir().join(format!("hoshi-native-{name}-{}", uuid::Uuid::new_v4()));
     let home = dir.join("home");
@@ -79,6 +84,17 @@ fn harness(cx: &mut TestAppContext, name: &str) -> Harness {
         .unwrap();
     engine.dispatch(thread("a", "first")).unwrap();
     engine.dispatch(thread("b", "second")).unwrap();
+    let (engine, notifications) = if events.is_empty() {
+        (engine, notifications)
+    } else {
+        drop(engine);
+        let mut store = hoshi_store::Store::open(&home.join("state.sqlite")).unwrap();
+        store.append(events, "2026-05-10T12:00:00.000Z").unwrap();
+        drop(store);
+        let (notify, notifications) = state::channel();
+        let engine = Arc::new(hoshi_engine::Engine::open(&home, notify).unwrap());
+        (engine, notifications)
+    };
     cx.update(|cx| {
         gpui_kit::init(cx);
         hoshi_ui::DialogLayer::init(cx);
@@ -864,4 +880,227 @@ fn the_custom_snooze_calendar_picks_a_day_ahead(cx: &mut TestAppContext) {
         .unwrap();
     let until = chrono::DateTime::parse_from_rfc3339(&until.unwrap()).unwrap();
     assert_eq!(until, expected);
+}
+
+fn section_of(h: &mut Harness, thread_id: &str) -> Option<SectionId> {
+    h.sidebar.update(&mut h.cx, |sidebar, cx| {
+        sidebar
+            .current_sections(cx)
+            .into_iter()
+            .find(|section| section.threads.iter().any(|thread| thread.id == thread_id))
+            .map(|section| section.id)
+    })
+}
+
+fn open_thread(h: &mut Harness, thread_id: &str) {
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        workspace.open_thread(thread_id, cx)
+    });
+    redraw(&mut h.cx);
+}
+
+fn turn_end(thread_id: &str) -> Event {
+    Event::TurnCompleted {
+        thread_id: thread_id.into(),
+        turn_id: "turn-1".into(),
+        outcome: TurnOutcome::Completed,
+        at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+fn merge(h: &mut Harness, thread_ids: &[&str]) {
+    let merged: hoshi_core::PullRequest = serde_json::from_value(serde_json::json!({
+        "forge": "github",
+        "number": 12,
+        "title": "Add the rail",
+        "url": "https://example.com/pr/12",
+        "author": "nxtvoid",
+        "headBranch": "rail",
+        "baseBranch": "main",
+        "state": "merged",
+        "unresolvedComments": 0,
+        "openTasks": 0,
+        "changesRequested": false,
+        "conflicts": false,
+        "additions": 0,
+        "deletions": 0,
+        "updatedAt": "2026-05-10T12:00:00.000Z",
+    }))
+    .unwrap();
+    h.workspace.update(&mut h.cx, |workspace, cx| {
+        for thread_id in thread_ids {
+            workspace
+                .pull_requests
+                .insert((*thread_id).into(), merged.clone());
+        }
+        cx.notify();
+    });
+    redraw(&mut h.cx);
+}
+
+fn unseen(h: &mut Harness, thread_id: &str) -> bool {
+    h.workspace
+        .read_with(&h.cx, |workspace, _| workspace.unseen().contains(thread_id))
+}
+
+fn visited(h: &mut Harness, thread_id: &str) -> bool {
+    h.workspace.read_with(&h.cx, |workspace, _| {
+        workspace
+            .model
+            .thread(thread_id)
+            .is_some_and(|thread| !thread.has_unseen_turn())
+    })
+}
+
+#[gpui_kit::test]
+fn a_merged_thread_left_unseen_moves_to_done_once_seen_and_left_after_a_restart(
+    cx: &mut TestAppContext,
+) {
+    let mut h = harness_after(cx, "sidebar-merged-unseen", &[turn_end("a")]);
+    assert!(unseen(&mut h, "a"));
+    open_thread(&mut h, "b");
+    merge(&mut h, &["a"]);
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Active));
+
+    open_thread(&mut h, "a");
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Active));
+
+    h.workspace
+        .update(&mut h.cx, |workspace, cx| workspace.open_thread("b", cx));
+    assert!(!unseen(&mut h, "a"));
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Done));
+    wait_for(&mut h, "the visit", |h| visited(h, "a"));
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Done));
+}
+
+#[gpui_kit::test]
+fn opening_a_done_thread_keeps_it_in_done_and_steps_walk_through_them_all(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "sidebar-done-steps");
+    add_threads(&mut h, 1);
+    merge(&mut h, &["a", "b", "x0"]);
+    h.sidebar.update(&mut h.cx, |sidebar, cx| {
+        sidebar.prefs.collapsed.remove(&SectionId::Done);
+        cx.notify();
+    });
+    open_thread(&mut h, "a");
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Done));
+
+    let mut opened = std::collections::HashSet::new();
+    for _ in 0..3 {
+        h.cx.simulate_keystrokes("alt-down");
+        redraw(&mut h.cx);
+        let open = h
+            .workspace
+            .read_with(&h.cx, |workspace, cx| workspace.open_thread_id(cx))
+            .unwrap();
+        assert_eq!(section_of(&mut h, &open), Some(SectionId::Done), "{open}");
+        opened.insert(open);
+    }
+    assert_eq!(opened.len(), 3, "{opened:?}");
+}
+
+struct Answers;
+
+struct Answered;
+
+impl hoshi_providers::RunningTurn for Answered {
+    fn interrupt(&self) {}
+
+    fn respond(&self, _request_id: &str, _response: &hoshi_core::RequestResponse) {}
+}
+
+impl hoshi_providers::ProviderAdapter for Answers {
+    fn provider(&self) -> &'static str {
+        hoshi_core::DEFAULT_PROVIDER
+    }
+
+    fn models(&self) -> hoshi_core::ProviderModels {
+        hoshi_core::ProviderModels::default()
+    }
+
+    fn start_turn(
+        &self,
+        _request: hoshi_providers::TurnRequest,
+        mut sink: hoshi_providers::OutputSink,
+    ) -> Result<Box<dyn hoshi_providers::RunningTurn>, hoshi_core::TurnFailure> {
+        std::thread::spawn(move || {
+            sink(hoshi_core::ProviderOutput::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+            })
+        });
+        Ok(Box::new(Answered))
+    }
+}
+
+#[gpui_kit::test]
+fn a_turn_that_ends_on_screen_is_seen_and_its_merged_thread_is_done_once_left(
+    cx: &mut TestAppContext,
+) {
+    let mut h = harness(cx, "sidebar-turn-on-screen");
+    let engine = h
+        .workspace
+        .read_with(&h.cx, |workspace, _| workspace.engine.clone());
+    engine.set_adapters(vec![Arc::new(Answers)]);
+    open_thread(&mut h, "a");
+    merge(&mut h, &["a"]);
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Done));
+
+    engine
+        .dispatch(Command::MessageSend {
+            thread_id: "a".into(),
+            message_id: "m1".into(),
+            text: "Read the file".into(),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+    wait_for(&mut h, "the turn to end and be seen", |h| {
+        h.workspace.read_with(&h.cx, |workspace, _| {
+            workspace.model.thread("a").is_some_and(|thread| {
+                thread.last_turn_ended_at.is_some()
+                    && thread.status == hoshi_core::ThreadStatus::Idle
+                    && !thread.has_unseen_turn()
+            })
+        })
+    });
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Active));
+    assert!(!unseen(&mut h, "a"));
+    h.sidebar.update(&mut h.cx, |sidebar, cx| {
+        sidebar.set_view(crate::sections::View::Inbox, cx)
+    });
+    redraw(&mut h.cx);
+    let inbox = h
+        .sidebar
+        .update(&mut h.cx, |sidebar, cx| sidebar.current_sections(cx));
+    assert_eq!(crate::sections::inbox_count(&inbox), 0);
+    h.sidebar.update(&mut h.cx, |sidebar, cx| {
+        sidebar.set_view(crate::sections::View::Project, cx)
+    });
+
+    open_thread(&mut h, "b");
+    assert!(!unseen(&mut h, "a"));
+    assert_eq!(section_of(&mut h, "a"), Some(SectionId::Done));
+}
+
+#[gpui_kit::test]
+fn an_archived_thread_is_not_unseen(cx: &mut TestAppContext) {
+    let mut h = harness_after(cx, "sidebar-archived-unseen", &[turn_end("a")]);
+    assert!(unseen(&mut h, "a"));
+    let engine = h
+        .workspace
+        .read_with(&h.cx, |workspace, _| workspace.engine.clone());
+    engine
+        .dispatch(Command::ThreadArchive {
+            thread_id: "a".into(),
+            archived: true,
+        })
+        .unwrap();
+    wait_for(&mut h, "the archive", |h| {
+        h.workspace.read_with(&h.cx, |workspace, _| {
+            workspace
+                .model
+                .thread("a")
+                .is_some_and(|thread| thread.archived)
+        })
+    });
+    assert!(!unseen(&mut h, "a"));
 }
