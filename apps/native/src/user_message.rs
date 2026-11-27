@@ -11,12 +11,51 @@ use gpui_kit::*;
 use hoshi_core::MessageAttachment;
 use hoshi_ui::assets::IconName;
 use hoshi_ui::prelude::{ActiveTheme as _, MessageBubble, PressSelectsNothing as _};
+use std::collections::HashMap;
 
 const IMAGE_TILE: Pixels = px(96.);
 /// How tall a long message shows until it is opened.
 const COLLAPSED_HEIGHT: Pixels = px(320.);
 /// A message only this much taller than the collapsed height shows whole.
 const COLLAPSE_SLACK: Pixels = px(48.);
+
+/// Whether a message measured long and whether the user opened it.
+#[derive(Clone, Copy, Default, PartialEq)]
+struct Collapse {
+    long: bool,
+    open: bool,
+}
+
+/// The [`Collapse`] of each long message by its id, kept while its row is out of the
+/// transcript's list.
+#[derive(Default)]
+struct Collapses(HashMap<SharedString, Collapse>);
+
+impl Global for Collapses {}
+
+fn collapse_of(id: &SharedString, cx: &App) -> Collapse {
+    cx.try_global::<Collapses>()
+        .and_then(|collapses| collapses.0.get(id))
+        .copied()
+        .unwrap_or_default()
+}
+
+fn change_collapse(
+    id: SharedString,
+    view: EntityId,
+    change: impl FnOnce(&mut Collapse),
+    cx: &mut App,
+) {
+    let mut collapse = collapse_of(&id, cx);
+    change(&mut collapse);
+    let collapses = &mut cx.default_global::<Collapses>().0;
+    if collapse == Collapse::default() {
+        collapses.remove(&id);
+    } else {
+        collapses.insert(id, collapse);
+    }
+    cx.notify(view);
+}
 
 /// A long message cut to its first lines, faded, with a button that shows it whole.
 #[derive(IntoElement)]
@@ -28,31 +67,18 @@ struct Collapsible {
 impl RenderOnce for Collapsible {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let colors = cx.hoshi().clone();
-        let overflows = window.use_keyed_state(
-            SharedString::from(format!("{}-overflows", self.id)),
-            cx,
-            |_, _| false,
-        );
-        let expanded = window.use_keyed_state(
-            SharedString::from(format!("{}-expanded", self.id)),
-            cx,
-            |_, _| false,
-        );
-        let long = *overflows.read(cx);
-        let open = *expanded.read(cx);
+        let view = window.current_view();
+        let Collapse { long, open } = collapse_of(&self.id, cx);
         let collapsed = long && !open;
-        let measured = overflows.clone();
+        let measured = self.id.clone();
         let content = div().relative().child(self.content).child(
             canvas(
                 move |bounds, _, cx| {
                     let long = bounds.size.height > COLLAPSED_HEIGHT + COLLAPSE_SLACK;
-                    if *measured.read(cx) != long {
-                        let measured = measured.clone();
+                    if collapse_of(&measured, cx).long != long {
+                        let id = measured.clone();
                         cx.defer(move |cx| {
-                            measured.update(cx, |overflows, cx| {
-                                *overflows = long;
-                                cx.notify();
-                            });
+                            change_collapse(id, view, |collapse| collapse.long = long, cx);
                         });
                     }
                 },
@@ -74,6 +100,10 @@ impl RenderOnce for Collapsible {
                     .relative()
                     .when(collapsed, |clip| {
                         clip.max_h(COLLAPSED_HEIGHT).overflow_hidden()
+                    })
+                    .when(!long, |clip| {
+                        clip.max_h(COLLAPSED_HEIGHT + COLLAPSE_SLACK)
+                            .overflow_hidden()
                     })
                     .child(content)
                     .when(collapsed, |clip| {
@@ -118,11 +148,16 @@ impl RenderOnce for Collapsible {
                             m::message_show_full()
                         })
                         .press_selects_nothing()
-                        .on_click(move |_, _, cx| {
-                            expanded.update(cx, |expanded, cx| {
-                                *expanded = !*expanded;
-                                cx.notify();
-                            });
+                        .on_click({
+                            let id = self.id.clone();
+                            move |_, _, cx| {
+                                change_collapse(
+                                    id.clone(),
+                                    view,
+                                    |collapse| collapse.open = !collapse.open,
+                                    cx,
+                                );
+                            }
                         }),
                 )
             })
@@ -328,7 +363,7 @@ mod tests {
     use gpui_kit::component::theme::ThemeMode;
     use gpui_kit::{
         AnyView, AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers,
-        ParentElement as _, Point, Render, StyleRefinement, Styled as _, TestAppContext,
+        ParentElement as _, Pixels, Point, Render, StyleRefinement, Styled as _, TestAppContext,
         VisualTestContext, Window, WindowBounds, WindowOptions, div, px, size,
     };
     use hoshi_core::MessageAttachment;
@@ -351,10 +386,14 @@ mod tests {
 
     struct Message {
         lines: usize,
+        shown: bool,
     }
 
     impl Render for Message {
         fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if !self.shown {
+                return div().size_full();
+            }
             let text = "A long question.\n\n".repeat(self.lines);
             div().size_full().child(super::user_message(
                 "u1",
@@ -379,8 +418,7 @@ mod tests {
         }
     }
 
-    #[gpui_kit::test]
-    fn a_long_message_collapses_inside_a_cached_view(cx: &mut TestAppContext) {
+    fn open_message(cx: &mut TestAppContext) -> (VisualTestContext, Entity<Message>) {
         cx.update(|cx| {
             gpui_kit::init(cx);
             hoshi_ui::theme::apply(ThemeMode::Dark, cx);
@@ -395,44 +433,99 @@ mod tests {
             };
             let mut shown = None;
             let (window, _) = gpui_kit::open_window(options, cx, |_, cx| {
-                let message = cx.new(|_| Message { lines: 1 });
+                let message = cx.new(|_| Message {
+                    lines: 1,
+                    shown: true,
+                });
                 shown = Some(message.clone());
                 cx.new(|_| Cached(message))
             })
             .unwrap();
             (window, shown.unwrap())
         });
-        let mut cx = VisualTestContext::from_window(window, cx);
-        let redraw = |cx: &mut VisualTestContext| {
+        (VisualTestContext::from_window(window, cx), message)
+    }
+
+    fn redraw(cx: &mut VisualTestContext) {
+        cx.run_until_parked();
+        for _ in 0..3 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
             cx.run_until_parked();
-            for _ in 0..3 {
-                cx.update(|window, cx| window.draw(cx).clear(cx));
-                cx.run_until_parked();
-            }
-        };
+        }
+    }
+
+    fn height(cx: &mut VisualTestContext) -> Pixels {
+        cx.debug_bounds("collapse-u1")
+            .expect("the bubble shows")
+            .size
+            .height
+    }
+
+    fn click_toggle(cx: &mut VisualTestContext) {
+        let toggle = cx
+            .debug_bounds("collapse-u1-toggle")
+            .expect("the show full button shows")
+            .center();
+        cx.simulate_click(toggle, Modifiers::none());
+        redraw(cx);
+    }
+
+    fn set_shown(message: &Entity<Message>, shown: bool, cx: &mut VisualTestContext) {
+        message.update(cx, |message, cx| {
+            message.shown = shown;
+            cx.notify();
+        });
+    }
+
+    #[gpui_kit::test]
+    fn a_long_message_collapses_inside_a_cached_view(cx: &mut TestAppContext) {
+        let (mut cx, message) = open_message(cx);
         redraw(&mut cx);
         message.update(&mut cx, |message, cx| {
             message.lines = 40;
             cx.notify();
         });
         redraw(&mut cx);
-        let height = |cx: &mut VisualTestContext| {
-            cx.debug_bounds("collapse-u1")
-                .expect("the bubble shows")
-                .size
-                .height
-        };
         let collapsed = height(&mut cx);
         assert!(
             collapsed > super::COLLAPSED_HEIGHT && collapsed < px(500.),
             "{collapsed:?}"
         );
-        let toggle = cx
-            .debug_bounds("collapse-u1-toggle")
-            .expect("the show full button shows")
-            .center();
-        cx.simulate_click(toggle, Modifiers::none());
-        redraw(&mut cx);
+        click_toggle(&mut cx);
         assert!(height(&mut cx) > px(1000.), "the whole message shows");
+    }
+
+    #[gpui_kit::test]
+    fn a_long_message_stays_collapsed_or_open_when_it_comes_back_into_view(
+        cx: &mut TestAppContext,
+    ) {
+        let (mut cx, message) = open_message(cx);
+        message.update(&mut cx, |message, cx| {
+            message.lines = 40;
+            cx.notify();
+        });
+        redraw(&mut cx);
+        let collapsed = height(&mut cx);
+
+        set_shown(&message, false, &mut cx);
+        redraw(&mut cx);
+        set_shown(&message, true, &mut cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            height(&mut cx),
+            collapsed,
+            "back collapsed in its first frame"
+        );
+
+        redraw(&mut cx);
+        click_toggle(&mut cx);
+        set_shown(&message, false, &mut cx);
+        redraw(&mut cx);
+        set_shown(&message, true, &mut cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            height(&mut cx) > px(1000.),
+            "still open after leaving the view"
+        );
     }
 }
