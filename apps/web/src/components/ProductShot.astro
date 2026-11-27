@@ -1,0 +1,47 @@
+---
+import { getImage } from 'astro:assets'
+import heroDark from '../assets/hero-dark.png'
+import heroLight from '../assets/hero-light.png'
+
+const widths = [960, heroDark.width]
+const sizes = '(min-width: 64rem) 1400px, 960px'
+
+async function sources(src: ImageMetadata) {
+  const images = await Promise.all(
+    widths.map((width) => getImage({ src, width, format: 'webp' }))
+  )
+  return images.map((image, i) => `${image.src} ${widths[i]}w`).join(', ')
+}
+
+const darkSrcset = await sources(heroDark)
+const lightSrcset = await sources(heroLight)
+const fallback = await getImage({ src: heroDark, width: 960, format: 'webp' })
+---
+
+<figure
+  class="relative h-[440px] overflow-hidden border-y bg-header sm:h-[560px] lg:col-start-2 lg:row-span-3 lg:row-start-1 lg:h-auto lg:border-y-0 lg:border-l"
+>
+  <picture>
+    <source
+      media="(prefers-color-scheme: dark)"
+      srcset={darkSrcset}
+      sizes={sizes}
+      type="image/webp"
+    />
+    <source
+      media="(prefers-color-scheme: light)"
+      srcset={lightSrcset}
+      sizes={sizes}
+      type="image/webp"
+    />
+    <img
+      src={fallback.src}
+      width={heroDark.width}
+      height={heroDark.height}
+      alt="hoshi with a finished Claude Code thread on its own worktree, next to the diff of the files it changed"
+      class="absolute top-8 left-6 w-[960px] max-w-none rounded-tl-xl border shadow-[0_24px_64px_-24px_var(--shadow)] sm:top-12 sm:left-12 lg:top-24 lg:left-16 lg:w-[1400px]"
+      fetchpriority="high"
+      decoding="async"
+    />
+  </picture>
+</figure>
