@@ -70,8 +70,8 @@ pub struct Thread {
     /// When the user last woke it from a snooze, by hand or by pinning it.
     #[serde(default)]
     pub last_snooze_wake_at: Option<String>,
-    /// When the user last opened it while it showed it woke from a snooze; nothing else
-    /// records visits.
+    /// When the user last opened it while it had something they hadn't seen: a turn that
+    /// ended since their last visit, or a wake from a snooze.
     #[serde(default)]
     pub last_visited_at: Option<String>,
     /// When its latest turn ended, however it ended.
@@ -95,6 +95,20 @@ pub struct Thread {
     pub created_at: String,
     /// RFC 3339 timestamp of the last activity.
     pub updated_at: String,
+}
+
+impl Thread {
+    /// Its latest turn ended after the user last opened it.
+    pub fn has_unseen_turn(&self) -> bool {
+        let instant = |at: &Option<String>| {
+            at.as_deref()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        };
+        let Some(ended) = instant(&self.last_turn_ended_at) else {
+            return false;
+        };
+        instant(&self.last_visited_at).is_none_or(|visited| ended > visited)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

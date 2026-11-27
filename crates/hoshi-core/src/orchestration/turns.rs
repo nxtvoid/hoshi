@@ -1,7 +1,8 @@
 use super::*;
 
 /// Closes a turn the app's close cut short. Its questions stay open: the agent that asked
-/// is gone, so the user's answers go to the thread as a message.
+/// is gone, so the user's answers go to the thread as a message. The cut doesn't count as a
+/// turn the user hasn't seen, unless one already was.
 pub fn close_stale_turn(
     model: &ReadModel,
     thread_id: &str,
@@ -15,7 +16,11 @@ pub fn close_stale_turn(
         .map(|item| item.id.as_str())
         .collect();
     let outcome = TurnOutcome::Interrupted;
-    record_output(
+    let seen = model
+        .threads
+        .get(thread_id)
+        .is_some_and(|thread| !thread.has_unseen_turn());
+    let mut events: Vec<Event> = record_output(
         model,
         thread_id,
         turn_id,
@@ -39,7 +44,14 @@ pub fn close_stale_turn(
         },
         event => event,
     })
-    .collect()
+    .collect();
+    if seen {
+        events.push(Event::ThreadVisited {
+            thread_id: thread_id.to_owned(),
+            at: now.to_owned(),
+        });
+    }
+    events
 }
 
 /// Whether hoshi may go on with the thread's conversation by itself, as after a restart or

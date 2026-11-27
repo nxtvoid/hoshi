@@ -6,7 +6,7 @@ use crate::HoshiWindow;
 use crate::state::{self, Workspace};
 use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::{
-    AppContext as _, Bounds, Entity, Modifiers, Point, ScrollDelta, ScrollEvent, TestAppContext,
+    AppContext as _, Bounds, Modifiers, Point, ScrollDelta, ScrollEvent, TestAppContext,
     VisualTestContext, WindowBounds, WindowOptions, point, px, size,
 };
 use hoshi_core::{
@@ -22,7 +22,6 @@ const NOW: &str = "2026-11-19T10:00:00Z";
 
 struct Harness {
     cx: VisualTestContext,
-    workspace: Entity<Workspace>,
     notify: Notify,
 }
 
@@ -199,11 +198,7 @@ fn harness_with(cx: &mut TestAppContext, threads: usize, items: Vec<ThreadItem>)
         redraw(&mut cx);
         std::thread::sleep(Duration::from_millis(20));
     }
-    Harness {
-        cx,
-        workspace,
-        notify,
-    }
+    Harness { cx, notify }
 }
 
 fn threads() -> usize {
@@ -246,11 +241,15 @@ fn perf_idle_window(cx: &mut TestAppContext) {
 #[ignore]
 fn perf_idle_window_with_an_unseen_thread(cx: &mut TestAppContext) {
     let mut h = harness(cx, threads());
-    h.workspace.update(&mut h.cx, |workspace, cx| {
-        workspace.unseen.insert("x0".into());
-        cx.notify();
-    });
-    redraw(&mut h.cx);
+    send(
+        &mut h,
+        Event::TurnCompleted {
+            thread_id: "x0".into(),
+            turn_id: "turn-1".into(),
+            outcome: hoshi_core::TurnOutcome::Completed,
+            at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
     animation_frames(&mut h, "unseen thread");
     timed_frames(&mut h, "unseen thread");
 }

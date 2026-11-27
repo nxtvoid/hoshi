@@ -167,6 +167,8 @@ impl Sidebar {
         let search = self.search.read(cx).value().to_string();
         let workspace = self.workspace.read(cx);
         let threads: Vec<Thread> = workspace.listed_threads();
+        let held = workspace.held(cx);
+        let unseen = workspace.unseen();
         sidebar_sections(
             &threads,
             &workspace.pull_requests,
@@ -181,9 +183,12 @@ impl Sidebar {
                 ),
                 logins: &workspace.logins,
                 model: &workspace.model,
+                seen: Seen {
+                    unseen: &unseen,
+                    held: held.as_deref(),
+                },
             },
             Utc::now(),
-            &workspace.unseen,
         )
     }
 
@@ -191,12 +196,17 @@ impl Sidebar {
         let order: Vec<String> = if attention {
             let workspace = self.workspace.read(cx);
             let threads: Vec<Thread> = workspace.listed_threads();
+            let held = workspace.held(cx);
+            let unseen = workspace.unseen();
             inbox_sections(
                 sections::with_delegated_work(&threads),
                 &workspace.pull_requests,
                 &workspace.model,
                 Utc::now(),
-                &workspace.unseen,
+                Seen {
+                    unseen: &unseen,
+                    held: held.as_deref(),
+                },
                 &workspace.logins,
             )
             .into_iter()

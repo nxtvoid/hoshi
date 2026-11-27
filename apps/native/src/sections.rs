@@ -86,6 +86,22 @@ pub struct Query<'a> {
     pub logins: &'a Logins,
     /// What snoozed threads wake for.
     pub model: &'a ReadModel,
+    pub seen: Seen<'a>,
+}
+
+/// The threads the user hasn't left yet: those whose turn ended while they looked elsewhere,
+/// and the one on screen while something new on it keeps it out of Done.
+#[derive(Clone, Copy, Debug)]
+pub struct Seen<'a> {
+    pub unseen: &'a HashSet<String>,
+    pub held: Option<&'a str>,
+}
+
+impl Seen<'_> {
+    /// The user saw the thread and moved on to another.
+    pub fn left(&self, thread_id: &str) -> bool {
+        !self.unseen.contains(thread_id) && self.held != Some(thread_id)
+    }
 }
 
 /// Idle threads untouched for this many days stop counting as active.
@@ -143,6 +159,7 @@ pub fn section_of(
     now: DateTime<Utc>,
     inactive_after: Duration,
     logins: &Logins,
+    seen: Seen,
 ) -> SectionId {
     if thread.archived {
         return SectionId::Done;
@@ -164,13 +181,16 @@ pub fn section_of(
             return SectionId::Attention;
         }
         if pull_request.state.is_finished() {
-            return SectionId::Done;
-        }
-        return if theirs {
-            SectionId::Reviewing
+            if seen.left(&thread.id) {
+                return SectionId::Done;
+            }
         } else {
-            SectionId::Review
-        };
+            return if theirs {
+                SectionId::Reviewing
+            } else {
+                SectionId::Review
+            };
+        }
     }
     let idle = active_since(thread, now).map_or_else(Duration::zero, |since| now - since);
     if idle > inactive_after {
@@ -188,6 +208,7 @@ fn group(
     now: DateTime<Utc>,
     inactive_after: Duration,
     logins: &Logins,
+    seen: Seen,
 ) -> Vec<Section> {
     let mut by_section: HashMap<SectionId, Vec<Thread>> = HashMap::new();
     for thread in threads {
@@ -198,6 +219,7 @@ fn group(
             now,
             inactive_after,
             logins,
+            seen,
         );
         by_section.entry(id).or_default().push(thread);
     }
@@ -335,7 +357,6 @@ pub fn sidebar_sections(
     pull_requests: &PullRequests,
     query: &Query,
     now: DateTime<Utc>,
-    unseen: &HashSet<String>,
 ) -> Vec<Section> {
     let mut visible: Vec<Thread> = with_delegated_work(threads)
         .into_iter()
@@ -356,7 +377,7 @@ pub fn sidebar_sections(
             pull_requests,
             query.model,
             now,
-            unseen,
+            query.seen,
             query.logins,
         )
     } else {
@@ -367,6 +388,7 @@ pub fn sidebar_sections(
             now,
             query.inactive_after,
             query.logins,
+            query.seen,
         )
     }
 }
@@ -379,11 +401,11 @@ pub fn inbox_sections(
     pull_requests: &PullRequests,
     model: &ReadModel,
     now: DateTime<Utc>,
-    unseen: &HashSet<String>,
+    seen: Seen,
     logins: &Logins,
 ) -> Vec<Section> {
     let (completed, rest): (Vec<Thread>, Vec<Thread>) = threads.into_iter().partition(|thread| {
-        unseen.contains(&thread.id)
+        seen.unseen.contains(&thread.id)
             && thread.status == ThreadStatus::Idle
             && !thread.archived
             && !is_snoozed(model, thread, now)
@@ -406,6 +428,7 @@ pub fn inbox_sections(
         now,
         inactive_after(0),
         logins,
+        seen,
     )
     .into_iter()
     .filter(|section| INBOX_SECTIONS.contains(&section.id))

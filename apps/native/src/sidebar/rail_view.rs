@@ -57,13 +57,17 @@ impl Sidebar {
         if projects.is_empty() && !has_chats {
             return div().into_any_element();
         }
-        let unseen = workspace.unseen.clone();
+        let unseen = workspace.unseen();
+        let held = workspace.held(cx);
         let inbox = inbox_sections(
             sections::with_delegated_work(&threads),
             &workspace.pull_requests,
             &workspace.model,
             Utc::now(),
-            &unseen,
+            Seen {
+                unseen: &unseen,
+                held: held.as_deref(),
+            },
             &workspace.logins,
         );
         let inbox_count = sections::inbox_count(&inbox);

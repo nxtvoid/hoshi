@@ -690,6 +690,93 @@ fn a_snooze_its_visits_and_its_wake_survive_a_restart() {
     );
 }
 
+#[test]
+fn a_turn_left_unseen_stays_unseen_after_a_restart_until_a_visit() {
+    let (mut store, mut model) = store_with_thread();
+    let ended = "2026-11-07T13:00:00.000Z";
+    let turn_end = Event::TurnCompleted {
+        thread_id: "t".into(),
+        turn_id: "turn-1".into(),
+        outcome: hoshi_core::TurnOutcome::Completed,
+        at: ended.into(),
+    };
+    store
+        .append(std::slice::from_ref(&turn_end), ended)
+        .unwrap();
+    model.apply(&turn_end);
+
+    let reloaded = ReadModel::from_snapshot(&store.snapshot().unwrap());
+    assert!(reloaded.thread("t").unwrap().has_unseen_turn());
+
+    let visited = "2026-11-07T14:00:00.000Z";
+    let visit = Command::ThreadVisit {
+        thread_id: "t".into(),
+    };
+    let events = decide(&model, visit, visited).unwrap();
+    store.append(&events, visited).unwrap();
+
+    let reloaded = ReadModel::from_snapshot(&store.snapshot().unwrap());
+    let thread = reloaded.thread("t").unwrap();
+    assert_eq!(thread.last_visited_at.as_deref(), Some(visited));
+    assert!(!thread.has_unseen_turn());
+}
+
+#[test]
+fn turns_that_ended_before_visits_were_kept_count_as_seen() {
+    let mut conn = Connection::open_in_memory().unwrap();
+    let tx = conn.transaction().unwrap();
+    for migration in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+        tx.execute_batch(migration).unwrap();
+    }
+    for (id, visited, ended) in [
+        ("never", None, Some("2026-11-07T13:00:00.000Z")),
+        (
+            "before",
+            Some("2026-11-07T11:00:00.000Z"),
+            Some("2026-11-07T13:00:00.000Z"),
+        ),
+        (
+            "after",
+            Some("2026-11-07T15:00:00.000Z"),
+            Some("2026-11-07T13:00:00.000Z"),
+        ),
+        ("idle", None, None),
+    ] {
+        tx.execute(
+            "INSERT INTO threads (id, project_id, title, status, created_at, updated_at,
+                 last_visited_at, last_turn_ended_at)
+                 VALUES (?1, 'p', 'old', 'idle', ?2, ?2, ?3, ?4)",
+            rusqlite::params![id, NOW, visited, ended],
+        )
+        .unwrap();
+    }
+    tx.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 1)
+        .unwrap();
+    tx.commit().unwrap();
+
+    let store = Store::init(conn).unwrap();
+
+    let threads = store.snapshot().unwrap().threads;
+    let visited = |id: &str| {
+        let thread = threads.iter().find(|thread| thread.id == id).unwrap();
+        assert!(!thread.has_unseen_turn(), "{id}");
+        thread.last_visited_at.clone()
+    };
+    assert_eq!(
+        visited("never").as_deref(),
+        Some("2026-11-07T13:00:00.000Z")
+    );
+    assert_eq!(
+        visited("before").as_deref(),
+        Some("2026-11-07T13:00:00.000Z")
+    );
+    assert_eq!(
+        visited("after").as_deref(),
+        Some("2026-11-07T15:00:00.000Z")
+    );
+    assert_eq!(visited("idle"), None);
+}
+
 fn send_text(message_id: &str) -> Command {
     Command::MessageSend {
         thread_id: "t".into(),

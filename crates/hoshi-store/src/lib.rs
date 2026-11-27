@@ -258,6 +258,11 @@ const MIGRATIONS: &[&str] = &[
     r"
     ALTER TABLE threads ADD COLUMN last_turn_model TEXT;
     ",
+    r"
+    UPDATE threads SET last_visited_at = last_turn_ended_at
+    WHERE last_turn_ended_at IS NOT NULL
+      AND (last_visited_at IS NULL OR julianday(last_visited_at) < julianday(last_turn_ended_at));
+    ",
 ];
 
 const JOURNAL_SIZE_LIMIT: i64 = 8 * 1024 * 1024;

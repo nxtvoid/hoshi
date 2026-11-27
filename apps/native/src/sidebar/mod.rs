@@ -18,8 +18,8 @@ use crate::drafts;
 use crate::m;
 use crate::palette;
 use crate::sections::{
-    self, Filter, Query, Section, SectionId, Signal, Sort, View, inbox_sections, project_signal,
-    relative_time, sidebar_sections,
+    self, Filter, Query, Section, SectionId, Seen, Signal, Sort, View, inbox_sections,
+    project_signal, relative_time, sidebar_sections,
 };
 use crate::state::Workspace;
 use crate::updates::UpdatesButton;
@@ -374,7 +374,7 @@ struct RowContext {
     show_project: bool,
     project_titles: HashMap<String, String>,
     pull_requests: HashMap<String, PullRequest>,
-    unseen: HashSet<String>,
+    unseen: std::rc::Rc<HashSet<String>>,
     /// Threads whose turn only waits for commands left running in the background.
     waiting: HashSet<String>,
     /// The branch each project's root is on.

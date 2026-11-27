@@ -80,6 +80,8 @@ pub enum Event {
         thread_id: String,
         woke_at: Option<String>,
     },
+    /// The user opened the thread or watched its turn end, which marks the turn seen and
+    /// hides its Woke indicator.
     ThreadVisited {
         thread_id: String,
         at: String,
