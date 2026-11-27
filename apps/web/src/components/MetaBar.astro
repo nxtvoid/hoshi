@@ -1,0 +1,45 @@
+---
+import type { Release } from '../lib/release'
+import { discussionsUrl, releasesUrl, repositoryUrl } from '../lib/release'
+
+type Props = {
+  release: Release
+}
+
+const { release } = Astro.props
+
+const link =
+  'rounded-sm transition-colors duration-150 ease-out hover:text-foreground'
+---
+
+<footer
+  class="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 px-6 py-6 text-xs leading-5 text-muted-foreground sm:px-12 lg:col-start-1 lg:row-start-3"
+>
+  <p>
+    <span data-release-meta hidden={!release.version}
+      ><a
+        href={release.notesUrl}
+        data-release-notes
+        class:list={[link, 'font-mono tabular-nums']}
+        ><span data-release-version>v{release.version}</span></a
+      >{' · '}</span
+    ><a
+      href={release.downloads.linux}
+      data-download="linux"
+      data-for-platform="windows"
+      class={link}>Debian and Ubuntu</a
+    ><a
+      href={release.downloads.windows}
+      data-download="windows"
+      data-for-platform="linux"
+      class={link}
+      hidden>Windows</a
+    >{' · '}<a href={releasesUrl} class={link}>All releases</a>
+  </p>
+  <p>
+    <a href={discussionsUrl} class={link}>Discussions</a>{' · '}<a
+      href={`${repositoryUrl}/blob/main/LICENSE`}
+      class={link}>MIT license</a
+    >
+  </p>
+</footer>

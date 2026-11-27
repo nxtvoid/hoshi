@@ -5,6 +5,7 @@
 - `apps/native` - The app, drawn natively with GPUI (`gpui-kit`). Renders state; holds no business logic. Its binary is `hoshi`; its installers are configured under `[package.metadata.packager]` in its `Cargo.toml`.
   - `messages/en.json`, `messages/es.json` - UI text, turned by `build.rs` into one `m::<key>()` function per message that picks the locale shown (`src/locale.rs`).
   - `icons`, `linux` - App icons (release and `dev`) and the Linux desktop entry and metainfo the `.deb` installs.
+- `apps/web` - The marketing site: Astro and Tailwind CSS v4, static, English only. Its colors are tokens copied from `crates/hoshi-ui/assets/globals.css`; its download links point at the latest GitHub release of `nxtvoid/hoshi`. Separate Bun project with its own lockfile.
 - `crates/hoshi-ui` - Reusable native components and the theme (`assets/globals.css`, read by `theme.rs`). Components here know nothing about the app: no engine, no `hoshi-core` types, no stores; text and state come in from the caller.
 - `crates/hoshi-app` - The home folder, settings and engine start.
 - `crates/hoshi-core` - Domain model and orchestrator. Pure: commands in, events out. No I/O.
@@ -25,6 +26,7 @@ Everything hoshi writes lives in one folder, its home: `~/.hoshi`, or `~/.hoshi-
 - `bun i` installs the JS tools: Biome, and the Tauri CLI the release workflow signs installers with. `bun run dev` starts the app. `bun run build` builds it in release.
 - `bun run check` runs Biome, rustfmt and clippy. `bun run fix` applies formatting.
 - `bun run test` runs the Rust tests and the scripts' tests.
+- `bun run web:dev` and `bun run web:build` install the site's dependencies and start or build it (output in `apps/web/dist`).
 - `bun run bump <version>` sets the version in `Cargo.toml`; a `v<version>` tag builds the installers (`.github/workflows/release.yml`).
 - Installers locally: `cargo install cargo-packager --locked`, then `cargo packager --release -p hoshi-native -f nsis` (Windows) or `-f deb` (Linux).
 

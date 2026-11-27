@@ -1,0 +1,38 @@
+---
+import Hero from '../components/Hero.astro'
+import MetaBar from '../components/MetaBar.astro'
+import ProductShot from '../components/ProductShot.astro'
+import Base from '../layouts/Base.astro'
+import { fetchLatestRelease } from '../lib/release'
+
+const release = await fetchLatestRelease(import.meta.env.GITHUB_TOKEN)
+---
+
+<Base
+  title="hoshi · Run coding agents side by side"
+  description="Claude Code, Codex and GitHub Copilot in one native app. One thread per task, each in its own folder or worktree, from the first message to the merged pull request."
+>
+  <div
+    class="flex min-h-dvh flex-col lg:grid lg:grid-cols-[minmax(0,30rem)_minmax(0,1fr)] lg:grid-rows-[auto_1fr_auto] xl:grid-cols-[minmax(0,34rem)_minmax(0,1fr)]"
+  >
+    <header class="flex h-16 items-center px-6 sm:px-12 lg:col-start-1 lg:row-start-1">
+      <a href="/" class="flex items-center gap-2 rounded-md text-base font-medium">
+        <img
+          src="/icon.svg"
+          alt=""
+          width="24"
+          height="24"
+          class="size-6 rounded-[5px]"
+        />
+        hoshi
+      </a>
+    </header>
+    <Hero release={release} />
+    <ProductShot />
+    <MetaBar release={release} />
+  </div>
+</Base>
+
+<script>
+  import '../lib/download-links'
+</script>

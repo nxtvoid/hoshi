@@ -4,6 +4,8 @@
   "scripts": {
     "dev": "cargo run -p hoshi-native",
     "build": "cargo build --release -p hoshi-native",
+    "web:dev": "bun i --cwd apps/web && bun run --cwd apps/web dev",
+    "web:build": "bun i --cwd apps/web && bun run --cwd apps/web build",
     "check": "biome check . && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings",
     "fix": "biome check --write . && cargo fmt --all",
     "test": "cargo test --workspace --no-fail-fast && bun test ./scripts",

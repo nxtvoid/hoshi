@@ -1,0 +1,49 @@
+---
+import type { Release } from '../lib/release'
+import { repositoryUrl } from '../lib/release'
+import ButtonLink from './ButtonLink.astro'
+
+type Props = {
+  release: Release
+}
+
+const { release } = Astro.props
+---
+
+<main
+  id="main"
+  class="px-6 pt-8 pb-12 sm:px-12 lg:col-start-1 lg:row-start-2 lg:self-center lg:py-16"
+>
+  <h1
+    class="text-[40px] leading-[1.06] font-medium tracking-[-0.02em] text-balance sm:text-[52px] sm:tracking-[-0.03em] xl:text-[56px]"
+  >
+    Run coding agents side by side
+  </h1>
+  <p
+    class="mt-6 max-w-[36rem] text-[17px] leading-7 text-pretty text-muted-foreground"
+  >
+    Claude Code, Codex and GitHub Copilot in one native app. One thread per
+    task, each in its own folder or worktree, from the first message to the
+    merged pull request.
+  </p>
+  <div class="mt-8 flex flex-wrap gap-3">
+    <ButtonLink
+      href={release.downloads.windows}
+      data-download="windows"
+      data-for-platform="windows"
+      variant="primary"
+    >
+      Download for Windows
+    </ButtonLink>
+    <ButtonLink
+      href={release.downloads.linux}
+      data-download="linux"
+      data-for-platform="linux"
+      variant="primary"
+      hidden
+    >
+      Download for Linux
+    </ButtonLink>
+    <ButtonLink href={repositoryUrl}>GitHub</ButtonLink>
+  </div>
+</main>
