@@ -3,8 +3,8 @@ use crate::state::ThreadState;
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::{
-    AppContext as _, Bounds, ClipboardItem, Entity, Modifiers, MouseButton, Point, TestAppContext,
-    VisualTestContext, WindowBounds, WindowOptions, point, px, size,
+    AppContext as _, Bounds, ClipboardItem, Entity, Modifiers, MouseButton, Pixels, Point,
+    TestAppContext, VisualTestContext, WindowBounds, WindowOptions, point, px, size,
 };
 use hoshi_core::{ItemContent, ThreadItem, ToolDetail};
 
@@ -664,4 +664,105 @@ fn a_long_answer_keeps_its_height_as_it_scrolls_past(cx: &mut TestAppContext) {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert_eq!(height(&mut cx), whole, "after {step} steps up");
     }
+}
+
+fn long_answer(id: &str, created_at: &str) -> ThreadItem {
+    let text = (0..60)
+        .map(|index| format!("Paragraph {index} says word{index}."))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    ThreadItem {
+        content: ItemContent::AssistantMessage { text },
+        ..answer(id, created_at)
+    }
+}
+
+fn question(id: &str, created_at: &str, text: String) -> ThreadItem {
+    let mut item = user(id, created_at);
+    if let ItemContent::UserMessage { text: question, .. } = &mut item.content {
+        *question = text;
+    }
+    item
+}
+
+fn scroll_top(cx: &mut VisualTestContext, view: &Entity<TranscriptView>) -> (usize, Pixels) {
+    view.read_with(cx, |view, cx| {
+        let top = view.scroller.read(cx).logical_scroll_top();
+        (top.item_ix, top.offset_in_item)
+    })
+}
+
+/// Turns the wheel `steps` times, up for a positive `delta`, and fails if the view moves the
+/// other way.
+fn scroll_steadily(
+    cx: &mut VisualTestContext,
+    view: &Entity<TranscriptView>,
+    delta: f32,
+    steps: usize,
+) {
+    for step in 0..steps {
+        let before = scroll_top(cx, view);
+        cx.simulate_event(gpui_kit::ScrollEvent {
+            position: point(px(200.), px(200.)),
+            delta: gpui_kit::ScrollDelta::Pixels(point(px(0.), px(delta))),
+            ..Default::default()
+        });
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        let after = scroll_top(cx, view);
+        let steady = if delta > 0. {
+            after <= before
+        } else {
+            after >= before
+        };
+        assert!(steady, "step {step}: {before:?} to {after:?}");
+    }
+}
+
+#[gpui_kit::test]
+fn scrolling_past_a_long_message_never_jumps_back(cx: &mut TestAppContext) {
+    let (mut cx, _, view) = open_with(
+        cx,
+        vec![
+            long_answer("a0", "2026-11-12T10:00:00Z"),
+            question(
+                "u1",
+                "2026-11-12T10:01:00Z",
+                "A long question.\n\n".repeat(40),
+            ),
+            long_answer("a1", "2026-11-12T10:02:00Z"),
+        ],
+    );
+    scroll_steadily(&mut cx, &view, 80., 40);
+    scroll_steadily(&mut cx, &view, -80., 40);
+    scroll_steadily(&mut cx, &view, 80., 40);
+}
+
+#[gpui_kit::test]
+fn a_message_that_grows_long_in_a_narrower_column_never_jumps(cx: &mut TestAppContext) {
+    let (mut cx, _, view) = open_with(
+        cx,
+        vec![
+            question(
+                "u1",
+                "2026-11-12T10:00:00Z",
+                "A question long enough to wrap in a narrow column, ".repeat(16),
+            ),
+            long_answer("a1", "2026-11-12T10:01:00Z"),
+        ],
+    );
+    scroll_steadily(&mut cx, &view, 80., 40);
+    assert!(
+        cx.debug_bounds("collapse-u1-toggle").is_none(),
+        "whole in the wide column"
+    );
+    scroll_steadily(&mut cx, &view, -80., 40);
+    cx.simulate_resize(size(px(360.), px(400.)));
+    redraw(&mut cx);
+    scroll_steadily(&mut cx, &view, 80., 60);
+    assert!(
+        cx.debug_bounds("collapse-u1-toggle").is_some(),
+        "collapsed in the narrow column"
+    );
 }
