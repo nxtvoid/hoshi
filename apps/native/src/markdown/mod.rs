@@ -388,15 +388,18 @@ pub fn open_web_link(href: &str, external: bool, cx: &mut App) {
     }
 }
 
+/// The workspace, the side panel and the thread shown, when one is.
+fn shown_thread(cx: &App) -> Option<(Entity<Workspace>, Entity<RightPanel>, String)> {
+    let links = cx.try_global::<Links>()?;
+    let workspace = links.workspace.as_ref()?.upgrade()?;
+    let panel = links.panel.as_ref()?.upgrade()?;
+    let thread_id = workspace.read(cx).open_thread_id(cx)?;
+    Some((workspace, panel, thread_id))
+}
+
 /// Opens `address` in hoshi's browser, beside the shown thread; `false` when no thread shows.
 pub fn open_in_panel(address: &str, cx: &mut App) -> bool {
-    let target = cx.try_global::<Links>().and_then(|links| {
-        let workspace = links.workspace.as_ref()?.upgrade()?;
-        let panel = links.panel.as_ref()?.upgrade()?;
-        let thread_id = workspace.read(cx).open_thread_id(cx)?;
-        Some((workspace, panel, thread_id))
-    });
-    let Some((workspace, panel, thread_id)) = target else {
+    let Some((workspace, panel, thread_id)) = shown_thread(cx) else {
         return false;
     };
     let browsers = workspace.read(cx).browsers.clone();
@@ -415,11 +418,32 @@ fn open_link(href: &str, external: bool, cx: &mut App) {
         open_web_link(href, external, cx);
         return;
     };
-    open_local(path, cx);
+    open_file(path, external, cx);
 }
 
-/// Opens a file on this machine: code in the editor of "Open in", the rest in its app.
+/// Whether a file opens beside the shown thread: a table or PDF, unless asked to open outside.
+fn opens_beside(path: &str, external: bool) -> bool {
+    !external && (hoshi_engine::table::is_table(path) || hoshi_engine::pdf::is_pdf(path))
+}
+
+fn open_file(path: String, external: bool, cx: &mut App) {
+    if opens_beside(&path, external)
+        && let Some((_, panel, thread_id)) = shown_thread(cx)
+    {
+        panel.update(cx, |panel, cx| panel.open_file(&thread_id, &path, cx));
+        return;
+    }
+    open_outside(path, cx);
+}
+
+/// Opens a file on this machine: a table or PDF beside the shown thread, code in the editor of
+/// "Open in", the rest in its app.
 pub fn open_local(path: String, cx: &mut App) {
+    open_file(path, false, cx);
+}
+
+/// Opens a file outside hoshi: code in the editor of "Open in", the rest in its app.
+pub fn open_outside(path: String, cx: &mut App) {
     let Some(links) = cx.try_global::<Links>() else {
         return;
     };
@@ -453,7 +477,7 @@ fn code_editor(installed: &[Editor], preferred: Option<Editor>) -> Option<Editor
 fn opens_in_editor(path: &str) -> bool {
     const MEDIA: &[&str] = &[
         "png", "jpg", "jpeg", "gif", "webp", "avif", "svg", "bmp", "ico", "pdf", "html", "htm",
-        "mp4", "mov", "webm", "mp3", "wav",
+        "mp4", "mov", "webm", "mp3", "wav", "xlsx", "xlsm", "xlsb", "xls", "ods",
     ];
     let extension = path
         .rsplit_once('.')
@@ -545,7 +569,16 @@ fn without_line(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_path, opens_in_editor};
+    use super::{local_path, opens_beside, opens_in_editor};
+
+    #[test]
+    fn tables_and_pdfs_open_beside_the_thread_unless_asked_to_open_outside() {
+        assert!(opens_beside("C:/dev/shop/report.XLSX", false));
+        assert!(opens_beside("/home/dev/shop/invoice.pdf", false));
+        assert!(!opens_beside("/home/dev/shop/invoice.pdf", true));
+        assert!(!opens_beside("/home/dev/shop/main.rs", false));
+        assert!(!opens_in_editor("C:/dev/shop/report.xlsx"));
+    }
 
     #[test]
     fn local_paths_are_absolute_paths_and_file_urls() {

@@ -378,3 +378,17 @@ fn the_path_wins_over_an_install_folder() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_path_reaches_the_launcher_with_the_system_s_separators() {
+    let expected = if cfg!(windows) {
+        r"C:\Users\dev\shop\report.pdf"
+    } else {
+        "C:/Users/dev/shop/report.pdf"
+    };
+    assert_eq!(native_path("C:/Users/dev/shop/report.pdf"), expected);
+    assert_eq!(
+        native_path("/home/dev/shop/report.pdf").contains('/'),
+        !cfg!(windows)
+    );
+}

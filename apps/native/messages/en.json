@@ -188,6 +188,67 @@
   "surface_diff": "Diff",
   "surface_terminal": "Terminal",
   "surface_browser": "Browser",
+  "surface_file": "File",
+  "file_view_table": "Table",
+  "file_view_source": "Source",
+  "file_copy_path": "Copy path",
+  "file_open_in_app": "Open in app",
+  "file_rows": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} row",
+        "countPlural=*": "{count} rows"
+      }
+    }
+  ],
+  "file_columns": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} column",
+        "countPlural=*": "{count} columns"
+      }
+    }
+  ],
+  "file_separator_semicolon": "Separator ;",
+  "file_truncated": "Showing the first {megabytes} MB",
+  "file_read_failed": "Couldn't read this file",
+  "file_empty": "This file is empty",
+  "file_too_large": "This file is too large to show here",
+  "sheet_true": "TRUE",
+  "sheet_false": "FALSE",
+  "sheet_copy_too_large": "Too many cells to copy at once",
+  "pdf_pages": [
+    {
+      "declarations": [
+        "input page",
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{page} / {count} page",
+        "countPlural=*": "{page} / {count} pages"
+      }
+    }
+  ],
+  "pdf_previous_page": "Previous page",
+  "pdf_next_page": "Next page",
+  "pdf_zoom_out": "Zoom out",
+  "pdf_zoom_in": "Zoom in",
+  "pdf_fit_width": "Fit width",
+  "pdf_zoom": "{percent}%",
+  "pdf_find_placeholder": "Find in PDF",
+  "pdf_match_position": "{current}/{total}",
+  "pdf_no_matches": "No results",
+  "pdf_downloading": "Downloading the PDF viewer…",
+  "pdf_download_failed": "Couldn't download the PDF viewer",
+  "pdf_unsupported": "There's no PDF viewer for this system",
+  "pdf_password": "This PDF is password protected",
+  "pdf_retry": "Try again",
   "worktree_setup_menu": "Worktree setup…",
   "project_settings_menu": "Project settings",
   "project_settings_title": "{project} · Project settings",

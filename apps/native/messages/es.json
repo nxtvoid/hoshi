@@ -188,6 +188,67 @@
   "surface_diff": "Diff",
   "surface_terminal": "Terminal",
   "surface_browser": "Navegador",
+  "surface_file": "Archivo",
+  "file_view_table": "Tabla",
+  "file_view_source": "Fuente",
+  "file_copy_path": "Copiar ruta",
+  "file_open_in_app": "Abrir en la app",
+  "file_rows": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} fila",
+        "countPlural=*": "{count} filas"
+      }
+    }
+  ],
+  "file_columns": [
+    {
+      "declarations": ["input count", "local countPlural = count: plural"],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{count} columna",
+        "countPlural=*": "{count} columnas"
+      }
+    }
+  ],
+  "file_separator_semicolon": "Separador ;",
+  "file_truncated": "Se muestran los primeros {megabytes} MB",
+  "file_read_failed": "No se pudo leer este archivo",
+  "file_empty": "Este archivo está vacío",
+  "file_too_large": "Este archivo es demasiado grande para mostrarlo aquí",
+  "sheet_true": "VERDADERO",
+  "sheet_false": "FALSO",
+  "sheet_copy_too_large": "Demasiadas celdas para copiar de una vez",
+  "pdf_pages": [
+    {
+      "declarations": [
+        "input page",
+        "input count",
+        "local countPlural = count: plural"
+      ],
+      "selectors": ["countPlural"],
+      "match": {
+        "countPlural=one": "{page} / {count} página",
+        "countPlural=*": "{page} / {count} páginas"
+      }
+    }
+  ],
+  "pdf_previous_page": "Página anterior",
+  "pdf_next_page": "Página siguiente",
+  "pdf_zoom_out": "Alejar",
+  "pdf_zoom_in": "Acercar",
+  "pdf_fit_width": "Ajustar al ancho",
+  "pdf_zoom": "{percent}%",
+  "pdf_find_placeholder": "Buscar en el PDF",
+  "pdf_match_position": "{current}/{total}",
+  "pdf_no_matches": "Sin resultados",
+  "pdf_downloading": "Descargando el visor de PDF…",
+  "pdf_download_failed": "No se pudo descargar el visor de PDF",
+  "pdf_unsupported": "No hay visor de PDF para este sistema",
+  "pdf_password": "Este PDF está protegido con contraseña",
+  "pdf_retry": "Reintentar",
   "worktree_setup_menu": "Preparación del worktree…",
   "project_settings_menu": "Ajustes del proyecto",
   "project_settings_title": "{project} · Ajustes del proyecto",

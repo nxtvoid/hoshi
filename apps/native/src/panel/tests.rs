@@ -2,7 +2,7 @@ use super::{DEFAULT_WIDTH, MAX_WIDTH, RightPanel, SurfaceKind, SurfaceView};
 use crate::state::{self, Workspace};
 use gpui_kit::component::theme::ThemeMode;
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, MouseButton,
+    AppContext as _, Bounds, ClipboardItem, Context, Entity, IntoElement, Modifiers, MouseButton,
     ParentElement as _, Point, Render, Styled as _, TestAppContext, VisualTestContext, Window,
     WindowBounds, WindowOptions, div, point, prelude::FluentBuilder as _, px, size,
 };
@@ -964,4 +964,214 @@ fn merging_asks_first_then_merges_with_the_chosen_method(cx: &mut TestAppContext
             method: MergeMethod::Squash
         }]
     );
+}
+
+fn file_rows(h: &Harness) -> Option<(usize, usize)> {
+    h.panel.read_with(&h.cx, |panel, cx| {
+        panel.views.values().find_map(|view| match view {
+            SurfaceView::File(view) => view.read(cx).shown_rows(cx),
+            _ => None,
+        })
+    })
+}
+
+#[gpui_kit::test]
+fn a_long_csv_opens_in_its_own_tab_and_builds_only_the_rows_in_view(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "table", 0);
+    let path = h.dir.join("project").join("sales.csv");
+    let text: String = std::iter::once("date;product;total\n".to_owned())
+        .chain((0..20_000).map(|n| format!("2026-01-04;Item {n};{n},50\n")))
+        .collect();
+    std::fs::write(&path, text).unwrap();
+    let path = path.to_string_lossy().into_owned();
+
+    h.panel.update(&mut h.cx, |panel, cx| {
+        panel.open_surface("t", SurfaceKind::Diff, cx);
+        panel.open_file("t", &path, cx);
+    });
+    wait_until(&mut h, "the table", |cx| {
+        cx.debug_bounds("file-surface").is_some()
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while file_rows(&h).is_none() {
+        assert!(Instant::now() < deadline, "the file was never read");
+        redraw(&mut h.cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (rows, built) = file_rows(&h).unwrap();
+    assert_eq!(rows, 20_001);
+    assert!(built > 0 && built < 100, "{built} rows were built");
+
+    h.panel.update(&mut h.cx, |panel, cx| {
+        panel.open_surface("t", SurfaceKind::Diff, cx);
+        panel.open_file("t", &path, cx);
+    });
+    assert_eq!(kinds(&h), [SurfaceKind::Diff, SurfaceKind::File]);
+}
+
+fn wait_for_table_rows(h: &mut Harness, rows: usize) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while file_rows(h).map(|(shown, _)| shown) != Some(rows) {
+        assert!(Instant::now() < deadline, "the table never had {rows} rows");
+        redraw(&mut h.cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[gpui_kit::test]
+fn opening_a_table_again_reads_it_again_once_it_changed(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "table-changed", 0);
+    let path = h.dir.join("project").join("stock.csv");
+    std::fs::write(&path, "item,units\nOak Table,3\n").unwrap();
+    let shown = path.to_string_lossy().into_owned();
+
+    h.panel
+        .update(&mut h.cx, |panel, cx| panel.open_file("t", &shown, cx));
+    wait_for_table_rows(&mut h, 2);
+    std::fs::write(&path, "item,units\nOak Table,3\nLamp,8\n").unwrap();
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    h.panel
+        .update(&mut h.cx, |panel, cx| panel.open_file("t", &shown, cx));
+
+    wait_for_table_rows(&mut h, 3);
+    assert_eq!(kinds(&h), [SurfaceKind::File]);
+}
+
+fn file_view(h: &Harness) -> Entity<super::file_surface::FileSurface> {
+    h.panel.read_with(&h.cx, |panel, _| {
+        panel
+            .views
+            .values()
+            .find_map(|view| match view {
+                SurfaceView::File(view) => Some(view.clone()),
+                _ => None,
+            })
+            .expect("a file view")
+    })
+}
+
+fn wait_for_source(h: &mut Harness) {
+    let view = file_view(h);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !view.read_with(&h.cx, |view, _| view.source_shown()) {
+        assert!(
+            Instant::now() < deadline,
+            "the source never showed its lines"
+        );
+        redraw(&mut h.cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[gpui_kit::test]
+fn the_source_of_a_table_read_again_shows_its_lines(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "source-changed", 0);
+    let path = h.dir.join("project").join("stock.csv");
+    std::fs::write(
+        &path,
+        "item,units
+Oak Table,3
+",
+    )
+    .unwrap();
+    let shown = path.to_string_lossy().into_owned();
+    h.panel
+        .update(&mut h.cx, |panel, cx| panel.open_file("t", &shown, cx));
+    wait_for_table_rows(&mut h, 2);
+    file_view(&h).update(&mut h.cx, |view, cx| view.show_source(cx));
+    wait_for_source(&mut h);
+
+    std::fs::write(
+        &path,
+        "item,units
+Oak Table,3
+Lamp,8
+",
+    )
+    .unwrap();
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    h.panel
+        .update(&mut h.cx, |panel, cx| panel.open_file("t", &shown, cx));
+    wait_for_table_rows(&mut h, 3);
+
+    wait_for_source(&mut h);
+}
+
+#[gpui_kit::test]
+fn cells_picked_in_a_table_copy_as_a_spreadsheet_pastes_them(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "sheet-copy", 0);
+    let path = h.dir.join("project").join("people.tsv");
+    std::fs::write(
+        &path,
+        "name\tcity\tage\nTest User\tLisbon\t31\nAna Example\tPorto\t27\n",
+    )
+    .unwrap();
+    let path = path.to_string_lossy().into_owned();
+
+    h.panel
+        .update(&mut h.cx, |panel, cx| panel.open_file("t", &path, cx));
+    wait_until(&mut h, "the cells", |cx| {
+        cx.debug_bounds("sheet-cell-2-1").is_some()
+    });
+    click(&mut h, "sheet-cell-1-0");
+    let corner = h.cx.debug_bounds("sheet-cell-2-1").unwrap().center();
+    h.cx.simulate_click(
+        corner,
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        },
+    );
+    redraw(&mut h.cx);
+    h.cx.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("before".into())));
+    let copy = if cfg!(target_os = "macos") {
+        "cmd-c"
+    } else {
+        "ctrl-c"
+    };
+    h.cx.simulate_keystrokes(copy);
+    h.cx.run_until_parked();
+
+    let copied =
+        h.cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(
+        copied.as_deref(),
+        Some("Test User\tLisbon\nAna Example\tPorto")
+    );
+}
+
+#[gpui_kit::test]
+fn a_pdf_opens_in_a_tab_of_its_own_beside_a_table(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "pdf", 0);
+    let folder = h.dir.join("project");
+    let (pdf, csv) = (folder.join("report.pdf"), folder.join("sales.csv"));
+    std::fs::write(&pdf, "%PDF-1.4\n").unwrap();
+    std::fs::write(&csv, "date;total\n2026-01-04;3\n").unwrap();
+    let (pdf, csv) = (
+        pdf.to_string_lossy().into_owned(),
+        csv.to_string_lossy().into_owned(),
+    );
+
+    h.panel.update(&mut h.cx, |panel, cx| {
+        panel.open_file("t", &csv, cx);
+        panel.open_file("t", &pdf, cx);
+    });
+    wait_until(&mut h, "the pdf", |cx| {
+        cx.debug_bounds("pdf-surface").is_some()
+    });
+
+    assert_eq!(kinds(&h), [SurfaceKind::File, SurfaceKind::File]);
+    let pdfs = h.panel.read_with(&h.cx, |panel, _| {
+        panel
+            .views
+            .values()
+            .filter(|view| matches!(view, SurfaceView::Pdf(_)))
+            .count()
+    });
+    assert_eq!(pdfs, 1);
 }

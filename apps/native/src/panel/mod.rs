@@ -1,8 +1,11 @@
 mod browser;
 mod changes;
 mod diff_surface;
+mod file_surface;
+mod pdf_surface;
 mod persist;
 mod pull_request;
+mod sheet_grid;
 pub(crate) use pull_request::{check_look, format_review_threads};
 mod surfaces;
 
@@ -10,10 +13,13 @@ use crate::m;
 use crate::state::Workspace;
 use browser::BrowserSurface;
 use diff_surface::{DiffSurface, DiffSurfaceEvent};
+use file_surface::FileSurface;
 use gpui_kit::component::Icon;
 use gpui_kit::component::Selectable as _;
 use gpui_kit::*;
+use hoshi_ui::assets::file_icon;
 use hoshi_ui::prelude::*;
+use pdf_surface::PdfSurface;
 use pull_request::PullRequestSurface;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -52,10 +58,12 @@ enum SurfaceView {
     },
     PullRequest(Entity<PullRequestSurface>),
     Browser(Entity<BrowserSurface>),
+    File(Entity<FileSurface>),
+    Pdf(Entity<PdfSurface>),
 }
 
 /// The thread's side panel on the right: tabs of open surfaces (changes, pull request,
-/// browser, terminals), each thread with its own, kept across restarts in `panel.json`.
+/// browser, terminals, files), each thread with its own, kept across restarts in `panel.json`.
 pub struct RightPanel {
     /// Where `panel.json` lives; `None` keeps the panel in memory only.
     home: Option<PathBuf>,
@@ -91,6 +99,13 @@ pub fn panel_message(text: String, colors: &Colors) -> Div {
         .text_xs()
         .text_color(colors.muted_foreground)
         .child(text)
+}
+
+/// The last part of a path, as a tab names the file.
+fn file_name(path: &str) -> &str {
+    path.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
 }
 
 fn dev_surface() -> Option<Option<SurfaceKind>> {
@@ -296,6 +311,19 @@ impl RightPanel {
         self.set_open(thread_id, true, cx);
     }
 
+    /// Opens the panel on the file at `path`, in the tab already showing it if there is one,
+    /// read again if it changed since.
+    pub fn open_file(&mut self, thread_id: &str, path: &str, cx: &mut Context<Self>) {
+        let panel = self.threads.entry(thread_id.to_owned()).or_default();
+        panel.open_file(path, new_id);
+        match panel.active_id.as_ref().and_then(|id| self.views.get(id)) {
+            Some(SurfaceView::File(view)) => view.update(cx, |view, cx| view.refresh(cx)),
+            Some(SurfaceView::Pdf(view)) => view.update(cx, |view, cx| view.refresh(cx)),
+            _ => {}
+        }
+        self.set_open(thread_id, true, cx);
+    }
+
     /// Opens the panel on what a turn changed, at `focus_path` when given.
     pub fn open_turn_diff(
         &mut self,
@@ -387,6 +415,8 @@ impl RightPanel {
                 SurfaceView::Diff { view, .. } => view.clone().into_any_element(),
                 SurfaceView::PullRequest(view) => view.clone().into_any_element(),
                 SurfaceView::Browser(view) => view.clone().into_any_element(),
+                SurfaceView::File(view) => view.clone().into_any_element(),
+                SurfaceView::Pdf(view) => view.clone().into_any_element(),
             };
         }
         let workspace = self.workspace.clone();
@@ -421,6 +451,14 @@ impl RightPanel {
                     cx.new(|cx| BrowserSurface::new(workspace, thread, window, cx)),
                 )
             }
+            SurfaceState::File { path } if hoshi_engine::pdf::is_pdf(path) => {
+                let (path, home) = (path.clone(), self.home.clone());
+                SurfaceView::Pdf(cx.new(|cx| PdfSurface::new(path, home, window, cx)))
+            }
+            SurfaceState::File { path } => {
+                let path = path.clone();
+                SurfaceView::File(cx.new(|cx| FileSurface::new(path, cx)))
+            }
             SurfaceState::Terminal => {
                 let colors = cx.hoshi().clone();
                 return match self.terminal.clone() {
@@ -451,7 +489,23 @@ impl RightPanel {
                 .get(thread_id)
                 .map(|pull_request| format!("#{}", pull_request.number))
                 .unwrap_or_else(|| kind.label()),
+            SurfaceKind::File => match &surface.state {
+                SurfaceState::File { path } => file_name(path).to_owned(),
+                _ => kind.label(),
+            },
             _ => kind.label(),
+        };
+        let icon = match &surface.state {
+            SurfaceState::File { path } => {
+                let (icon, tint) = file_path_icon(path);
+                svg()
+                    .path(file_icon(icon))
+                    .size_3p5()
+                    .flex_none()
+                    .text_color(tint(colors))
+                    .into_any_element()
+            }
+            _ => Icon::new(kind.icon()).size_3p5().into_any_element(),
         };
         let group: SharedString = format!("surface-tab-{index}").into();
         let (thread, id) = (thread_id.to_owned(), surface.id.clone());
@@ -492,8 +546,8 @@ impl RightPanel {
                     .h_full()
                     .pl_2()
                     .cursor_pointer()
-                    .child(Icon::new(kind.icon()).size_3p5())
-                    .child(title)
+                    .child(icon)
+                    .child(div().max_w(px(180.)).truncate().child(title))
                     .on_click(
                         cx.listener(move |this, _, _, cx| this.activate_surface(&thread, &id, cx)),
                     ),

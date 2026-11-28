@@ -194,7 +194,7 @@ const BRAND: [(&str, &[u8]); 7] = [
 ];
 
 /// File-type icons from `@pierre/trees` (Apache-2.0, `assets/file-icons/LICENSE.md`), the set
-/// the web UI shows; drawn in one color each, like the icons.
+/// the web UI shows, and `pdf` drawn in their style; one color each, like the icons.
 macro_rules! file_icon {
     ($name:literal) => {
         (
@@ -204,7 +204,7 @@ macro_rules! file_icon {
     };
 }
 
-const FILE_ICONS: [(&str, &[u8]); 21] = [
+const FILE_ICONS: [(&str, &[u8]); 23] = [
     file_icon!("bash"),
     file_icon!("c"),
     file_icon!("cpp"),
@@ -217,12 +217,14 @@ const FILE_ICONS: [(&str, &[u8]); 21] = [
     file_icon!("javascript"),
     file_icon!("json"),
     file_icon!("markdown"),
+    file_icon!("pdf"),
     file_icon!("python"),
     file_icon!("react"),
     file_icon!("ruby"),
     file_icon!("rust"),
     file_icon!("sass"),
     file_icon!("swift"),
+    file_icon!("table"),
     file_icon!("text"),
     file_icon!("typescript"),
     file_icon!("yml"),

@@ -80,6 +80,7 @@
   --file-purple: #693acf;
   --file-magenta: #a631be;
   --file-gray: #84848a;
+  --pdf-page: #ffffff;
   --scrollbar: oklch(0.145 0 0 / 0.18);
   --scrollbar-hover: oklch(0.145 0 0 / 0.34);
 }
@@ -185,6 +186,7 @@ html[data-terminal-font="system"] {
   --color-file-purple: var(--file-purple);
   --color-file-magenta: var(--file-magenta);
   --color-file-gray: var(--file-gray);
+  --color-pdf-page: var(--pdf-page);
   --color-scrollbar: var(--scrollbar);
   --color-scrollbar-hover: var(--scrollbar-hover);
   --font-heading: var(--font-sans);
@@ -346,6 +348,7 @@ html[data-terminal-font="system"] {
   --file-purple: #9d6afb;
   --file-magenta: #d568ea;
   --file-gray: #adadb1;
+  --pdf-page: #ffffff;
   --scrollbar: oklch(0.985 0 0 / 0.16);
   --scrollbar-hover: oklch(0.985 0 0 / 0.3);
 }

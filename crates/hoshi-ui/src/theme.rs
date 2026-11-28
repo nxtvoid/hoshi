@@ -73,7 +73,7 @@ tokens! {
     diff_added, diff_removed,
     backdrop, scrollbar, scrollbar_hover, window_close, window_close_foreground, terminal_selection,
     file_blue, file_cyan, file_teal, file_green, file_yellow, file_orange, file_red, file_pink,
-    file_purple, file_magenta, file_gray,
+    file_purple, file_magenta, file_gray, pdf_page,
 }
 
 pub struct HoshiTheme {
