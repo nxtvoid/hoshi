@@ -3,11 +3,14 @@
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
-use std::io::BufReader;
+use std::cell::Cell;
+use std::io::{BufReader, Read};
 use std::path::Path;
+use std::rc::Rc;
 
 /// The cells the sheets of the XLS or ODS at `path` span together, each from its first used
-/// cell to its last; `None` when it can't be measured, so its reader still tries.
+/// cell to its last; `None` when it can't be measured, so its reader still tries, and
+/// `u64::MAX` when a part of it is too large to read.
 pub fn cells(path: &Path, extension: &str) -> Option<u64> {
     match extension {
         "xls" => xls_cells(&std::fs::read(path).ok()?),
@@ -177,8 +180,11 @@ fn xls_cells(file: &[u8]) -> Option<u64> {
 fn sheet_cells(stream: &[u8], start: usize) -> u64 {
     const DIMENSIONS: u16 = 0x0200;
     const MUL_RK: u16 = 0x00BD;
-    const CELLS: [u16; 7] = [0x0006, 0x00D6, 0x00FD, 0x0203, 0x0204, 0x0205, 0x027E];
+    const FORMULA: u16 = 0x0006;
+    const STRING: u16 = 0x0207;
+    const CELLS: [u16; 6] = [0x00D6, 0x00FD, 0x0203, 0x0204, 0x0205, 0x027E];
     let mut declared = 0u64;
+    let mut formula = (0, 0);
     let mut reached: Option<[u16; 4]> = None;
     let mut reach = |row: u16, first: u16, last: u16| {
         let [top, bottom, left, right] = reached.get_or_insert([row, row, first, last]);
@@ -200,7 +206,14 @@ fn sheet_cells(stream: &[u8], start: usize) -> u64 {
             BOF if opened => nested += 1,
             BOF => opened = true,
             EOF => break,
-            DIMENSIONS => declared = declared_cells(data).unwrap_or(0),
+            DIMENSIONS => declared = declared.max(declared_cells(data).unwrap_or(0)),
+            FORMULA => {
+                if let (Some(row), Some(column)) = (u16_at(data, 0), u16_at(data, 2)) {
+                    formula = (row, column);
+                    reach(row, column, column);
+                }
+            }
+            STRING => reach(formula.0, formula.1, formula.1),
             MUL_RK if data.len() >= 6 => {
                 if let (Some(row), Some(first), Some(last)) = (
                     u16_at(data, 0),
@@ -256,6 +269,29 @@ fn declared_cells(data: &[u8]) -> Option<u64> {
     )
 }
 
+/// The most `content.xml` may hold in one tag or text: far past any real cell's.
+const MAX_EVENT: u64 = 16 * 1024 * 1024;
+
+/// `inner`, failing once more than [`MAX_EVENT`] bytes are read with `read` not set back to
+/// zero, and then leaving `read` at `u64::MAX`.
+struct Capped<R> {
+    inner: R,
+    read: Rc<Cell<u64>>,
+}
+
+impl<R: Read> Read for Capped<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.inner.read(buffer)?;
+        let read = self.read.get().saturating_add(count as u64);
+        if read > MAX_EVENT {
+            self.read.set(u64::MAX);
+            return Err(std::io::Error::other("an XML event is too large"));
+        }
+        self.read.set(read);
+        Ok(count)
+    }
+}
+
 fn repeated(element: &BytesStart<'_>, name: &str) -> u64 {
     element
         .try_get_attribute(name)
@@ -286,14 +322,21 @@ fn has_value(element: &BytesStart<'_>) -> bool {
 /// rows and cells repeated.
 fn ods_cells(path: &Path) -> Option<u64> {
     let mut archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
-    let content = archive.by_name("content.xml").ok()?;
-    let mut reader = Reader::from_reader(BufReader::new(content));
+    let inner = archive.by_name("content.xml").ok()?;
+    let read = Rc::new(Cell::new(0));
+    let mut reader = Reader::from_reader(BufReader::new(Capped {
+        inner,
+        read: read.clone(),
+    }));
     let mut buffer = Vec::new();
     let mut cells = 0u64;
     let (mut row, mut rows, mut columns) = (0u64, 0u64, 0u64);
     let (mut column, mut repeats, mut filled) = (0u64, 1u64, false);
     loop {
-        let event = reader.read_event_into(&mut buffer).ok()?;
+        let Ok(event) = reader.read_event_into(&mut buffer) else {
+            return (read.get() == u64::MAX).then_some(u64::MAX);
+        };
+        read.set(0);
         match &event {
             Event::Start(element) | Event::Empty(element) => {
                 let empty = matches!(event, Event::Empty(_));
@@ -478,7 +521,15 @@ mod tests {
             record(0x0200, &data)
         }]]));
 
+        let shrunk = compound(biff(&[vec![dimensions(65_536, 256), dimensions(1, 1)]]));
+        let string = compound(biff(&[vec![
+            record(0x0207, &[1, 0, 0, b'a']),
+            number(65_535, 255),
+        ]]));
+
         assert_eq!(xls_cells(&misleading), Some(40 + 65_536 * 256));
+        assert_eq!(xls_cells(&shrunk), Some(65_536 * 256));
+        assert_eq!(xls_cells(&string), Some(65_536 * 256));
         assert!(xls_cells(&backwards).unwrap() > 4_000_000_000);
     }
 
@@ -532,6 +583,15 @@ mod tests {
             r#"<table:table><table:table-row table:number-rows-repeated="3"><table:table-cell table:formula="of:=1" table:number-columns-repeated="5"></table:table-cell></table:table-row></table:table>"#,
         );
         assert_eq!(ods_cells(&formulas), Some(15));
+
+        let long = ods(
+            &dir,
+            &format!(
+                r#"<table:table><table:table-row><table:table-cell office:value-type="string"><text:p>{}</text:p></table:table-cell></table:table-row></table:table>"#,
+                "a".repeat(17 * 1024 * 1024)
+            ),
+        );
+        assert_eq!(ods_cells(&long), Some(u64::MAX));
 
         let huge = ods(
             &dir,

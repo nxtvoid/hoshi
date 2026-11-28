@@ -15,19 +15,29 @@ pub struct Delimited {
 
 /// How many rows, or lines, one kept start covers.
 const STRIDE: usize = 16;
+/// How far past the last kept start a start is kept too, so no row is read through a long
+/// one before it.
+const SPAN: usize = 64 * 1024;
 
 /// Where rows or lines start, kept for every [`STRIDE`]th one so a text of tiny rows needs
 /// little more memory than itself; the others are read on from the nearest kept.
 #[derive(Default)]
 struct Starts {
     kept: Vec<usize>,
+    /// Starts past a long stretch, with their entry's index.
+    far: Vec<(usize, usize)>,
     count: usize,
+    last: usize,
 }
 
 impl Starts {
     fn push(&mut self, start: usize) {
         if self.count.is_multiple_of(STRIDE) {
             self.kept.push(start);
+            self.last = start;
+        } else if start - self.last >= SPAN {
+            self.far.push((self.count, start));
+            self.last = start;
         }
         self.count += 1;
     }
@@ -35,6 +45,8 @@ impl Starts {
     fn truncate(&mut self, count: usize) {
         self.count = self.count.min(count);
         self.kept.truncate(self.count.div_ceil(STRIDE));
+        let far = self.far.partition_point(|(index, _)| *index < self.count);
+        self.far.truncate(far);
     }
 
     /// Where entry `index` starts, with `end` giving where the entry starting at a byte ends.
@@ -42,7 +54,13 @@ impl Starts {
         if index >= self.count {
             return None;
         }
-        Some((0..index % STRIDE).fold(self.kept[index / STRIDE], |start, _| end(start)))
+        let kept = (index / STRIDE * STRIDE, self.kept[index / STRIDE]);
+        let far = self.far.partition_point(|(at, _)| *at <= index);
+        let (from, start) = match far.checked_sub(1).map(|at| self.far[at]) {
+            Some(far) if far.0 > kept.0 => far,
+            _ => kept,
+        };
+        Some((from..index).fold(start, |start, _| end(start)))
     }
 }
 
@@ -370,6 +388,20 @@ mod tests {
     fn a_quote_inside_an_unquoted_cell_is_text() {
         let table = Delimited::new("5\" screen,ok".into(), b',');
         assert_eq!(table.row(0), ["5\" screen", "ok"]);
+    }
+
+    #[test]
+    fn the_rows_after_a_long_one_are_not_read_through_it() {
+        let long = "y".repeat(200 * 1024);
+        let text = format!("{}{long}\n{}", "x\n".repeat(16), "z\n".repeat(20));
+        let table = Delimited::new(text, b',');
+
+        assert_eq!(table.rows.far, [(17, 32 + long.len() + 1)]);
+        assert_eq!(table.row(16), [long]);
+        for row in 17..37 {
+            assert_eq!(table.row(row), ["z"]);
+        }
+        assert!(table.row(37).is_empty());
     }
 
     #[test]
