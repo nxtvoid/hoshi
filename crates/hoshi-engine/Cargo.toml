@@ -23,6 +23,7 @@ keyring.workspace = true
 notify.workspace = true
 pdfium-render.workspace = true
 portable-pty.workspace = true
+quick-xml.workspace = true
 roxmltree.workspace = true
 serde.workspace = true
 serde_json.workspace = true

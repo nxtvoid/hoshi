@@ -143,12 +143,31 @@ fn text(data: &Data) -> String {
     }
 }
 
+/// A number with the fifteen significant digits a spreadsheet keeps, in scientific notation
+/// when it is very small or very large, as `1E-11`.
 fn float_text(number: f64) -> String {
+    if number == 0.0 || !number.is_finite() {
+        return number.to_string();
+    }
     if number.fract() == 0.0 && number.abs() < 1e15 {
         return format!("{number:.0}");
     }
-    let text = format!("{number:.10}");
-    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    let trimmed = |text: &str| -> String {
+        if text.contains('.') {
+            text.trim_end_matches('0').trim_end_matches('.').to_owned()
+        } else {
+            text.to_owned()
+        }
+    };
+    let magnitude = number.abs().log10().floor() as i32;
+    if !(-5..15).contains(&magnitude) {
+        let text = format!("{number:.14e}");
+        let (mantissa, exponent) = text.split_once('e').unwrap_or((&text, "0"));
+        let sign = if exponent.starts_with('-') { "" } else { "+" };
+        return format!("{}E{sign}{exponent}", trimmed(mantissa));
+    }
+    let decimals = (14 - magnitude).max(0) as usize;
+    trimmed(&format!("{number:.decimals$}"))
 }
 
 #[cfg(test)]
@@ -162,6 +181,11 @@ mod tests {
         assert_eq!(float_text(12.0), "12");
         assert_eq!(float_text(0.1 + 0.2), "0.3");
         assert_eq!(float_text(-1.25), "-1.25");
+        assert_eq!(float_text(1e-11), "1E-11");
+        assert_eq!(float_text(-2.5e-7), "-2.5E-7");
+        assert_eq!(float_text(0.000123), "0.000123");
+        assert_eq!(float_text(1234.5678), "1234.5678");
+        assert_eq!(float_text(1e20), "1E+20");
         assert_eq!(text(&Data::Int(7)), "7");
         assert_eq!(text(&Data::Empty), "");
     }

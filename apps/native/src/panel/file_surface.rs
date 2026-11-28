@@ -178,6 +178,7 @@ impl FileSurface {
             }
         };
         self.indexing = None;
+        self.index_lines(cx);
         cx.notify();
     }
 
@@ -230,6 +231,17 @@ impl FileSurface {
         }));
     }
 
+    #[cfg(test)]
+    pub fn show_source(&mut self, cx: &mut Context<Self>) {
+        self.set_view(View::Source, cx);
+    }
+
+    /// Whether the source view shows its lines, rather than waiting for them.
+    #[cfg(test)]
+    pub fn source_shown(&self) -> bool {
+        matches!(&self.body, Body::Ready { sheet: Some(sheet), .. } if self.view == View::Source && sheet.grid.lines_indexed())
+    }
+
     /// The rows of the table shown, and how many of them were split into cells.
     #[cfg(test)]
     pub fn shown_rows(&self, cx: &App) -> Option<(usize, usize)> {
@@ -248,23 +260,30 @@ impl FileSurface {
             return;
         }
         self.view = view;
-        if let Body::Ready {
+        self.index_lines(cx);
+        cx.notify();
+    }
+
+    /// Indexes the source's lines off the UI thread when the source view shows them.
+    fn index_lines(&mut self, cx: &mut Context<Self>) {
+        let Body::Ready {
             sheet: Some(sheet), ..
         } = &self.body
-            && view == View::Source
-            && !sheet.grid.lines_indexed()
-        {
-            let grid = sheet.grid.clone();
-            self.indexing = Some(cx.spawn(async move |this, cx| {
-                cx.background_spawn(async move { grid.lines() }).await;
-                this.update(cx, |this, cx| {
-                    this.indexing = None;
-                    cx.notify();
-                })
-                .ok();
-            }));
+        else {
+            return;
+        };
+        if self.view != View::Source || sheet.grid.lines_indexed() {
+            return;
         }
-        cx.notify();
+        let grid = sheet.grid.clone();
+        self.indexing = Some(cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move { grid.lines() }).await;
+            this.update(cx, |this, cx| {
+                this.indexing = None;
+                cx.notify();
+            })
+            .ok();
+        }));
     }
 
     fn toolbar(&self, colors: &Colors, cx: &mut Context<Self>) -> impl IntoElement + use<> {

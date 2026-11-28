@@ -18,6 +18,8 @@ pub const MAX_MATCHES: usize = 1000;
 const MAX_SIDE: f32 = 8192.;
 /// The most pixels a page is drawn with; a larger drawing is scaled up on screen.
 const MAX_PIXELS: f32 = 16_000_000.;
+/// The width a page is measured at to place what a search found on it.
+const AREA_SCALE: f32 = 10_000.;
 
 /// Why a PDF can't be shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -256,7 +258,8 @@ fn render(document: &PdfDocument<'_>, page: usize, width: u32) -> Result<Bitmap,
         .pages()
         .get(page as PdfPageIndex)
         .map_err(|_| PdfFailure::Read)?;
-    let width = drawn_width(width, page.width().value / page.height().value.max(1.));
+    let width = drawn_width(width, page.width().value / page.height().value.max(1.))
+        .ok_or(PdfFailure::Read)?;
     let config = PdfRenderConfig::new()
         .set_target_width(width as Pixels)
         .render_form_data(true);
@@ -271,14 +274,18 @@ fn render(document: &PdfDocument<'_>, page: usize, width: u32) -> Result<Bitmap,
 }
 
 /// The width a page `wanted` pixels wide is drawn at, with `aspect` its width over its height:
-/// narrower when its longest side or its pixels would pass the most drawn.
-fn drawn_width(wanted: u32, aspect: f32) -> u32 {
-    let aspect = aspect.max(0.001);
+/// narrower when its longest side or its pixels would pass the most drawn. `None` for a page so
+/// thin that even a pixel wide it would be taller than that.
+fn drawn_width(wanted: u32, aspect: f32) -> Option<u32> {
+    if !aspect.is_finite() || aspect <= 0. {
+        return None;
+    }
     let width = (wanted.max(1) as f32)
         .min(MAX_SIDE)
         .min(MAX_SIDE * aspect)
-        .min((MAX_PIXELS * aspect).sqrt());
-    (width.floor() as u32).max(1)
+        .min((MAX_PIXELS * aspect).sqrt())
+        .floor();
+    (width >= 1.).then_some(width as u32)
 }
 
 fn search(document: &PdfDocument<'_>, index: usize, query: &str) -> Vec<Match> {
@@ -289,7 +296,9 @@ fn search(document: &PdfDocument<'_>, index: usize, query: &str) -> Vec<Match> {
     let Ok(page) = document.pages().get(index as PdfPageIndex) else {
         return Vec::new();
     };
-    let (width, height) = (page.width().value, page.height().value);
+    let aspect = page.width().value / page.height().value.max(1.);
+    let shown = PdfRenderConfig::new().set_target_width(AREA_SCALE as Pixels);
+    let size = (AREA_SCALE, (AREA_SCALE / aspect.max(0.001)).round());
     let Ok(text) = page.text() else {
         return Vec::new();
     };
@@ -300,7 +309,7 @@ fn search(document: &PdfDocument<'_>, index: usize, query: &str) -> Vec<Match> {
     while let Some(segments) = search.find_next() {
         let areas = segments
             .iter()
-            .map(|segment| area(segment.bounds(), width, height))
+            .filter_map(|segment| area(&page, segment.bounds(), &shown, size))
             .collect();
         found.push(Match { page: index, areas });
         if found.len() >= MAX_MATCHES {
@@ -310,30 +319,52 @@ fn search(document: &PdfDocument<'_>, index: usize, query: &str) -> Vec<Match> {
     found
 }
 
-fn area(bounds: PdfRect, width: f32, height: f32) -> Area {
-    let (width, height) = (width.max(1.), height.max(1.));
-    Area {
-        left: bounds.left().value / width,
-        top: (height - bounds.top().value) / height,
-        width: bounds.width().value / width,
-        height: bounds.height().value / height,
-    }
+/// Where `bounds`, in the page's own space, fall on the page as drawn with `shown`, `size`
+/// pixels: past its box's origin, and turned with the page.
+fn area(
+    page: &PdfPage<'_>,
+    bounds: PdfRect,
+    shown: &PdfRenderConfig,
+    size: (f32, f32),
+) -> Option<Area> {
+    let (x1, y1) = page
+        .points_to_pixels(bounds.left(), bounds.top(), shown)
+        .ok()?;
+    let (x2, y2) = page
+        .points_to_pixels(bounds.right(), bounds.bottom(), shown)
+        .ok()?;
+    let (width, height) = (size.0.max(1.), size.1.max(1.));
+    Some(Area {
+        left: x1.min(x2) as f32 / width,
+        top: y1.min(y2) as f32 / height,
+        width: x1.abs_diff(x2) as f32 / width,
+        height: y1.abs_diff(y2) as f32 / height,
+    })
 }
 
 impl Document {
     /// Opens the PDF at `path`, with the PDF library hoshi keeps under `home`.
+    /// A PDF thread found stopped is started again for it.
     pub fn open(home: &Path, path: &Path) -> Result<Self, PdfFailure> {
-        let service = service(home)?;
-        let (reply, answer) = mpsc::channel();
-        service.send(Request::Open {
-            path: path.to_owned(),
-            reply,
-        })?;
-        let (id, pages) = answer.recv().map_err(|_| PdfFailure::Library)??;
-        Ok(Self {
-            handle: Arc::new(Handle { id, service }),
-            pages: Arc::new(pages),
-        })
+        let mut retried = false;
+        loop {
+            let service = service(home)?;
+            let (reply, answer) = mpsc::channel();
+            let sent = service.send(Request::Open {
+                path: path.to_owned(),
+                reply,
+            });
+            if sent.is_err() && !retried {
+                retried = true;
+                continue;
+            }
+            sent?;
+            let (id, pages) = answer.recv().map_err(|_| PdfFailure::Library)??;
+            return Ok(Self {
+                handle: Arc::new(Handle { id, service }),
+                pages: Arc::new(pages),
+            });
+        }
     }
 
     pub fn pages(&self) -> &[PageSize] {

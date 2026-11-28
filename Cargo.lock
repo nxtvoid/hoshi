@@ -3616,6 +3616,7 @@ dependencies = [
  "notify",
  "pdfium-render",
  "portable-pty",
+ "quick-xml 0.42.0",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",

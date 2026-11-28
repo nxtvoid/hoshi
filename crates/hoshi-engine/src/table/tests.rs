@@ -182,6 +182,28 @@ fn a_text_larger_than_the_limit_is_cut_at_its_last_whole_line() {
 }
 
 #[test]
+fn a_cut_keeps_whole_lines_in_utf16_and_with_old_mac_breaks() {
+    let dir = folder("cut-encodings");
+    let wide = dir.join("wide.csv");
+    let mut bytes = vec![0xFF, 0xFE];
+    bytes.extend("a,b\n1,2\n3,4\n".encode_utf16().flat_map(u16::to_le_bytes));
+    std::fs::write(&wide, &bytes).unwrap();
+    let mac = dir.join("mac.csv");
+    std::fs::write(&mac, "a,b\r1,2\r3,4\r").unwrap();
+
+    assert_eq!(read_text(&wide, 22).unwrap(), ("a,b\n1,2\n".into(), true));
+    assert_eq!(read_text(&mac, 10).unwrap(), ("a,b\r1,2\r".into(), true));
+}
+
+#[test]
+fn a_text_with_more_columns_than_a_spreadsheet_is_refused() {
+    let path = folder("columns").join("wide.csv");
+    std::fs::write(&path, ",".repeat(20_000)).unwrap();
+
+    assert_eq!(open(&path).err(), Some(TableFailure::TooLarge));
+}
+
+#[test]
 fn a_file_that_is_not_a_workbook_fails_to_open() {
     let path = folder("broken").join("broken.xlsx");
     std::fs::write(&path, "not a zip").unwrap();

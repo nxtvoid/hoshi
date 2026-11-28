@@ -3,6 +3,7 @@
 //! only when it is shown.
 
 mod delimited;
+mod preflight;
 mod workbook;
 
 use calamine::{Data, Range};
@@ -16,6 +17,8 @@ pub const MAX_TEXT_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_WORKBOOK_BYTES: u64 = 128 * 1024 * 1024;
 /// The most cells a sheet spans from A1; a sheet past it is refused rather than held.
 const MAX_CELLS: u64 = 20_000_000;
+/// The most columns a text table has, as many as a spreadsheet's.
+const MAX_COLUMNS: usize = 16_384;
 /// Rows looked at to size columns.
 const SAMPLE_ROWS: usize = 500;
 /// Characters a column grows to at most.
@@ -116,6 +119,9 @@ pub fn open(path: &Path) -> Result<TableFile, TableFailure> {
         delimited::csv_separator(&text)
     };
     let table = Delimited::new(text, separator);
+    if table.columns() > MAX_COLUMNS {
+        return Err(TableFailure::TooLarge);
+    }
     Ok(TableFile {
         format: Format::Delimited {
             separator: table.separator(),
@@ -135,10 +141,35 @@ fn open_workbook(path: &Path) -> Result<workbook::Book, TableFailure> {
     let size = std::fs::metadata(path)
         .map_err(|error| TableFailure::Read(error.to_string()))?
         .len();
-    if size > MAX_WORKBOOK_BYTES {
+    let extension = extension(&path.to_string_lossy()).unwrap_or_default();
+    if size > MAX_WORKBOOK_BYTES
+        || preflight::cells(path, &extension).is_some_and(|cells| cells > MAX_CELLS)
+    {
         return Err(TableFailure::TooLarge);
     }
     workbook::open(path)
+}
+
+/// Where the last whole line of `bytes` ends, its line breaks read in the encoding its byte
+/// order mark names: UTF-16 two bytes a character, anything else one.
+fn whole_lines(bytes: &[u8]) -> usize {
+    let wide = match bytes {
+        [0xFF, 0xFE, ..] => Some(u16::from_le_bytes as fn([u8; 2]) -> u16),
+        [0xFE, 0xFF, ..] => Some(u16::from_be_bytes as fn([u8; 2]) -> u16),
+        _ => None,
+    };
+    let Some(unit) = wide else {
+        return bytes
+            .iter()
+            .rposition(|byte| matches!(byte, b'\n' | b'\r'))
+            .map_or(0, |at| at + 1);
+    };
+    bytes[2..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .rposition(|pair| matches!(unit(*pair), 0x0A | 0x0D))
+        .map_or(0, |at| 2 + (at + 1) * 2)
 }
 
 /// The file's text, up to its last whole line within `max` bytes when it is larger.
@@ -152,11 +183,7 @@ fn read_text(path: &Path, max: u64) -> Result<(String, bool), TableFailure> {
     let truncated = bytes.len() as u64 > max;
     if truncated {
         bytes.truncate(max as usize);
-        let end = bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |at| at + 1);
-        bytes.truncate(end);
+        bytes.truncate(whole_lines(&bytes));
     }
     Ok((delimited::decode(bytes), truncated))
 }

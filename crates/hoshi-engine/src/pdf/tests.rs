@@ -25,6 +25,12 @@ fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
 
 /// A PDF of `pages` pages, each saying `Page <n>` and, on the last, `Total sales`.
 fn pdf(path: &Path, pages: usize) {
+    pdf_with(path, pages, 0, 0);
+}
+
+/// [`pdf`] with its pages' box starting `origin` points from the page space's corner and the
+/// pages turned `rotate` degrees.
+fn pdf_with(path: &Path, pages: usize, origin: u32, rotate: u32) {
     let mut objects = vec![
         "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
         format!(
@@ -37,12 +43,18 @@ fn pdf(path: &Path, pages: usize) {
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
     ];
     for page in 0..pages {
-        let mut text = format!("BT /F1 18 Tf 72 720 Td (Page {}) Tj ET", page + 1);
+        let (left, low) = (72 + origin, 720 + origin);
+        let mut text = format!("BT /F1 18 Tf {left} {low} Td (Page {}) Tj ET", page + 1);
         if page + 1 == pages {
-            text.push_str(" BT /F1 12 Tf 72 680 Td (Total sales: 1.234.567) Tj ET");
+            text.push_str(&format!(
+                " BT /F1 12 Tf {left} {} Td (Total sales: 1.234.567) Tj ET",
+                low - 40
+            ));
         }
         objects.push(format!(
-            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [{origin} {origin} {} {}] /Rotate {rotate} /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>",
+            612 + origin,
+            792 + origin,
             5 + page * 2
         ));
         objects.push(format!(
@@ -79,13 +91,15 @@ fn search(document: &Document, query: &str) -> Vec<Match> {
 
 #[test]
 fn a_page_too_large_to_draw_is_drawn_narrower() {
-    assert_eq!(drawn_width(1200, 0.75), 1200);
-    let long = drawn_width(3000, 0.1);
+    assert_eq!(drawn_width(1200, 0.75), Some(1200));
+    let long = drawn_width(3000, 0.1).unwrap();
     assert!(long as f32 / 0.1 <= 8192., "{long}");
-    let huge = drawn_width(20_000, 1.);
+    let huge = drawn_width(20_000, 1.).unwrap();
     assert!((huge * huge) as f32 <= 16_000_000., "{huge}");
     assert!(huge > 3900);
-    assert_eq!(drawn_width(0, 1.), 1);
+    assert_eq!(drawn_width(0, 1.), Some(1));
+    assert_eq!(drawn_width(3000, 0.0001), None);
+    assert_eq!(drawn_width(3000, 0.), None);
 }
 
 #[test]
@@ -167,4 +181,22 @@ fn a_pdf_opens_draws_its_pages_and_finds_its_text() {
     assert!(search(&document, "  ").is_empty());
     assert_eq!(Document::open(&dir, &broken).err(), Some(PdfFailure::Read));
     assert!(dir.join("tools/pdfium/8125").is_dir());
+
+    let moved = dir.join("moved.pdf");
+    pdf_with(&moved, 1, 300, 0);
+    let moved = Document::open(&dir, &moved).unwrap();
+    let area = search(&moved, "total sales")[0].areas[0];
+    assert!(area.left > 0.1 && area.left < 0.15, "{area:?}");
+    assert!(area.top > 0.1 && area.top < 0.16, "{area:?}");
+
+    let turned = dir.join("turned.pdf");
+    pdf_with(&turned, 1, 0, 90);
+    let turned = Document::open(&dir, &turned).unwrap();
+    assert!(turned.pages()[0].width > turned.pages()[0].height);
+    let area = search(&turned, "total sales")[0].areas[0];
+    assert!(area.height > area.width, "{area:?}");
+    assert!(
+        area.left > 0.8 && area.top > 0.05 && area.top < 0.15,
+        "{area:?}"
+    );
 }

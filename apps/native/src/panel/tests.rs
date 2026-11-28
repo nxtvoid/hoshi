@@ -1040,6 +1040,68 @@ fn opening_a_table_again_reads_it_again_once_it_changed(cx: &mut TestAppContext)
     assert_eq!(kinds(&h), [SurfaceKind::File]);
 }
 
+fn file_view(h: &Harness) -> Entity<super::file_surface::FileSurface> {
+    h.panel.read_with(&h.cx, |panel, _| {
+        panel
+            .views
+            .values()
+            .find_map(|view| match view {
+                SurfaceView::File(view) => Some(view.clone()),
+                _ => None,
+            })
+            .expect("a file view")
+    })
+}
+
+fn wait_for_source(h: &mut Harness) {
+    let view = file_view(h);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !view.read_with(&h.cx, |view, _| view.source_shown()) {
+        assert!(
+            Instant::now() < deadline,
+            "the source never showed its lines"
+        );
+        redraw(&mut h.cx);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[gpui_kit::test]
+fn the_source_of_a_table_read_again_shows_its_lines(cx: &mut TestAppContext) {
+    let mut h = harness(cx, "source-changed", 0);
+    let path = h.dir.join("project").join("stock.csv");
+    std::fs::write(
+        &path,
+        "item,units
+Oak Table,3
+",
+    )
+    .unwrap();
+    let shown = path.to_string_lossy().into_owned();
+    h.panel
+        .update(&mut h.cx, |panel, cx| panel.open_file("t", &shown, cx));
+    wait_for_table_rows(&mut h, 2);
+    file_view(&h).update(&mut h.cx, |view, cx| view.show_source(cx));
+    wait_for_source(&mut h);
+
+    std::fs::write(
+        &path,
+        "item,units
+Oak Table,3
+Lamp,8
+",
+    )
+    .unwrap();
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    h.panel
+        .update(&mut h.cx, |panel, cx| panel.open_file("t", &shown, cx));
+    wait_for_table_rows(&mut h, 3);
+
+    wait_for_source(&mut h);
+}
+
 #[gpui_kit::test]
 fn cells_picked_in_a_table_copy_as_a_spreadsheet_pastes_them(cx: &mut TestAppContext) {
     let mut h = harness(cx, "sheet-copy", 0);
