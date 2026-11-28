@@ -7,12 +7,43 @@ use std::sync::OnceLock;
 pub struct Delimited {
     text: String,
     separator: u8,
-    /// Where each row starts; a quoted cell may hold line breaks, so rows aren't lines.
-    rows: Vec<usize>,
-    /// Where the last row ends: blank lines after it are no rows.
-    end: usize,
-    lines: OnceLock<Vec<usize>>,
+    /// A quoted cell may hold line breaks, so rows aren't lines.
+    rows: Starts,
+    lines: OnceLock<Starts>,
     columns: usize,
+}
+
+/// How many rows, or lines, one kept start covers.
+const STRIDE: usize = 16;
+
+/// Where rows or lines start, kept for every [`STRIDE`]th one so a text of tiny rows needs
+/// little more memory than itself; the others are read on from the nearest kept.
+#[derive(Default)]
+struct Starts {
+    kept: Vec<usize>,
+    count: usize,
+}
+
+impl Starts {
+    fn push(&mut self, start: usize) {
+        if self.count.is_multiple_of(STRIDE) {
+            self.kept.push(start);
+        }
+        self.count += 1;
+    }
+
+    fn truncate(&mut self, count: usize) {
+        self.count = self.count.min(count);
+        self.kept.truncate(self.count.div_ceil(STRIDE));
+    }
+
+    /// Where entry `index` starts, with `end` giving where the entry starting at a byte ends.
+    fn start(&self, index: usize, end: impl Fn(usize) -> usize) -> Option<usize> {
+        if index >= self.count {
+            return None;
+        }
+        Some((0..index % STRIDE).fold(self.kept[index / STRIDE], |start, _| end(start)))
+    }
 }
 
 /// The text of a file's bytes: UTF-8, or UTF-16 with its byte order mark, or else
@@ -101,19 +132,11 @@ impl Delimited {
         if text.starts_with('\u{feff}') {
             text.drain(..'\u{feff}'.len_utf8());
         }
-        let (mut rows, columns) = index_rows(text.as_bytes(), separator);
-        let mut end = text.len();
-        while let Some(&start) = rows.last()
-            && without_break(&text[start..end]).is_empty()
-        {
-            rows.pop();
-            end = start;
-        }
+        let (rows, columns) = index_rows(text.as_bytes(), separator);
         Self {
             text,
             separator,
             rows,
-            end,
             lines: OnceLock::new(),
             columns,
         }
@@ -124,7 +147,7 @@ impl Delimited {
     }
 
     pub fn rows(&self) -> usize {
-        self.rows.len()
+        self.rows.count
     }
 
     pub fn columns(&self) -> usize {
@@ -132,14 +155,15 @@ impl Delimited {
     }
 
     pub fn row(&self, index: usize) -> Vec<String> {
-        let Some(&start) = self.rows.get(index) else {
+        let bytes = self.text.as_bytes();
+        let end = |start| row_end(bytes, start, self.separator).0;
+        let Some(start) = self.rows.start(index, end) else {
             return Vec::new();
         };
-        let end = self.rows.get(index + 1).copied().unwrap_or(self.end);
-        split(without_break(&self.text[start..end]), self.separator)
+        split(without_break(&self.text[start..end(start)]), self.separator)
     }
 
-    fn line_starts(&self) -> &[usize] {
+    fn line_starts(&self) -> &Starts {
         self.lines.get_or_init(|| index_lines(self.text.as_bytes()))
     }
 
@@ -148,16 +172,16 @@ impl Delimited {
     }
 
     pub fn lines(&self) -> usize {
-        self.line_starts().len()
+        self.line_starts().count
     }
 
     pub fn line(&self, index: usize) -> &str {
-        let lines = self.line_starts();
-        let Some(&start) = lines.get(index) else {
+        let bytes = self.text.as_bytes();
+        let end = |start| line_end(bytes, start);
+        let Some(start) = self.line_starts().start(index, end) else {
             return "";
         };
-        let end = lines.get(index + 1).copied().unwrap_or(self.text.len());
-        without_break(&self.text[start..end])
+        without_break(&self.text[start..end(start)])
     }
 }
 
@@ -168,17 +192,12 @@ fn without_break(row: &str) -> &str {
         .unwrap_or(row)
 }
 
-/// Where each row starts, and how many cells the widest row has.
-fn index_rows(bytes: &[u8], separator: u8) -> (Vec<usize>, usize) {
-    if bytes.is_empty() {
-        return (Vec::new(), 0);
-    }
-    let mut rows = vec![0];
+/// Where the row starting at `start` ends, past its line break, and how many cells it has.
+fn row_end(bytes: &[u8], start: usize, separator: u8) -> (usize, usize) {
     let mut quoted = false;
     let mut field_start = true;
     let mut cells = 1;
-    let mut widest = 0;
-    let mut index = 0;
+    let mut index = start;
     while index < bytes.len() {
         let byte = bytes[index];
         if quoted {
@@ -199,45 +218,59 @@ fn index_rows(bytes: &[u8], separator: u8) -> (Vec<usize>, usize) {
             cells += 1;
             field_start = true;
         } else if byte == b'\n' || byte == b'\r' {
-            if byte == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
-                index += 1;
-            }
-            widest = widest.max(cells);
-            cells = 1;
-            field_start = true;
-            if index + 1 < bytes.len() {
-                rows.push(index + 1);
-            }
+            return (break_end(bytes, index), cells);
         } else {
             field_start = false;
         }
         index += 1;
     }
-    let last_open = rows.last().is_some_and(|start| *start < bytes.len())
-        && !matches!(bytes.last(), Some(b'\n' | b'\r'));
-    if last_open {
-        widest = widest.max(cells);
+    (bytes.len(), cells)
+}
+
+/// Past the line break at `index`, `\r\n` counting as one.
+fn break_end(bytes: &[u8], index: usize) -> usize {
+    if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+        index + 2
+    } else {
+        index + 1
     }
+}
+
+fn line_end(bytes: &[u8], start: usize) -> usize {
+    bytes[start..]
+        .iter()
+        .position(|byte| matches!(byte, b'\n' | b'\r'))
+        .map_or(bytes.len(), |at| break_end(bytes, start + at))
+}
+
+/// Where the rows start, blank lines after the last one left out, and how many cells the
+/// widest row has.
+fn index_rows(bytes: &[u8], separator: u8) -> (Starts, usize) {
+    let mut rows = Starts::default();
+    let (mut filled, mut widest) = (0, 0);
+    let mut start = 0;
+    while start < bytes.len() {
+        let (end, cells) = row_end(bytes, start, separator);
+        rows.push(start);
+        if !bytes[start..end]
+            .iter()
+            .all(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            filled = rows.count;
+        }
+        widest = widest.max(cells);
+        start = end;
+    }
+    rows.truncate(filled);
     (rows, widest)
 }
 
-fn index_lines(bytes: &[u8]) -> Vec<usize> {
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = vec![0];
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if byte == b'\n' || byte == b'\r' {
-            if byte == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
-                index += 1;
-            }
-            if index + 1 < bytes.len() {
-                lines.push(index + 1);
-            }
-        }
-        index += 1;
+fn index_lines(bytes: &[u8]) -> Starts {
+    let mut lines = Starts::default();
+    let mut start = 0;
+    while start < bytes.len() {
+        lines.push(start);
+        start = line_end(bytes, start);
     }
     lines
 }
@@ -337,6 +370,34 @@ mod tests {
     fn a_quote_inside_an_unquoted_cell_is_text() {
         let table = Delimited::new("5\" screen,ok".into(), b',');
         assert_eq!(table.row(0), ["5\" screen", "ok"]);
+    }
+
+    #[test]
+    fn a_text_of_tiny_rows_keeps_few_of_their_starts() {
+        let table = Delimited::new("x\n".repeat(100_000), b',');
+
+        assert_eq!((table.rows(), table.lines()), (100_000, 100_000));
+        assert!(table.rows.kept.len() <= 100_000 / 16 + 1);
+        assert_eq!(table.row(99_999), ["x"]);
+        assert_eq!(table.line(54_321), "x");
+        assert!(table.row(100_000).is_empty());
+    }
+
+    #[test]
+    fn any_row_or_line_reads_as_reading_them_all_in_order() {
+        let text: String = (0..50)
+            .map(|row| format!("{row},\"a\nb{row}\"\r\n"))
+            .chain(["\n\n".to_owned()])
+            .collect();
+        let table = Delimited::new(text, b',');
+
+        assert_eq!(table.rows(), 50);
+        assert_eq!(table.lines(), 102);
+        for row in [0, 15, 16, 17, 33, 49] {
+            assert_eq!(table.row(row), [row.to_string(), format!("a\nb{row}")]);
+        }
+        assert_eq!(table.line(33), "b16\"");
+        assert_eq!(table.line(100), "");
     }
 
     #[test]

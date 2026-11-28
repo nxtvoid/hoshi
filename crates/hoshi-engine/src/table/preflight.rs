@@ -25,13 +25,15 @@ fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 /// The sectors a compound file chains from `start` in `table`, stopping at its end mark or
-/// at a loop.
+/// at the first sector it reaches again.
 fn chain(table: &[u32], start: u32) -> Vec<u32> {
     let mut chained = Vec::new();
-    let mut at = start;
-    while (at as usize) < table.len() && chained.len() < table.len() {
-        chained.push(at);
-        at = table[at as usize];
+    let mut seen = vec![false; table.len()];
+    let mut at = start as usize;
+    while at < table.len() && !seen[at] {
+        seen[at] = true;
+        chained.push(at as u32);
+        at = table[at] as usize;
     }
     chained
 }
@@ -47,7 +49,6 @@ fn words(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
 /// The `Workbook` stream of an XLS: an OLE compound file, read as `[MS-CFB]` lays it out.
 fn workbook_stream(file: &[u8]) -> Option<Vec<u8>> {
     const SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
-    const LAST_ID: u32 = 0xFFFF_FFFA;
     if file.get(..8)? != SIGNATURE {
         return None;
     }
@@ -62,17 +63,26 @@ fn workbook_stream(file: &[u8]) -> Option<Vec<u8>> {
         let start = (id as usize).checked_add(1)?.checked_mul(size)?;
         file.get(start..start.checked_add(size)?)
     };
-    let mut fat_sectors: Vec<u32> = words(file.get(0x4C..0x4C + 109 * 4)?)
-        .filter(|id| *id < LAST_ID)
-        .collect();
+    let sectors = (file.len() / size).saturating_sub(1);
+    let mut taken = vec![false; sectors];
+    let mut fat_sectors = Vec::new();
+    let mut take = |ids: &[u8]| {
+        for id in words(ids) {
+            if (id as usize) < sectors && !taken[id as usize] {
+                taken[id as usize] = true;
+                fat_sectors.push(id);
+            }
+        }
+    };
+    take(file.get(0x4C..0x4C + 109 * 4)?);
     let mut difat = u32_at(file, 0x44)?;
-    let mut seen = 0;
-    while difat < LAST_ID && seen < file.len() / size {
+    let mut read_difat = vec![false; sectors];
+    while (difat as usize) < sectors && !read_difat[difat as usize] {
+        read_difat[difat as usize] = true;
         let data = sector(difat)?;
         let entries = size / 4 - 1;
-        fat_sectors.extend(words(&data[..entries * 4]).filter(|id| *id < LAST_ID));
+        take(&data[..entries * 4]);
         difat = u32_at(data, entries * 4)?;
-        seen += 1;
     }
     let fat: Vec<u32> = fat_sectors
         .iter()
@@ -130,56 +140,120 @@ fn workbook_stream(file: &[u8]) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// The cells an XLS's worksheets span, as each sheet's dimensions record gives them.
+const BOF: u16 = 0x0809;
+const EOF: u16 = 0x000A;
+
+/// One record of a BIFF stream at `at`: its kind, its data, and where the next one starts.
+fn record(stream: &[u8], at: usize) -> Option<(u16, &[u8], usize)> {
+    let kind = u16_at(stream, at)?;
+    let length = u16_at(stream, at + 2)? as usize;
+    let data = stream.get(at + 4..at + 4 + length)?;
+    Some((kind, data, at + 4 + length))
+}
+
+/// The cells an XLS's sheets span: each sheet as many as its reader sets aside for it, the
+/// larger of what its dimensions record declares and what its cells reach.
 fn xls_cells(file: &[u8]) -> Option<u64> {
-    const EOF: u16 = 0x000A;
     const BOUND_SHEET: u16 = 0x0085;
-    const DIMENSIONS: u16 = 0x0200;
     let stream = workbook_stream(file)?;
-    let record = |at: usize| {
-        let kind = u16_at(&stream, at)?;
-        let length = u16_at(&stream, at + 2)? as usize;
-        let data = stream.get(at + 4..at + 4 + length)?;
-        Some((kind, data, at + 4 + length))
-    };
     let mut sheets = Vec::new();
     let mut at = 0;
     loop {
-        let (kind, data, next) = record(at)?;
+        let (kind, data, next) = record(&stream, at)?;
         match kind {
-            BOUND_SHEET if data.get(5) == Some(&0) => sheets.push(u32_at(data, 0)? as usize),
+            BOUND_SHEET => sheets.push(u32_at(data, 0)? as usize),
             EOF => break,
             _ => {}
         }
         at = next;
     }
-    let mut cells = 0u64;
-    for start in sheets {
-        let mut at = start;
-        loop {
-            let (kind, data, next) = record(at)?;
-            if kind == DIMENSIONS {
-                let (rows, columns) = if data.len() >= 14 {
-                    (
-                        u32_at(data, 4)?.saturating_sub(u32_at(data, 0)?),
-                        u16_at(data, 10)?.saturating_sub(u16_at(data, 8)?),
-                    )
-                } else {
-                    (
-                        u32::from(u16_at(data, 2)?.saturating_sub(u16_at(data, 0)?)),
-                        u16_at(data, 6)?.saturating_sub(u16_at(data, 4)?),
-                    )
-                };
-                cells = cells.saturating_add(u64::from(rows) * u64::from(columns));
-                break;
+    Some(sheets.into_iter().fold(0u64, |cells, start| {
+        cells.saturating_add(sheet_cells(&stream, start))
+    }))
+}
+
+/// The cells of the sheet whose records start at `start`, skipping the charts and other
+/// streams nested in it, as its reader does.
+fn sheet_cells(stream: &[u8], start: usize) -> u64 {
+    const DIMENSIONS: u16 = 0x0200;
+    const MUL_RK: u16 = 0x00BD;
+    const CELLS: [u16; 7] = [0x0006, 0x00D6, 0x00FD, 0x0203, 0x0204, 0x0205, 0x027E];
+    let mut declared = 0u64;
+    let mut reached: Option<[u16; 4]> = None;
+    let mut reach = |row: u16, first: u16, last: u16| {
+        let [top, bottom, left, right] = reached.get_or_insert([row, row, first, last]);
+        (*top, *bottom) = ((*top).min(row), (*bottom).max(row));
+        (*left, *right) = ((*left).min(first), (*right).max(last));
+    };
+    let (mut at, mut nested, mut opened) = (start, 0usize, false);
+    while let Some((kind, data, next)) = record(stream, at) {
+        at = next;
+        if nested > 0 {
+            match kind {
+                BOF => nested += 1,
+                EOF => nested -= 1,
+                _ => {}
             }
-            if kind == EOF {
-                break;
+            continue;
+        }
+        match kind {
+            BOF if opened => nested += 1,
+            BOF => opened = true,
+            EOF => break,
+            DIMENSIONS => declared = declared_cells(data).unwrap_or(0),
+            MUL_RK if data.len() >= 6 => {
+                if let (Some(row), Some(first), Some(last)) = (
+                    u16_at(data, 0),
+                    u16_at(data, 2),
+                    u16_at(data, data.len() - 2),
+                ) {
+                    reach(row, first, last.max(first));
+                }
             }
-            at = next;
+            kind if CELLS.contains(&kind) => {
+                if let (Some(row), Some(column)) = (u16_at(data, 0), u16_at(data, 2)) {
+                    reach(row, column, column);
+                }
+            }
+            _ => {}
         }
     }
-    Some(cells)
+    let spanned = reached.map_or(0, |[top, bottom, left, right]| {
+        (u64::from(bottom - top) + 1) * (u64::from(right - left) + 1)
+    });
+    declared.max(spanned)
+}
+
+/// The cells a dimensions record declares, counted as its reader counts them: a first row
+/// past the last wraps around to a count too large to hold.
+fn declared_cells(data: &[u8]) -> Option<u64> {
+    let (first_row, end_row, first_column, end_column) = match data.len() {
+        10 => (
+            u32::from(u16_at(data, 0)?),
+            u32::from(u16_at(data, 2)?),
+            u32::from(u16_at(data, 4)?),
+            u32::from(u16_at(data, 6)?),
+        ),
+        14 | 16 => (
+            u32_at(data, 0)?,
+            u32_at(data, 4)?,
+            u32::from(u16_at(data, 8)?),
+            u32::from(u16_at(data, 10)?),
+        ),
+        _ => return None,
+    };
+    if end_row == 0 || end_column == 0 {
+        return Some(1);
+    }
+    let first_column = if first_column > 0xFF || end_column < first_column {
+        0
+    } else {
+        first_column
+    };
+    Some(
+        u64::from(end_row.wrapping_sub(first_row))
+            * u64::from(end_column.wrapping_sub(first_column)),
+    )
 }
 
 fn repeated(element: &BytesStart<'_>, name: &str) -> u64 {
@@ -191,12 +265,21 @@ fn repeated(element: &BytesStart<'_>, name: &str) -> u64 {
         .unwrap_or(1)
 }
 
+/// Whether the reader keeps the cell: with a value, a type or a formula. Text without a type
+/// it leaves out.
 fn has_value(element: &BytesStart<'_>) -> bool {
-    element
-        .try_get_attribute("office:value-type")
-        .ok()
-        .flatten()
-        .is_some()
+    element.attributes().flatten().any(|attribute| {
+        matches!(
+            attribute.key.as_ref(),
+            "office:value-type"
+                | "office:value"
+                | "office:string-value"
+                | "office:date-value"
+                | "office:time-value"
+                | "office:boolean-value"
+                | "table:formula"
+        )
+    })
 }
 
 /// The cells an ODS's tables span from A1 to their last cell with something in it, counting
@@ -226,7 +309,7 @@ fn ods_cells(path: &Path) -> Option<u64> {
                     }
                     "table:table-cell" | "table:covered-table-cell" => {
                         let times = repeated(element, "table:number-columns-repeated");
-                        if !empty || has_value(element) {
+                        if has_value(element) {
                             filled = true;
                             columns = columns.max(column.saturating_add(times));
                         }
@@ -255,7 +338,7 @@ fn ods_cells(path: &Path) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ods_cells, xls_cells};
+    use super::{chain, ods_cells, xls_cells};
     use std::io::Write;
     use zip::write::SimpleFileOptions;
 
@@ -266,8 +349,31 @@ mod tests {
         bytes
     }
 
-    /// A BIFF8 workbook stream whose worksheets span `sheets` rows by columns each.
-    fn biff(sheets: &[(u32, u16)]) -> Vec<u8> {
+    fn dimensions(rows: u32, columns: u16) -> Vec<u8> {
+        let mut data = 0u32.to_le_bytes().to_vec();
+        data.extend(rows.to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        data.extend(columns.to_le_bytes());
+        data.extend(0u16.to_le_bytes());
+        record(0x0200, &data)
+    }
+
+    fn number(row: u16, column: u16) -> Vec<u8> {
+        let mut data = row.to_le_bytes().to_vec();
+        data.extend(column.to_le_bytes());
+        data.extend([0; 10]);
+        record(0x0203, &data)
+    }
+
+    fn substream(records: &[Vec<u8>]) -> Vec<u8> {
+        let mut bytes = record(0x0809, &[0; 16]);
+        bytes.extend(records.concat());
+        bytes.extend(record(0x000A, &[]));
+        bytes
+    }
+
+    /// A BIFF8 workbook stream with a sheet holding each of `sheets`' records.
+    fn biff(sheets: &[Vec<Vec<u8>>]) -> Vec<u8> {
         let bof = record(0x0809, &[0; 16]);
         let bound = |at: u32| {
             let mut data = at.to_le_bytes().to_vec();
@@ -277,16 +383,9 @@ mod tests {
         let globals_length = bof.len() + sheets.len() * bound(0).len() + 4;
         let mut sheet_streams = Vec::new();
         let mut offsets = Vec::new();
-        for (rows, columns) in sheets {
+        for records in sheets {
             offsets.push((globals_length + sheet_streams.len()) as u32);
-            let mut dimensions = 0u32.to_le_bytes().to_vec();
-            dimensions.extend(rows.to_le_bytes());
-            dimensions.extend(0u16.to_le_bytes());
-            dimensions.extend(columns.to_le_bytes());
-            dimensions.extend(0u16.to_le_bytes());
-            sheet_streams.extend(&bof);
-            sheet_streams.extend(record(0x0200, &dimensions));
-            sheet_streams.extend(record(0x000A, &[]));
+            sheet_streams.extend(substream(records));
         }
         let mut stream = bof.clone();
         for at in offsets {
@@ -350,12 +449,57 @@ mod tests {
 
     #[test]
     fn an_xls_spans_what_its_sheets_dimensions_say() {
-        let one = compound(biff(&[(65_536, 256)]));
-        let two = compound(biff(&[(65_536, 256), (10, 4)]));
+        let one = compound(biff(&[vec![dimensions(65_536, 256)]]));
+        let two = compound(biff(&[
+            vec![dimensions(65_536, 256)],
+            vec![dimensions(10, 4)],
+        ]));
 
         assert_eq!(xls_cells(&one), Some(65_536 * 256));
         assert_eq!(xls_cells(&two), Some(65_536 * 256 + 40));
         assert_eq!(xls_cells(b"not a compound file"), None);
+    }
+
+    #[test]
+    fn an_xls_spans_where_its_cells_are_whatever_its_dimensions_say() {
+        let misleading = compound(biff(&[
+            vec![dimensions(10, 4)],
+            vec![
+                dimensions(1, 1),
+                substream(&[number(0, 0)]),
+                number(0, 0),
+                number(65_535, 255),
+            ],
+        ]));
+        let backwards = compound(biff(&[vec![{
+            let mut data = 9u32.to_le_bytes().to_vec();
+            data.extend(5u32.to_le_bytes());
+            data.extend([0, 0, 1, 0, 0, 0]);
+            record(0x0200, &data)
+        }]]));
+
+        assert_eq!(xls_cells(&misleading), Some(40 + 65_536 * 256));
+        assert!(xls_cells(&backwards).unwrap() > 4_000_000_000);
+    }
+
+    #[test]
+    fn a_chain_of_sectors_ends_where_it_loops() {
+        assert_eq!(chain(&[0], 0), [0]);
+        assert_eq!(chain(&[1, 0, 7], 0), [0, 1]);
+        assert_eq!(chain(&[1, 0xFFFF_FFFE], 0), [0, 1]);
+    }
+
+    #[test]
+    fn a_compound_file_whose_tables_point_back_at_themselves_is_read_once() {
+        let mut file = compound(biff(&[vec![dimensions(10, 4)]]));
+        file[0x44..0x48].copy_from_slice(&0u32.to_le_bytes());
+        file[0x48..0x4C].copy_from_slice(&1u32.to_le_bytes());
+        for slot in 1..109 {
+            file[0x4C + slot * 4..0x50 + slot * 4].copy_from_slice(&0u32.to_le_bytes());
+        }
+        file[512 + 127 * 4..512 + 128 * 4].copy_from_slice(&0u32.to_le_bytes());
+
+        assert_eq!(xls_cells(&file), Some(40));
     }
 
     fn ods(dir: &std::path::Path, table: &str) -> std::path::PathBuf {
@@ -379,9 +523,15 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let small = ods(
             &dir,
-            r#"<table:table><table:table-row><table:table-cell office:value-type="float"/><table:table-cell><text:p>b</text:p></table:table-cell><table:table-cell table:number-columns-repeated="1000"/></table:table-row><table:table-row table:number-rows-repeated="1048000"><table:table-cell table:number-columns-repeated="1024"/></table:table-row></table:table>"#,
+            r#"<table:table><table:table-row><table:table-cell office:value-type="float"/><table:table-cell office:value-type="string"><text:p>b</text:p></table:table-cell><table:table-cell><text:p>no type</text:p></table:table-cell><table:table-cell table:number-columns-repeated="1000"/></table:table-row><table:table-row table:number-rows-repeated="1048000"><table:table-cell table:number-columns-repeated="1024"/></table:table-row><table:table-row table:number-rows-repeated="20000"><table:table-cell table:number-columns-repeated="2000"></table:table-cell></table:table-row></table:table>"#,
         );
         assert_eq!(ods_cells(&small), Some(2));
+
+        let formulas = ods(
+            &dir,
+            r#"<table:table><table:table-row table:number-rows-repeated="3"><table:table-cell table:formula="of:=1" table:number-columns-repeated="5"></table:table-cell></table:table-row></table:table>"#,
+        );
+        assert_eq!(ods_cells(&formulas), Some(15));
 
         let huge = ods(
             &dir,
