@@ -175,22 +175,27 @@ fn xls_cells(file: &[u8]) -> Option<u64> {
     }))
 }
 
+/// Takes the cells of `row` from column `first` to `last` into the box `reached` spans, and
+/// counts them.
+fn reach(reached: &mut Option<[u16; 4]>, row: u16, first: u16, last: u16) -> u64 {
+    let [top, bottom, left, right] = reached.get_or_insert([row, row, first, last]);
+    (*top, *bottom) = ((*top).min(row), (*bottom).max(row));
+    (*left, *right) = ((*left).min(first), (*right).max(last));
+    u64::from(last - first) + 1
+}
+
 /// The cells of the sheet whose records start at `start`, skipping the charts and other
-/// streams nested in it, as its reader does.
+/// streams nested in it, as its reader does: the most of the box its cells span, the cells
+/// read, and what a dimensions record has it set aside past those read before it.
 fn sheet_cells(stream: &[u8], start: usize) -> u64 {
     const DIMENSIONS: u16 = 0x0200;
     const MUL_RK: u16 = 0x00BD;
     const FORMULA: u16 = 0x0006;
     const STRING: u16 = 0x0207;
     const CELLS: [u16; 6] = [0x00D6, 0x00FD, 0x0203, 0x0204, 0x0205, 0x027E];
-    let mut declared = 0u64;
+    let (mut read, mut reserved) = (0u64, 0u64);
     let mut formula = (0, 0);
-    let mut reached: Option<[u16; 4]> = None;
-    let mut reach = |row: u16, first: u16, last: u16| {
-        let [top, bottom, left, right] = reached.get_or_insert([row, row, first, last]);
-        (*top, *bottom) = ((*top).min(row), (*bottom).max(row));
-        (*left, *right) = ((*left).min(first), (*right).max(last));
-    };
+    let mut reached = None;
     let (mut at, mut nested, mut opened) = (start, 0usize, false);
     while let Some((kind, data, next)) = record(stream, at) {
         at = next;
@@ -206,26 +211,29 @@ fn sheet_cells(stream: &[u8], start: usize) -> u64 {
             BOF if opened => nested += 1,
             BOF => opened = true,
             EOF => break,
-            DIMENSIONS => declared = declared.max(declared_cells(data).unwrap_or(0)),
+            DIMENSIONS => {
+                let declared = declared_cells(data).unwrap_or(0);
+                reserved = reserved.max(read.saturating_add(declared));
+            }
             FORMULA => {
                 if let (Some(row), Some(column)) = (u16_at(data, 0), u16_at(data, 2)) {
                     formula = (row, column);
-                    reach(row, column, column);
+                    read += reach(&mut reached, row, column, column);
                 }
             }
-            STRING => reach(formula.0, formula.1, formula.1),
+            STRING => read += reach(&mut reached, formula.0, formula.1, formula.1),
             MUL_RK if data.len() >= 6 => {
                 if let (Some(row), Some(first), Some(last)) = (
                     u16_at(data, 0),
                     u16_at(data, 2),
                     u16_at(data, data.len() - 2),
                 ) {
-                    reach(row, first, last.max(first));
+                    read += reach(&mut reached, row, first, last.max(first));
                 }
             }
             kind if CELLS.contains(&kind) => {
                 if let (Some(row), Some(column)) = (u16_at(data, 0), u16_at(data, 2)) {
-                    reach(row, column, column);
+                    read += reach(&mut reached, row, column, column);
                 }
             }
             _ => {}
@@ -234,7 +242,7 @@ fn sheet_cells(stream: &[u8], start: usize) -> u64 {
     let spanned = reached.map_or(0, |[top, bottom, left, right]| {
         (u64::from(bottom - top) + 1) * (u64::from(right - left) + 1)
     });
-    declared.max(spanned)
+    spanned.max(read).max(reserved)
 }
 
 /// The cells a dimensions record declares, counted as its reader counts them: a first row
@@ -271,6 +279,8 @@ fn declared_cells(data: &[u8]) -> Option<u64> {
 
 /// The most `content.xml` may hold in one tag or text: far past any real cell's.
 const MAX_EVENT: u64 = 16 * 1024 * 1024;
+/// The most spaces `text:s` may add to an ODS's text altogether.
+const MAX_SPACES: u64 = MAX_EVENT;
 
 /// `inner`, failing once more than [`MAX_EVENT`] bytes are read with `read` not set back to
 /// zero, and then leaving `read` at `u64::MAX`.
@@ -332,6 +342,7 @@ fn ods_cells(path: &Path) -> Option<u64> {
     let mut cells = 0u64;
     let (mut row, mut rows, mut columns) = (0u64, 0u64, 0u64);
     let (mut column, mut repeats, mut filled) = (0u64, 1u64, false);
+    let mut spaces = 0u64;
     loop {
         let Ok(event) = reader.read_event_into(&mut buffer) else {
             return (read.get() == u64::MAX).then_some(u64::MAX);
@@ -342,6 +353,12 @@ fn ods_cells(path: &Path) -> Option<u64> {
                 let empty = matches!(event, Event::Empty(_));
                 match element.name().as_ref() {
                     "table:table" => (row, rows, columns) = (0, 0, 0),
+                    "text:s" => {
+                        spaces = spaces.saturating_add(repeated(element, "text:c"));
+                        if spaces > MAX_SPACES {
+                            return Some(u64::MAX);
+                        }
+                    }
                     "table:table-row" => {
                         let times = repeated(element, "table:number-rows-repeated");
                         if empty {
@@ -530,6 +547,10 @@ mod tests {
         assert_eq!(xls_cells(&misleading), Some(40 + 65_536 * 256));
         assert_eq!(xls_cells(&shrunk), Some(65_536 * 256));
         assert_eq!(xls_cells(&string), Some(65_536 * 256));
+
+        let mut read_first = vec![number(0, 0); 1000];
+        read_first.push(dimensions(100, 100));
+        assert_eq!(xls_cells(&compound(biff(&[read_first]))), Some(11_000));
         assert!(xls_cells(&backwards).unwrap() > 4_000_000_000);
     }
 
@@ -592,6 +613,17 @@ mod tests {
             ),
         );
         assert_eq!(ods_cells(&long), Some(u64::MAX));
+
+        let spaced = |count: &str| {
+            ods(
+                &dir,
+                &format!(
+                    r#"<table:table><table:table-row><table:table-cell office:value-type="string"><text:p>a<text:s/>b<text:s text:c="{count}"/></text:p></table:table-cell></table:table-row></table:table>"#
+                ),
+            )
+        };
+        assert_eq!(ods_cells(&spaced("3")), Some(1));
+        assert_eq!(ods_cells(&spaced("2147483647")), Some(u64::MAX));
 
         let huge = ods(
             &dir,
