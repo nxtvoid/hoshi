@@ -9,9 +9,12 @@ use zip::write::SimpleFileOptions;
 #[test]
 fn reads_a_workbook_when_asked() {
     if std::env::var_os(super::PATH).is_some() {
-        std::process::exit(serve_request(|limit| {
-            let _ = super::ALLOCATOR.set_limit(limit);
-        }));
+        std::process::exit(serve_request(
+            |limit| {
+                let _ = super::ALLOCATOR.set_limit(limit);
+            },
+            || super::ALLOCATOR.allocated(),
+        ));
     }
 }
 
@@ -167,6 +170,25 @@ fn what_the_reader_sends_back_reads_as_it_was() {
         round_trip(Err(TableFailure::Read("broken".into()))),
         Err(TableFailure::Read("broken".into()))
     );
+}
+
+#[test]
+fn a_date_or_duration_too_far_to_tell_reads_as_its_number() {
+    let mut range = Range::new((0, 0), (0, 2));
+    let far = [
+        ExcelDateTime::new(-1e300, ExcelDateTimeType::TimeDelta, false),
+        ExcelDateTime::new(1e300, ExcelDateTimeType::DateTime, false),
+        ExcelDateTime::new(f64::NAN, ExcelDateTimeType::DateTime, false),
+    ];
+    for (column, date) in far.into_iter().enumerate() {
+        range.set_value((0, column as u32), Data::DateTime(date));
+    }
+
+    let (_, read) = round_trip(Ok((Vec::new(), range))).unwrap();
+
+    assert_eq!(read.get_value((0, 0)), Some(&Data::Float(-1e300)));
+    assert_eq!(read.get_value((0, 1)), Some(&Data::Float(1e300)));
+    assert!(matches!(read.get_value((0, 2)), Some(Data::Float(value)) if value.is_nan()));
 }
 
 #[test]

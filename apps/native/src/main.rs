@@ -746,9 +746,12 @@ impl Render for HoshiWindow {
 static ALLOCATOR: cap::Cap<std::alloc::System> = cap::Cap::new(std::alloc::System, usize::MAX);
 
 fn main() {
-    if let Some(code) = hoshi_engine::table::serve(|limit| {
-        let _ = ALLOCATOR.set_limit(limit);
-    }) {
+    if let Some(code) = hoshi_engine::table::serve(
+        |limit| {
+            let _ = ALLOCATOR.set_limit(limit);
+        },
+        || ALLOCATOR.allocated(),
+    ) {
         std::process::exit(code);
     }
     let home = home::resolve().expect("hoshi needs a home folder");

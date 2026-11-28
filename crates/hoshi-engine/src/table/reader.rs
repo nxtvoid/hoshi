@@ -20,6 +20,9 @@ const MARK: &[u8] = b"\0hoshi-workbook\0";
 const MAX_BEFORE_MARK: usize = 64 * 1024;
 /// The most memory the reading process holds.
 const MEMORY: usize = 3 << 30;
+/// The memory past which the reading process stops on its own, before an allocation is refused
+/// and it aborts.
+const SOFT_MEMORY: usize = MEMORY / 8 * 7;
 /// How long a workbook is given to be read.
 #[cfg(not(test))]
 const PATIENCE: Duration = Duration::from_secs(120);
@@ -29,6 +32,12 @@ const PATIENCE: Duration = Duration::from_secs(5);
 const UNWRITTEN: i32 = 2;
 /// The reader's exit code when it panicked.
 const PANICKED: i32 = 3;
+/// The reader's exit code when it passed [`SOFT_MEMORY`] or [`PATIENCE`].
+const EXHAUSTED: i32 = 4;
+/// The reader's exit code when the program that started it is gone.
+const ABANDONED: i32 = 5;
+/// The largest date or duration, in days, sent as one: past it, it is sent as a number.
+const MAX_DAYS: f64 = 10_000_000.;
 
 /// A sheet as read: the names of the workbook's visible worksheets, and the cells of the sheet
 /// asked for or else the first.
@@ -49,7 +58,7 @@ pub fn read(path: &Path, sheet: Option<&str>) -> Result<Opened, TableFailure> {
     let mut command = command().map_err(failed)?;
     command
         .env(PATH, path)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     match sheet {
@@ -63,6 +72,7 @@ pub fn read(path: &Path, sheet: Option<&str>) -> Result<Opened, TableFailure> {
         command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command.spawn().map_err(failed)?;
+    let held_open = child.stdin.take();
     let output = child.stdout.take().ok_or_else(|| failed(malformed()))?;
     let reading = std::thread::spawn(move || {
         let mut output = BufReader::new(output);
@@ -70,6 +80,7 @@ pub fn read(path: &Path, sheet: Option<&str>) -> Result<Opened, TableFailure> {
         decode(&mut output)
     });
     let waited = wait(&mut child);
+    drop(held_open);
     let read = reading.join().unwrap_or_else(|_| Err(failed(malformed())));
     let Some(status) = waited.map_err(failed)? else {
         return Err(TableFailure::TooLarge);
@@ -83,9 +94,14 @@ pub fn read(path: &Path, sheet: Option<&str>) -> Result<Opened, TableFailure> {
     }
 }
 
+/// The running program, which on Linux is still there when an update replaced its file.
 #[cfg(not(test))]
 fn command() -> std::io::Result<Command> {
-    let mut command = Command::new(std::env::current_exe()?);
+    #[cfg(target_os = "linux")]
+    let program = std::path::PathBuf::from("/proc/self/exe");
+    #[cfg(not(target_os = "linux"))]
+    let program = std::env::current_exe()?;
+    let mut command = Command::new(program);
     command.arg(FLAG);
     Ok(command)
 }
@@ -107,7 +123,11 @@ fn wait(child: &mut Child) -> std::io::Result<Option<ExitStatus>> {
     let deadline = Instant::now() + PATIENCE;
     let mut pause = Duration::from_millis(2);
     loop {
-        if let Some(status) = child.try_wait()? {
+        let status = child.try_wait().inspect_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+        })?;
+        if let Some(status) = status {
             return Ok(Some(status));
         }
         if Instant::now() >= deadline {
@@ -120,15 +140,30 @@ fn wait(child: &mut Child) -> std::io::Result<Option<ExitStatus>> {
     }
 }
 
-/// Reads the workbook the program was started for, when it was started as its reader, after
-/// `limit` holds what the program allocates to the bytes given; and gives the code to exit with.
-pub fn serve(limit: impl FnOnce(usize)) -> Option<i32> {
-    (std::env::args_os().nth(1)? == FLAG).then(|| serve_request(limit))
+/// Reads the workbook the program was started for, when it was started as its reader, and
+/// gives the code to exit with: `limit` holds what the program allocates to the bytes given,
+/// and `allocated` tells how much it holds.
+pub fn serve(limit: fn(usize), allocated: fn() -> usize) -> Option<i32> {
+    (std::env::args_os().nth(1)? == FLAG).then(|| serve_request(limit, allocated))
 }
 
-fn serve_request(limit: impl FnOnce(usize)) -> i32 {
+fn serve_request(limit: fn(usize), allocated: fn() -> usize) -> i32 {
     std::panic::set_hook(Box::new(|_| std::process::exit(PANICKED)));
     limit(MEMORY);
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        while started.elapsed() < PATIENCE {
+            if allocated() > SOFT_MEMORY {
+                std::process::exit(EXHAUSTED);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::process::exit(EXHAUSTED);
+    });
+    std::thread::spawn(|| {
+        let _ = std::io::stdin().read(&mut [0]);
+        std::process::exit(ABANDONED);
+    });
     let Some(path) = std::env::var_os(PATH) else {
         return UNWRITTEN;
     };
@@ -242,6 +277,10 @@ fn encode_data(out: &mut impl Write, data: &Data) -> std::io::Result<()> {
             write_text(out, text)
         }
         Data::Bool(value) => out.write_all(&[4, u8::from(*value)]),
+        Data::DateTime(date) if !date.as_f64().is_finite() || date.as_f64().abs() > MAX_DAYS => {
+            out.write_all(&[2])?;
+            out.write_all(&date.as_f64().to_le_bytes())
+        }
         Data::DateTime(date) if date.is_duration() => {
             out.write_all(&[6])?;
             out.write_all(&date.as_f64().to_le_bytes())
