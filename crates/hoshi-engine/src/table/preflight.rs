@@ -2,6 +2,7 @@
 //! every sheet as the workbook opens, so a sheet too large to hold must be caught first.
 
 use quick_xml::Reader;
+use quick_xml::errors::IllFormedError;
 use quick_xml::events::{BytesStart, Event};
 use std::cell::Cell;
 use std::io::{BufReader, Read};
@@ -279,8 +280,8 @@ fn declared_cells(data: &[u8]) -> Option<u64> {
 
 /// The most `content.xml` may hold in one tag or text: far past any real cell's.
 const MAX_EVENT: u64 = 16 * 1024 * 1024;
-/// The most spaces `text:s` may add to an ODS's text altogether.
-const MAX_SPACES: u64 = MAX_EVENT;
+/// The most text an ODS's cells may hold, each cell's as many times as it is repeated.
+const MAX_TEXT: u64 = 512 * 1024 * 1024;
 
 /// `inner`, failing once more than [`MAX_EVENT`] bytes are read with `read` not set back to
 /// zero, and then leaving `read` at `u64::MAX`.
@@ -302,13 +303,34 @@ impl<R: Read> Read for Capped<R> {
     }
 }
 
+/// A count attribute, its character references read as its reader reads them.
 fn repeated(element: &BytesStart<'_>, name: &str) -> u64 {
     element
         .try_get_attribute(name)
         .ok()
         .flatten()
-        .and_then(|attribute| attribute.value.parse().ok())
+        .and_then(|attribute| {
+            quick_xml::escape::unescape(&attribute.value)
+                .ok()?
+                .parse()
+                .ok()
+        })
         .unwrap_or(1)
+}
+
+/// The text a cell's attributes give it: its value, as text, and its formula.
+fn attributes_text(element: &BytesStart<'_>) -> u64 {
+    element
+        .attributes()
+        .flatten()
+        .filter(|attribute| {
+            matches!(
+                attribute.key.as_ref(),
+                "office:string-value" | "office:date-value" | "office:time-value" | "table:formula"
+            )
+        })
+        .map(|attribute| attribute.value.len() as u64)
+        .sum()
 }
 
 /// Whether the reader keeps the cell: with a value, a type or a formula. Text without a type
@@ -329,7 +351,8 @@ fn has_value(element: &BytesStart<'_>) -> bool {
 }
 
 /// The cells an ODS's tables span from A1 to their last cell with something in it, counting
-/// rows and cells repeated.
+/// rows and cells repeated; `u64::MAX` when its cells' text, repeated, passes [`MAX_TEXT`], or
+/// its XML can't be read through, as its reader may still read on past what stopped it.
 fn ods_cells(path: &Path) -> Option<u64> {
     let mut archive = zip::ZipArchive::new(std::fs::File::open(path).ok()?).ok()?;
     let inner = archive.by_name("content.xml").ok()?;
@@ -338,27 +361,36 @@ fn ods_cells(path: &Path) -> Option<u64> {
         inner,
         read: read.clone(),
     }));
+    let config = reader.config_mut();
+    config.check_end_names = false;
+    config.check_comments = false;
+    config.trim_text(false);
     let mut buffer = Vec::new();
     let mut cells = 0u64;
     let (mut row, mut rows, mut columns) = (0u64, 0u64, 0u64);
     let (mut column, mut repeats, mut filled) = (0u64, 1u64, false);
-    let mut spaces = 0u64;
+    let (mut text, mut held, mut cell) = (0u64, 0u64, None::<u64>);
     loop {
-        let Ok(event) = reader.read_event_into(&mut buffer) else {
-            return (read.get() == u64::MAX).then_some(u64::MAX);
+        let event = match reader.read_event_into(&mut buffer) {
+            Ok(event) => event,
+            Err(quick_xml::Error::IllFormed(IllFormedError::UnmatchedEndTag(_))) => {
+                buffer.clear();
+                continue;
+            }
+            Err(_) => return Some(u64::MAX),
         };
         read.set(0);
+        let mut hold = |copies: u64, length: u64| {
+            text = text.saturating_add(copies.saturating_mul(length));
+            text > MAX_TEXT
+        };
         match &event {
             Event::Start(element) | Event::Empty(element) => {
                 let empty = matches!(event, Event::Empty(_));
                 match element.name().as_ref() {
                     "table:table" => (row, rows, columns) = (0, 0, 0),
-                    "text:s" => {
-                        spaces = spaces.saturating_add(repeated(element, "text:c"));
-                        if spaces > MAX_SPACES {
-                            return Some(u64::MAX);
-                        }
-                    }
+                    "text:s" => held = held.saturating_add(repeated(element, "text:c")),
+                    "text:tab" | "text:line-break" => held = held.saturating_add(1),
                     "table:table-row" => {
                         let times = repeated(element, "table:number-rows-repeated");
                         if empty {
@@ -374,11 +406,30 @@ fn ods_cells(path: &Path) -> Option<u64> {
                             columns = columns.max(column.saturating_add(times));
                         }
                         column = column.saturating_add(times);
+                        let copies = times.saturating_mul(repeats);
+                        if has_value(element) && empty {
+                            if hold(copies, attributes_text(element)) {
+                                return Some(u64::MAX);
+                            }
+                        } else if has_value(element) {
+                            (cell, held) = (Some(copies), attributes_text(element));
+                        }
                     }
                     _ => {}
                 }
             }
+            Event::Text(content) if cell.is_some() => {
+                held = held.saturating_add(content.len() as u64);
+            }
+            Event::GeneralRef(_) if cell.is_some() => held = held.saturating_add(4),
             Event::End(element) => match element.name().as_ref() {
+                "table:table-cell" | "table:covered-table-cell" => {
+                    if let Some(copies) = cell.take()
+                        && hold(copies, held)
+                    {
+                        return Some(u64::MAX);
+                    }
+                }
                 "table:table-row" => {
                     row = row.saturating_add(repeats);
                     if filled {
@@ -614,16 +665,26 @@ mod tests {
         );
         assert_eq!(ods_cells(&long), Some(u64::MAX));
 
-        let spaced = |count: &str| {
+        let spaced = |count: &str, columns: u32, before: &str| {
             ods(
                 &dir,
                 &format!(
-                    r#"<table:table><table:table-row><table:table-cell office:value-type="string"><text:p>a<text:s/>b<text:s text:c="{count}"/></text:p></table:table-cell></table:table-row></table:table>"#
+                    r#"<table:table><table:table-row table:number-rows-repeated="2"><table:table-cell office:value-type="string" table:number-columns-repeated="{columns}"><text:p>{before}a<text:s/>b<text:s text:c="{count}"/></text:p></table:table-cell></table:table-row></table:table>"#
                 ),
             )
         };
-        assert_eq!(ods_cells(&spaced("3")), Some(1));
-        assert_eq!(ods_cells(&spaced("2147483647")), Some(u64::MAX));
+        assert_eq!(ods_cells(&spaced("3", 1, "")), Some(2));
+        assert_eq!(ods_cells(&spaced("1048576", 1, "")), Some(2));
+        assert_eq!(ods_cells(&spaced("2147483647", 1, "")), Some(u64::MAX));
+        assert_eq!(ods_cells(&spaced("&#50;147483647", 1, "")), Some(u64::MAX));
+        assert_eq!(ods_cells(&spaced("1048576", 4096, "")), Some(u64::MAX));
+        assert_eq!(
+            ods_cells(&spaced("2147483647", 1, "<text:p></text:span>")),
+            Some(u64::MAX)
+        );
+        assert_eq!(ods_cells(&spaced("3", 1, "</text:span>")), Some(2));
+        let broken = ods(&dir, r#"<table:table><table:table-row a="></table:table>"#);
+        assert_eq!(ods_cells(&broken), Some(u64::MAX));
 
         let huge = ods(
             &dir,
