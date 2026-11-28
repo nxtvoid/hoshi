@@ -19,7 +19,15 @@ const MARK: &[u8] = b"\0hoshi-workbook\0";
 /// How much output may come before [`MARK`].
 const MAX_BEFORE_MARK: usize = 64 * 1024;
 /// The most memory the reading process holds.
+#[cfg(not(test))]
 const MEMORY: usize = 3 << 30;
+#[cfg(test)]
+const MEMORY: usize = 1 << 30;
+/// The most text a sheet sent back holds, its cells' and its sheets' names together.
+#[cfg(not(test))]
+const MAX_TEXT: usize = 512 << 20;
+#[cfg(test)]
+const MAX_TEXT: usize = 1 << 20;
 /// The memory past which the reading process stops on its own, before an allocation is refused
 /// and it aborts.
 const SOFT_MEMORY: usize = MEMORY / 8 * 7;
@@ -233,6 +241,9 @@ fn encode(out: &mut impl Write, read: &Result<Opened, TableFailure>) -> std::io:
         }
         Ok(read) => read,
     };
+    if text_held(sheets, range) > MAX_TEXT {
+        return out.write_all(&[1]);
+    }
     out.write_all(&[0])?;
     write_u32(out, sheets.len() as u32)?;
     for sheet in sheets {
@@ -249,6 +260,15 @@ fn encode(out: &mut impl Write, read: &Result<Opened, TableFailure>) -> std::io:
         encode_data(out, data)?;
     }
     Ok(())
+}
+
+fn text_held(sheets: &[String], range: &Range<Data>) -> usize {
+    let names = sheets.iter().map(String::len);
+    let cells = range.used_cells().map(|(_, _, data)| match data {
+        Data::String(text) | Data::DateTimeIso(text) | Data::DurationIso(text) => text.len(),
+        _ => 0,
+    });
+    names.chain(cells).fold(0, usize::saturating_add)
 }
 
 /// A date as a serial day of the 1900 system, which a workbook may have counted from 1904.
@@ -322,8 +342,13 @@ fn read_8(input: &mut impl Read) -> std::io::Result<[u8; 8]> {
     Ok(bytes)
 }
 
-fn read_text(input: &mut impl Read) -> std::io::Result<String> {
-    let mut bytes = vec![0; read_u32(input)? as usize];
+/// A text, taken out of the `left` bytes of text still allowed; past them, out of memory.
+fn read_text(input: &mut impl Read, left: &mut usize) -> std::io::Result<String> {
+    let length = read_u32(input)? as usize;
+    *left = left
+        .checked_sub(length)
+        .ok_or(std::io::ErrorKind::OutOfMemory)?;
+    let mut bytes = vec![0; length];
     input.read_exact(&mut bytes)?;
     String::from_utf8(bytes).map_err(std::io::Error::other)
 }
@@ -333,17 +358,25 @@ fn malformed() -> std::io::Error {
 }
 
 fn decode(input: &mut impl Read) -> Result<Opened, TableFailure> {
-    match byte(input).map_err(failed)? {
-        0 => decode_read(input).map_err(failed),
-        1 => Err(TableFailure::TooLarge),
-        2 => Err(TableFailure::Read(read_text(input).map_err(failed)?)),
-        _ => Err(failed(malformed())),
-    }
+    let mut left = MAX_TEXT;
+    let read = match byte(input).map_err(failed)? {
+        0 => decode_read(input, &mut left),
+        1 => return Err(TableFailure::TooLarge),
+        2 => match read_text(input, &mut left) {
+            Ok(reason) => return Err(TableFailure::Read(reason)),
+            Err(error) => Err(error),
+        },
+        _ => Err(malformed()),
+    };
+    read.map_err(|error| match error.kind() {
+        std::io::ErrorKind::OutOfMemory => TableFailure::TooLarge,
+        _ => failed(error),
+    })
 }
 
-fn decode_read(input: &mut impl Read) -> std::io::Result<Opened> {
+fn decode_read(input: &mut impl Read, allowed: &mut usize) -> std::io::Result<Opened> {
     let sheets = (0..read_u32(input)?)
-        .map(|_| read_text(input))
+        .map(|_| read_text(input, allowed))
         .collect::<Result<Vec<_>, _>>()?;
     if byte(input)? == 0 {
         return Ok((sheets, Range::default()));
@@ -360,7 +393,7 @@ fn decode_read(input: &mut impl Read) -> std::io::Result<Opened> {
     let mut range = Range::new(start, end);
     for row in start.0..=end.0 {
         for column in start.1..=end.1 {
-            let data = decode_data(input)?;
+            let data = decode_data(input, allowed)?;
             if data != Data::Empty {
                 range.set_value((row, column), data);
             }
@@ -369,12 +402,12 @@ fn decode_read(input: &mut impl Read) -> std::io::Result<Opened> {
     Ok((sheets, range))
 }
 
-fn decode_data(input: &mut impl Read) -> std::io::Result<Data> {
+fn decode_data(input: &mut impl Read, left: &mut usize) -> std::io::Result<Data> {
     Ok(match byte(input)? {
         0 => Data::Empty,
         1 => Data::Int(i64::from_le_bytes(read_8(input)?)),
         2 => Data::Float(f64::from_le_bytes(read_8(input)?)),
-        3 => Data::String(read_text(input)?),
+        3 => Data::String(read_text(input, left)?),
         4 => Data::Bool(byte(input)? != 0),
         5 => Data::DateTime(ExcelDateTime::new(
             f64::from_le_bytes(read_8(input)?),
@@ -386,8 +419,8 @@ fn decode_data(input: &mut impl Read) -> std::io::Result<Data> {
             ExcelDateTimeType::TimeDelta,
             false,
         )),
-        7 => Data::DateTimeIso(read_text(input)?),
-        8 => Data::DurationIso(read_text(input)?),
+        7 => Data::DateTimeIso(read_text(input, left)?),
+        8 => Data::DurationIso(read_text(input, left)?),
         9 => Data::Error(
             ERRORS
                 .get(byte(input)? as usize)

@@ -216,10 +216,9 @@ fn a_workbook_whose_reader_runs_out_of_memory_is_too_large() {
     assert_eq!(read(&path, None).err(), Some(TableFailure::TooLarge));
 }
 
-#[test]
-fn a_workbook_whose_reader_never_ends_is_too_large() {
-    let path = folder("endless").join("endless.ods");
-    let mut writer = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+/// An ODS whose content holds `tables`, cut off there.
+fn ods(path: &std::path::Path, tables: &str) {
+    let mut writer = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
     writer
         .start_file("mimetype", SimpleFileOptions::default())
         .unwrap();
@@ -235,12 +234,69 @@ fn a_workbook_whose_reader_never_ends_is_too_large() {
     writer
         .start_file("content.xml", SimpleFileOptions::default())
         .unwrap();
-    writer
-        .write_all(br#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"><office:body><office:spreadsheet><table:table table:name="Open">"#)
-        .unwrap();
+    write!(
+        writer,
+        r#"<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet>{tables}"#
+    )
+    .unwrap();
     writer.finish().unwrap();
+}
+
+/// An ODS of one string cell with `spaces` spaces, repeated across `columns` columns.
+fn spaced(path: &std::path::Path, spaces: &str, columns: u32) {
+    ods(
+        path,
+        &format!(
+            r#"<table:table table:name="Spaces"><table:table-row><table:table-cell office:value-type="string" table:number-columns-repeated="{columns}"><text:p>a<text:s text:c="{spaces}"/>b</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#
+        ),
+    );
+}
+
+#[test]
+fn a_workbook_whose_reader_never_ends_is_too_large() {
+    let path = folder("endless").join("endless.ods");
+    ods(&path, r#"<table:table table:name="Open">"#);
 
     assert_eq!(read(&path, None).err(), Some(TableFailure::TooLarge));
+}
+
+#[test]
+fn spaces_an_ods_cell_expands_to_are_held_to_the_limits() {
+    let dir = folder("spaces");
+    let few = dir.join("few.ods");
+    spaced(&few, "3", 2);
+    let escaped = dir.join("escaped.ods");
+    spaced(&escaped, "&#50;147483647", 1);
+    let repeated = dir.join("repeated.ods");
+    spaced(&repeated, "1048576", 4096);
+    let under_memory = dir.join("under_memory.ods");
+    spaced(&under_memory, "600000", 2);
+
+    let (sheets, range) = read(&few, None).unwrap();
+    assert_eq!(sheets, ["Spaces"]);
+    assert_eq!(range.get_value((0, 1)), Some(&Data::String("a   b".into())));
+    assert_eq!(read(&escaped, None).err(), Some(TableFailure::TooLarge));
+    assert_eq!(read(&repeated, None).err(), Some(TableFailure::TooLarge));
+    assert_eq!(
+        read(&under_memory, None).err(),
+        Some(TableFailure::TooLarge)
+    );
+}
+
+#[test]
+fn a_sheet_with_more_text_than_the_limit_is_too_large_either_side() {
+    let mut range = Range::new((0, 0), (0, 1));
+    range.set_value((0, 0), Data::String("a".repeat(super::MAX_TEXT / 2 + 1)));
+    range.set_value((0, 1), Data::String("b".repeat(super::MAX_TEXT / 2 + 1)));
+    let held = Ok((Vec::new(), range));
+
+    assert_eq!(round_trip(held.clone()), Err(TableFailure::TooLarge));
+
+    let mut frame = vec![0, 0, 0, 0, 0, 1];
+    frame.extend([0u8; 16]);
+    frame.push(3);
+    frame.extend(((super::MAX_TEXT + 1) as u32).to_le_bytes());
+    assert_eq!(decode(&mut frame.as_slice()), Err(TableFailure::TooLarge));
 }
 
 #[test]
