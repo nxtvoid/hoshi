@@ -100,13 +100,28 @@ pub type RunEdit = Rc<dyn Fn(EditAction, &mut Window, &mut App)>;
 
 /// The four edit items, enabled as `enabled` says, each running `run`.
 pub fn edit_items(menu: PopoverMenu, enabled: EditMenu, run: RunEdit) -> PopoverMenu {
-    menu.items(EDIT_ACTIONS.into_iter().map(|action| {
-        let run = run.clone();
-        MenuOption::new(("edit-menu", action as usize), label(action))
-            .shortcut(edit_shortcut(action, cfg!(target_os = "macos")))
-            .disabled(!enabled.enables(action))
-            .on_select(move |window, cx| run(action, window, cx))
-    }))
+    menu.items(
+        EDIT_ACTIONS
+            .into_iter()
+            .map(|action| edit_item(action, enabled.enables(action), run.clone())),
+    )
+}
+
+/// Only the items `enabled` turns on, for a view nothing can be typed into.
+pub fn enabled_edit_items(menu: PopoverMenu, enabled: EditMenu, run: RunEdit) -> PopoverMenu {
+    menu.items(
+        EDIT_ACTIONS
+            .into_iter()
+            .filter(|action| enabled.enables(*action))
+            .map(|action| edit_item(action, true, run.clone())),
+    )
+}
+
+fn edit_item(action: EditAction, enabled: bool, run: RunEdit) -> MenuOption {
+    MenuOption::new(("edit-menu", action as usize), label(action))
+        .shortcut(edit_shortcut(action, cfg!(target_os = "macos")))
+        .disabled(!enabled)
+        .on_select(move |window, cx| run(action, window, cx))
 }
 
 /// The menu over read-only text, such as the transcript's: right-clicking a selection there

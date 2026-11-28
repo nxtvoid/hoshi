@@ -8,8 +8,11 @@ publish.workspace = true
 
 [dependencies]
 base64.workspace = true
+calamine.workspace = true
 chrono.workspace = true
 dunce.workspace = true
+encoding_rs.workspace = true
+flate2.workspace = true
 getrandom.workspace = true
 hoshi-core.workspace = true
 hoshi-forge.workspace = true
@@ -18,12 +21,16 @@ hoshi-store.workspace = true
 ignore.workspace = true
 keyring.workspace = true
 notify.workspace = true
+pdfium-render.workspace = true
 portable-pty.workspace = true
 roxmltree.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
 tiny_http.workspace = true
 tungstenite.workspace = true
+ureq.workspace = true
 zip.workspace = true
 
 [target.'cfg(windows)'.dependencies]

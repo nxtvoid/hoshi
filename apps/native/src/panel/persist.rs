@@ -65,6 +65,7 @@ fn surface_value(surface: &Surface) -> Value {
         SurfaceState::PullRequest => json!({ "id": surface.id, "kind": "pullRequest" }),
         SurfaceState::Terminal => json!({ "id": surface.id, "kind": "terminal" }),
         SurfaceState::Browser => json!({ "id": surface.id, "kind": "browser" }),
+        SurfaceState::File { path } => json!({ "id": surface.id, "kind": "file", "path": path }),
     }
 }
 
@@ -87,6 +88,9 @@ fn parse_surface(value: &Value) -> Option<Surface> {
         "pullRequest" => SurfaceState::PullRequest,
         "terminal" => SurfaceState::Terminal,
         "browser" => SurfaceState::Browser,
+        "file" => SurfaceState::File {
+            path: text("path").filter(|path| !path.is_empty())?,
+        },
         _ => return None,
     };
     Some(Surface { id, state })
@@ -240,6 +244,12 @@ mod tests {
                         id: "e".into(),
                         state: SurfaceState::Browser,
                     },
+                    Surface {
+                        id: "f".into(),
+                        state: SurfaceState::File {
+                            path: "/home/dev/shop/sales.csv".into(),
+                        },
+                    },
                 ],
                 active_id: Some("e".into()),
             },
@@ -257,6 +267,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains(r#""turnId":"m1""#), "{text}");
+        assert!(
+            text.contains(r#"{"id":"f","kind":"file","path":"/home/dev/shop/sales.csv"}"#),
+            "{text}"
+        );
     }
 
     #[test]

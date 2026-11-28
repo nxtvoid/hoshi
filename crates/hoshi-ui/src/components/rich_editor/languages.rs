@@ -83,8 +83,12 @@ pub fn code_language_id(id: &str) -> String {
 
 /// The file-type icon a language shows, as its name in `assets/file-icons`, and its color.
 pub fn code_language_icon(id: &str) -> (&'static str, fn(&Colors) -> Hsla) {
-    match code_language_id(id).as_str() {
+    match code_language_id(id).to_ascii_lowercase().as_str() {
         "" => ("text", |colors| colors.file_gray),
+        "csv" | "tsv" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ods" => {
+            ("table", |colors| colors.file_green)
+        }
+        "pdf" => ("pdf", |colors| colors.file_red),
         "typescript" => ("typescript", |colors| colors.file_blue),
         "tsx" | "jsx" => ("react", |colors| colors.file_cyan),
         "javascript" => ("javascript", |colors| colors.file_yellow),
@@ -147,5 +151,8 @@ mod tests {
         assert_eq!(file_path_icon("deploy/Dockerfile").0, "docker");
         assert_eq!(file_path_icon("notes.v2.md").0, "markdown");
         assert_eq!(file_path_icon("Makefile").0, "default");
+        assert_eq!(file_path_icon("reports/Q3.XLSX").0, "table");
+        assert_eq!(file_path_icon("people.tsv").0, "table");
+        assert_eq!(file_path_icon("Invoice.PDF").0, "pdf");
     }
 }

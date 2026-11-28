@@ -141,6 +141,7 @@ fn launchers() -> &'static [(Editor, Launcher)] {
 /// Opens `path`, a folder or a file, in `editor`; the file manager opens a file in the app the
 /// system has for it.
 pub fn open(editor: Editor, path: &str) -> Result<(), String> {
+    let path = &native_path(path);
     let folder = match Path::new(path).parent() {
         Some(parent) if Path::new(path).is_file() => parent.to_string_lossy().into_owned(),
         _ => path.to_owned(),
@@ -187,6 +188,15 @@ pub fn open(editor: Editor, path: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|error| error.to_string())
+}
+
+/// `path` with the system's separators: Explorer reads `C:/a/b.pdf` as no path at all.
+fn native_path(path: &str) -> String {
+    if cfg!(windows) {
+        path.replace('/', "\\")
+    } else {
+        path.to_owned()
+    }
 }
 
 /// Where editors get installed besides the `PATH`.

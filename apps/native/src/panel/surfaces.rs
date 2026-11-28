@@ -9,6 +9,8 @@ pub enum SurfaceKind {
     Diff,
     PullRequest,
     Browser,
+    /// A file shown in hoshi, a table or a PDF; it opens from a link, not the launcher.
+    File,
 }
 
 /// Launcher order.
@@ -22,7 +24,7 @@ pub const SURFACE_KINDS: [SurfaceKind; 4] = [
 impl SurfaceKind {
     /// Kinds a thread shows at most once; opening another one focuses it.
     pub fn single_instance(self) -> bool {
-        self != Self::Terminal
+        !matches!(self, Self::Terminal | Self::File)
     }
 
     /// The single key that opens it from the launcher.
@@ -32,6 +34,7 @@ impl SurfaceKind {
             Self::Diff => "D",
             Self::PullRequest => "P",
             Self::Browser => "B",
+            Self::File => "",
         }
     }
 
@@ -41,6 +44,7 @@ impl SurfaceKind {
             Self::Diff => m::surface_diff(),
             Self::PullRequest => m::surface_pull_request(),
             Self::Browser => m::surface_browser(),
+            Self::File => m::surface_file(),
         }
     }
 
@@ -50,6 +54,7 @@ impl SurfaceKind {
             Self::Diff => IconName::FileDiff,
             Self::PullRequest => IconName::GitPullRequest,
             Self::Browser => IconName::Globe,
+            Self::File => IconName::File,
         }
     }
 
@@ -57,7 +62,7 @@ impl SurfaceKind {
         match self {
             Self::PullRequest => context.has_pull_request,
             Self::Terminal => context.has_terminal,
-            Self::Diff | Self::Browser => true,
+            Self::Diff | Self::Browser | Self::File => true,
         }
     }
 }
@@ -75,6 +80,17 @@ pub fn kind_for_shortcut(key: &str, context: SurfaceContext) -> Option<SurfaceKi
     SURFACE_KINDS
         .into_iter()
         .find(|kind| kind.shortcut().eq_ignore_ascii_case(key) && kind.available(context))
+}
+
+/// Whether two paths name the same file; on Windows, `windows`, whatever their slashes and
+/// letter case.
+fn same_file(a: &str, b: &str, windows: bool) -> bool {
+    if windows {
+        let folded = |path: &str| path.replace('\\', "/").to_lowercase();
+        folded(a) == folded(b)
+    } else {
+        a == b
+    }
 }
 
 /// What the diff surface compares.
@@ -97,6 +113,9 @@ pub enum SurfaceState {
     /// Its id is also its terminal's id.
     Terminal,
     Browser,
+    File {
+        path: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,7 +125,8 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn new(kind: SurfaceKind, id: String) -> Self {
+    /// A new surface of `kind`; none for a file, which opens with its path.
+    fn new(kind: SurfaceKind, make_id: impl FnOnce() -> String) -> Option<Self> {
         let state = match kind {
             SurfaceKind::Diff => SurfaceState::Diff {
                 shown: DiffShown::Scope(DiffScope::Uncommitted),
@@ -116,8 +136,12 @@ impl Surface {
             SurfaceKind::PullRequest => SurfaceState::PullRequest,
             SurfaceKind::Terminal => SurfaceState::Terminal,
             SurfaceKind::Browser => SurfaceState::Browser,
+            SurfaceKind::File => return None,
         };
-        Self { id, state }
+        Some(Self {
+            id: make_id(),
+            state,
+        })
     }
 
     pub fn kind(&self) -> SurfaceKind {
@@ -126,6 +150,7 @@ impl Surface {
             SurfaceState::PullRequest => SurfaceKind::PullRequest,
             SurfaceState::Terminal => SurfaceKind::Terminal,
             SurfaceState::Browser => SurfaceKind::Browser,
+            SurfaceState::File { .. } => SurfaceKind::File,
         }
     }
 }
@@ -155,7 +180,28 @@ impl ThreadSurfaces {
             self.active_id = Some(existing.id.clone());
             return;
         }
-        let surface = Surface::new(kind, make_id());
+        let Some(surface) = Surface::new(kind, make_id) else {
+            return;
+        };
+        self.active_id = Some(surface.id.clone());
+        self.surfaces.push(surface);
+    }
+
+    /// Focuses the surface showing the file at `path`, or adds one.
+    pub fn open_file(&mut self, path: &str, make_id: impl FnOnce() -> String) {
+        let open = self.surfaces.iter().find(|surface| {
+            matches!(&surface.state, SurfaceState::File { path: shown } if same_file(shown, path, cfg!(windows)))
+        });
+        if let Some(existing) = open {
+            self.active_id = Some(existing.id.clone());
+            return;
+        }
+        let surface = Surface {
+            id: make_id(),
+            state: SurfaceState::File {
+                path: path.to_owned(),
+            },
+        };
         self.active_id = Some(surface.id.clone());
         self.surfaces.push(surface);
     }
@@ -209,7 +255,7 @@ impl ThreadSurfaces {
 mod tests {
     use super::{
         DiffShown, Surface, SurfaceContext, SurfaceKind, SurfaceState, ThreadSurfaces,
-        kind_for_shortcut,
+        kind_for_shortcut, same_file,
     };
     use hoshi_core::DiffScope;
 
@@ -344,6 +390,37 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_file_already_open_is_focused_and_another_gets_its_own_tab() {
+        let mut make_id = ids();
+        let mut panel = ThreadSurfaces::default();
+        panel.open_file("/home/dev/shop/a.csv", &mut make_id);
+        panel.open_file("/home/dev/shop/b.xlsx", &mut make_id);
+        panel.open(SurfaceKind::Diff, &mut make_id);
+
+        panel.open_file("/home/dev/shop/a.csv", &mut make_id);
+
+        assert_eq!(
+            kinds(&panel),
+            [SurfaceKind::File, SurfaceKind::File, SurfaceKind::Diff]
+        );
+        assert_eq!(panel.active_id.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn a_path_names_the_same_file_whatever_its_slashes_on_windows() {
+        assert!(same_file(r"C:\dev\shop\a.csv", "c:/dev/shop/A.csv", true));
+        assert!(!same_file("/home/dev/a.csv", "/home/dev/A.csv", false));
+        assert!(!same_file(r"C:\dev\a.csv", "C:/dev/b.csv", true));
+    }
+
+    #[test]
+    fn a_file_surface_opens_only_with_its_path() {
+        let mut panel = ThreadSurfaces::default();
+        panel.open(SurfaceKind::File, ids());
+        assert!(panel.surfaces.is_empty());
     }
 
     #[test]
