@@ -741,7 +741,16 @@ impl Render for HoshiWindow {
     }
 }
 
+/// The system's allocator, held to a limit only while the program reads a workbook.
+#[global_allocator]
+static ALLOCATOR: cap::Cap<std::alloc::System> = cap::Cap::new(std::alloc::System, usize::MAX);
+
 fn main() {
+    if let Some(code) = hoshi_engine::table::serve(|limit| {
+        let _ = ALLOCATOR.set_limit(limit);
+    }) {
+        std::process::exit(code);
+    }
     let home = home::resolve().expect("hoshi needs a home folder");
     #[cfg(windows)]
     app_user_model::register(&home);

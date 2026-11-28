@@ -915,6 +915,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cap"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f125eb85b84a24c36b02ed1d22c9dd8632f53b3cde6e4d23512f94021030003"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3601,6 +3607,7 @@ version = "1.4.1"
 dependencies = [
  "base64 0.23.1",
  "calamine",
+ "cap",
  "chrono",
  "dunce",
  "encoding_rs",
@@ -3616,7 +3623,6 @@ dependencies = [
  "notify",
  "pdfium-render",
  "portable-pty",
- "quick-xml 0.42.0",
  "roxmltree 0.20.0",
  "serde",
  "serde_json",
@@ -3647,6 +3653,7 @@ version = "1.4.1"
 dependencies = [
  "alacritty_terminal",
  "base64 0.23.1",
+ "cap",
  "chrono",
  "futures",
  "gpui-kit",

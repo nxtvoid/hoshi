@@ -3,8 +3,10 @@
 //! only when it is shown.
 
 mod delimited;
-mod preflight;
+mod reader;
 mod workbook;
+
+pub use reader::serve;
 
 use calamine::{Data, Range};
 use delimited::Delimited;
@@ -101,12 +103,7 @@ pub struct Grid {
 pub fn open(path: &Path) -> Result<TableFile, TableFailure> {
     let extension = extension(&path.to_string_lossy()).unwrap_or_default();
     if WORKBOOKS.contains(&extension.as_str()) {
-        let mut book = open_workbook(path)?;
-        let sheets = workbook::sheets(&book);
-        let range = match sheets.first() {
-            Some(first) => workbook::sheet(&mut book, first)?,
-            None => Range::default(),
-        };
+        let (sheets, range) = open_workbook(path, None)?;
         return Ok(TableFile {
             format: Format::Workbook { sheets },
             grid: Grid::new(Cells::Sheet(range)),
@@ -133,21 +130,18 @@ pub fn open(path: &Path) -> Result<TableFile, TableFailure> {
 
 /// Reads one sheet of the workbook at `path`.
 pub fn open_sheet(path: &Path, name: &str) -> Result<Grid, TableFailure> {
-    let mut book = open_workbook(path)?;
-    workbook::sheet(&mut book, name).map(|range| Grid::new(Cells::Sheet(range)))
+    let (_, range) = open_workbook(path, Some(name))?;
+    Ok(Grid::new(Cells::Sheet(range)))
 }
 
-fn open_workbook(path: &Path) -> Result<workbook::Book, TableFailure> {
+fn open_workbook(path: &Path, sheet: Option<&str>) -> Result<reader::Opened, TableFailure> {
     let size = std::fs::metadata(path)
         .map_err(|error| TableFailure::Read(error.to_string()))?
         .len();
-    let extension = extension(&path.to_string_lossy()).unwrap_or_default();
-    if size > MAX_WORKBOOK_BYTES
-        || preflight::cells(path, &extension).is_some_and(|cells| cells > MAX_CELLS)
-    {
+    if size > MAX_WORKBOOK_BYTES {
         return Err(TableFailure::TooLarge);
     }
-    workbook::open(path)
+    reader::read(path, sheet)
 }
 
 /// Where the last whole line of `bytes` ends, its line breaks read in the encoding its byte

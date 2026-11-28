@@ -125,7 +125,7 @@ fn a_tsv_splits_on_tabs_even_with_commas_in_it() {
 
 #[test]
 fn a_workbook_lists_its_visible_sheets_and_shows_cells_where_they_sit() {
-    let path = folder("xlsx").join("sales.xlsx");
+    let path = folder("xlsx").join("SALES.XLSX");
     workbook(&path);
 
     let table = open(&path).unwrap();
@@ -207,8 +207,11 @@ fn a_text_with_more_columns_than_a_spreadsheet_is_refused() {
 fn a_file_that_is_not_a_workbook_fails_to_open() {
     let path = folder("broken").join("broken.xlsx");
     std::fs::write(&path, "not a zip").unwrap();
+    let named_otherwise = folder("named").join("book.XLS");
+    workbook(&named_otherwise);
 
     assert!(open(&path).is_err());
+    assert!(matches!(open(&named_otherwise), Err(TableFailure::Read(_))));
 }
 
 #[test]

@@ -3,7 +3,7 @@
 
 use super::{Kind, MAX_CELLS, TableFailure, Value};
 use calamine::{
-    Cell, Data, DataRef, Range, Reader, SheetType, SheetVisible, Sheets, open_workbook_auto,
+    Cell, Data, DataRef, Range, Reader, SheetType, SheetVisible, Sheets, open_workbook,
 };
 use std::fmt::Display;
 use std::fs::File;
@@ -12,8 +12,16 @@ use std::path::Path;
 
 pub type Book = Sheets<BufReader<File>>;
 
+/// The workbook at `path`, read as its extension says, whatever its case.
 pub fn open(path: &Path) -> Result<Book, TableFailure> {
-    open_workbook_auto(path).map_err(unreadable)
+    let extension = super::extension(&path.to_string_lossy()).unwrap_or_default();
+    Ok(match extension.as_str() {
+        "xls" => Sheets::Xls(open_workbook(path).map_err(unreadable)?),
+        "xlsx" | "xlsm" => Sheets::Xlsx(open_workbook(path).map_err(unreadable)?),
+        "xlsb" => Sheets::Xlsb(open_workbook(path).map_err(unreadable)?),
+        "ods" => Sheets::Ods(open_workbook(path).map_err(unreadable)?),
+        _ => return Err(TableFailure::Read(format!("not a workbook: .{extension}"))),
+    })
 }
 
 fn unreadable(error: impl Display) -> TableFailure {
